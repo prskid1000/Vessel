@@ -124,6 +124,77 @@ rather than a veto.
 Full flag reference, with primary sources and what could not be verified, is
 in [TUNING.md](TUNING.md).
 
+## Running downloaded native code on Android
+
+Android's W^X enforcement is the constraint that decides whether components can
+be downloaded at all, so it is worth stating exactly rather than approximately.
+It is narrower than the folklore suggests, and the `.wcp` model survives.
+
+**`dlopen` from `filesDir` is permitted, at any targetSdk.** Two independent
+layers allow it, and both were checked:
+
+- SELinux — `untrusted_app_all.te` grants `app_data_file:file { r_file_perms
+  execute }` to every untrusted app.
+- The linker — AOSP `art/libnativeloader/library_namespaces.cpp` sets
+  `kAlwaysPermittedDirectories = "/data:/mnt/expand"`, so an absolute path under
+  `filesDir` is inside the app classloader namespace's permitted paths.
+
+`darksylinc/AdrenoToolsTest` ships this pattern at targetSdk 34, which is direct
+proof it survives a modern target.
+
+**`execve` of a downloaded binary is what is actually blocked** at targetSdk 29
+and above. The escape hatch is `system_linker_exec`: exec the system linker and
+pass the binary as its argument, rather than exec'ing the binary directly.
+
+```
+execve("/system/bin/linker64", ["/system/bin/linker64", "<filesDir>/.../wineserver", ...])
+```
+
+The linker lives in a system exec context, so the policy permits it, and it
+loads and runs the target. This is how `wineserver` and `bin/wine` start.
+
+### Why Winlator is not a guide here
+
+Winlator execs from `filesDir` with a plain `ProcessBuilder` and no such trick.
+It can, because it declares **`targetSdkVersion 28`** — below the threshold
+where the restriction applies. That is not a route open to us: Vessel targets
+36, and Play requires a recent target in any case. Any Winlator code or
+technique that appears to execute downloaded binaries directly should be read
+with its manifest in hand.
+
+### What this means per component
+
+| Component | Kind | Delivery |
+|---|---|---|
+| Wine unix side (`wineserver`, `bin/wine`, `*-unix/*.so`) | host bionic ELF | `.wcp`, started via the system linker |
+| Turnip (`libvulkan_freedreno.so`) | host bionic ELF | `.wcp`, `dlopen`ed from `filesDir` |
+| FEX DLLs, DXVK, vkd3d, Wine's PE DLLs | Windows PE | `.wcp`; Android's loader never sees them — Wine opens them as data |
+
+The guest PEs are the majority of what we ship and are entirely unaffected. So
+**every component remains downloadable**, and the update-without-reinstall
+property holds.
+
+### Turnip may not need adrenotools
+
+Worth recording because the assumption is easy to inherit: in Winlator, Turnip
+is *not* loaded through adrenotools. It is extracted into the glibc container
+rootfs and loaded by the container's glibc loader, so bionic never touches it.
+Adrenotools is used only on Winlator's Vortek path, to replace the **host**
+`/system/lib64/libvulkan.so`.
+
+Vessel has no glibc container, so our Turnip is host-side bionic — structurally
+Winlator's Vortek case, not its Turnip case. But adrenotools is a large piece of
+machinery (it recovers bionic's hidden `__loader_android_create_namespace` by
+disassembling `dlopen` for its `BL` instruction, then preloads a hook to
+interpose `android_dlopen_ext`, and its hook early-outs unless the filename
+contains `vulkan.`). Mesa's Turnip talks to `/dev/kgsl` directly and has no
+vendor-blob dependencies, so it may load with a plain `dlopen` and need none of
+it. **Spike this before adopting adrenotools**, rather than assuming.
+
+If the unix-side Wine `.so` files turn out to need soname resolution rather than
+absolute paths, `liblinkernsbypass` alone provides that without the hook chain —
+arm64-only and API ≥ 28, both satisfied here.
+
 ## Component pipeline
 
 Native components are not bundled into the APK. Each is built independently and
