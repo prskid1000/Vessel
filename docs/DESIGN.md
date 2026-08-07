@@ -187,9 +187,100 @@ from `assets/params-manifest.json`, exactly like the On-Device AI
 `ParamRenderer`, so adding a knob is a data change and never a UI one. Each
 parameter carries a one-sentence explanation of what it actually does.
 
-**Session** — the running Windows desktop. Vulkan surface plus an edge-swipe
-overlay: `VMetricStrip`, input mode, on-screen controls, and a kill switch. The
-overlay is the only place the design allows translucency.
+**Session** — the running Windows desktop. Specified in full below, because it
+is the screen the product is actually for and the one where a bad design shows
+within seconds.
+
+### Session, in detail
+
+Five states, not one. Most designs for this screen only draw the happy one, and
+then the first real launch shows a black rectangle with no explanation.
+
+```
+PREPARING ──► STARTING ──► RUNNING ──► EXITED
+     │             │           │
+     └─────────────┴───────────┴──────► FAILED
+```
+
+**1. Preparing** — first launch of a container only. Creating the Wine prefix
+and installing the five components takes real time, so it gets a checklist with
+per-step progress, not a spinner: *create prefix · install Wine · install FEX ·
+install driver · install D3D layers · first-run registry*. A step that fails
+stops there and turns red, so the failure is attributable to a step rather than
+to "it didn't work".
+
+**2. Starting** — wineserver, the X server, then the executable. Short, but it
+is where a missing DLL surfaces, so it shows the last log line as it goes rather
+than a blank screen.
+
+**3. Running** — the desktop surface, described below.
+
+**4. Failed** — the important one, and the one most apps get wrong. Shows what
+step failed, the last error line from the log, and two actions: **View log**
+(straight into the session's log, already filtered to errors) and **Retry**. No
+generic "something went wrong".
+
+**5. Exited** — clean exit with the exit code, and a link to the log. A
+non-zero exit is stated plainly rather than dismissed silently.
+
+Early on, states 1, 2 and 4 are where users will spend most of their time. They
+get the same design attention as 3.
+
+#### The running surface
+
+Full-bleed Vulkan surface, immersive — no system bars, gesture inset handling
+only. Nothing is drawn over the desktop except on request.
+
+```
+┌─────────────────────────────────────────────┐
+│  ⟨48 fps  12.4 ms⟩              ← optional  │
+│                                             │
+│                                             │
+│              Windows desktop                │
+│           (full-bleed surface)              │
+│                                             │
+│ ▎← 4dp handle, swipe to open the rail       │
+│                                             │
+│  [ Esc  Tab  Ctrl  Alt  ⌨  ← ↑ ↓ → ]        │
+└─────────────────────────────────────────────┘
+```
+
+**The rail, not a sheet.** Controls live in a narrow vertical rail swiped in
+from the left edge, collapsed to a 4 dp handle. A bottom sheet would be the
+obvious choice and is the wrong one: this screen is usually landscape, where
+vertical space is scarce and horizontal space is not. The rail carries icon
+buttons only — keyboard, input mode, metrics, logs, and stop — on a translucent
+`surface`. This is the sole place the design permits translucency.
+
+**The auxiliary key bar** is what makes "run any laptop app" true rather than
+aspirational. Android's IME has no `Esc`, no `Tab`, no `Ctrl`, no function keys,
+no arrows — and a Windows application is unusable without them. A compact
+persistent bar supplies them, with modifiers that latch so `Ctrl`+click works
+from a touchscreen. Toggleable, because a fullscreen game does not want it.
+
+**Two input modes, because the software cannot infer which you want:**
+
+- **Direct** — you touch where you want to click. Correct for desktop
+  applications, menus, installers.
+- **Trackpad** — relative movement with the pointer decoupled from your finger.
+  Correct for anything with mouselook, where absolute positioning is unusable.
+
+This is a genuine preference, so it is a control. Rendering mode was not, and
+is not.
+
+Physical keyboard, mouse and gamepad are used automatically when present — no
+setting, because their presence is a fact rather than a preference.
+
+**Metrics** (`VMetricStrip`: fps, frame time) are off by default and pinned to a
+corner when on. Deliberately small: this is the one screen where our UI competes
+with the content for attention, and the content wins.
+
+#### Leaving
+
+Stop is in the rail, behind a confirmation — an accidental tap should not
+discard an unsaved document in a Windows application. Android's back gesture
+does not exit; it is forwarded as `Esc`, because in a desktop application that
+is what a user means by back.
 
 **App profile** — per-executable overrides: component pins, memory ordering,
 launch arguments. Shows the detected architecture and how it was determined.
