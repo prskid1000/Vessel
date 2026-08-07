@@ -1,0 +1,25 @@
+# Line endings are a correctness issue here, not a style one: these scripts run
+# inside a Linux container, and a CRLF shebang fails with a confusing
+# "bad interpreter" error. Force LF regardless of the host's core.autocrlf.
+
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.py      text eol=lf
+*.env     text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+Dockerfile text eol=lf
+gradlew   text eol=lf
+
+# Windows-only files keep CRLF.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+*.jar     binary
+*.png     binary
+*.jpg     binary
+*.webp    binary
+*.wcp     binary
+*.so      binary
+*.dll     binary

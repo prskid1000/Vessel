@@ -1,0 +1,10 @@
+.git
+native/*/
+dist/
+out/
+app/build/
+app/.cxx/
+.gradle/
+.idea/
+*.apk
+*.wcp

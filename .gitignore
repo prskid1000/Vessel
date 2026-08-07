@@ -1,0 +1,36 @@
+# Upstream sources — fetched by build/fetch.sh from native/pins.env, never committed
+/native/*/
+!/native/pins.env
+
+# Build outputs
+/dist/
+/out/
+build/
+!/build/
+/build/*/
+!/build/*.sh
+!/build/*.py
+!/build/targets/
+
+# Android / Gradle
+.gradle/
+local.properties
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+captures/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Secrets
+*.jks
+signing.properties

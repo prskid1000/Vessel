@@ -1,0 +1,21 @@
+name: dxvk
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - native/pins.env
+      - patches/dxvk/**
+      - build/dxvk.sh
+      - build/common.sh
+      - build/package_wcp.py
+      - build/targets/**
+      - Dockerfile
+
+jobs:
+  build:
+    uses: ./.github/workflows/_component.yml
+    with:
+      component: dxvk
+      ref_var: DXVK_REF

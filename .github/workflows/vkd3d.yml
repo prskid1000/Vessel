@@ -1,0 +1,21 @@
+name: vkd3d
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - native/pins.env
+      - patches/vkd3d/**
+      - build/vkd3d.sh
+      - build/common.sh
+      - build/package_wcp.py
+      - build/targets/**
+      - Dockerfile
+
+jobs:
+  build:
+    uses: ./.github/workflows/_component.yml
+    with:
+      component: vkd3d
+      ref_var: VKD3D_REF

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Only what the window needs before Compose draws. The palette itself is
+        Kotlin (ui/theme/VesselTheme.kt); this exists so the launch window is
+        already `bg` rather than a white flash. The literal is VColors.bg.
+    -->
+    <style name="Theme.Vessel" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0A0C0F</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

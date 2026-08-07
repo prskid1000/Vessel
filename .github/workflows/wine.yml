@@ -1,0 +1,21 @@
+name: wine
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - native/pins.env
+      - patches/wine/**
+      - build/wine.sh
+      - build/common.sh
+      - build/package_wcp.py
+      - build/targets/**
+      - Dockerfile
+
+jobs:
+  build:
+    uses: ./.github/workflows/_component.yml
+    with:
+      component: wine
+      ref_var: WINE_REF

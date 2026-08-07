@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "_comment": [
+    "Every tunable setting in Vessel is declared here, not in UI code. The",
+    "container editor renders this file with one composable per param type, so",
+    "adding a knob is a data change. Defaults are correct for the canoe target",
+    "and mirror build/targets/canoe.env.",
+    "",
+    "'help' is shown next to the control. It must be one plain sentence that a",
+    "user who does not know what a dynarec is can act on. If a setting cannot",
+    "be explained that way, it belongs in Diagnostics, not here.",
+    "",
+    "For params of type 'component', the default is a selector, not a package",
+    "id: '@latest' resolves to the newest installed package of componentType.",
+    "Package ids are build outputs (dxvk-2.7.1-canoe) and must never be",
+    "hardcoded here, or a version bump would silently break every default."
+  ],
+
+  "groups": [
+    {
+      "id": "engine",
+      "title": "Engine",
+      "help": "How x86 code is translated to run on this phone.",
+      "params": [
+        {
+          "key": "engine.x64",
+          "title": "64-bit engine",
+          "help": "FEX runs alongside native ARM64 Wine and is usually faster; Box64 emulates everything and sometimes fixes apps FEX cannot run.",
+          "type": "enum",
+          "options": ["FEX", "BOX64"],
+          "default": "FEX",
+          "appliesTo": ["UNIVERSAL"]
+        },
+        {
+          "key": "engine.x86",
+          "title": "32-bit engine",
+          "help": "Which translator handles older 32-bit programs.",
+          "type": "enum",
+          "options": ["FEX_WOW64", "WOWBOX64"],
+          "default": "FEX_WOW64",
+          "appliesTo": ["UNIVERSAL"]
+        }
+      ]
+    },
+
+    {
+      "id": "memory",
+      "title": "Memory ordering",
+      "help": "This phone's CPU does not have the hardware mode that makes x86 memory rules free, so these settings trade speed against the risk of glitches in multi-threaded programs. They matter more here than anywhere else.",
+      "params": [
+        {
+          "key": "fex.TSOEnabled",
+          "title": "Strict memory ordering",
+          "help": "Keep this on: turning it off is faster but breaks most multi-threaded programs.",
+          "type": "bool",
+          "default": true,
+          "env": "FEX_TSOENABLED",
+          "warnWhen": false,
+          "warnText": "Most programs will crash or corrupt data with this off.",
+          "appliesTo": ["UNIVERSAL"]
+        },
+        {
+          "key": "fex.HalfBarrierTSOEnabled",
+          "title": "Cheap ordering barriers",
+          "help": "Uses a lighter method to enforce memory ordering; leave on unless a program misbehaves.",
+          "type": "bool",
+          "default": true,
+          "env": "FEX_HALFBARRIERTSOENABLED",
+          "appliesTo": ["UNIVERSAL"]
+        },
+        {
+          "key": "fex.VectorTSOEnabled",
+          "title": "Ordering for vector memory",
+          "help": "Very slow in games and rarely needed; turn on only to fix a specific graphical or audio corruption.",
+          "type": "bool",
+          "default": false,
+          "env": "FEX_VECTORTSOENABLED",
+          "advanced": true,
+          "appliesTo": ["UNIVERSAL"]
+        },
+        {
+          "key": "box64.STRONGMEM",
+          "title": "Memory ordering strictness",
+          "help": "Raise this one step at a time if a program hangs, desyncs, or crashes at random; each step costs speed.",
+          "type": "int",
+          "min": 0,
+          "max": 4,
+          "default": 0,
+          "env": "BOX64_DYNAREC_STRONGMEM",
+          "appliesTo": ["COMPATIBILITY"]
+        }
+      ]
+    },
+
+    {
+      "id": "dynarec",
+      "title": "Translation tuning",
+      "help": "Box64 code-generation options.",
+      "advanced": true,
+      "params": [
+        {
+          "key": "box64.BIGBLOCK",
+          "title": "Translation block size",
+          "help": "Larger blocks are faster but can make some programs unstable.",
+          "type": "int",
+          "min": 0,
+          "max": 3,
+          "default": 2,
+          "env": "BOX64_DYNAREC_BIGBLOCK",
+          "appliesTo": ["COMPATIBILITY"]
+        },
+        {
+          "key": "box64.SAFEFLAGS",
+          "title": "CPU flag accuracy",
+          "help": "Lowering this is faster but can break programs that depend on exact CPU flag behaviour.",
+          "type": "int",
+          "min": 0,
+          "max": 2,
+          "default": 1,
+          "env": "BOX64_DYNAREC_SAFEFLAGS",
+          "appliesTo": ["COMPATIBILITY"]
+        },
+        {
+          "key": "box64.CALLRET",
+          "title": "Call/return optimisation",
+          "help": "Speeds up function calls; lower it if a program crashes on startup.",
+          "type": "int",
+          "min": 0,
+          "max": 2,
+          "default": 2,
+          "env": "BOX64_DYNAREC_CALLRET",
+          "appliesTo": ["COMPATIBILITY"]
+        },
+        {
+          "key": "box64.DYNACACHE",
+          "title": "Reuse translated code",
+          "help": "Saves translated code to storage so a program starts faster the second time.",
+          "type": "bool",
+          "default": true,
+          "env": "BOX64_DYNACACHE",
+          "appliesTo": ["COMPATIBILITY"]
+        }
+      ]
+    },
+
+    {
+      "id": "graphics",
+      "title": "Graphics",
+      "params": [
+        {
+          "key": "gpu.driver",
+          "title": "GPU driver",
+          "help": "Turnip is the open driver this app builds for your Adreno 829; the system driver is missing features that most games need.",
+          "type": "component",
+          "componentType": "Turnip",
+          "default": "@latest"
+        },
+        {
+          "key": "gpu.d3dLayer",
+          "title": "Direct3D translation",
+          "help": "Converts the game's Direct3D calls to Vulkan; must match your GPU driver.",
+          "type": "component",
+          "componentType": "DXVK",
+          "default": "@latest"
+        },
+        {
+          "key": "turnip.TU_DEBUG",
+          "title": "Driver mode",
+          "help": "Leave on system memory rendering — the tiled path is broken on this GPU generation.",
+          "type": "enum",
+          "options": ["sysmem", "default"],
+          "default": "sysmem",
+          "env": "TU_DEBUG",
+          "advanced": true
+        },
+        {
+          "key": "display.resolution",
+          "title": "Resolution",
+          "help": "Lower resolutions gain a lot of performance on this phone; it has a smaller GPU cache than the full-size chip.",
+          "type": "enum",
+          "options": ["1280x720", "1600x900", "1920x1080", "native"],
+          "default": "1280x720"
+        },
+        {
+          "key": "display.fpsLimit",
+          "title": "Frame rate limit",
+          "help": "Capping frame rate keeps the phone cool, which keeps performance steady over a long session.",
+          "type": "enum",
+          "options": ["30", "45", "60", "unlimited"],
+          "default": "60"
+        }
+      ]
+    },
+
+    {
+      "id": "system",
+      "title": "System",
+      "params": [
+        {
+          "key": "wine.sync",
+          "title": "Thread synchronisation",
+          "help": "esync is the working option on this phone; ntsync needs kernel support Android does not ship yet.",
+          "type": "enum",
+          "options": ["esync", "fsync", "none"],
+          "default": "esync"
+        },
+        {
+          "key": "system.cpuAffinity",
+          "title": "CPU cores",
+          "help": "Restricting to the two fastest cores can help single-threaded programs and reduce heat.",
+          "type": "enum",
+          "options": ["all", "performance", "efficiency"],
+          "default": "all",
+          "advanced": true
+        }
+      ]
+    }
+  ]
+}

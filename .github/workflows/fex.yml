@@ -1,0 +1,21 @@
+name: fex
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - native/pins.env
+      - patches/fex/**
+      - build/fex.sh
+      - build/common.sh
+      - build/package_wcp.py
+      - build/targets/**
+      - Dockerfile
+
+jobs:
+  build:
+    uses: ./.github/workflows/_component.yml
+    with:
+      component: fex
+      ref_var: FEX_REF
