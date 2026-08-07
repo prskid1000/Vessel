@@ -88,6 +88,18 @@
           "default": 0,
           "env": "BOX64_DYNAREC_STRONGMEM",
           "appliesTo": ["COMPATIBILITY"]
+        },
+        {
+          "key": "box64.WEAKBARRIER",
+          "title": "Cheaper ordering barriers",
+          "help": "Recovers most of the speed lost to the setting above; raise it before giving up on stricter ordering.",
+          "type": "int",
+          "min": 0,
+          "max": 2,
+          "default": 1,
+          "env": "BOX64_DYNAREC_WEAKBARRIER",
+          "dependsOn": "box64.STRONGMEM",
+          "appliesTo": ["COMPATIBILITY"]
         }
       ]
     },
@@ -129,6 +141,13 @@
           "max": 2,
           "default": 2,
           "env": "BOX64_DYNAREC_CALLRET",
+          "clamp": [
+            {
+              "when": { "engine.x86": "WOWBOX64" },
+              "max": 1,
+              "reason": "Box64 documents level 2 as not working under WowBox64."
+            }
+          ],
           "appliesTo": ["COMPATIBILITY"]
         },
         {
@@ -166,10 +185,19 @@
         {
           "key": "turnip.TU_DEBUG",
           "title": "Driver mode",
-          "help": "Leave on system memory rendering — the tiled path is broken on this GPU generation.",
-          "type": "enum",
-          "options": ["sysmem", "default"],
-          "default": "sysmem",
+          "help": "Leave on system memory rendering — the tiled path corrupts the picture on this GPU generation.",
+          "_note": "Widely reposted Chinese guides say to uncheck sysmem and select gmem. That advice is scoped to Adreno 710/720 and is wrong here: the A8xx fork maintainer reports GMEM write page faults on this generation. This is the most likely piece of circulating advice to break the build.",
+          "type": "multi",
+          "options": ["sysmem", "gmem", "nocb", "nolrz", "noubwc", "deck_emu"],
+          "optionLabels": {
+            "sysmem": "System memory rendering (required)",
+            "gmem": "Tiled rendering (breaks A829)",
+            "nocb": "Disable concurrent binning",
+            "nolrz": "Disable low-resolution Z",
+            "noubwc": "Disable bandwidth compression",
+            "deck_emu": "Report as Steam Deck"
+          },
+          "default": ["sysmem"],
           "env": "TU_DEBUG",
           "advanced": true
         },
@@ -207,9 +235,11 @@
         {
           "key": "system.cpuAffinity",
           "title": "CPU cores",
-          "help": "Restricting to the two fastest cores can help single-threaded programs and reduce heat.",
+          "help": "This phone has no slow cores, so restricting to the two fastest only helps programs that use a single core.",
+          "_note": "Verified on device: cpu0-5 run at 3.32 GHz and cpu6-7 at 3.80 GHz, all Oryon. There is no efficiency cluster, so the usual 'pin to cores 4-7' advice from big.LITTLE devices does not apply. Leave on 'all' until profiling says otherwise.",
           "type": "enum",
-          "options": ["all", "performance", "efficiency"],
+          "options": ["all", "prime"],
+          "optionLabels": { "all": "All 8 cores", "prime": "Fastest 2 (cpu6-7)" },
           "default": "all",
           "advanced": true
         }

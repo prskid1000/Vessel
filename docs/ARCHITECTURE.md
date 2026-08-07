@@ -91,18 +91,38 @@ container editor surfaces them properly instead of hiding them.
 
 ## Runtime defaults
 
-Per-target defaults live in `build/targets/<target>.env` and are compiled into
-the component registry, so a fresh container is correct without the user
-knowing any of this. For `canoe`:
+Runtime defaults live in exactly one place — `app/src/main/assets/params-manifest.json`
+— so a fresh container is correct without the user knowing any of this.
+`build/targets/<target>.env` is build-time only. For `canoe`:
 
 | Setting | Value | Reason |
 |---|---|---|
-| `TU_DEBUG` | `sysmem` | GMEM tiled rendering is broken on gen8 Adreno in current Turnip |
+| `TU_DEBUG` | `sysmem` | GMEM tiled rendering page-faults on gen8 Adreno; see the warning below |
 | FEX `TSOEnabled` | on | required for correctness |
 | FEX `HalfBarrierTSOEnabled` | on | cheap ordering, no `FEAT_TSO` on Oryon |
 | FEX `VectorTSOEnabled` | off | severe cost on vector-heavy workloads |
-| Box64 `STRONGMEM` | 0 | fastest; raise per-app if unstable |
-| Wine sync | esync/fsync | kernel 6.12 GKI has no `/dev/ntsync` |
+| Box64 `STRONGMEM` | 0 | upstream default; contested — see below |
+| Box64 `WEAKBARRIER` | 1 | makes raising `STRONGMEM` affordable |
+| Wine sync | esync | kernel 6.12 GKI has no `/dev/ntsync` |
+
+Two of these deserve more than a table row, because the widely circulated
+advice is wrong:
+
+**`TU_DEBUG=sysmem` is not optional on this GPU.** Popular guides — most
+Chinese-language ones, and the K11MCH1 release notes they derive from — say to
+disable sysmem and select `gmem`. That guidance is scoped to Adreno 710/720.
+On A8xx the fork maintainer reports GMEM write page faults, and the picture
+corrupts. This is the single most likely piece of circulating advice to break
+a build on this device.
+
+**`STRONGMEM=0` is inherited, not chosen.** It is Box64's own default, and at
+0 x86 store ordering is simply not emulated — which is fine until a
+multithreaded title desyncs. The best-evidenced way to buy ordering back
+cheaply is pairing `STRONGMEM=1` with `WEAKBARRIER=1` or `2`. Measure it on
+the target rather than inheriting either value.
+
+Full flag reference, with primary sources and what could not be verified, is
+in [TUNING.md](TUNING.md).
 
 ## Component pipeline
 
