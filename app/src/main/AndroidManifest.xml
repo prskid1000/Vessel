@@ -32,6 +32,21 @@
             </intent-filter>
         </activity>
 
+        <!--
+            Exported session logs, and nothing else. Scoped to
+            `cacheDir/log-export/` by res/xml/file_paths.xml so a share sheet can
+            read one log file and cannot reach a container's Wine prefix.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.logs"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- Component downloads survive the app being swiped away. -->
         <service
             android:name=".service.ComponentDownloadService"

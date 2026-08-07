@@ -11,7 +11,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
 /**
@@ -69,19 +68,11 @@ class ContainersViewModel @Inject constructor(
  */
 internal fun lastRunLabel(lastRun: Long?, now: Long = System.currentTimeMillis()): String {
     if (lastRun == null) return "never launched"
-    val elapsed = (now - lastRun).coerceAtLeast(0)
-    val minutes = TimeUnit.MILLISECONDS.toMinutes(elapsed)
-    val hours = TimeUnit.MILLISECONDS.toHours(elapsed)
-    val days = TimeUnit.MILLISECONDS.toDays(elapsed)
-    return when {
-        minutes < 1 -> "ran just now"
-        minutes < 60 -> "ran $minutes minute${plural(minutes)} ago"
-        hours < 24 -> "ran $hours hour${plural(hours)} ago"
-        else -> "ran $days day${plural(days)} ago"
-    }
+    // The elapsed-time wording lives in `relativeLabel`, beside the session list
+    // that also uses it. Two copies of "12 minutes ago" is two places for the
+    // same moment to be described two different ways on two screens.
+    return "ran ${relativeLabel(lastRun, now)}"
 }
-
-private fun plural(n: Long) = if (n == 1L) "" else "s"
 
 /**
  * One container, and one is the point.

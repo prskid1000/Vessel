@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The only thing this app ever hands to another app: one exported session log,
+    written into `cacheDir/log-export/` by `SessionLogStore.export`.
+
+    Deliberately not `files-path`. The container directory and the component
+    install tree live under `filesDir`, and a provider rooted there would make
+    every Wine prefix on the device shareable by URI to anything that could
+    guess a path.
+-->
+<paths>
+    <cache-path name="log-export" path="log-export/" />
+</paths>

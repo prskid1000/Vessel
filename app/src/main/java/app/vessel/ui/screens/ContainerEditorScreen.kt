@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
@@ -75,6 +76,7 @@ import app.vessel.ui.vm.EditorUiState
 @Composable
 fun ContainerEditorScreen(
     onBack: () -> Unit,
+    onOpenLogs: () -> Unit,
     viewModel: ContainerEditorViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -90,6 +92,7 @@ fun ContainerEditorScreen(
         onParam = viewModel::setParam,
         onSave = viewModel::save,
         onDelete = viewModel::delete,
+        onOpenLogs = onOpenLogs,
     )
 }
 
@@ -101,6 +104,7 @@ private fun ContainerEditorContent(
     onParam: (String, ParamValue) -> Unit,
     onSave: () -> Unit,
     onDelete: () -> Unit,
+    onOpenLogs: () -> Unit = {},
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -117,6 +121,16 @@ private fun ContainerEditorContent(
                         // of the bar. The confirmation behind the bin is still
                         // words — see [VConfirmSheet].
                         if (!state.creating) {
+                            // The way into the session logs, and the only one.
+                            // They belong to this container, so they are reached
+                            // from it rather than from a tab: a container that
+                            // has never been saved has never run, which is why
+                            // this is inside the same guard as Delete.
+                            VIconButton(
+                                Icons.AutoMirrored.Filled.List,
+                                "Session logs",
+                                onOpenLogs,
+                            )
                             VIconButton(
                                 Icons.Filled.Delete,
                                 "Delete container",

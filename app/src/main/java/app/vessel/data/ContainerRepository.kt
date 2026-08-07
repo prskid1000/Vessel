@@ -26,6 +26,7 @@ class ContainerRepository @Inject constructor(
     private val store: DataStore<ContainerDocument>,
     private val manifests: ParamManifestStore,
     private val components: InstalledComponents,
+    private val sessionLogs: SessionLogStore,
 ) {
     val containers: Flow<List<ContainerProfile>> = store.data.map { it.containers }
 
@@ -68,10 +69,20 @@ class ContainerRepository @Inject constructor(
         }
     }
 
+    /**
+     * Remove a container, and its session logs with it.
+     *
+     * The logs go because they are a property of the container and of nothing
+     * else: keeping them would leave up to eighty megabytes on the device
+     * belonging to something the user has just said they are finished with, and
+     * reachable from no screen, since every route into the viewer starts at a
+     * container that no longer exists.
+     */
     suspend fun delete(id: String) {
         store.updateData { document ->
             document.copy(containers = document.containers.filterNot { it.id == id })
         }
+        sessionLogs.deleteAll(id)
     }
 
     /**

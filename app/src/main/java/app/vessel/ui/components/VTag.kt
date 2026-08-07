@@ -22,8 +22,16 @@ import app.vessel.ui.theme.vRing
  * enough to sit on `surface` without becoming a button, and light enough that
  * the label is unambiguous. Picking a mid-ramp step for either side is what
  * makes a tag start reading as a tappable chip.
+ *
+ * [Ok] and [Danger] are the two status forms, and they are here because a
+ * session that crashed has to say so in the colour the rest of the product uses
+ * for danger — a `crashed` tag in the neutral ramp is a fact the eye skips over
+ * in a list whose whole purpose is finding the run that went wrong. Nocturne has
+ * no `-800` step for the status tokens, so the ground is the token itself at low
+ * alpha and the ink is the token; that is the same derivation `divider` and the
+ * button tints already use, rather than a new colour.
  */
-enum class VTagTone { Accent, Accent2, Neutral, Outline }
+enum class VTagTone { Accent, Accent2, Neutral, Outline, Ok, Danger }
 
 /**
  * `.tag` — a small non-interactive label.
@@ -45,12 +53,16 @@ fun VTag(
         VTagTone.Accent2 -> colors.accent2800
         VTagTone.Neutral -> colors.neutral800
         VTagTone.Outline -> Color.Transparent
+        VTagTone.Ok -> colors.ok.copy(alpha = STATUS_GROUND_ALPHA)
+        VTagTone.Danger -> colors.danger.copy(alpha = STATUS_GROUND_ALPHA)
     }
     val ink = when (tone) {
         VTagTone.Accent -> colors.accent100
         VTagTone.Accent2 -> colors.accent2100
         VTagTone.Neutral -> colors.neutral100
         VTagTone.Outline -> colors.accent
+        VTagTone.Ok -> colors.ok
+        VTagTone.Danger -> colors.danger
     }
 
     Text(
@@ -66,6 +78,14 @@ fun VTag(
             .padding(horizontal = 10.dp, vertical = 3.dp),
     )
 }
+
+/**
+ * How far a status token is knocked back to become a ground.
+ *
+ * The same 16% the `divider` token sits at, which is the alpha in this system
+ * that means "present, not loud".
+ */
+private const val STATUS_GROUND_ALPHA = 0.16f
 
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
 @Composable

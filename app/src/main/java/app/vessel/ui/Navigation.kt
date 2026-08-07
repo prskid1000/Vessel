@@ -20,6 +20,8 @@ import app.vessel.ui.screens.ContainerEditorScreen
 import app.vessel.ui.screens.ContainersScreen
 import app.vessel.ui.screens.DriversScreen
 import app.vessel.ui.screens.FilesScreen
+import app.vessel.ui.screens.SessionLogScreen
+import app.vessel.ui.screens.SessionLogsScreen
 import app.vessel.ui.screens.SessionScreen
 import app.vessel.ui.vm.NEW_CONTAINER
 
@@ -34,6 +36,17 @@ object Routes {
     const val DRIVERS = "drivers"
     const val FILES = "files"
 
+    /**
+     * Logs hang off a container and are not a destination of their own.
+     *
+     * There is no global "Logs" screen and no bottom-nav entry for one, because
+     * a log is a property of the run that produced it: a list of every session
+     * across every container would be a list whose first column is the container
+     * name, which is the shape of a screen that should have been two.
+     */
+    const val SESSION_LOGS = "logs/{containerId}"
+    const val SESSION_LOG = "logs/{containerId}/{startedAt}"
+
     /** Null is "create one", which the editor is told by [NEW_CONTAINER] rather than by a flag. */
     fun containerEditor(containerId: String? = null) =
         "containerEditor/${Uri.encode(containerId ?: NEW_CONTAINER)}"
@@ -42,8 +55,14 @@ object Routes {
 
     fun appProfile(appId: String) = "appProfile/${Uri.encode(appId)}"
 
+    fun sessionLogs(containerId: String) = "logs/${Uri.encode(containerId)}"
+
+    fun sessionLog(containerId: String, startedAt: Long) =
+        "logs/${Uri.encode(containerId)}/$startedAt"
+
     const val ARG_CONTAINER_ID = "containerId"
     const val ARG_APP_ID = "appId"
+    const val ARG_STARTED_AT = "startedAt"
 }
 
 /**
@@ -120,8 +139,27 @@ fun VesselApp(
         // The editor takes no id argument: it reads `containerId` off the route
         // through its SavedStateHandle, which is also how it survives the
         // process being killed with the screen open.
-        composable(Routes.CONTAINER_EDITOR) {
-            ContainerEditorScreen(onBack = { navController.popBackStack() })
+        composable(Routes.CONTAINER_EDITOR) { entry ->
+            val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
+            ContainerEditorScreen(
+                onBack = { navController.popBackStack() },
+                onOpenLogs = { navController.navigate(Routes.sessionLogs(containerId)) },
+            )
+        }
+
+        // Both log routes take the container in the path, which is what keeps
+        // the viewer from ever being reachable without one.
+        composable(Routes.SESSION_LOGS) { entry ->
+            val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
+            SessionLogsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenSession = { startedAt ->
+                    navController.navigate(Routes.sessionLog(containerId, startedAt))
+                },
+            )
+        }
+        composable(Routes.SESSION_LOG) {
+            SessionLogScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.SESSION) { entry ->
             SessionScreen(
