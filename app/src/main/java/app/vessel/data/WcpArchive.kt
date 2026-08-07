@@ -1,5 +1,6 @@
 package app.vessel.data
 
+import org.tukaani.xz.XZInputStream
 import java.io.EOFException
 import java.io.File
 import java.io.FileInputStream
@@ -11,24 +12,20 @@ import java.util.zip.GZIPInputStream
 /**
  * How the tar inside a `.wcp` is compressed, and whether this app can undo it.
  *
- * **The load-bearing fact: [ZSTD] and [XZ] are not decodable here.** Android
- * ships no `zstd` and no `xz` binary, `java.util.zip` implements neither, and
- * the app's declared dependencies (`gradle/libs.versions.toml`) contain no
- * Apache Commons Compress, no `org.tukaani:xz` and no `com.github.luben:zstd-jni`
- * — okio, which arrives transitively via okhttp and DataStore, does gzip and
- * raw deflate only. Every package in `dist/` today is zstd (`28 b5 2f fd`), so
- * with the dependency set as declared **no shipped `.wcp` can be installed**.
+ * **[XZ] is the codec that matters**: it is what `build/package_wcp.py` produces
+ * and therefore what every shipped package is. Android provides no xz and
+ * `java.util.zip` cannot decode it, so the app carries `org.tukaani:xz` — pure
+ * Java, no native code, declared in `gradle/libs.versions.toml`. That dependency
+ * is not optional: drop it and no shipped `.wcp` installs.
  *
- * That is reported rather than papered over. [WcpInstaller] returns
- * [WcpInstallResult.UnsupportedCompression] naming the codec, instead of
- * failing with a corrupt-archive error that would send whoever reads it looking
- * at the wrong thing. Resolving it is a decision above this layer: either
- * `build/package_wcp.py` defaults to a codec the app can read, or a decoder
- * dependency is added deliberately.
+ * [ZSTD] stays undecodable, deliberately — adding it means a native dependency
+ * for packages we no longer produce. It is still *named* so an old zstd package
+ * on a device fails as [WcpInstallResult.UnsupportedCompression] rather than
+ * reaching the tar reader and looking like a corrupt archive.
  *
- * [NONE] and [GZIP] are decodable with what is already here, which is what
- * makes the extraction path — the traversal guard especially — testable today
- * against real archives rather than against a stub.
+ * [NONE] and [GZIP] cost nothing to support and keep the extraction path — the
+ * traversal guard especially — testable against archives a test can build with
+ * the JDK alone.
  */
 enum class WcpCompression(
     /** What to call it in a message a person reads. */
@@ -38,7 +35,7 @@ enum class WcpCompression(
 ) {
     NONE("uncompressed tar", true),
     GZIP("gzip", true),
-    XZ("xz", false),
+    XZ("xz", true),
     ZSTD("zstd", false),
     UNKNOWN("unrecognised", false),
     ;
@@ -47,12 +44,11 @@ enum class WcpCompression(
     val requirement: String
         get() = when (this) {
             ZSTD -> "no zstd decoder is available: Android has no zstd, java.util.zip " +
-                "cannot decode it, and no declared dependency provides one"
-            XZ -> "no xz decoder is available: Android has no xz, java.util.zip cannot " +
-                "decode it, and no declared dependency provides one"
+                "cannot decode it, and no declared dependency provides one — this " +
+                "package predates the switch to xz and needs repackaging"
             UNKNOWN -> "the file does not begin with a tar header or any compression " +
                 "magic this app recognises"
-            NONE, GZIP -> "supported"
+            NONE, GZIP, XZ -> "supported"
         }
 }
 
@@ -60,7 +56,7 @@ enum class WcpCompression(
  * Reading the container format of a `.wcp`: which codec, and the tar inside it.
  *
  * Compression is identified by magic bytes rather than by file extension. A
- * `.wcp` is downloaded content and its name is attacker-chosen; the first four
+ * `.wcp` is downloaded content and its name is attacker-chosen; the leading
  * bytes are the only honest statement it makes about itself.
  */
 internal object WcpArchive {
@@ -95,21 +91,40 @@ internal object WcpArchive {
     }
 
     /**
-     * The decoded tar bytes.
+     * The decoded tar bytes, as a stream.
+     *
+     * A stream and never a byte array: the Wine package is 71 MB compressed and
+     * several times that expanded, and the whole point of installing on a phone
+     * is that it works on one that is already short of memory. Every caller
+     * copies through a fixed buffer.
      *
      * Only ever called for a [WcpCompression.decodable] codec; anything else is
      * refused by [WcpInstaller] before it gets this far, with a message that
-     * names the codec.
+     * names the codec. The `else` branch is the belt-and-braces case and closes
+     * the file rather than leaking the descriptor.
      */
     fun open(file: File, compression: WcpCompression): InputStream {
         val raw = FileInputStream(file).buffered()
-        return when (compression) {
-            WcpCompression.NONE -> raw
-            WcpCompression.GZIP -> GZIPInputStream(raw)
-            else -> {
-                raw.close()
-                throw IOException("${compression.label}: ${compression.requirement}")
+        return try {
+            when (compression) {
+                WcpCompression.NONE -> raw
+                WcpCompression.GZIP -> GZIPInputStream(raw)
+                // No memory limit: `xz -9` writes a 64 MiB dictionary size into
+                // the block header and the decoder must be allowed to honour it,
+                // or every package we ship fails with MemoryLimitException. The
+                // dictionary is the one large allocation in this path and it is
+                // bounded by the encoder preset, not by the file's size.
+                WcpCompression.XZ -> XZInputStream(raw)
+                else -> throw IOException("${compression.label}: ${compression.requirement}")
             }
+        } catch (e: Throwable) {
+            // XZInputStream reads and validates the stream header in its
+            // constructor, so a corrupt package throws here, before anything
+            // holds the stream. Without this the file descriptor leaks on every
+            // bad archive. The close is swallowed so it cannot mask the real
+            // reason the archive would not open.
+            runCatching { raw.close() }
+            throw e
         }
     }
 
@@ -192,6 +207,12 @@ internal class TarReader(private val input: InputStream) : AutoCloseable {
 
             if (kind == TarEntryKind.LONG_NAME) {
                 pendingLongName = readBody().toString(Charsets.UTF_8).trimEnd('\u0000')
+                // readBody consumes the body but not the block padding after it,
+                // and the next header must start on a block boundary. Without
+                // this the read walks into the padding and reports a truncated
+                // header two entries later, which is a confusing way to say
+                // "long names are broken".
+                skipBody()
                 continue
             }
 

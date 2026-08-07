@@ -6,10 +6,9 @@ import java.io.File
 /**
  * The on-disk layout of a container, in one place.
  *
- * Every other class asks this one where something lives. That is not tidiness:
- * a container directory is deleted wholesale when the container is, and a path
- * assembled independently somewhere else is a directory that survives the
- * delete and a gigabyte of Wine prefix nobody can reach from any screen.
+ * Every other class asks this one where something lives. A container directory
+ * is deleted wholesale, so a path assembled independently elsewhere is a
+ * gigabyte of Wine prefix that survives the delete and no screen can reach.
  *
  * ```
  * filesDir/containers/<id>/
@@ -21,13 +20,11 @@ import java.io.File
  * filesDir/logs/<id>/      session logs
  * ```
  *
- * **Logs are the one thing not under the container directory**, and the reason
- * is worth stating rather than fixing. [SessionLogStore] has owned
- * `filesDir/logs/<id>/` since before this class existed, and it is the writer:
- * moving the tree would orphan every log already on a device for no gain. So
- * [ContainerLayout.logs] reports where the logs *are*, not where a diagram put
- * them, and [safeName] is shared with [SessionLogStore] so the two can never
- * disagree about which directory a given container id names.
+ * **Logs are the one thing not under the container directory.**
+ * [SessionLogStore] has owned `filesDir/logs/<id>/` since before this class
+ * existed and is the writer; moving the tree would orphan every log already on a
+ * device. [safeName] is shared with it so the two cannot disagree about which
+ * directory an id names.
  *
  * Constructed from `filesDir` rather than from a `Context` so it can be pointed
  * at a temporary directory in a unit test.

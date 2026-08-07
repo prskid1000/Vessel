@@ -33,16 +33,12 @@ object DataModule {
      * package from another producer must not fail to read because it carries a
      * key this app has never heard of.
      *
-     * It is also what makes removing a field from a persisted model safe.
-     * `ContainerProfile.archProfile` is gone — Box64 went with it and there is
-     * one kind of container now — and every `containers.json` written before
-     * that still carries the key. With this off, opening the app on such a
-     * device would throw on the first read and be reset to an empty list by the
-     * corruption handler; with it on, the container simply loads without it.
+     * It is also what makes removing a field from a persisted model safe. A
+     * `containers.json` still carrying a since-deleted key would otherwise throw
+     * on first read and be reset to an empty list by the corruption handler.
      *
      * `prettyPrint` costs nothing at this size and makes the container document
-     * something a person can read over adb when a bug report says the list came
-     * back empty.
+     * readable over adb when a bug report says the list came back empty.
      */
     @Provides
     @Singleton

@@ -27,15 +27,13 @@ import javax.inject.Singleton
  * Every session log on this device: writing, rotation, listing and reading.
  *
  * One file per session at `filesDir/logs/<containerId>/<startedAt>.log`, ten
- * sessions kept per container, eight megabytes each at most. Deleting a
- * container deletes its logs — [ContainerRepository.delete] calls
- * [deleteAll], because a log is a property of a container and not a thing that
- * should outlive it on someone's storage.
+ * sessions kept per container, eight megabytes each at most.
+ * [ContainerRepository.delete] calls [deleteAll], so logs do not outlive their
+ * container.
  *
- * Reads never load a body into a `String`. [read] takes a byte cursor and
- * returns a page; [export] and [textFor] stream. That is not fastidiousness at
- * this size — an eight megabyte log is a hundred thousand lines, and the one
- * moment a user opens it is the moment something has already gone wrong.
+ * Reads never load a body into a `String`: [read] takes a byte cursor and
+ * returns a page, [export] and [textFor] stream. An eight megabyte log is a
+ * hundred thousand lines.
  */
 @Singleton
 class SessionLogStore @Inject constructor(
@@ -53,12 +51,8 @@ class SessionLogStore @Inject constructor(
 
     /**
      * Bumped whenever anything on disk changes — a flush, a session ending, a
-     * delete.
-     *
-     * One signal for both jobs the UI has: re-listing the sessions, and
-     * following a live one. A file watcher would be the other way to do it and
-     * would mean the writer telling the filesystem which then tells the reader,
-     * for a change the writer already knows it made.
+     * delete. One signal serves both re-listing the sessions and following a
+     * live one, without a file watcher.
      */
     val revision: StateFlow<Long> = _revision.asStateFlow()
 
@@ -67,9 +61,8 @@ class SessionLogStore @Inject constructor(
     /**
      * **The integration point.** Open a log for a session that is starting.
      *
-     * Nothing calls this yet. The session launcher — which does not exist, and
-     * which will live behind [app.vessel.service.SessionService] — is the only
-     * intended caller, and its contract is four lines:
+     * Nothing calls this yet; the session launcher, behind
+     * [app.vessel.service.SessionService], is the only intended caller:
      *
      * ```
      * val log = sessionLogs.open(container.id)
@@ -78,40 +71,20 @@ class SessionLogStore @Inject constructor(
      * log.finish(if (code == 0) SessionExit.OK else SessionExit.CRASHED, code)
      * ```
      *
-     * Two things about the process it will be logging, recorded here because
-     * this is where whoever writes that code will be looking:
-     *
-     *  - **stderr must be a real pipe.** Wine's `init_options()` `fstat`s fd 2,
-     *    detects `/dev/null`, and returns *before* it parses `WINEDEBUG`. A
-     *    child wired to `/dev/null` therefore ignores the variable entirely, and
-     *    every debug channel setting silently does nothing. The Winlator lineage
-     *    redirects to `/dev/null` unless its debug dialog is open, which is why
-     *    its `WINEDEBUG` setting has no effect in normal use.
-     *  - **The channel set is
-     *    `WINEDEBUG=-all,err+all,warn+module,+winediag,+loaddll`.**
-     *    Order is load-bearing: `-all` first, and `warn+module` after `err+all`
-     *    so the module channel inherits ERR and ends up ERR|WARN. It is not
-     *    `+err` — that registers a channel literally named "err", which does not
-     *    exist, so `+warn,+err,+fixme` configures nothing at all.
-     *
-     *    `warn+module` is not optional padding: `loader.c`'s WARN tier carries
-     *    "No implementation for X.Y imported from Z, setting to stub", which is
-     *    a DLL that loaded with a missing export and then dies later at a
-     *    confusing address. `err+all` misses it because it is WARN, and
-     *    `+loaddll` misses it because the module loaded fine.
-     *
-     *    The graphics side rides the same pipe: DXVK and vkd3d both write
-     *    through `__wine_dbg_output`. Do NOT set `VKD3D_LOG_FILE` — it moves
-     *    vkd3d's output off stderr rather than copying it. See docs/LOGGING.md.
+     * **The child's fd 2 must be a real pipe**, not `/dev/null`: Wine's
+     * `init_options()` `fstat`s it and returns before parsing `WINEDEBUG` if it
+     * is the null device, so every channel setting silently does nothing — and
+     * DXVK and vkd3d write through `__wine_dbg_output`, so the same redirect
+     * discards the graphics story too. The channel set and the rest of the
+     * environment are `docs/LOGGING.md`'s business; do not restate it here.
      *
      * The returned handle is safe to use from any thread and cannot throw. It
-     * must be closed, or the session is recovered as
-     * [SessionExit.CRASHED] the next time the list is read.
+     * must be closed, or the session is recovered as [SessionExit.CRASHED] the
+     * next time the list is read.
      */
     fun open(containerId: String, startedAt: Long = System.currentTimeMillis()): SessionLog {
         var stamp = startedAt
-        // Two launches inside one millisecond would otherwise share a file. It
-        // cannot happen from the UI; it can happen from a test.
+        // Two launches inside one millisecond would otherwise share a file.
         while (writers.containsKey(key(containerId, stamp))) stamp++
 
         val writer = SessionLogWriter(
@@ -153,14 +126,10 @@ class SessionLogStore @Inject constructor(
         }
 
     /**
-     * Read the sidecar, repairing what the last run of the app left behind.
-     *
-     * Two things are repaired. A session still marked `RUNNING` with no writer
-     * attached did not end cleanly — the process was killed with the container
-     * up — so it becomes `CRASHED`, which is what actually happened. And tail
-     * segments left on disk are folded into the head file, using the elided
-     * count the sidecar was recording as it went, so a crashed session reads
-     * exactly like a finished one.
+     * Read the sidecar, repairing what the last run of the app left behind: a
+     * session still marked `RUNNING` with no writer attached becomes `CRASHED`,
+     * and stray tail segments are folded into the head file so a crashed session
+     * reads exactly like a finished one.
      */
     private fun recover(directory: File, containerId: String, startedAt: Long): SessionLogMeta {
         val stored = readSessionMeta(directory, startedAt, json)
@@ -191,10 +160,10 @@ class SessionLogStore @Inject constructor(
     /**
      * One page of a session, resuming from [cursor].
      *
-     * The page is bounded twice: by [maxLines] returned, and by [MAX_SCAN_LINES]
-     * examined. The second bound is what keeps a filtered read of a log with no
-     * errors in it from scanning a hundred thousand lines in one call — it
-     * returns an empty page that is not at the end, and the caller asks again.
+     * Bounded twice: by [maxLines] returned and by [MAX_SCAN_LINES] examined.
+     * The second bound stops a filtered read of an error-free log scanning a
+     * hundred thousand lines in one call — it returns an empty page that is not
+     * at the end, and the caller asks again.
      */
     suspend fun read(
         containerId: String,
@@ -234,8 +203,8 @@ class SessionLogStore @Inject constructor(
                     }
                 }
             }.onFailure {
-                // An unreadable segment ends the segment rather than the read:
-                // the next one may still be there, and half a log beats none.
+                // An unreadable segment ends the segment, not the read: the next
+                // one may still be there, and half a log beats none.
                 exhausted = true
             }
             if (!exhausted) break
@@ -251,11 +220,9 @@ class SessionLogStore @Inject constructor(
     }
 
     /**
-     * The session as plain text, for the clipboard.
-     *
-     * Bounded, and it says when it has been. A clipboard is a Binder
-     * transaction, and an eight megabyte one does not fail politely — the whole
-     * log goes to [export] and the share sheet instead.
+     * The session as plain text, for the clipboard. Bounded, and it says when it
+     * has been: a clipboard is a Binder transaction and an eight megabyte one
+     * does not fail politely. The whole log goes through [export] instead.
      */
     suspend fun textFor(
         containerId: String,
@@ -282,11 +249,9 @@ class SessionLogStore @Inject constructor(
     }
 
     /**
-     * The whole session written out as readable text, for the share sheet.
-     *
-     * Into `cacheDir` rather than `filesDir`: it is a copy made to be handed to
-     * another app, and the system is welcome to reclaim it afterwards. Streamed,
-     * so exporting the cap costs one line of memory rather than eight megabytes.
+     * The whole session as readable text, for the share sheet. Into `cacheDir`
+     * rather than `filesDir` — the system is welcome to reclaim it — and
+     * streamed, so exporting the cap costs one line of memory.
      */
     suspend fun export(containerId: String, startedAt: Long): File? = withContext(Dispatchers.IO) {
         val directory = directoryFor(containerId)
@@ -352,11 +317,8 @@ class SessionLogStore @Inject constructor(
     }
 
     /**
-     * Ten sessions per container, and the eleventh pushes the oldest off.
-     *
-     * Run when a session opens rather than on a schedule, because that is the
-     * only moment the count can go up, and a sweep that runs at any other time
-     * is a sweep that has to be remembered.
+     * Ten sessions per container, and the eleventh pushes the oldest off. Run
+     * when a session opens, which is the only moment the count can go up.
      */
     private fun prune(containerId: String) {
         val directory = directoryFor(containerId)
@@ -380,13 +342,10 @@ class SessionLogStore @Inject constructor(
     private fun directoryFor(containerId: String) = File(root, safeName(containerId))
 
     /**
-     * A container id is a UUID today, but it arrives here as a string and a
-     * string that reaches the filesystem gets sanitised. One separator in the
-     * wrong place is a write outside the app's own directory.
-     *
-     * Delegated to [ContainerPaths], which owns the layout, so this store and
-     * [ContainerLayout.logs] can never disagree about which directory a given
-     * container id names.
+     * A container id is a UUID today, but it arrives as a string, and one
+     * separator in the wrong place is a write outside the app's own directory.
+     * Delegated to [ContainerPaths] so this store and [ContainerLayout.logs] can
+     * never disagree about which directory an id names.
      */
     private fun safeName(containerId: String): String = ContainerPaths.safeName(containerId)
 

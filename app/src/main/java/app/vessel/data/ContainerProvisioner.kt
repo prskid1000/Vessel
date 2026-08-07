@@ -117,17 +117,13 @@ sealed interface BootstrapOutcome {
 /**
  * **The integration point. This is where provisioning stops.**
  *
- * Everything above this interface is file manipulation: making directories,
- * verifying and unpacking archives, rendering a `.reg` file. Everything below it
- * needs a *process* — `wineboot` to create the prefix, `regedit` to import the
- * seed — and how this app executes a downloaded ELF binary on Android is an open
- * question being answered separately. Nothing in this file depends on that
- * answer, which is why it can be finished before the answer arrives.
+ * Everything above this interface is file manipulation. Everything below needs a
+ * *process* — `wineboot` for the prefix, `regedit` for the seed — which is why
+ * this file can be finished before the launcher exists.
  *
- * Until an implementation exists, [Deferred] is used and both steps report
- * [BootstrapOutcome.NotAvailable]. They appear in the checklist as skipped with
- * the reason attached, so the Preparing state tells the truth — the alternative
- * is a checklist that claims a prefix was created when the directory is empty.
+ * Until then [Deferred] reports [BootstrapOutcome.NotAvailable] for both steps,
+ * and they appear in the checklist as skipped with the reason attached rather
+ * than claiming a prefix was created when the directory is empty.
  *
  * The launcher implements this. It must not be implemented anywhere else: a
  * second thing that knows how to start a Wine process is a second thing that has

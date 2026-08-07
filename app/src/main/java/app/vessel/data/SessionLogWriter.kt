@@ -28,23 +28,18 @@ import java.util.concurrent.atomic.AtomicReference
  * the thread draining the session's stderr and a full buffer must never become
  * back-pressure on the process being logged.
  *
- * Three defences, applied in this order, and the order is the design:
+ * Three defences, applied in this order:
  *
- *  1. **Dedup.** Consecutive identical lines collapse to `<line>  ×N`. This is
- *     the common explosion — one `fixme` inside a render loop — and it is
- *     collapsed for the cost of a string comparison.
- *  2. **Rate limit.** At most [RATE_LIMIT_LINES] lines are written per second.
- *     Dedup cannot help when a draw path fails: wined3d has hundreds of
- *     unguarded `ERR` sites and two of them alternating produce a stream of
- *     non-identical lines at frame rate. Over the limit the sink stops writing
- *     and counts; when the rate falls it writes one marker saying how many lines
- *     it refused. It never drops silently — a log that hides its own truncation
- *     turns a gap in the evidence into a claim that nothing happened.
- *  3. **Head + tail cap.** The first [HEAD_LIMIT_BYTES] and the last
- *     [TAIL_SEGMENT_BYTES]–2× of the file are kept, with the middle replaced by
- *     one elision marker. Truncating from the end would throw away the crash;
- *     truncating from the start would throw away why it broke. Both halves
- *     matter, so both halves are kept.
+ *  1. **Dedup.** Consecutive identical lines collapse to one line and a count —
+ *     the common explosion, one `fixme` inside a render loop.
+ *  2. **Rate limit** to [RATE_LIMIT_LINES] per second, for what dedup cannot
+ *     catch: two *alternating* unguarded wined3d `ERR` sites at frame rate.
+ *  3. **Head + tail cap.** [HEAD_LIMIT_BYTES] from the start and two
+ *     [TAIL_SEGMENT_BYTES] from the end, middle elided — truncating from either
+ *     end alone throws away either the crash or why it broke.
+ *
+ * No layer ever drops silently: a log that hides its own truncation turns a gap
+ * in the evidence into a claim that nothing happened.
  *
  * Nothing here throws. Every file operation is wrapped, and the first failure
  * puts the writer into a state where it accepts lines and discards them, so a

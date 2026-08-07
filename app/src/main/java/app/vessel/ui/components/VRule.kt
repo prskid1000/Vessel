@@ -58,8 +58,8 @@ private fun VRulePreview() {
         Column(Modifier.padding(horizontal = 18.dp)) {
             VRule()
             VRule(color = Vessel.colors.accent)
-            // Narrower than two fades: the rule degrades to one soft mark
-            // rather than losing its middle.
+            // Narrower than two fades: degrade to one soft mark rather than
+            // losing the middle.
             Box(Modifier.width(60.dp)) { VRule() }
         }
     }

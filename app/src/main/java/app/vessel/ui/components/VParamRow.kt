@@ -52,33 +52,19 @@ import kotlin.math.roundToInt
  * One setting from the manifest: a label line, its control directly beneath, and
  * the sentence that says what the control does.
  *
- * **The row is flat.** It used to be wrapped in `vCard()`, which boxed every
- * setting on the container editor and turned a list of ten knobs into ten
- * separate panels — boxes inside a screen that is itself a box, with the eye
- * spending its attention on the frames rather than on the settings. Rows now sit
- * directly on `bg` and are separated by vertical rhythm alone (`s8`), which is
- * both denser and calmer. The only ruled or bordered things left on the screen
- * are the *controls*: a dropdown, a text field, a stepper button.
+ * **The row is flat** — no card. Rows sit directly on `bg`, separated by
+ * vertical rhythm alone, so the only ruled things on the screen are the
+ * controls. The right-aligned [value] lets the whole configuration be read down
+ * one edge without touching a control; [valueIsMachine] sets it in mono.
  *
- * The right-aligned [value] is the other half of that: with every row's value
- * ending on the same edge, the whole configuration can be read down the right
- * side of the screen without touching a control. Use [valueIsMachine] where the
- * value is a machine string — a package id, a selector, a version — so it is set
- * in mono like every other machine fact in the product.
+ * [help] is the point of the container editor, not garnish — DESIGN.md's rule is
+ * that a knob which cannot be explained in one plain sentence does not ship — so
+ * it renders under the control, never truncated, wrapping as far as it needs.
  *
- * The sentence is the point of the container editor, not garnish. Every other
- * app in this space shows a wall of raw environment variables and assumes you
- * already know; DESIGN.md's rule is that a knob which cannot be explained in one
- * plain sentence does not ship. So [help] renders under the control rather than
- * behind an info affordance, is never truncated, and wraps to as many lines as
- * it needs.
- *
- * [note] is for a fact about the control's *bounds* — a clamp that is currently
- * active, or a component selector that resolved to nothing — and [warning] for a
- * value that is dangerous right now.
- *
- * [trailing] sits on the label line itself, at the right edge; it is where a
- * boolean's switch goes. [control] sits under the line and spans the width.
+ * [note] is a fact about the control's *bounds* (an active clamp, a selector
+ * that resolved to nothing); [warning] is a value that is dangerous right now.
+ * [trailing] sits on the label line, where a boolean's switch goes; [control]
+ * sits under it and spans the width.
  */
 @Composable
 fun VParamRow(

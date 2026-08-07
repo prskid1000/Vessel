@@ -68,25 +68,14 @@ object Routes {
 /**
  * Two roots and no more.
  *
- * Everything else in the product — the editor, the session, components, drivers,
- * files — is pushed on top of one of these. A third tab is the first sign that a
- * screen has been added instead of designed.
+ * Everything else — the editor, the session, components, drivers, files — is
+ * pushed on top of one of these. The two here are the two things a user comes to
+ * this app to do: pick a container, or pick a program.
  *
- * The two that are here are the two things a user comes to this app to do: pick
- * a container, or pick a program. Nothing else is a place you go on purpose.
- *
- * **Settings was a root and is now gone**, which is the clearest case of the
- * rule. It held two readouts that could not be changed — storage location and a
- * container count — and the links onward. Once the readouts were removed for
- * being decoration, what was left was a menu with a tab of its own: a whole
- * destination whose only content was the names of other destinations. Those
- * links now hang off the overflow in the Containers toolbar, which is where a
- * maintainer looks for them and where a user never has to.
- *
- * Components deliberately is not a root either. Vessel ships one current build
- * of each component, compiled for this device, so there is nothing to browse and
- * no choice to make: the set is provisioned on first run. A store front would be
- * UI for a decision the product does not ask the user to make.
+ * Settings and Components are deliberately not roots. Settings became a
+ * destination whose only content was the names of other destinations, so its
+ * links hang off the Containers overflow instead; Components has one current
+ * build of each component and therefore nothing to browse.
  *
  * TODO: Material icons stand in for the bespoke set DESIGN.md implies.
  */

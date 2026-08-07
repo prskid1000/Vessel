@@ -176,8 +176,14 @@ resolve_cpu_flags() {
 
 # Clone (or update) a component to its pinned ref and apply our patches.
 # Idempotent: safe to re-run, always ends at exactly the pinned ref.
+# fetch_source <name> <repo> <ref> [exact_sha]
+#
+# The optional fourth argument freezes a branch ref to one commit. Branches move
+# — the Mesa gen8 branch advanced mid-session and both Mesa-derived components
+# silently changed version — so a pin is the difference between a reproducible
+# build and whatever upstream pushed this morning. Empty means track the ref.
 fetch_source() {
-  local name="$1" repo="$2" ref="$3"
+  local name="$1" repo="$2" ref="$3" exact="${4:-}"
   local dir="$NATIVE_DIR/$name"
 
   if [ ! -d "$dir/.git" ]; then
@@ -194,6 +200,16 @@ fetch_source() {
   if git -C "$dir" symbolic-ref -q HEAD >/dev/null 2>&1; then
     git -C "$dir" reset --hard "origin/$ref"
   fi
+  # Freeze to the exact commit if one is pinned. After the branch checkout, so
+  # the pin is a hard override rather than an alternative path — and verified to
+  # exist, because a typo'd SHA must fail here and not silently build the head.
+  if [ -n "$exact" ]; then
+    git -C "$dir" rev-parse --verify --quiet "$exact^{commit}" >/dev/null       || die "$name: pinned commit '$exact' does not exist in $repo.
+     Clear the pin in native/pins.env to track '$ref', or correct the SHA."
+    log "pinning $name to $exact"
+    git -C "$dir" checkout --force --detach "$exact"
+  fi
+
   git -C "$dir" submodule update --init --recursive
 
   apply_patches "$name"

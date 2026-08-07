@@ -37,18 +37,11 @@ data class ComponentsUiState(
 /**
  * What is actually installed, and nothing else.
  *
- * This used to serve a fixed list of six packages. It read well and it was a
- * lie: [InstalledComponents] scans the `profile.json` in every
- * `files/components/<id>` directory, so on a device with nothing unpacked the
- * driver manager correctly reported zero Turnip
- * builds while this screen claimed six installed components — including the very
- * Turnip the other screen said was missing. Two screens disagreeing about the
- * same directory is worse than an empty screen, because it makes the honest one
- * look broken.
- *
- * So there is one source now, and it is the disk. The fixed list survives only
- * as `@Preview` data in `ComponentsScreen`, where nobody can mistake it for a
- * fact about their phone.
+ * One source, and it is the disk: [InstalledComponents] scans the `profile.json`
+ * in every `files/components/<id>` directory. A hardcoded list here would let
+ * this screen and the driver manager disagree about the same directory, which is
+ * worse than an empty screen because it makes the honest one look broken. The
+ * fixed list survives only as `@Preview` data in `ComponentsScreen`.
  *
  * TODO: the *available* half — packages not yet downloaded — arrives with the
  *  registry read and the downloader. Until then "installed" is the whole story

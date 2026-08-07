@@ -35,19 +35,18 @@ import androidx.compose.ui.unit.sp
 /**
  * Nocturne, as Vessel expresses it.
  *
- * Every value here is transcribed from `_ds/nocturne-<id>/styles.css` in the
- * On-Device AI project by way of `docs/DESIGN.md`. That stylesheet is the
- * system's source of truth: retune there, mirror here. The two products read as
- * one family because they are literally the same tokens.
+ * Every value is transcribed from `_ds/nocturne-<id>/styles.css` in the
+ * On-Device AI project by way of `docs/DESIGN.md`, which is the source of truth:
+ * retune there, mirror here.
  *
- * Dark-only, and deliberately not Material dynamic colour: architecture is
+ * Dark-only, and deliberately not Material dynamic colour — architecture is
  * carried by colour here, so `archX64` meaning blue on one phone and something
- * wallpaper-derived on another would destroy the one signal the product leans
- * on hardest.
+ * wallpaper-derived on another would destroy the signal the product leans on
+ * hardest.
  *
- * Kotlin lets a default expression name an earlier parameter, which is used
- * throughout below so the derived tokens (`divider`, `textMuted`, the
- * interaction tints) cannot drift away from the role they are derived from.
+ * Derived tokens (`divider`, `textMuted`, the interaction tints) are default
+ * expressions naming an earlier parameter, so they cannot drift from the role
+ * they are derived from.
  */
 @Immutable
 data class VColors(
@@ -501,8 +500,7 @@ fun Modifier.vFadingRule(
     if (size.width <= 0f) return@drawBehind
     val fade = fadeWidth.toPx().coerceAtMost(size.width / 2f)
     val stops = if (fade * 2f >= size.width) {
-        // Narrower than two fades: the rule becomes a single soft mark rather
-        // than losing its middle.
+        // See VRule: narrower than two fades becomes one soft mark.
         arrayOf(0f to Color.Transparent, 0.5f to color, 1f to Color.Transparent)
     } else {
         arrayOf(

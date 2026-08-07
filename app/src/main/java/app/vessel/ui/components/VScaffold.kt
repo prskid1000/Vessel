@@ -208,10 +208,8 @@ enum class VButtonStyle { Primary, Secondary, Ghost, Danger }
  *
  * **Buttons in Nocturne are outlined, not filled.** A primary button is accent
  * text with a 1 dp accent border on a transparent ground, tinting to 12% accent
- * on hover and 22% on press. A solid accent slab is not a form this system has,
- * and it used to be one here: the previous version filled Primary with the flat
- * accent and set the label to `bg`, which read as a Material FAB dropped onto a
- * Nocturne screen and made the Launch button the loudest thing in the product.
+ * on hover and 22% on press. A solid accent slab is not a form this system has;
+ * filling Primary reads as a Material FAB dropped onto a Nocturne screen.
  *
  * `.btn-secondary` is the same geometry with a `divider` border and text
  * colour; `.btn-ghost` drops the border entirely. Disabled is 45% opacity, not

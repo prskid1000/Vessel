@@ -88,8 +88,19 @@ def compress(tar_path: Path, out_path: Path, method: str) -> None:
         exe = shutil.which("xz")
         if not exe:
             raise SystemExit("xz not found; install it or pass --compress zstd")
+        # preset 9 with a 16 MiB dictionary, not plain -9.
+        #
+        # The dictionary size is written into the block header, and the decoder
+        # must allocate it up front — so `xz -9` (64 MiB) makes every install on
+        # the phone a 64 MiB allocation regardless of how carefully the app
+        # streams the rest. 16 MiB cuts that fourfold and costs about 1% of
+        # ratio on these payloads. Peak decode memory is a device constraint;
+        # compression ratio is only a download size.
         with out_path.open("wb") as fh:
-            subprocess.run([exe, "-9", "-T0", "-c", str(tar_path)], stdout=fh, check=True)
+            subprocess.run(
+                [exe, "--lzma2=preset=9,dict=16MiB", "-T0", "-c", str(tar_path)],
+                stdout=fh, check=True,
+            )
     else:
         raise SystemExit(f"unknown compression: {method}")
 
@@ -104,7 +115,13 @@ def main() -> int:
     ap.add_argument("--provenance", type=Path, default=None)
     ap.add_argument("--description", default="")
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--compress", choices=("zstd", "xz"), default="zstd")
+    # xz, not zstd. The Android app has no zstd decoder — neither the platform
+    # nor java.util.zip provides one, and shipping a native zstd would mean an
+    # NDK dependency in the app for the sake of the packager's default. xz costs
+    # one 110 KB pure-Java library, compresses these payloads slightly better
+    # than zstd -19, and is what the .wcp ecosystem already uses. Passing
+    # --compress zstd still works, but nothing we ship should use it.
+    ap.add_argument("--compress", choices=("zstd", "xz"), default="xz")
     args = ap.parse_args()
 
     if args.type not in KNOWN_TYPES:

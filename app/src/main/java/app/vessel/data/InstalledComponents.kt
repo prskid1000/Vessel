@@ -142,9 +142,7 @@ data class ComponentResolution(
     val note: String?,
 )
 
-// `profile.json` itself is declared once, in `app.vessel.core.WcpProfile`, and
-// shared with `WcpInstaller`. It used to be duplicated here as a private model
-// with a subset of the fields, which is the shape of bug this project can least
-// afford: decoding is lenient by design, so the copy that was not updated when
-// the packager gained a field would have gone on reading successfully and
-// silently dropping it.
+// `profile.json` is declared once, in `app.vessel.core.WcpProfile`, and shared
+// with `WcpInstaller`. Do not add a second private copy: decoding is lenient by
+// design, so whichever copy missed a new packager field would go on reading
+// successfully and silently dropping it.

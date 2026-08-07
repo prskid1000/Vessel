@@ -4,10 +4,10 @@ package app.vessel.core
  * One registry value. [name] is empty for a key's default value, which a `.reg`
  * file writes as `@`.
  *
- * Every value here is `REG_SZ`. That is not a simplification — it is what the
- * readers require. `load_arm64ec_module` and `get_cpu_dll_name` both test
- * `info->Type == REG_SZ` and ignore the value otherwise, so emitting one of them
- * as `REG_EXPAND_SZ` would leave the key present, readable, and silently unused.
+ * Every value here is `REG_SZ` because the readers require it:
+ * `load_arm64ec_module` and `get_cpu_dll_name` both test `info->Type == REG_SZ`
+ * and ignore the value otherwise, so `REG_EXPAND_SZ` would leave the key
+ * present, readable, and silently unused.
  */
 data class RegistryValue(val name: String, val data: String) {
     companion object {
@@ -22,10 +22,9 @@ data class RegistryKey(val path: String, val values: List<RegistryValue>)
 /**
  * The registry a fresh prefix needs, as data and as a `.reg` file.
  *
- * Applying it needs `regedit` inside a running prefix, which needs a process,
- * which is out of scope here — [app.vessel.data.ContainerProvisioner] renders
- * this to `prefix-seed.reg` and stops. The split is deliberate: the *content* of
- * the seed is a set of facts about Wine that can be reviewed and tested now,
+ * Applying it needs `regedit` in a running prefix, so
+ * [app.vessel.data.ContainerProvisioner] renders this to `prefix-seed.reg` and
+ * stops. The split keeps the seed's *content* reviewable and testable now,
  * independently of how the app eventually executes anything.
  */
 object PrefixRegistry {
@@ -46,14 +45,12 @@ object PrefixRegistry {
     /**
      * **`renderer = vulkan`, and this is the one nobody remembers.**
      *
-     * DXVK covers D3D9 through D3D11 and vkd3d covers D3D12, so it is easy to
-     * conclude wined3d is not in the picture. It is: **DirectDraw and D3D1–7 go
-     * through wined3d**, which defaults to its OpenGL renderer — and Vessel's
-     * Wine is built with no GLX at all. Without this value an old title fails
-     * with no obvious cause, because nothing on the way down says "I tried to use
-     * OpenGL". The only hint is `+winediag`'s renderer-selection line, which is
-     * in [WINEDEBUG_CHANNELS] precisely so this failure is visible when it
-     * happens anyway.
+     * DXVK covers D3D9–11 and vkd3d covers D3D12, which makes it easy to
+     * conclude wined3d is out of the picture. It is not: **DirectDraw and D3D1–7
+     * go through wined3d**, which defaults to its OpenGL renderer — and our Wine
+     * has no GLX at all. Without this value an old title fails with nothing on
+     * the way down saying "I tried to use OpenGL"; the only hint is
+     * `+winediag`'s renderer-selection line.
      */
     val direct3D: RegistryKey = RegistryKey(
         path = """HKEY_CURRENT_USER\Software\Wine\Direct3D""",
@@ -77,16 +74,11 @@ object PrefixRegistry {
     /**
      * Where Wine looks for the ARM64EC emulator, i.e. FEX.
      *
-     * Read by `load_arm64ec_module()` at `dlls/ntdll/loader.c:4233` in the tree
-     * under `native/wine`: it opens
-     * `\Registry\Machine\Software\Microsoft\Wow64\amd64`, takes the default
-     * value if it is `REG_SZ`, and appends it to `C:\windows\system32\`. With the
-     * key absent it falls back to `libarm64ecfex.dll` — the same answer — so this
-     * is an assertion of the value Wine would pick anyway, not a repair.
-     *
-     * `loader/wine.inf.in:436` writes it during `wineboot` with the NOCLOBBER
-     * flag. Seeding it before that leaves ours in place; applying the seed after
-     * overwrites with an identical value. Either order lands correctly.
+     * Read by `load_arm64ec_module()` (`dlls/ntdll/loader.c:4233`), which appends
+     * the default value to `C:\windows\system32\`. Absent, it falls back to
+     * `libarm64ecfex.dll` — the same answer — so this asserts the value Wine
+     * would pick anyway rather than repairing anything. `wine.inf.in:436` writes
+     * it during `wineboot` with NOCLOBBER, so either ordering lands correctly.
      */
     val arm64ecEmulator: RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\amd64""",
@@ -96,20 +88,15 @@ object PrefixRegistry {
     /**
      * Where Wine looks for the 32-bit x86 emulator under WoW64, i.e. FEX again.
      *
-     * Read by `get_cpu_dll_name()` at `dlls/wow64/syscall.c:741`, which opens
-     * `…\Wow64\x86` and requires `REG_SZ`. Its built-in fallback is already
-     * `libwow64fex.dll` when the native machine is ARM64, and `wine.inf.in:438`
-     * writes the same. Recorded for the same reason as [arm64ecEmulator]: the
-     * value the container depends on should be visible in Vessel's own seed
-     * rather than only in Wine's.
+     * Read by `get_cpu_dll_name()` (`dlls/wow64/syscall.c:741`). Its built-in
+     * fallback is already `libwow64fex.dll` on an ARM64 native machine; recorded
+     * for the same reason as [arm64ecEmulator].
      *
      * TODO: confirm on a booted prefix that these two are the *only* keys the
-     *  ARM64EC path consults. `\Registry\Machine\Software\Microsoft\Wow64\arm`
-     *  (`wowarmhw.dll`) is the 32-bit-ARM case and is irrelevant here, and no
-     *  `FEX_*` value is read from the registry — FEX is configured entirely
-     *  through the environment, per `docs/TUNING.md`. Nothing else was found by
-     *  reading `dlls/ntdll/loader.c` and `dlls/wow64/syscall.c`, but neither has
-     *  been exercised at runtime, because nothing has run yet.
+     *  ARM64EC path consults. Reading `dlls/ntdll/loader.c` and
+     *  `dlls/wow64/syscall.c` found nothing else — FEX is configured entirely
+     *  through the environment, not the registry — but neither has been
+     *  exercised at runtime.
      */
     val x86Emulator: RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\x86""",
@@ -122,9 +109,8 @@ object PrefixRegistry {
     /**
      * [keys] as the text of a `.reg` file.
      *
-     * CRLF throughout and UTF-8 on disk. Wine's `regedit` accepts UTF-8 and LF,
-     * but a `.reg` file is a Windows format and there is no reason for the one we
-     * generate to be the unusual variant of it.
+     * CRLF throughout, UTF-8 on disk. Wine's `regedit` accepts LF too, but a
+     * `.reg` file is a Windows format.
      */
     fun render(keys: List<RegistryKey> = seed): String = buildString {
         append(HEADER).append(CRLF)
@@ -146,9 +132,9 @@ object PrefixRegistry {
     /**
      * `.reg` string escaping: backslash then quote, in that order.
      *
-     * Doing it the other way round would escape the backslashes this function
-     * just inserted. Only value text is escaped — a key path in `[...]` carries
-     * its separators literally.
+     * The other way round escapes the backslashes this function just inserted.
+     * Only value text is escaped; a key path in `[...]` carries its separators
+     * literally.
      */
     private fun escape(text: String): String =
         text.replace("""\""", """\\""").replace("\"", """\"""")

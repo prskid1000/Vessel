@@ -181,9 +181,8 @@ class ContainerEditorViewModel @Inject constructor(
      * clamp and touches nothing else.
      *
      * Keys the manifest no longer declares are dropped rather than carried
-     * forward. A container saved before Box64 was removed still has its
-     * `box64.*` values in the document, and re-writing settings for an engine
-     * that is not in the build would keep them alive forever.
+     * forward, so settings for a component that has left the build do not live
+     * on in every container document.
      */
     private fun clampedParams(profile: ContainerProfile): Map<String, ParamValue> {
         val currentManifest = manifest ?: return profile.params
@@ -197,15 +196,9 @@ class ContainerEditorViewModel @Inject constructor(
     // — rendering model ------------------------------------------------------
 
     /**
-     * Every group, every param, in manifest order.
-     *
-     * There is no filter here any more. The editor used to drop whatever the
-     * "Show advanced" disclosure was hiding, which meant this function decided
-     * on the user's behalf which of the app's own settings they were not
-     * qualified to see — and a param that resolved to nothing visible took its
-     * whole group with it. Hierarchy is the manifest's ordering now, and the
-     * only thing that can remove a param from the screen is [resolve] failing to
-     * give it a value at all.
+     * Every group, every param, in manifest order — no filter. Hierarchy is the
+     * manifest's ordering, and the only thing that can remove a param from the
+     * screen is [resolve] failing to give it a value at all.
      */
     private fun rebuild() {
         val currentManifest = manifest ?: return

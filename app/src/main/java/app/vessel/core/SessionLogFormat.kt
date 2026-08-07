@@ -4,14 +4,9 @@ package app.vessel.core
  * Which engine produced a line.
  *
  * A session's output is one interleaved stream — Wine, the translator, the D3D
- * layer and the driver all write to the same file descriptor — so the source is
- * something the log has to *recover* rather than something it is told. It is
- * carried per line because "which layer said this" is the first question anyone
- * reading a crash asks, and answering it by eye means knowing that `fixme:d3d:`
- * is Wine while `DXVK:` is not.
- *
- * [wire] is the single character the on-disk format uses; it never changes for a
- * given entry, because old log files are read by new builds.
+ * layer and the driver share a file descriptor — so the source is *recovered*
+ * rather than told. [wire] is the single character the on-disk format uses and
+ * must never change for a given entry: old log files are read by new builds.
  */
 enum class LogSource(val wire: Char, val label: String) {
     WINE('W', "wine"),
@@ -30,11 +25,9 @@ enum class LogSource(val wire: Char, val label: String) {
 }
 
 /**
- * Four levels and no more.
- *
- * Wine's `fixme` maps to [WARN] rather than to a level of its own: it means "this
- * call is stubbed", which is a warning about behaviour, and a fifth level would
- * need a fifth colour in a palette where colour is reserved for meaning.
+ * Four levels and no more. Wine's `fixme` maps to [WARN] — it means "this call is
+ * stubbed", a warning about behaviour, and a fifth level would need a fifth
+ * colour in a palette where colour is reserved for meaning.
  */
 enum class LogLevel(val wire: Char, val label: String) {
     ERROR('E', "error"),
@@ -51,11 +44,9 @@ enum class LogLevel(val wire: Char, val label: String) {
 /**
  * One line as the viewer draws it.
  *
- * [index] is the line's position in the file, counted from zero over every line
- * including the ones a filter hides. It is the viewer's `LazyColumn` key, which
- * is why it has to come from the file's own ordering rather than from the
- * position in a filtered list — a key that changes when the filter changes is a
- * key that recomposes the whole list.
+ * [index] is the position in the file, counted over every line including those a
+ * filter hides, because it is the `LazyColumn` key: a key that changes when the
+ * filter changes recomposes the whole list.
  */
 data class LogEntry(
     val index: Int,
@@ -65,12 +56,9 @@ data class LogEntry(
 )
 
 /**
- * The viewer's severity filter.
- *
- * A *view* over lines already captured, and deliberately not a capture setting.
- * Choosing which channels to record is the mistake this product refuses
- * elsewhere too: it asks the user to predict, before the crash, which layer will
- * turn out to be at fault. Everything is captured; this decides what is drawn.
+ * The viewer's severity filter — a *view* over lines already captured, never a
+ * capture setting. Choosing what to record asks the user to predict, before the
+ * crash, which layer will turn out to be at fault.
  */
 enum class LogFilter {
     ALL,
@@ -91,12 +79,9 @@ data class ParsedLogLine(
 )
 
 /**
- * The longest single line that will ever be stored.
- *
- * A `fixme` carrying a serialised structure can be tens of kilobytes, and one
- * such line per frame is how a log goes from readable to unopenable. Truncation
- * is visible — the line ends in an ellipsis — because a silently shortened line
- * is a line that lies.
+ * The longest single line that will ever be stored. A `fixme` carrying a
+ * serialised structure can be tens of kilobytes, and one per frame is how a log
+ * goes from readable to unopenable. Truncation ends the line in an ellipsis.
  */
 const val MAX_LOG_LINE_CHARS: Int = 4096
 
@@ -104,33 +89,19 @@ const val MAX_LOG_LINE_CHARS: Int = 4096
  * Raw stderr in, `(source, level, text)` out.
  *
  * Pure, and in `core/` on purpose: this is the one piece of the logging feature
- * with real logic, and it is the piece a new Wine or DXVK release is most likely
- * to break. The session launcher will feed every line of the process's stderr
- * through it — see `SessionLogStore.open`.
+ * with real logic, and the piece a new Wine or DXVK release is most likely to
+ * break.
  *
- * What it recognises:
+ * It recognises Wine channels (`err:module:import_dll …`), Wine's optional
+ * pid/tid/timestamp prefixes (`0.012:0024:0028:err:…`, from `+pid`/`+tid`/
+ * `+timestamp`), DXVK's `info:  DXVK:` form, FEX's `[ERR]` brackets and Mesa's
+ * `MESA: error:`. Wine's leading level token is consumed but the channel kept,
+ * since `module:import_dll` is the useful part; Mesa's whole prefix is consumed,
+ * since the source column already says `driver`.
  *
- *  - **Wine channels** — `err:module:import_dll …`, `fixme:d3d:…`, `warn:heap:…`,
- *    `trace:seh:…`. The leading level token is consumed; the channel is kept,
- *    because `module:import_dll` is the most useful part of the line and the
- *    level is already carried out of band.
- *  - **Wine's pid/tid and timestamp prefixes** — `0024:0028:err:…` and
- *    `0.012:0024:0028:err:…`, which appear when `WINEDEBUG` carries `+pid`,
- *    `+tid` or `+timestamp`. Only fields that look like numbers are skipped, so
- *    a channel name can never be mistaken for a prefix.
- *  - **DXVK** — `info:  DXVK: v2.3`, `warn:`, `err:`. DXVK uses the same level
- *    tokens as Wine, so the level comes from the token and the source from the
- *    `DXVK:`/`D3D11:`/`DXGI:` tag that follows it.
- *  - **FEX** — `[ERR] …`, `[WARN] …`, `[INFO] …`, `[ASSERT] …`. The bracket is
- *    consumed; it is a level marker and nothing else.
- *  - **Mesa/Turnip** — `MESA: error: …`, `MESA-INTEL: warning: …`. The whole
- *    prefix is consumed here, because the source column already says `driver`
- *    and repeating it in the text costs a third of a phone's line width.
- *
- * Anything it does not recognise is `(WINE, INFO)` with the text untouched.
- * Wine is the process that owns the pipe, so unprefixed output on it is Wine's
- * until something says otherwise, and guessing a level from prose would put a
- * red line on screen for a game that printed the word "error" in its splash.
+ * Anything unrecognised is `(WINE, INFO)` with the text untouched. Wine owns the
+ * pipe, and guessing a level from prose would put a red line on screen for a
+ * game that printed the word "error" in its splash.
  */
 fun parseSessionLogLine(raw: String): ParsedLogLine {
     val line = raw.trimEnd('\n', '\r', ' ', '\t')
@@ -175,12 +146,9 @@ private fun findLevelToken(line: String): Pair<LogLevel, Int>? {
 }
 
 /**
- * Which layer a line's body belongs to.
- *
- * `d3d11`, `d3d9` and `dxgi` resolve to DXVK rather than to Wine: this product
- * always installs a D3D translation layer, so a line on one of those channels is
- * that layer's, and filing it under `wine` would send someone reading a
- * rendering bug to the wrong component.
+ * Which layer a line's body belongs to. `d3d11`, `d3d9` and `dxgi` resolve to
+ * DXVK, not Wine: this product always installs a D3D translation layer, so
+ * filing them under `wine` sends a rendering bug to the wrong component.
  */
 private fun sourceOf(body: String): LogSource {
     val channel = body.substringBefore(' ').substringBefore(':').lowercase()
@@ -200,10 +168,9 @@ private fun sourceOf(body: String): LogSource {
  * One line, as it is stored: `<level><source> <text>`.
  *
  * Two characters and a space rather than JSON per line. The viewer decodes tens
- * of thousands of these to draw one screen, and the prefix means it can colour a
- * line without re-running the parser — which would also mean re-deciding the
- * source every time the file is scrolled, and getting a different answer after a
- * parser change than the session actually recorded.
+ * of thousands of these per screen, and the prefix means it never re-runs the
+ * parser — which would re-decide the source on every scroll and, after a parser
+ * change, give a different answer than the session recorded.
  *
  * Newlines and carriage returns inside [text] become spaces: one stored line is
  * one line of output, or the file's own line count stops meaning anything.
@@ -223,12 +190,10 @@ fun encodeLogLine(source: LogSource, level: LogLevel, text: String): String {
 }
 
 /**
- * The inverse, with a fallback rather than an exception.
- *
- * A line whose prefix does not decode is shown verbatim as a Vessel INFO line. A
- * log file is the thing someone reaches for when everything else has already
- * gone wrong, and refusing to open one because three bytes are wrong is the
- * worst moment to be strict.
+ * The inverse, with a fallback rather than an exception: a line whose prefix does
+ * not decode is shown verbatim as a Vessel INFO line. A log is what someone
+ * reaches for when everything else has gone wrong — the worst moment to refuse
+ * over three bad bytes.
  */
 fun decodeLogLine(raw: String, index: Int): LogEntry {
     if (raw.length >= 3 && raw[2] == ' ') {
@@ -252,12 +217,7 @@ fun repeatedLogLine(text: String, count: Int): String =
 /** The one line that replaces the middle of a log that outgrew its cap. */
 fun elidedLogMarker(lines: Int): String = "… $lines lines elided …"
 
-/**
- * What the sink says when it has been shouted at faster than it will write.
- *
- * Never silent. A log that hides its own truncation is worse than no log: it
- * turns a gap in the evidence into a false claim that nothing happened.
- */
+/** What the sink says when it has been shouted at faster than it will write. */
 fun rateLimitedLogMarker(dropped: Int): String =
     "… logging rate-limited, $dropped lines dropped …"
 

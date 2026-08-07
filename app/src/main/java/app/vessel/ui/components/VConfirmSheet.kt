@@ -23,22 +23,16 @@ import app.vessel.ui.theme.vRing
 /**
  * Destructive confirmation.
  *
- * A centred panel rather than a bottom sheet, and that is a correctness decision
- * rather than a taste one. The bottom-anchored version was built first: a
- * `fillMaxSize` scrim with the panel aligned to its bottom edge. On device the
- * dialog window turned out to be positioned below the status bar while still
- * being given the full display height, so the panel's own bottom — buttons
- * included — hung off the screen. `decorFitsSystemWindows = false` did not move
- * it. A wrap-content panel has no such argument with the window manager: the
- * platform sizes the window to the content and centres it, and the buttons are
- * always reachable.
+ * A centred wrap-content panel rather than a bottom sheet, for correctness
+ * rather than taste: a `fillMaxSize` scrim with the panel on its bottom edge
+ * puts the buttons off-screen, because the dialog window sits below the status
+ * bar while still being given the full display height, and
+ * `decorFitsSystemWindows = false` does not move it. A wrap-content panel is
+ * sized and centred by the platform, so the buttons are always reachable.
  *
- * Material's `ModalBottomSheet` is not used either — it is behind an opt-in in
- * this Compose version and arrives with its own container tone, scrim and drag
- * handle, none of which this system has a form for. What is left is `surface`,
- * the `lg` ring that `VElev` documents as dialog-only, and two outlined buttons:
- * the destructive one in `danger`, which is the only place that token appears on
- * an action.
+ * Material's `ModalBottomSheet` is not used either — opt-in in this Compose
+ * version, and it brings its own container tone, scrim and drag handle, none of
+ * which this system has a form for.
  *
  * The panel names what will be removed. "Are you sure?" is not a question anyone
  * can answer; "Delete Canoe test?" is.

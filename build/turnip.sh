@@ -20,7 +20,7 @@ COMPONENT=turnip
 SOURCE_NAME=mesa
 COMPONENT_REF="$MESA_REF"
 
-fetch_source "$SOURCE_NAME" "$MESA_REPO" "$MESA_REF"
+fetch_source "$SOURCE_NAME" "$MESA_REPO" "$MESA_REF" "${MESA_SHA:-}"
 
 SRC="$NATIVE_DIR/$SOURCE_NAME"
 BUILD="$WORK_DIR/$COMPONENT"
@@ -59,6 +59,18 @@ fi
 PKG_CONFIG="$(command -v pkg-config || true)"
 [ -n "$PKG_CONFIG" ] || die "pkg-config not found on PATH; meson needs it even for a stubbed Android build"
 
+# pkg_config_libdir points at an EMPTY directory on purpose, and this is not
+# belt-and-braces. Without it meson resolves `auto` dependencies against the
+# BUILD machine's pkg-config and cheerfully reports that the container's x86-64
+# Linux zlib satisfies an aarch64 Android build, which fails at link:
+#   ld.lld: /usr/lib/x86_64-linux-gnu/libz.so is incompatible with aarch64linux
+# An empty search path makes host packages invisible, so an auto feature
+# resolves to "not found" and falls back to a wrap subproject built for the
+# target — instead of "found, wrong architecture".
+EMPTY_PKGDIR="$WORK_DIR/$COMPONENT-empty-pkgconfig"
+rm -rf "$EMPTY_PKGDIR"
+mkdir -p "$EMPTY_PKGDIR"
+
 # VESSEL_CPU_FLAGS is a shell string ("-mcpu=oryon-1"); meson wants a list.
 CPU_ARGS=""
 for f in ${VESSEL_CPU_FLAGS:-}; do
@@ -74,6 +86,9 @@ cpp = '$NDK_CXX'
 ar = '$NDK_BIN/llvm-ar'
 strip = '$NDK_BIN/llvm-strip'
 pkg-config = '$PKG_CONFIG'
+
+[properties]
+pkg_config_libdir = ['$EMPTY_PKGDIR']
 
 [host_machine]
 system = 'android'

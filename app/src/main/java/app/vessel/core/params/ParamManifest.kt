@@ -11,11 +11,9 @@ import kotlinx.serialization.json.jsonPrimitive
 /**
  * `assets/params-manifest.json`, as Kotlin.
  *
- * This file is the whole reason the container editor has no per-setting code in
- * it. The editor renders one composable per [ParamType] and nothing per key, so
- * adding a `FEX_*` or `TU_*` knob is a data change to the manifest and never a
- * UI change — which is the promise `docs/DESIGN.md` makes about this screen and
- * the one most easily broken by a single `when (key)`.
+ * The editor renders one composable per [ParamType] and nothing per key, so
+ * adding a `FEX_*` or `TU_*` knob is a data change and never a UI change. A
+ * single `when (key)` anywhere downstream breaks that.
  *
  * Unknown keys are ignored when this is decoded, because the manifest carries
  * `_comment` and `_note` prose that is addressed to whoever edits it rather than
@@ -32,11 +30,9 @@ data class ParamManifest(
     fun spec(key: String): ParamSpec? = allParams.firstOrNull { it.key == key }
 
     /**
-     * The starting values for a new container: every param's manifest default.
-     *
-     * Every one of them, always. Reading a container's values back — for an
-     * export bundle, or to build the launch environment — never finds a hole
-     * where a setting should be.
+     * The starting values for a new container: every param's manifest default,
+     * always all of them, so reading a container's values back never finds a
+     * hole where a setting should be.
      */
     fun defaults(): Map<String, ParamValue> =
         allParams.mapNotNull { spec -> spec.defaultValue()?.let { spec.key to it } }.toMap()
@@ -46,14 +42,13 @@ data class ParamManifest(
  * One section of the editor.
  *
  * Groups are named for what a setting *affects* — Display, Graphics, Rendering,
- * Compatibility — and never for the subsystem that implements it. `memory` and
- * `system` were the old names, and they grouped a FEX barrier flag with a Wine
- * synchronisation mode because both are "system", which is a fact about our
- * source tree and not about anything the user is trying to do.
+ * Compatibility — never for the subsystem that implements it, which would group
+ * a FEX barrier flag with a Wine synchronisation mode on the grounds that both
+ * are "system".
  *
- * Order is the other half of that. Nothing is hidden any more, so declaration
- * order *is* the hierarchy: the groups a user actually opens the screen for come
- * first, and the ones that are correct until something breaks come last.
+ * Nothing is hidden, so declaration order *is* the hierarchy: the groups a user
+ * opens the screen for come first, the ones that are correct until something
+ * breaks come last.
  */
 @Serializable
 data class ParamGroup(
@@ -120,10 +115,9 @@ data class ParamSpec(
      * another param takes a particular value, with the reason shown next to the
      * control rather than the step silently refusing to move.
      *
-     * No manifest entry declares one today — the last case was a Box64 dynarec
-     * level, and Box64 is gone. The mechanism stays because it is generic and
-     * the alternative is a `when (key)` in the editor the first time a real
-     * conditional bound turns up.
+     * No manifest entry declares one today. The mechanism stays because it is
+     * generic, and the alternative is a `when (key)` in the editor the first
+     * time a real conditional bound turns up.
      */
     val clamp: List<ParamClamp> = emptyList(),
 

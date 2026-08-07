@@ -55,23 +55,13 @@ import app.vessel.ui.vm.EditorUiState
  * entry, never touching UI code, and the moment a key needs a special case here
  * the promise has quietly stopped being true.
  *
- * **Nothing is hidden.** There used to be a "Show advanced" disclosure, and both
- * halves of that idea were wrong. A user who has been told there is more cannot
- * unlearn it, so the toggle produced the anxiety of hidden settings without
- * saving anyone the scroll; and deciding which knobs were "advanced" was the app
- * guessing which of its own settings the user is not qualified for. Hierarchy is
- * carried by grouping and order instead — Display first because it is what
- * people change, Compatibility last because it is correct until something breaks
- * — and every parameter is one scroll away.
- *
- * There used to be an architecture-profile picker above the parameters, choosing
- * between an ARM64EC Wine tree and an x86-64 one under Box64. Wine is built
- * `arm64ec,aarch64,i386` and no x86-64 tree exists, so the second option had
- * nothing to run: there is one kind of container now and no choice to present.
+ * **Nothing is hidden** — no "Show advanced" disclosure. Hierarchy is carried by
+ * grouping and order instead: Display first because it is what people change,
+ * Compatibility last because it is correct until something breaks.
  *
  * Everything that decides *what* to draw — which clamp is active, what a
- * component selector resolved to — is worked out in
- * [ContainerEditorViewModel]. This file only draws.
+ * component selector resolved to — is worked out in [ContainerEditorViewModel].
+ * This file only draws.
  */
 @Composable
 fun ContainerEditorScreen(
@@ -116,16 +106,13 @@ private fun ContainerEditorContent(
                 onBack = onBack,
                 trailing = {
                     if (state.error == null && !state.loading) {
-                        // Glyphs, because a toolbar is the one place where a
-                        // tick and a bin are unambiguous and a word is a third
-                        // of the bar. The confirmation behind the bin is still
-                        // words — see [VConfirmSheet].
+                        // Glyphs: in a toolbar a tick and a bin are
+                        // unambiguous and a word is a third of the bar. The
+                        // confirmation behind the bin is still words.
                         if (!state.creating) {
-                            // The way into the session logs, and the only one.
-                            // They belong to this container, so they are reached
-                            // from it rather than from a tab: a container that
-                            // has never been saved has never run, which is why
-                            // this is inside the same guard as Delete.
+                            // The only way into the session logs. Inside the
+                            // same guard as Delete, because a container that has
+                            // never been saved has never run.
                             VIconButton(
                                 Icons.AutoMirrored.Filled.List,
                                 "Session logs",

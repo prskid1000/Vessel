@@ -78,9 +78,8 @@ internal fun lastRunLabel(lastRun: Long?, now: Long = System.currentTimeMillis()
  * One container, and one is the point.
  *
  * Preview data only — the screen itself reads the store, so nothing here reaches
- * a device. There used to be a second row and it was doing the exact thing
- * DESIGN.md refuses: legacy Wine is not part of this product, and offering a
- * second tree implies a catalogue the user then has to choose from.
+ * a device. One row, deliberately: a second implies a catalogue of Wine trees
+ * this product does not have.
  */
 internal val SampleContainerRows = listOf(
     ContainerRow(

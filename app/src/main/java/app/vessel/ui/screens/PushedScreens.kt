@@ -21,10 +21,9 @@ import app.vessel.ui.theme.VesselTheme
  * either way the person holding the phone spends time deciding whether the app
  * is broken. Saying "not built yet" costs one clause and settles the question.
  *
- * These are the last three. The container editor and drivers used to be here too
- * and are now real screens in their own files. A stub earns its place only while
- * something real is coming; where that stopped being true the route was deleted
- * rather than left as a screen whose only content is an apology.
+ * A stub earns its place only while something real is coming. Where that stops
+ * being true, delete the route rather than leave a screen whose only content is
+ * an apology.
  */
 @Composable
 private fun NotBuiltYet(

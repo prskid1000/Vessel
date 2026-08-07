@@ -155,6 +155,9 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
 
+    // Decodes the .wcp packages this app installs. See WcpArchive.
+    implementation(libs.xz)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
 }

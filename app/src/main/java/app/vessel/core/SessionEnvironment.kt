@@ -7,23 +7,13 @@ import java.io.File
 /**
  * The fixed Wine debug channel set.
  *
- * **Order is load-bearing and this string must not be reformatted.** Wine parses
- * left to right and seeds each newly named channel from `default_flags` as of
- * that moment, so:
+ * **Order is load-bearing and this string must not be reformatted** — Wine
+ * parses left to right and seeds each newly named channel from `default_flags`
+ * as of that moment. Note also that `err` is a class, not a channel: `+err`
+ * registers a channel that does not exist.
  *
- *  - `-all` has to come **first**. A trailing `-all` erases everything before it.
- *  - `warn+module` has to come **after** `err+all`, so the module channel
- *    inherits ERR and ends up ERR|WARN. That WARN tier is the whole reason it is
- *    here: `loader.c` logs *"No implementation for X.Y imported from Z"* at WARN,
- *    which is a DLL that loaded with a missing export and then dies later at a
- *    confusing address. `err+all` misses it because it is WARN; `+loaddll`
- *    misses it because the module loaded fine.
- *  - It is `err+all`, the class form — **not** `+err`. A leading `+` names a
- *    channel, and there is no channel called `err`, `warn` or `fixme`. The
- *    Winlator lineage's `+warn,+err,+fixme` registers three channels that do not
- *    exist and configures nothing at all.
- *
- * See `docs/LOGGING.md`, which is the source of truth for this file.
+ * `docs/LOGGING.md` is the source of truth for every term here and why it earns
+ * its place. Change that document first.
  */
 const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+loaddll"
 
@@ -60,20 +50,14 @@ const val DEFAULT_DISPLAY: String = ":0"
 /**
  * Variables this layer owns outright, which a manifest param may never set.
  *
- * Two different reasons, both worth keeping:
+ * Most are simply not settings — `WINEDEBUG` is fixed per `docs/LOGGING.md`,
+ * `WINEESYNC` because esync is the only synchronisation mode that works here
+ * (README, Known limitations).
  *
- *  - most are *not settings*. `WINEDEBUG` is fixed because a user who chooses
- *    among 521 channels can still get nothing (see `docs/LOGGING.md`), and
- *    `WINEESYNC` is fixed because esync is the only synchronisation mode that
- *    works here — the manifest's own `_fixedNote` explains that ntsync needs a
- *    kernel driver Android does not ship and that fsync's `futex_waitv` probe is
- *    absent from Android's seccomp allowlist, where the default action is
- *    `SECCOMP_RET_TRAP`, so probing it SIGSYS-kills the process.
- *  - `VKD3D_LOG_FILE` is here to guarantee its **absence**. `vkd3d_dbg_init_once`
- *    is an if/else: set the variable and it opens the file *instead of* resolving
- *    `__wine_dbg_output`. Setting it does not add a file, it moves vkd3d's output
- *    off the pipe the session log reads. A manifest key that happened to name it
- *    would silence the D3D12 layer, which is the weakest part of this stack.
+ * `VKD3D_LOG_FILE` is different: it is listed to guarantee its **absence**.
+ * `vkd3d_dbg_init_once` is an if/else — set the variable and it opens the file
+ * *instead of* resolving `__wine_dbg_output`, so it moves vkd3d's output off the
+ * pipe the session log reads rather than copying it.
  */
 val RESERVED_SESSION_ENV: Set<String> = setOf(
     "WINEPREFIX",
@@ -96,13 +80,12 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
  * A Turnip driver that is actually installed, with everything libadrenotools
  * needs to load it.
  *
- * All three fields or none. `AdrenotoolsManager.setDriverById()` in the Winlator
- * lineage falls through **without setting `ADRENOTOOLS_DRIVER_*` and without
- * logging** when a driver id does not resolve, and the system Vulkan driver
- * quietly takes over — everything appears to work, slower and with different
- * bugs. Modelling "no driver" as a null [TurnipDriver] rather than as three
- * possibly-empty strings makes that state impossible to construct by accident,
- * and makes the absence of the variables something a test can assert.
+ * All three fields or none. The Winlator lineage's
+ * `AdrenotoolsManager.setDriverById()` falls through **without setting
+ * `ADRENOTOOLS_DRIVER_*` and without logging** when a driver id does not
+ * resolve, and the system Vulkan driver quietly takes over. Modelling "no
+ * driver" as a null [TurnipDriver] makes that state impossible to construct by
+ * accident.
  */
 data class TurnipDriver(
     /** The directory holding the driver `.so` — the installed Turnip component. */
@@ -126,40 +109,22 @@ data class SessionPaths(
 )
 
 /**
- * The environment a session is started with.
+ * The environment a session is started with — `docs/LOGGING.md` as code.
  *
- * A pure function of its arguments: no `Context`, no disk, no clock. That is not
- * style. This map is the single place where `docs/LOGGING.md` either is or is
- * not implemented, every one of its failure modes is silent — the wrong
- * `WINEDEBUG` string produces an empty log, not an error — and the only way to
- * hold it to the document is to assert the exact output in a unit test.
+ * A pure function of its arguments: no `Context`, no disk, no clock. Every
+ * failure mode here is silent (the wrong `WINEDEBUG` string produces an empty
+ * log, not an error), so the only way to hold it to the document is to assert
+ * the exact output in a unit test.
  *
- * What it sets, and why each one is not obvious:
- *
- *  - **`WINEDEBUG`** — [WINEDEBUG_CHANNELS], order load-bearing. Note that Wine
- *    will not parse it at all if fd 2 is `/dev/null`: `init_options()` `fstat`s
- *    stderr, recognises the null device and returns before reading the variable.
- *    Setting it correctly here is necessary and not sufficient; the launcher must
- *    hand the process a real pipe. DXVK and vkd3d resolve `__wine_dbg_output`
- *    from ntdll and write through it, so the same redirect would discard the
- *    entire graphics story too.
- *  - **`DXVK_LOG_PATH`** — insurance, not the primary path. Under Wine with no
- *    path set DXVK creates no file and everything rides stderr; its file write is
- *    a separate unconditional block, so setting the path is additive. It earns
- *    its place only for the case where `__wine_dbg_output` fails to resolve.
- *  - **`VKD3D_SHADER_DEBUG`** — a *separate* channel from `VKD3D_DEBUG`, with its
- *    own level. `VKD3D_DEBUG=warn` does not carry shader translation failures.
- *  - **`VKD3D_LOG_FILE`** — never set. See [RESERVED_SESSION_ENV].
- *  - **`TU_DEBUG`** — always includes [TU_DEBUG_STARTUP]. Only Turnip honours it,
- *    so output means Turnip loaded and silence means it did not. No Wine channel
- *    reports which Vulkan driver was selected, and DXVK cannot be trusted for it
- *    in a Winlator-style container, so this is the ground truth.
+ * Two things the document explains that are easy to undo from here: setting
+ * `WINEDEBUG` correctly is necessary but not sufficient, because Wine skips
+ * parsing it entirely when fd 2 is `/dev/null`; and `TU_DEBUG` always includes
+ * [TU_DEBUG_STARTUP], which is the only ground truth for whether Turnip loaded.
  *
  * @param profile the container, for its manifest values.
- * @param manifest the param manifest, which is what maps a param key to the
- *   environment variable it becomes. Null means no manifest was readable, in
- *   which case only the fixed variables are produced — an incomplete environment
- *   is better than a guessed one.
+ * @param manifest maps a param key to the environment variable it becomes. Null
+ *   produces only the fixed variables — an incomplete environment is better than
+ *   a guessed one.
  * @param turnip null when no Turnip package is installed, which omits the
  *   `ADRENOTOOLS_*` variables entirely rather than setting them empty.
  */
@@ -187,8 +152,8 @@ fun sessionEnvironment(
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
 
     if (turnip != null) {
-        // libadrenotools concatenates path and name, so the directory needs its
-        // trailing separator or it would look for `…/componentslibvulkan….so`.
+        // libadrenotools concatenates path and name, so without the trailing
+        // separator it looks for `…/componentslibvulkan….so`.
         environment["ADRENOTOOLS_DRIVER_PATH"] = turnip.driverDir.absolutePath + File.separator
         environment["ADRENOTOOLS_HOOKS_PATH"] = turnip.hooksDir.absolutePath + File.separator
         environment["ADRENOTOOLS_DRIVER_NAME"] = turnip.libraryName
@@ -204,13 +169,10 @@ fun sessionEnvironment(
 /**
  * Every manifest param that declares an `env`, resolved against this container.
  *
- * A param with no `env` produces nothing — `display.resolution` and
- * `display.fpsLimit` are consumed by the session surface rather than by a child
- * process, and inventing `DXVK_FRAME_RATE` for the second because it looks like
- * it should exist is exactly the kind of fabrication the manifest is meant to
- * prevent. A key the container has no value for falls back to the manifest
- * default, which [ContainerRepository.draft] has already written for every
- * container it created.
+ * A param with no `env` produces nothing: `display.resolution` and
+ * `display.fpsLimit` are consumed by the session surface, and inventing a
+ * `DXVK_FRAME_RATE` for the latter because it looks like it should exist is the
+ * fabrication the manifest exists to prevent.
  */
 internal fun manifestEnvironment(
     profile: ContainerProfile,
@@ -227,11 +189,6 @@ internal fun manifestEnvironment(
 
 /**
  * `TU_DEBUG` as a flag list: whatever the container asks for, then `startup`.
- *
- * `docs/LOGGING.md` writes it as `TU_DEBUG=<existing flags>,startup`, and the
- * order is kept — a container that forces `sysmem` gets `sysmem,startup`.
- * Duplicates are collapsed so a manifest that names `startup` itself does not
- * produce it twice.
  *
  * Only text and multi-select params contribute. A boolean or an integer cannot
  * name a Turnip flag, so one carrying `env: TU_DEBUG` is ignored rather than
@@ -256,10 +213,9 @@ internal fun tuDebugFlags(profile: ContainerProfile, manifest: ParamManifest?): 
 /**
  * One stored value as an environment variable's text.
  *
- * Booleans are `1`/`0` rather than `true`/`false`: FEX's config reader takes
- * `FEX_TSOENABLED=1`, and `docs/TUNING.md` records the naming derivation —
- * the enum name is uppercased by the generator before `Config.cpp` prefixes it,
- * so it is `FEX_TSOENABLED` and never `FEX_TSOEnabled`.
+ * Booleans are `1`/`0` rather than `true`/`false`, because that is what FEX's
+ * config reader takes. Note the variable is `FEX_TSOENABLED`, never
+ * `FEX_TSOEnabled` — see `docs/ARCHITECTURE.md`.
  */
 internal fun ParamValue.asEnvValue(): String = when (this) {
     is ParamValue.Flag -> if (value) "1" else "0"

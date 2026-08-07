@@ -47,9 +47,9 @@ sealed interface WcpInstallResult {
     }
 
     /**
-     * The archive is zstd or xz, and this app has no decoder for either.
-     *
-     * The single most likely reason an install fails today. See [WcpCompression].
+     * The archive uses a codec this app has no decoder for — in practice zstd,
+     * which nothing we publish has used since packaging moved to xz, but which
+     * an older package still on a device will be. See [WcpCompression].
      */
     data class UnsupportedCompression(val compression: WcpCompression) : Failure {
         override val summary

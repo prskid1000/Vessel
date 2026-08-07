@@ -50,9 +50,8 @@ fun VContainerCard(
             .padding(Vessel.metrics.s17),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
-        // No architecture badge beside the name any more. It named the container's
-        // profile — Universal or Compatibility — and with Box64 gone there is one
-        // kind of container, so the pill was telling every card the same thing.
+        // No architecture badge: there is one kind of container, so a pill here
+        // would say the same thing on every card.
         Text(
             container.name,
             style = Vessel.type.cardTitle,
@@ -80,17 +79,10 @@ fun VContainerCard(
                 color = Vessel.colors.textMuted,
                 modifier = Modifier.weight(1f),
             )
-            // Outlined, like every primary action in the system. This used to be
-            // a solid accent slab and was the single loudest thing on the home
-            // screen — which is exactly backwards for a card whose job is to
-            // show machine facts.
-            //
-            // The word "Launch" went with it. A play triangle on a card that has
-            // already named the container and listed its Wine build is not
-            // ambiguous, and dropping the label gives the row back to the
-            // last-run time, which is the fact a glance at this card is for. The
-            // description is still there for anything that reads the screen
-            // aloud.
+            // Outlined and unlabelled, like every primary action in the system.
+            // A play triangle on a card that has already named the container is
+            // unambiguous, and the row is worth more to the last-run time. The
+            // content description carries the label for screen readers.
             VIconAction(
                 icon = Icons.Filled.PlayArrow,
                 contentDescription = "Launch ${container.name}",
