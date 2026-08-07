@@ -27,12 +27,12 @@
     {
       "id": "display",
       "title": "Display",
-      "help": "How large the Windows desktop is and how fast it may run \u2014 on this phone the resolution is the single biggest thing you can change for performance.",
+      "help": "Desktop size and frame rate.",
       "params": [
         {
           "key": "display.resolution",
           "title": "Resolution",
-          "help": "Lower is much faster on this phone. Every step up is more work for the GPU, and the top of the slider is the screen's own 2780 x 1264 -- there is nothing above it worth rendering.",
+          "help": "Lower is much faster. The top of the list is the screen's own size.",
           "type": "enum",
           "options": [
             "640x480",
@@ -71,7 +71,7 @@
         {
           "key": "display.fpsLimit",
           "title": "Frame rate limit",
-          "help": "Only rates this screen can actually show. Capping lower keeps the phone cool, which keeps performance steady over a long session.",
+          "help": "Only rates this screen can show. Lower keeps the phone cool.",
           "type": "enum",
           "options": [
             "24",
@@ -96,12 +96,12 @@
     {
       "id": "compatibility",
       "title": "Compatibility",
-      "help": "One escape hatch, for working around a single misbehaving program. Everything else about how programs run is fixed, because there is one right answer for this device and it is already set.",
+      "help": "One escape hatch for a single misbehaving program.",
       "params": [
         {
           "key": "wine.dllOverrides",
           "title": "Extra DLL overrides",
-          "help": "Wine's WINEDLLOVERRIDES, for working around one program. Leave empty unless you are following specific advice: the Direct3D and OpenGL DLLs are already set correctly and do not need listing here.",
+          "help": "Wine's WINEDLLOVERRIDES. Leave empty unless following specific advice.",
           "type": "text",
           "default": ""
         }
