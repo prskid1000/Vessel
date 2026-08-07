@@ -138,23 +138,13 @@ actually loaded, so check there rather than assuming.
 
 ### Checking a component without the app
 
-For anything that is a plain ELF, the fastest confidence check is to run it
-directly. Box64, for example:
+For anything that is a plain ELF — `wineserver`, `bin/wine` — the fastest
+confidence check is `file` on the host: the unix side must report
+`ARM aarch64` and `interpreter /system/bin/linker64`, which no glibc build can
+produce. The PE DLLs need `verify_pe_dll`'s CHPE check rather than `file`,
+because an ARM64EC image's machine type (`0xA641`) renders as x86-64.
 
-```powershell
-adb push out\box64 /data/local/tmp/box64
-adb shell "chmod 755 /data/local/tmp/box64; /data/local/tmp/box64 --version"
-# Box64 arm64 v0.4.4 with Dynarec built on ...
-```
-
-Better still, prove it *translates*. Any statically linked x86-64 binary the
-phone cannot run natively will run under it — the container image is amd64, so
-one is a `gcc -static` away:
-
-```bash
-adb shell /data/local/tmp/x86test          # not executable: 64-bit ELF file
-adb shell "cd /data/local/tmp && ./box64 ./x86test"   # runs
-```
-
-`lscpu: inaccessible or not found` on stderr is normal and harmless; Box64
-probes for it at startup.
+Running an ELF on the device directly is not a check available here: Android
+blocks `execve` of a downloaded binary at targetSdk 29 and above, so it has to
+go through the system linker. See
+[ARCHITECTURE.md](ARCHITECTURE.md#running-downloaded-native-code-on-android).

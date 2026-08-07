@@ -1,8 +1,10 @@
 # Logging
 
-Vessel keeps one log per container session. The channel set is **fixed** — there
-is no picker. This document is why it is fixed, what is in it, and the traps
-that make naive logging silently do nothing.
+Vessel keeps one log per container session, with a **fixed** channel set and no
+picker. This document is the source of truth for that configuration: why it is
+fixed, what is in it, and the traps that make naive logging silently do nothing.
+Code that implements it (`core/SessionEnvironment.kt`, `data/SessionLogStore.kt`)
+points here rather than restating it.
 
 Verified against Wine, DXVK, vkd3d-proton and Winlator-Ludashi source on
 2026-08-07. Line references are to those trees at that date.
@@ -71,14 +73,12 @@ it only as insurance for the case where `__wine_dbg_output` fails to resolve.
 | `+winediag` | yes, init only | 58 sites, 55 of them `ERR_(winediag)`: no Vulkan library, no display driver, broken .NET, missing codecs. Also the renderer-selection line, `"Using the Vulkan renderer."` / `"Using the OpenGL renderer."` — which tells you whether you landed on wined3d at all. |
 | `+loaddll` | yes, 6 sites | The DLL inventory. Successful whole-module loads only, so it complements rather than duplicates `err+all`. |
 
-### `warn+module` — the correction
+### `warn+module` — why WARN and not just ERR
 
-An earlier version of this document excluded `module` on the grounds that
-`err+all` already covers `err:module:`. That is true but insufficient, and the
-gap is a failure this project will hit often.
-
-`dlls/ntdll/loader.c` carries 17 ERR, **14 WARN**, 6 FIXME and 46 TRACE sites on
-the module channel. The WARN tier holds exactly the case ERR misses:
+`err+all` already covers `err:module:`, which makes `warn+module` look
+redundant. It is not. `dlls/ntdll/loader.c` carries 17 ERR, **14 WARN**, 6 FIXME
+and 46 TRACE sites on the module channel, and the WARN tier holds exactly the
+case ERR misses:
 
 - `:1235` `WARN("No implementation for %s.%d imported from %s, setting to %p\n")`
 - `:1251` the same, by name
@@ -96,18 +96,13 @@ module channel.
 
 ### `seh` — excluded, and crashes are free anyway
 
-Two reasons, the second decisive.
+It is far noisier than its macro count suggests: `dispatch_exception`
+(`dlls/ntdll/exception.c:284`) runs for **every raised exception, handled or
+not**, emitting a code line, up to 15 `info[]` lines and a full register dump —
+and C++ and .NET exceptions are SEH, so a managed app raises these constantly.
 
-It is far noisier than its macro count suggests. `WINE_DEFAULT_DEBUG_CHANNEL(seh)`
-owns 18 files including all of `dlls/msvcrt/except*.c`, giving 245 unadorned
-`TRACE(` sites. And `dispatch_exception` (`dlls/ntdll/exception.c:284`) runs for
-**every raised exception, handled or not**, emitting a code line, up to 15
-`info[]` lines and a full register dump. C++ and .NET exceptions are SEH, so a
-managed app raises these constantly. Wine's own `if (!TRACE_ON(seh))` guard
-exists to avoid double-reporting — upstream treats this as high-volume.
-
-More importantly, **`+seh` buys nothing for crashes**. Unhandled exceptions do
-not go through the channel system at all: `format_exception_msg`
+The decisive reason is that **`+seh` buys nothing for crashes**. Unhandled
+exceptions do not go through the channel system at all: `format_exception_msg`
 (`dlls/kernelbase/debug.c:464`) feeds `MESSAGE()`, which is unconditional
 `wine_dbg_printf` with no channel and no class check. So
 
