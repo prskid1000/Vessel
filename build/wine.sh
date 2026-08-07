@@ -17,6 +17,38 @@
 # picks up anything dropped there, in filename order.
 # ---------------------------------------------------------------------------
 #
+# STATUS 2026-08-07: THIS SCRIPT DOES NOT YET PRODUCE A PACKAGE. It fails at
+# configure with:
+#     configure: error: X 64-bit development files not found.
+#
+# That error is a symptom, not the problem, and installing libx11-dev would
+# paper over it. Wine is not one build, it is two halves:
+#
+#   * the PE side  — arm64ec / aarch64 / i386 Windows modules, via llvm-mingw.
+#     This part the script already has right.
+#   * the Unix side — wineserver and ntdll.so, which are ELF binaries that must
+#     run ON THE PHONE. They therefore have to be built against Android's bionic
+#     with the NDK, not against the build container's glibc.
+#
+# The script currently calls setup_mingw alone, so configure is looking for X11
+# and every other Unix dependency on the BUILD machine. Even if those were
+# installed, the result would be a Unix side linked against x86-64 glibc, which
+# cannot run on the device. Wine also needs X11 for real — the container's
+# display path is Wine's X11 driver talking to the app's built-in X server — so
+# --without-x is not a shortcut either; it would build and then have no way to
+# put a window on screen.
+#
+# What this needs, roughly:
+#   1. setup_ndk alongside setup_mingw, with --host=aarch64-linux-android
+#   2. X11 (and freetype et al.) headers/libs cross-built for Android, or
+#      vendored, since the NDK ships none
+#   3. the two-pass tools build below pointed at a native Wine tree
+#
+# This is the shape the Winlator-bionic forks solve, and it is a project in
+# itself. Until then Wine is the one component we cannot yet build; the other
+# five do produce verified packages.
+# ---------------------------------------------------------------------------
+#
 #   ./build/wine.sh             # -> dist/wine-<ver>-<target>.wcp
 
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
