@@ -85,6 +85,18 @@ RUN set -eux; \
     test -x /opt/llvm-mingw/bin/arm64ec-w64-mingw32-clang \
       || { echo "ERROR: llvm-mingw ${LLVM_MINGW_VERSION} has no arm64ec target"; exit 1; }
 
+# --- Meson ---------------------------------------------------------------------
+# Ubuntu 24.04 ships meson 1.3.2 and Mesa requires >= 1.4, so the apt version
+# cannot configure Turnip at all. pip's copy lands in /usr/local/bin and shadows
+# it; the apt package stays only because removing it here would invalidate the
+# NDK layer above and re-download 700 MB for nothing.
+#
+# --break-system-packages is needed because 24.04 marks the system Python as
+# externally managed (PEP 668). This is a single-purpose build image, so
+# installing into the system interpreter is fine.
+RUN pip3 install --no-cache-dir --break-system-packages 'meson>=1.8.0' \
+    && meson --version
+
 # Object files land here; mount a volume over it.
 ENV VESSEL_WORK_DIR=/work
 RUN mkdir -p /work

@@ -30,7 +30,7 @@ One script per component, all with the same shape:
 
 | Script | Produces | Toolchain | Rough time |
 |---|---|---|---|
-| `build/box64.sh` | Box64 ELF | NDK | minutes |
+| `build/box64.sh` | Box64 ELF | NDK | ~4 min (verified) |
 | `build/fex.sh` | `libarm64ecfex.dll`, `libwow64fex.dll` | llvm-mingw | ~15 min |
 | `build/turnip.sh` | `libvulkan_freedreno.so` | NDK | ~10 min |
 | `build/dxvk.sh` | DXVK PE DLLs | llvm-mingw | ~10 min |
@@ -83,6 +83,19 @@ Tuning flags are **probed, not assumed**. If a toolchain rejects
 that quietly loses its chip tuning would be worse than one that fails, so this
 is deliberately noisy.
 
+This is not hypothetical. NDK **r28c advertises clang 19.0.1 and still rejects
+`-mtune=oryon-1`**, because Android builds clang from an LLVM snapshot that
+predates the `oryon-1` definition — its newest known core is `cortex-x4`. A
+version check passes there and the build then fails at compile time, which is
+why both the Dockerfile and `common.sh` test the flag rather than the number.
+r29 (clang 21.0.0) accepts it. Do not "roll back to an older NDK" without
+re-probing.
+
+There are two API-level variables and they are not interchangeable:
+`TARGET_API` is what the device runs (36); `TARGET_NDK_API` is what native code
+compiles against (35, because no NDK ships an API 36 sysroot yet). Requesting a
+level the NDK lacks fails with the available list.
+
 ## Patching a component
 
 Put a `.patch` in `patches/<component>/`; they apply in filename order on top
@@ -95,13 +108,22 @@ file in this repo is how that is satisfied. See [LICENSING.md](LICENSING.md).
 
 ## Building the app
 
-Standard Android project. JDK 17 is expected; note the host currently has
-JDK 25 installed, which AGP 8.9 does not support — use the JDK bundled with
-Android Studio or install 17 alongside.
+Standard Android project. The JDK bundled with Android Studio works and is the
+easiest route — verified with its **JDK 21**. A bare `java -version` on this
+host reports 25, which AGP 8.9 does not support, so set `JAVA_HOME` explicitly:
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
+.\gradlew.bat :app:assembleSideloadDebug
+```
 
 ```bash
-./gradlew :app:assembleSideloadDebug
+JAVA_HOME=/c/'Program Files'/Android/'Android Studio'/jbr ./gradlew :app:assembleSideloadDebug
 ```
+
+`local.properties` needs `sdk.dir`; it is gitignored, so a fresh clone must
+create it (or open the project once in Android Studio). Requires platform
+android-36 and build-tools 36.
 
 ## Verifying on device
 
@@ -110,7 +132,30 @@ adb install -r app/build/outputs/apk/sideload/debug/app-sideload-debug.apk
 adb push dist/box64-0.4.4-canoe.wcp /sdcard/Download/
 ```
 
-Then install the package from the Components screen. A component built for the
-wrong architecture fails silently at load time in most Winlator-family apps —
-Vessel's driver and component screens read back what actually loaded, so check
-there rather than assuming.
+Then install the package from the Components screen (Settings ▸ Components). A
+component built for the wrong architecture fails silently at load time in most
+Winlator-family apps — Vessel's driver and component screens read back what
+actually loaded, so check there rather than assuming.
+
+### Checking a component without the app
+
+For anything that is a plain ELF, the fastest confidence check is to run it
+directly. Box64, for example:
+
+```powershell
+adb push out\box64 /data/local/tmp/box64
+adb shell "chmod 755 /data/local/tmp/box64; /data/local/tmp/box64 --version"
+# Box64 arm64 v0.4.4 with Dynarec built on ...
+```
+
+Better still, prove it *translates*. Any statically linked x86-64 binary the
+phone cannot run natively will run under it — the container image is amd64, so
+one is a `gcc -static` away:
+
+```bash
+adb shell /data/local/tmp/x86test          # not executable: 64-bit ELF file
+adb shell "cd /data/local/tmp && ./box64 ./x86test"   # runs
+```
+
+`lscpu: inaccessible or not found` on stderr is normal and harmless; Box64
+probes for it at startup.

@@ -124,7 +124,21 @@ meson setup "$BUILD" "$SRC" \
   -Dfreedreno-kmds="$TARGET_KMD" \
   -Dbuildtype=release \
   -Dstrip=true \
-  -Db_lto=true
+  -Dspirv-tools=disabled
+
+# No -Db_lto: Mesa refuses to configure with it, by explicit check —
+#   meson.build:52: "Building Mesa with LTO is not supported."
+# It is not a toolchain limitation on our side, so do not try to work around it.
+#
+# -Dspirv-tools=disabled is not cosmetic. The option defaults to `auto`, and
+# meson resolves it with the pkg-config on PATH — which in a cross build is the
+# BUILD machine's. It finds the container's SPIRV-Tools, defines
+# HAVE_SPIRV_TOOLS, and then the aarch64 compile dies on a header that was never
+# in the target sysroot:
+#   vtn_debug.c:11: fatal error: 'spirv-tools/libspirv.h' file not found
+# SPIRV-Tools only exists here to dump SPIR-V for debugging, so a shipping
+# driver does not want it regardless. Any other `auto` feature can leak the same
+# way; if a future build fails on a missing host-detected header, this is why.
 
 log "building $COMPONENT"
 ninja -C "$BUILD" -j "$(nproc_safe)"

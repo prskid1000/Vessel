@@ -60,10 +60,20 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
     "FEX requires clang >= 13 and does not build with GCC at any version.
      Point LLVM_MINGW_HOME at a newer llvm-mingw."
 
-  # FEX's JIT probes the *host* CPU at runtime and emits code for whatever it
-  # finds, so this tuning reaches only FEX's own C++ (the JIT compiler, the
-  # thunks, the syscall layer) — never the code FEX generates for the guest.
-  # Worth having, not worth expecting a benchmark to move because of it.
+  # Probe the tuning flags for the record, but do NOT pass them to this build.
+  #
+  # FEX's JIT probes the host CPU at runtime and emits code for whatever it
+  # finds, so -mcpu would reach only FEX's own C++ (the JIT compiler, thunks,
+  # syscall layer) and never the code FEX generates for the guest. The upside is
+  # slight and the downside is measured: putting -mcpu=oryon-1 in CMAKE_C_FLAGS
+  # leaks it into C++20 module dependency scans, which run under the host triple
+  # and reject it —
+  #     error: unsupported option '-mcpu=' for target 'x86_64-unknown-linux-gnu'
+  # — printed repeatedly through an otherwise good build. Noise that trains you
+  # to ignore errors is worse than a tuning flag is worth.
+  #
+  # If FEX's own C++ is ever worth tuning, the flag belongs in the mingw
+  # toolchain file, where it applies to the target and nothing else.
   resolve_cpu_flags "$TRIPLE_CC"
 
   BUILD="$WORK_DIR/$COMPONENT-$TRIPLE"
@@ -76,16 +86,19 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
   #                                   and costs more build time than it wins.
   # ENABLE_JEMALLOC_GLIBC_ALLOC=False there is no glibc here; the PE build gets
   #                                   its allocator from the Windows side.
-  # BUILD_TESTS=False                 the test suite needs a Linux host FEX.
+  # BUILD_TESTING=False               CMake's own CTest variable, NOT BUILD_TESTS
+  #                                   — that is what FEX actually gates on. With
+  #                                   tests enabled, configure demands NASM to
+  #                                   assemble the x86 test corpus and dies
+  #                                   before compiling anything we want.
   cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DMINGW_TRIPLE="$TRIPLE" \
     -DCMAKE_BUILD_TYPE=Release \
     -DENABLE_LTO=False \
     -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
-    -DBUILD_TESTS=False \
-    -DCMAKE_C_FLAGS="${VESSEL_CPU_FLAGS:-}" \
-    -DCMAKE_CXX_FLAGS="${VESSEL_CPU_FLAGS:-}"
+    -DBUILD_TESTING=False \
+    -DBUILD_FEX_LINUX_TESTS=False
 
   log "building $DLL_NAME"
   cmake --build "$BUILD" -j "$(nproc_safe)"
@@ -94,11 +107,32 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
   [ -n "$DLL" ] || die "build produced no $DLL_NAME (searched $BUILD).
      If the link failed on jemalloc symbols, add -DENABLE_JEMALLOC=False."
 
-  # ARM64EC binaries carry the same AA64 machine type as plain ARM64, so file(1)
-  # cannot tell the two apart — this only proves we did not accidentally build a
-  # host ELF. The real EC check is the CHPE load-config, done on the device.
-  file "$DLL" | grep -Eqi 'PE32\+.*(aarch64|arm64)' \
-    || die "$DLL_NAME is not an ARM64 PE: $(file -b "$DLL")"
+  # Verify the DLL, which is less obvious than it sounds.
+  #
+  # An ARM64EC image reports machine type AMD64, not ARM64 — file(1) says
+  # "PE32+ executable (DLL) x86-64" and that is CORRECT, not a broken build.
+  # That is the entire point of EC: the binary presents an x64-compatible
+  # machine type and ABI so x64 code can call into it, while the code inside is
+  # ARM64. Checking for "aarch64" here rejects a perfectly good EC build, which
+  # is exactly what it did the first time.
+  #
+  # So: assert it is a PE32+ DLL, then assert the real thing — the hybrid
+  # (CHPE) load-config directory, which only an EC/ARM64X image carries.
+  file "$DLL" | grep -Eqi 'PE32\+ executable \(DLL\)' \
+    || die "$DLL_NAME is not a PE32+ DLL: $(file -b "$DLL")"
+
+  if [ "$TRIPLE" = "arm64ec-w64-mingw32" ]; then
+    if "$MINGW_BIN/llvm-readobj" --coff-load-config "$DLL" 2>/dev/null \
+         | grep -qE 'CHPEMetadata|HybridMetadataPointer'; then
+      info "$DLL_NAME carries hybrid (CHPE) metadata — genuine ARM64EC"
+    else
+      die "$DLL_NAME has no CHPE load-config, so it is not really ARM64EC.
+     A plain x64 DLL here would mean the arm64ec target silently fell back."
+    fi
+  else
+    file "$DLL" | grep -Eqi 'aarch64|arm64' \
+      || die "$DLL_NAME should be an ARM64 PE but is: $(file -b "$DLL")"
+  fi
 
   install -m 0644 "$DLL" "$STAGE/$DLL_NAME"
   ok "$DLL_NAME ($TRIPLE)"
@@ -108,8 +142,10 @@ done
 [ -f "$STAGE/libarm64ecfex.dll" ] || die "libarm64ecfex.dll missing from payload"
 [ -f "$STAGE/libwow64fex.dll" ]   || die "libwow64fex.dll missing from payload"
 
-# Both passes probe the same llvm-mingw, so the flags recorded here (from the
-# last pass) describe both DLLs; resolve_cpu_flags warns if a probe falls back.
+# Record what was actually applied, which for FEX is no CPU tuning at all — see
+# the note above the configure step. Claiming -mcpu=oryon-1 here because the
+# probe accepted it would put a flag in the UI that never reached a compiler.
+VESSEL_CPU_FLAGS="none (JIT detects host CPU at runtime)"
 write_provenance "$STAGE/provenance.json" "$COMPONENT" "$VERSION"
 
 log "packaging"
