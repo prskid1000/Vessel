@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Launcher ground. Nocturne's `bg` token — the deep indigo the whole product
+      sits on, not black. Duplicated here as a hex literal because resource XML
+      cannot read Compose tokens; if VesselTheme's bg changes, change this too.
+    -->
+    <color name="ic_launcher_background">#161826</color>
+</resources>

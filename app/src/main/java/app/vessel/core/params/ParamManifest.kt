@@ -32,25 +32,35 @@ data class ParamManifest(
     fun spec(key: String): ParamSpec? = allParams.firstOrNull { it.key == key }
 
     /**
-     * The starting values for a new container: every param's manifest default,
-     * including the ones sitting behind the advanced disclosure.
+     * The starting values for a new container: every param's manifest default.
      *
-     * Storing the hidden ones too is deliberate. Reading a container's values
-     * back — for an export bundle, or to build the launch environment — never
-     * finds a hole where a setting should be.
+     * Every one of them, always. Reading a container's values back — for an
+     * export bundle, or to build the launch environment — never finds a hole
+     * where a setting should be.
      */
     fun defaults(): Map<String, ParamValue> =
         allParams.mapNotNull { spec -> spec.defaultValue()?.let { spec.key to it } }.toMap()
 }
 
+/**
+ * One section of the editor.
+ *
+ * Groups are named for what a setting *affects* — Display, Graphics, Rendering,
+ * Compatibility — and never for the subsystem that implements it. `memory` and
+ * `system` were the old names, and they grouped a FEX barrier flag with a Wine
+ * synchronisation mode because both are "system", which is a fact about our
+ * source tree and not about anything the user is trying to do.
+ *
+ * Order is the other half of that. Nothing is hidden any more, so declaration
+ * order *is* the hierarchy: the groups a user actually opens the screen for come
+ * first, and the ones that are correct until something breaks come last.
+ */
 @Serializable
 data class ParamGroup(
     val id: String,
     val title: String,
     /** One sentence under the group heading. Optional; most groups need none. */
     val help: String? = null,
-    /** An advanced group hides behind the same disclosure as an advanced param. */
-    val advanced: Boolean = false,
     val params: List<ParamSpec>,
 )
 
@@ -104,9 +114,6 @@ data class ParamSpec(
 
     /** [ParamType.COMPONENT]: which `.wcp` type the selector resolves against. */
     val componentType: String? = null,
-
-    /** Behind the "Show advanced" disclosure, collapsed by default. */
-    val advanced: Boolean = false,
 
     /**
      * Bounds that only hold in some configurations: a ceiling that drops when

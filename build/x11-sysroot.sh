@@ -38,7 +38,10 @@ BUILD_ROOT="$WORK_DIR/x11-build"
 STAMP="$SYSROOT/.vessel-x11-sysroot"
 
 XORG_BASE=https://www.x.org/releases/individual
-FREETYPE_BASE=https://download.savannah.gnu.org/releases/freetype
+# FreeType's own host is download.savannah.gnu.org, which returned 502 for hours
+# on 2026-08-07. SourceForge is FreeType's official mirror and carries identical
+# tarballs, so it is the primary here; savannah is the fallback if SF ever goes.
+FREETYPE_BASE=https://downloads.sourceforge.net/project/freetype/freetype2
 
 # Build order is dependency order and is not negotiable — every entry below
 # needs the .pc files installed by the ones above it.
@@ -75,7 +78,7 @@ PACKAGES=(
   #   configure: error: FreeType development files not found.
   # Building it here is what keeps --without-freetype (a Wine with no glyph
   # rasterizer at all) off the table.
-  "$FREETYPE_BASE/freetype-$FREETYPE_VERSION.tar.xz|freetype-$FREETYPE_VERSION|--without-harfbuzz --without-brotli --without-bzip2 --without-png --with-zlib=yes"
+  "$FREETYPE_BASE/$FREETYPE_VERSION/freetype-$FREETYPE_VERSION.tar.xz|freetype-$FREETYPE_VERSION|--without-harfbuzz --without-brotli --without-bzip2 --without-png --with-zlib=yes"
 )
 
 # The stamp is the whole pin set, not a version number, so that changing any one
@@ -225,5 +228,10 @@ for lib in libX11.so libXext.so libXrender.so libXfixes.so libXi.so \
     || die "$lib in the sysroot is not aarch64: $(file -bL "$path")"
 done
 
+# Worth knowing when the runtime side of this gets built: libtool's linux-android
+# configuration produces UNVERSIONED sonames — libX11.so, not libX11.so.6 —
+# because bionic has no support for the versioned-symlink chain glibc uses. So
+# winex11.drv.so records DT_NEEDED libX11.so, and whatever provides the X11
+# client libraries on the device must use those exact unversioned names.
 echo "$PIN_ID" > "$STAMP"
 ok "android X11 sysroot ready ($SYSROOT)"

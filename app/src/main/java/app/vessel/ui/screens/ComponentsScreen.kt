@@ -39,7 +39,6 @@ import app.vessel.ui.components.VTag
 import app.vessel.ui.components.VTagTone
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
-import app.vessel.ui.theme.vCard
 import app.vessel.ui.theme.vRing
 import app.vessel.core.ComponentType
 import app.vessel.ui.vm.ComponentSection
@@ -137,15 +136,19 @@ private fun ComponentsContent(
  * assertion. `cpuFlags` in particular is worth the space: `resolve_cpu_flags`
  * falls back to `-march`/`-mtune` when a toolchain refuses `-mcpu`, and the
  * whole difference between a tuned build and a generic one is visible there.
+ *
+ * Flat, like every other list row in the product. It was a `vCard()`, which put
+ * a panel around each of four or five entries under a section header that was
+ * already grouping them — boxes inside boxes, and a screen that read as busier
+ * than the container editor beside it. The row's own title does the separating
+ * now, and the surface stays quiet.
  */
 @Composable
 private fun ComponentRow(component: ComponentPackage, onInstall: (ComponentPackage) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = Vessel.metrics.s8)
-            .vCard()
-            .padding(Vessel.metrics.s11),
+            .padding(vertical = Vessel.metrics.s8),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
         verticalAlignment = Alignment.Top,
     ) {

@@ -190,7 +190,15 @@ data class VMetrics(
     val s17: Dp = 17.dp,
     val s22: Dp = 22.dp,
 
-    val screenGutter: Dp = 18.dp,
+    /**
+     * The margin every screen's content sits inside.
+     *
+     * `--space-4`, and not a value of its own. It was 18 dp, which is off the
+     * scale entirely and made a settings list read as a consumer form with a lot
+     * of air around it. This product is an instrument: dense, and aligned to the
+     * same grid as everything inside it.
+     */
+    val screenGutter: Dp = s11,
     val touchTarget: Dp = 44.dp,
 
     /** Motion is confirmation, never decoration: one duration, no springs. */

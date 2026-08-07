@@ -32,6 +32,7 @@ captures/
 Thumbs.db
 .DS_Store
 
-# Secrets
+# Secrets — never commit a signing key or its passwords
 *.jks
+keystore.properties
 signing.properties

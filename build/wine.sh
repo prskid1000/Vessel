@@ -79,9 +79,17 @@ if [ ! -x "$SRC/configure" ]; then
   ( cd "$SRC" && autoreconf -f -i ) || die "autoreconf failed; install autoconf/automake"
 fi
 
-# STAGE 1 SCRATCH: x11-sysroot.sh call disabled while the dual-toolchain build
-# is being proven. Restored before Stage 2.
-mkdir -p "$SYSROOT/usr/lib/pkgconfig" "$SYSROOT/usr/include"
+# --- X11 and FreeType for Android ---------------------------------------------
+# Cross-built once into a staging sysroot and reused; the script is a no-op when
+# the sysroot already matches the pins. Run before the tools pass so a broken
+# sysroot fails in seconds rather than after Wine's host tools have built.
+"$COMMON_SH_DIR/x11-sysroot.sh" \
+  || die "x11-sysroot.sh failed; Wine cannot be built with X11 support without it"
+
+for pc in x11 xext freetype2; do
+  [ -f "$SYSROOT/usr/lib/pkgconfig/$pc.pc" ] \
+    || die "x11-sysroot.sh reported success but left no $pc.pc in $SYSROOT/usr/lib/pkgconfig"
+done
 
 # --- Pass 1: native build tools -----------------------------------------------
 # Wine generates a large part of itself with its own tools (winebuild, wrc,
@@ -150,6 +158,25 @@ export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfi
 export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
 unset PKG_CONFIG_PATH
 
+# And having isolated it, we have to hand it back to configure by name. Wine
+# uses WINE_CHECK_HOST_TOOL for pkg-config, described in aclocal.m4 as
+# "like AC_CHECK_TOOL but without the broken fallback to non-prefixed name":
+# when cross-compiling it looks only for aarch64-linux-android35-pkg-config,
+# finds nothing, and leaves PKG_CONFIG empty. Every pkg-config-based dependency
+# then silently reports "not found" — which surfaced as
+#     checking for ft2build.h... no
+#     configure: error: FreeType development files not found.
+# with a perfectly good freetype2.pc sitting in the sysroot.
+#
+# That refusal is right in general and wrong here: the danger it guards against
+# is pkg-config answering with build-machine paths, and PKG_CONFIG_LIBDIR above
+# has already made that impossible.
+# Passed as a configure argument rather than exported so config.status records
+# it; a Makefile regeneration would otherwise quietly drop it again.
+HOST_PKG_CONFIG="$(command -v pkg-config || true)"
+[ -n "$HOST_PKG_CONFIG" ] \
+  || die "pkg-config is not on PATH; Wine cannot find the sysroot libraries without it"
+
 # The NDK ships no per-triple binutils, only llvm-*. configure's AC_CHECK_TOOL
 # would fall back to the container's /usr/bin/ar and /usr/bin/strip, which are
 # x86-64 GNU tools; llvm's handle aarch64 objects correctly and match the
@@ -168,16 +195,42 @@ export READELF="$NDK_BIN/llvm-readelf"
 # upstream targets the Android NDK's multi-ABI layout. That would install to
 # usr/arm64-v8a/bin and usr/arm64-v8a/lib, which is not the layout the package
 # format or the app's container expects.
+# enable_wineandroid_drv=no is a configure *variable*, not an option, because
+# Wine has no --disable-wineandroid.drv. configure.ac turns the driver on by
+# default for any linux-android host:
+#     linux-android*) enable_wineandroid_drv=${enable_wineandroid_drv:-yes}
+# and autoconf eval's VAR=value command-line assignments before that runs, so
+# this is the supported way to override it (and unlike an exported variable it
+# is recorded in config.status, surviving a Makefile regeneration).
+#
+# Two reasons to switch it off. It is not our display path — Vessel talks to the
+# X server the app embeds, through winex11.drv — and its APK rule shells out to
+# gradle, which is not in the build image:
+#     make: *** [dlls/wineandroid.drv/wine-debug.apk] Error 127
+# It is also simply broken on this branch with a modern clang, in all three PE
+# architectures:
+#     dllmain.c:126:34: error: incompatible pointer to integer conversion
+#     assigning to 'UINT64' from 'NTSTATUS (void *, ULONG) __stdcall'
+# That is an upstream bug worth a patch only if the driver were wanted; it is not.
+#
+# Side effect worth knowing: with wineandroid, winemac and winewayland all off,
+# configure promotes "X development files not found" from a notice back to a
+# hard error whenever --with-x is requested. That is the behaviour we want.
 CONFIGURE_ARGS=(
   --prefix=/usr
   --exec-prefix=/usr
   --host="$HOST_TRIPLE"
   --with-wine-tools="$TOOLS"
+  enable_wineandroid_drv=no
+  PKG_CONFIG="$HOST_PKG_CONFIG"
   --enable-archs=arm64ec,aarch64,i386
   --with-mingw=clang
   --disable-tests
-  --without-x
-  --without-freetype
+  # AC_PATH_XTRA does not consult pkg-config, so the sysroot has to be named
+  # again here even though PKG_CONFIG_SYSROOT_DIR already points at it.
+  --with-x
+  --x-includes="$SYSROOT/usr/include"
+  --x-libraries="$SYSROOT/usr/lib"
 
   # Everything below is a host library we do not ship and do not want configure
   # hunting for. Left on `auto` each one probes the build machine, and the ones
@@ -223,6 +276,17 @@ log "configuring $COMPONENT for $HOST_TRIPLE (arm64ec + aarch64 + i386)"
 ( cd "$BUILD" && "$SRC/configure" "${CONFIGURE_ARGS[@]}" ) \
   || die "cross configure failed (see $BUILD/config.log)"
 
+# Fail now, not in an hour. configure records every module it decided to skip in
+# DISABLED_SUBDIRS, and a winex11.drv in that list means the X11 sysroot was
+# found but rejected for some other reason — a missing extension header, say.
+# --with-x already turns a *missing* X11 into a configure error; this catches
+# the quieter case.
+if grep -E '^DISABLED_SUBDIRS' "$BUILD/Makefile" | grep -q 'dlls/winex11\.drv'; then
+  die "configure disabled dlls/winex11.drv despite --with-x.
+     Search $BUILD/config.log for 'checking for X' and for the X11 extension
+     header checks that follow it."
+fi
+
 log "building $COMPONENT — expect an hour or more"
 make -C "$BUILD" -j"$(build_jobs 1)" || die "wine build failed"
 
@@ -243,28 +307,47 @@ make -C "$BUILD" install-lib DESTDIR="$STAGE" || die "make install-lib failed"
 
 # The unix side must be bionic aarch64. A host-glibc binary here is the exact
 # failure this rewrite exists to prevent, and `file` is the only cheap way to
-# tell the two apart.
-for elf in bin/wineserver lib/wine/aarch64-unix/ntdll.so; do
+# tell the two apart — look for "interpreter /system/bin/linker64" on the
+# executables, which no glibc build can produce.
+for elf in bin/wineserver bin/wine lib/wine/aarch64-unix/ntdll.so \
+           lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/winex11.drv.so; do
   path="$PAYLOAD/$elf"
-  [ -f "$path" ] || die "missing unix binary $elf (expected $path)"
+  [ -f "$path" ] || die "missing unix binary $elf (expected $path).
+     Without winex11.drv.so in particular, Wine has no way to put a window on
+     screen; check the 'checking for X' lines in $BUILD/config.log."
   file "$path" | grep -q 'ARM aarch64' \
     || die "$elf is not an aarch64 ELF: $(file -b "$path")"
 done
 
-# Each --enable-archs target gets its own PE tree. A missing one means configure
-# quietly dropped that architecture — usually because the toolchain could not
-# target it — and the package would be broken in a way only noticed on device.
-for arch in arm64ec aarch64 i386; do
-  [ -d "$PAYLOAD/lib/wine/$arch-windows" ] \
-    || die "no PE tree for $arch (expected $PAYLOAD/lib/wine/$arch-windows).
-     --enable-archs did not build it; check the configure summary for the
-     'Wine will be built with' lines."
+# THE PE TREES ARE NOT ONE PER --enable-archs VALUE, and expecting that is the
+# obvious mistake. Wine builds arm64ec as ARM64X: the arm64ec objects are linked
+# *into* the aarch64 DLLs, producing hybrid images that carry both instruction
+# sets, and they install to lib/wine/aarch64-windows. There is no
+# lib/wine/arm64ec-windows directory and there never will be — nor an
+# x86_64-windows one, even though arm64ec implies x86_64 as an extra arch, since
+# that side exists only to generate the x64 thunks folded into the same image.
+#
+# Confirmed against the generated Makefile: the only install destinations are
+# $(libdir)/wine/{aarch64-windows,i386-windows,aarch64-unix}.
+for tree in aarch64-windows i386-windows aarch64-unix; do
+  [ -d "$PAYLOAD/lib/wine/$tree" ] \
+    || die "no $tree tree (expected $PAYLOAD/lib/wine/$tree).
+     --enable-archs did not build it; check the 'Wine will be built with' lines
+     in the configure summary."
 done
 
-# Shared with fex.sh, dxvk.sh and vkd3d.sh. The naive "is it aarch64" test
-# rejects a correct ARM64EC DLL — see the verify_pe_dll comment in common.sh.
-verify_pe_dll "$PAYLOAD/lib/wine/arm64ec-windows/ntdll.dll" \
-  arm64ec-w64-mingw32 "arm64ec ntdll.dll"
+# So this is where ARM64EC is actually proved. verify_pe_dll's arm64ec branch
+# ignores the machine type — an EC image legitimately reports AMD64 — and looks
+# for the hybrid (CHPE) load-config directory instead. If the arm64ec half had
+# silently fallen out, this file would be a plain ARM64 PE and fail here, which
+# is the one failure that would otherwise survive all the way to the device.
+verify_pe_dll "$PAYLOAD/lib/wine/aarch64-windows/ntdll.dll" \
+  arm64ec-w64-mingw32 "aarch64-windows/ntdll.dll (ARM64X)"
+
+# i386 has no such subtlety; check it is really 32-bit x86 and not a copy of the
+# ARM64 build under a different name.
+verify_pe_dll "$PAYLOAD/lib/wine/i386-windows/ntdll.dll" \
+  i686-w64-mingw32 "i386 ntdll.dll"
 
 write_provenance "$PAYLOAD/provenance.json" "$COMPONENT" "$VERSION"
 

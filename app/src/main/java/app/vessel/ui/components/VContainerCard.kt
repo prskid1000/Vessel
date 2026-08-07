@@ -84,11 +84,18 @@ fun VContainerCard(
             // a solid accent slab and was the single loudest thing on the home
             // screen — which is exactly backwards for a card whose job is to
             // show machine facts.
-            VButton(
-                label = "Launch",
+            //
+            // The word "Launch" went with it. A play triangle on a card that has
+            // already named the container and listed its Wine build is not
+            // ambiguous, and dropping the label gives the row back to the
+            // last-run time, which is the fact a glance at this card is for. The
+            // description is still there for anything that reads the screen
+            // aloud.
+            VIconAction(
+                icon = Icons.Filled.PlayArrow,
+                contentDescription = "Launch ${container.name}",
                 onClick = onLaunch,
                 style = VButtonStyle.Primary,
-                icon = Icons.Filled.PlayArrow,
             )
         }
     }

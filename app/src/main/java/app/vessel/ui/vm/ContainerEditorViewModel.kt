@@ -25,15 +25,11 @@ import javax.inject.Inject
 /** The id the editor is given when there is no container yet. */
 const val NEW_CONTAINER: String = "new"
 
-/**
- * One group as the editor draws it — the manifest's own grouping, with whatever
- * the advanced disclosure is currently hiding taken out.
- */
+/** One group as the editor draws it — the manifest's own grouping, in its order. */
 data class EditorGroup(
     val id: String,
     val title: String,
     val help: String?,
-    val advanced: Boolean,
     val params: List<EditorParam>,
 )
 
@@ -57,9 +53,6 @@ data class EditorUiState(
     val creating: Boolean = false,
     val name: String = "",
     val groups: List<EditorGroup> = emptyList(),
-    val showAdvanced: Boolean = false,
-    /** Whether the disclosure has anything behind it at all. */
-    val hasAdvanced: Boolean = false,
     /** Set when the manifest or the container could not be read. Shown, not swallowed. */
     val error: String? = null,
     /** One-shot: the screen pops back and the editor is gone. */
@@ -151,11 +144,6 @@ class ContainerEditorViewModel @Inject constructor(
         rebuild()
     }
 
-    fun toggleAdvanced() {
-        _state.update { it.copy(showAdvanced = !it.showAdvanced) }
-        rebuild()
-    }
-
     // — commit ---------------------------------------------------------------
 
     fun save() {
@@ -208,31 +196,29 @@ class ContainerEditorViewModel @Inject constructor(
 
     // — rendering model ------------------------------------------------------
 
+    /**
+     * Every group, every param, in manifest order.
+     *
+     * There is no filter here any more. The editor used to drop whatever the
+     * "Show advanced" disclosure was hiding, which meant this function decided
+     * on the user's behalf which of the app's own settings they were not
+     * qualified to see — and a param that resolved to nothing visible took its
+     * whole group with it. Hierarchy is the manifest's ordering now, and the
+     * only thing that can remove a param from the screen is [resolve] failing to
+     * give it a value at all.
+     */
     private fun rebuild() {
         val currentManifest = manifest ?: return
         val current = draft ?: return
-        val showAdvanced = _state.value.showAdvanced
         val values = currentManifest.defaults() + current.params
 
-        // The disclosure only exists if it is hiding something, so this is
-        // computed before the advanced filter rather than after it.
-        val hasAdvanced = currentManifest.groups.any { group ->
-            (group.advanced && group.params.isNotEmpty()) || group.params.any { it.advanced }
-        }
-
         val groups = currentManifest.groups.mapNotNull { group ->
-            if (group.advanced && !showAdvanced) return@mapNotNull null
-            val visible = group.params
-                .filter { showAdvanced || !it.advanced }
+            val params = group.params
                 .mapNotNull { spec -> spec.resolve(values)?.let { toEditorParam(it) } }
-            if (visible.isEmpty()) {
-                null
-            } else {
-                EditorGroup(group.id, group.title, group.help, group.advanced, visible)
-            }
+            if (params.isEmpty()) null else EditorGroup(group.id, group.title, group.help, params)
         }
 
-        _state.update { it.copy(groups = groups, hasAdvanced = hasAdvanced) }
+        _state.update { it.copy(groups = groups) }
     }
 
     private fun toEditorParam(resolved: ResolvedParam): EditorParam {

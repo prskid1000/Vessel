@@ -232,30 +232,9 @@ fun VButton(
     val shape = Vessel.metrics.shapeMd
     val colors = Vessel.colors
 
-    // Transparent at rest, always. The tint is the only thing a state changes.
-    val fill = when {
-        !enabled -> Color.Transparent
-        style == VButtonStyle.Ghost && pressed -> colors.accentGhostPressed
-        style == VButtonStyle.Ghost && hovered -> colors.accentGhostHover
-        style == VButtonStyle.Primary && pressed -> colors.accentPressed
-        style == VButtonStyle.Primary && hovered -> colors.accentHover
-        style == VButtonStyle.Secondary && pressed -> colors.neutralPressed
-        style == VButtonStyle.Secondary && hovered -> colors.neutralHover
-        style == VButtonStyle.Danger && pressed -> colors.danger.copy(alpha = 0.22f)
-        style == VButtonStyle.Danger && hovered -> colors.danger.copy(alpha = 0.12f)
-        else -> Color.Transparent
-    }
-    val stroke = when (style) {
-        VButtonStyle.Primary -> colors.accent
-        VButtonStyle.Secondary -> colors.divider
-        VButtonStyle.Ghost -> Color.Transparent
-        VButtonStyle.Danger -> colors.danger
-    }
-    val content = when (style) {
-        VButtonStyle.Primary, VButtonStyle.Ghost -> colors.accent
-        VButtonStyle.Secondary -> colors.textPrimary
-        VButtonStyle.Danger -> colors.danger
-    }
+    val fill = buttonFill(style, enabled, pressed, hovered)
+    val stroke = buttonStroke(style)
+    val content = buttonContent(style)
     val alpha = if (enabled) 1f else colors.disabledAlpha
 
     Row(
@@ -281,6 +260,106 @@ fun VButton(
         val tinted = content.copy(alpha = alpha)
         if (icon != null) Icon(icon, null, Modifier.size(16.dp), tint = tinted)
         Text(label, style = Vessel.type.control, color = tinted, maxLines = 1)
+    }
+}
+
+// The three colour rules a button follows, shared by the text form and the icon
+// form so the two cannot drift. Transparent at rest, always: the tint is the
+// only thing a state changes, and a solid accent slab is not a Nocturne shape.
+
+@Composable
+private fun buttonFill(
+    style: VButtonStyle,
+    enabled: Boolean,
+    pressed: Boolean,
+    hovered: Boolean,
+): Color {
+    val colors = Vessel.colors
+    return when {
+        !enabled -> Color.Transparent
+        style == VButtonStyle.Ghost && pressed -> colors.accentGhostPressed
+        style == VButtonStyle.Ghost && hovered -> colors.accentGhostHover
+        style == VButtonStyle.Primary && pressed -> colors.accentPressed
+        style == VButtonStyle.Primary && hovered -> colors.accentHover
+        style == VButtonStyle.Secondary && pressed -> colors.neutralPressed
+        style == VButtonStyle.Secondary && hovered -> colors.neutralHover
+        style == VButtonStyle.Danger && pressed -> colors.danger.copy(alpha = 0.22f)
+        style == VButtonStyle.Danger && hovered -> colors.danger.copy(alpha = 0.12f)
+        else -> Color.Transparent
+    }
+}
+
+@Composable
+private fun buttonStroke(style: VButtonStyle): Color = when (style) {
+    VButtonStyle.Primary -> Vessel.colors.accent
+    VButtonStyle.Secondary -> Vessel.colors.divider
+    VButtonStyle.Ghost -> Color.Transparent
+    VButtonStyle.Danger -> Vessel.colors.danger
+}
+
+@Composable
+private fun buttonContent(style: VButtonStyle): Color = when (style) {
+    VButtonStyle.Primary, VButtonStyle.Ghost -> Vessel.colors.accent
+    VButtonStyle.Secondary -> Vessel.colors.textPrimary
+    VButtonStyle.Danger -> Vessel.colors.danger
+}
+
+/**
+ * [VButton]'s outlined form with a glyph where the label would be.
+ *
+ * For an action whose meaning survives without a word — Launch on a card that
+ * has already said what it is, Save and Delete in a toolbar. It keeps the ring,
+ * the tint states and the disabled treatment of the text button, so an icon
+ * action and a text action beside each other are the same control.
+ *
+ * [contentDescription] is required rather than optional: an icon with no label
+ * is a mystery glyph to a screen reader and to the next person reading the call
+ * site, and it costs one string to not be.
+ *
+ * A destructive *confirmation* never takes this form. Cancel and Delete inside
+ * [VConfirmSheet] stay words, because that is the one place where reading the
+ * button is the whole point of the button.
+ */
+@Composable
+fun VIconAction(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    style: VButtonStyle = VButtonStyle.Secondary,
+    enabled: Boolean = true,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val hovered by interaction.collectIsHoveredAsState()
+    val shape = Vessel.metrics.shapeMd
+    val colors = Vessel.colors
+    val alpha = if (enabled) 1f else colors.disabledAlpha
+
+    Box(
+        modifier
+            .size(Vessel.metrics.touchTarget)
+            .background(buttonFill(style, enabled, pressed, hovered), shape)
+            .border(
+                Vessel.metrics.hairline,
+                buttonStroke(style).let { it.copy(alpha = it.alpha * alpha) },
+                shape,
+            )
+            .clickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+                enabled = enabled,
+                onClickLabel = contentDescription,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            contentDescription,
+            Modifier.size(20.dp),
+            tint = buttonContent(style).copy(alpha = alpha),
+        )
     }
 }
 

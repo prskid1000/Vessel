@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Only an anydpi-v26 adaptive icon is provided, with no PNG density fallbacks.
+  That is deliberate and safe: minSdk is 31, so every device that can install
+  this app supports adaptive icons and will never look for mipmap-hdpi et al.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

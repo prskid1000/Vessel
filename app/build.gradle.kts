@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -47,16 +50,57 @@ android {
         }
     }
 
+    // The release key is never in the repository. It comes from
+    // `keystore.properties` at the repo root, or from the environment on a
+    // build machine with no checkout-local file. If neither exists the release
+    // build still runs and produces an unsigned APK, so a fresh clone can
+    // verify R8 and the shrinker without holding a signing key — which is the
+    // part of a release build that ordinary changes actually break.
+    val keystoreProperties = Properties()
+    rootProject.file("keystore.properties").takeIf { it.exists() }?.let { file ->
+        FileInputStream(file).use { keystoreProperties.load(it) }
+    }
+
+    fun secret(key: String, env: String): String? =
+        keystoreProperties.getProperty(key) ?: System.getenv(env)
+
+    // Resolved against the repo root, not this module. `file(...)` inside an
+    // `android {}` block is relative to app/, so a `storeFile=release.jks`
+    // sitting beside keystore.properties would silently not exist and the
+    // release would come out unsigned — with no error, because an unsigned
+    // release is a legitimate thing to produce. Learned the hard way in the
+    // sibling project; encoded here so it is not learned twice.
+    val releaseStore = secret("storeFile", "ANDROID_KEYSTORE")
+        ?.let { rootProject.file(it) }
+        ?.takeIf { it.exists() }
+
+    signingConfigs {
+        if (releaseStore != null) {
+            create("release") {
+                storeFile = releaseStore
+                storePassword = secret("storePassword", "ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = secret("keyAlias", "ANDROID_KEY_ALIAS")
+                keyPassword = secret("keyPassword", "ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+
+            // Sign debug with the release key when one is available. Debug and
+            // release carry the same applicationId, so with different keys the
+            // only way to swap builds on a phone is to uninstall — taking every
+            // container and its multi-gigabyte Wine prefix with it. Falls back
+            // to the debug key so a fresh clone still builds.
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
         release {
-            // TODO: no signingConfig yet. A release build here produces an
-            //  unsigned APK, which is enough to check that R8 is happy.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

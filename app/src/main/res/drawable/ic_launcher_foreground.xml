@@ -1,0 +1,45 @@
+<!--
+  Vessel launcher glyph.
+
+  A container holding contents: a stroked rounded square with two bars inside,
+  the lower one shorter. Which is the product, literally — a container with
+  things running in it.
+
+  Drawn as a vector rather than PNG densities because minSdk is 31, so the
+  adaptive icon in mipmap-anydpi-v26 is the only one Android will ever ask for.
+  No binary assets, and it stays sharp at every size.
+
+  Geometry: the adaptive canvas is 108x108 with a 72x72 safe zone (18..90) —
+  anything outside can be masked away by the launcher's shape. The glyph sits
+  in 30..78, comfortably inside that, and stays clear of the corners a circular
+  mask cuts.
+
+  Colour is Nocturne's accent (#9184D9), the same blurple as the On-Device AI
+  icon, so the two read as a family on the home screen.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- The vessel -->
+    <path
+        android:pathData="M44,30 H64 A14,14 0 0 1 78,44 V64 A14,14 0 0 1 64,78 H44 A14,14 0 0 1 30,64 V44 A14,14 0 0 1 44,30 Z"
+        android:strokeColor="#9184D9"
+        android:strokeWidth="6.5"
+        android:strokeLineJoin="round" />
+
+    <!-- Contents: unequal lengths, so it reads as material rather than as a
+         menu glyph. -->
+    <path
+        android:pathData="M42,48 H66"
+        android:strokeColor="#9184D9"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M42,60 H58"
+        android:strokeColor="#9184D9"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+</vector>

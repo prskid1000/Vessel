@@ -10,6 +10,14 @@
     "user who does not know what a translator is can act on. If a setting",
     "cannot be explained that way, it does not belong in this file at all.",
     "",
+    "Nothing here is hidden any more: there is no 'advanced' flag and no",
+    "disclosure in the editor. That means ORDER IS THE HIERARCHY. Groups are",
+    "named for what a setting affects rather than for the subsystem that",
+    "implements it, and they run from the ones a user opens the screen for",
+    "(Display) to the ones that are correct until something breaks",
+    "(Compatibility). Put a new param where a user would look for it, not next",
+    "to the code that reads it.",
+    "",
     "For params of type 'component', the default is a selector, not a package",
     "id: '@latest' resolves to the newest installed package of componentType.",
     "Package ids are build outputs (dxvk-2.7.1-canoe) and must never be",
@@ -18,11 +26,100 @@
 
   "groups": [
     {
-      "id": "memory",
-      "title": "Memory ordering",
-      "help": "This phone's CPU does not have the hardware mode that makes x86 memory rules free, so FEX has to enforce them itself. These settings trade speed against the risk of glitches in multi-threaded programs, and they matter more here than anywhere else.",
-      "advanced": true,
-      "_advancedNote": "Every default in this group is the safe one, and every change to any of them is a trade the user is asked to make blind — 'raise this if a program hangs at random' is a debugging instruction, not a setting. It stays in the product because a maintainer chasing a specific hang needs it, and it stays behind the disclosure because nobody else should meet it.",
+      "id": "display",
+      "title": "Display",
+      "help": "How large the Windows desktop is and how fast it may run — on this phone the resolution is the single biggest thing you can change for performance.",
+      "params": [
+        {
+          "key": "display.resolution",
+          "title": "Resolution",
+          "help": "Lower resolutions gain a lot of performance on this phone; it has a smaller GPU cache than the full-size chip.",
+          "type": "enum",
+          "options": ["1280x720", "1600x900", "1920x1080", "native"],
+          "default": "1280x720"
+        },
+        {
+          "key": "display.fpsLimit",
+          "title": "Frame rate limit",
+          "help": "Capping frame rate keeps the phone cool, which keeps performance steady over a long session.",
+          "type": "enum",
+          "options": ["30", "45", "60", "unlimited"],
+          "default": "60"
+        }
+      ]
+    },
+
+    {
+      "id": "graphics",
+      "title": "Graphics",
+      "help": "Which graphics driver and Direct3D translation this container loads; both are the one build Vessel compiled for this device.",
+      "params": [
+        {
+          "key": "gpu.driver",
+          "title": "GPU driver",
+          "help": "Turnip is the open driver this app builds for your Adreno 829; the system driver is missing features that most games need.",
+          "type": "component",
+          "componentType": "Turnip",
+          "default": "@latest"
+        },
+        {
+          "key": "gpu.d3dLayer",
+          "title": "Direct3D translation",
+          "help": "Converts the game's Direct3D calls to Vulkan; must match your GPU driver.",
+          "_note": "'@latest' resolves to the one DXVK build published for this device, and the only other honest value is a pin to an older one for a rollback. There is nothing to choose here, which is why the control is a readout rather than a picker.",
+          "type": "component",
+          "componentType": "DXVK",
+          "default": "@latest"
+        }
+      ]
+    },
+
+    {
+      "id": "rendering",
+      "title": "Rendering",
+      "help": "How the driver decides to draw each frame; worth touching only when a game looks wrong, and the nudge is always a better first move than the override.",
+      "params": [
+        {
+          "key": "turnip.TU_AUTOTUNE_ALGO",
+          "title": "Rendering mode preference",
+          "help": "Nudges the driver toward direct rendering, which fixes most corruption, while still letting it use the faster tiled path when it is confident.",
+          "_note": "Preferred over forcing TU_DEBUG=sysmem: Turnip's own docs note this still allows the other mode in high-confidence cases, so it is a nudge rather than a veto. It is declared before turnip.TU_DEBUG for that reason — order is the only hierarchy this screen has.",
+          "type": "enum",
+          "options": ["default", "prefer_sysmem"],
+          "optionLabels": {
+            "default": "Automatic",
+            "prefer_sysmem": "Prefer direct rendering"
+          },
+          "default": "default",
+          "env": "TU_AUTOTUNE_ALGO"
+        },
+        {
+          "key": "turnip.TU_DEBUG",
+          "title": "Driver mode",
+          "help": "Leave this alone unless a game shows corruption; forcing a mode is a troubleshooting step, not a speed-up.",
+          "_note": "CORRECTION (verified in Turnip source, 2026-08-07). An earlier version of this file said GMEM was broken on this GPU and sysmem was mandatory. That is wrong, and it was wrong in both directions. The GMEM page-fault report is scoped to Adreno *830*, not 829, and Turnip does not set disable_gmem for a829 — so forcing sysmem here would give up tiled rendering the hardware can actually do. The Chinese-guide advice to force gmem is equally unfounded: it is Adreno 710/720 guidance. Neither forcing is justified without measuring on this device. Prefer turnip.TU_AUTOTUNE_ALGO, which keeps both modes available and lets the driver choose.",
+          "type": "multi",
+          "options": ["sysmem", "gmem", "forcecb", "nolrz", "noubwc", "noconform", "deck_emu"],
+          "optionLabels": {
+            "sysmem": "Force direct rendering",
+            "gmem": "Force tiled rendering",
+            "forcecb": "Re-enable concurrent binning",
+            "nolrz": "Disable low-resolution Z",
+            "noubwc": "Disable bandwidth compression",
+            "noconform": "Relax conformance workarounds",
+            "deck_emu": "Report as Steam Deck"
+          },
+          "default": [],
+          "env": "TU_DEBUG"
+        }
+      ]
+    },
+
+    {
+      "id": "compatibility",
+      "title": "Compatibility",
+      "help": "Every setting here is already correct for this phone; change one only when a specific program misbehaves, and change it back if it does not help.",
+      "_note": "This is the old 'memory' group plus wine.sync, and the rename is the point. What these four have in common is not that they touch memory or the system — it is that each one trades correctness for speed in a program that is already running badly. Grouping them by what they are FOR is what lets them sit last on the screen without a disclosure hiding them.",
       "params": [
         {
           "key": "fex.TSOEnabled",
@@ -48,94 +145,8 @@
           "help": "Very slow in games and rarely needed; turn on only to fix a specific graphical or audio corruption.",
           "type": "bool",
           "default": false,
-          "env": "FEX_VECTORTSOENABLED",
-          "advanced": true
-        }
-      ]
-    },
-
-    {
-      "id": "graphics",
-      "title": "Graphics",
-      "params": [
-        {
-          "key": "gpu.driver",
-          "title": "GPU driver",
-          "help": "Turnip is the open driver this app builds for your Adreno 829; the system driver is missing features that most games need.",
-          "type": "component",
-          "componentType": "Turnip",
-          "default": "@latest"
+          "env": "FEX_VECTORTSOENABLED"
         },
-        {
-          "key": "gpu.d3dLayer",
-          "title": "Direct3D translation",
-          "help": "Converts the game's Direct3D calls to Vulkan; must match your GPU driver.",
-          "_advancedNote": "'@latest' resolves to the one DXVK build published for this device, and the only other honest value is a pin to an older one for a rollback. There is no choice to offer a user here, and the row's own help sentence says the value must match the driver — a control whose correct setting is 'whatever the other control implies' is a readout.",
-          "type": "component",
-          "componentType": "DXVK",
-          "default": "@latest",
-          "advanced": true
-        },
-        {
-          "key": "turnip.TU_DEBUG",
-          "title": "Driver mode",
-          "help": "Leave on automatic unless a game shows corruption; forcing a mode is a troubleshooting step, not a speed-up.",
-          "_note": "CORRECTION (verified in Turnip source, 2026-08-07). An earlier version of this file said GMEM was broken on this GPU and sysmem was mandatory. That is wrong, and it was wrong in both directions. The GMEM page-fault report is scoped to Adreno *830*, not 829, and Turnip does not set disable_gmem for a829 — so forcing sysmem here would give up tiled rendering the hardware can actually do. The Chinese-guide advice to force gmem is equally unfounded: it is Adreno 710/720 guidance. Neither forcing is justified without measuring on this device. Prefer turnip.TU_AUTOTUNE_ALGO, which keeps both modes available and lets the driver choose.",
-          "type": "multi",
-          "options": ["sysmem", "gmem", "forcecb", "nolrz", "noubwc", "noconform", "deck_emu"],
-          "optionLabels": {
-            "sysmem": "Force direct rendering",
-            "gmem": "Force tiled rendering",
-            "forcecb": "Re-enable concurrent binning",
-            "nolrz": "Disable low-resolution Z",
-            "noubwc": "Disable bandwidth compression",
-            "noconform": "Relax conformance workarounds",
-            "deck_emu": "Report as Steam Deck"
-          },
-          "default": [],
-          "env": "TU_DEBUG",
-          "advanced": true
-        },
-        {
-          "key": "turnip.TU_AUTOTUNE_ALGO",
-          "title": "Rendering mode preference",
-          "help": "Nudges the driver toward direct rendering, which fixes most corruption, while still letting it use the faster tiled path when it is confident.",
-          "_note": "Preferred over forcing TU_DEBUG=sysmem: Turnip's own docs note this still allows the other mode in high-confidence cases, so it is a nudge rather than a veto.",
-          "type": "enum",
-          "options": ["default", "prefer_sysmem"],
-          "optionLabels": {
-            "default": "Automatic",
-            "prefer_sysmem": "Prefer direct rendering"
-          },
-          "default": "default",
-          "env": "TU_AUTOTUNE_ALGO",
-          "advanced": true
-        },
-        {
-          "key": "display.resolution",
-          "title": "Resolution",
-          "help": "Lower resolutions gain a lot of performance on this phone; it has a smaller GPU cache than the full-size chip.",
-          "type": "enum",
-          "options": ["1280x720", "1600x900", "1920x1080", "native"],
-          "default": "1280x720"
-        },
-        {
-          "key": "display.fpsLimit",
-          "title": "Frame rate limit",
-          "help": "Capping frame rate keeps the phone cool, which keeps performance steady over a long session.",
-          "type": "enum",
-          "options": ["30", "45", "60", "unlimited"],
-          "default": "60"
-        }
-      ]
-    },
-
-    {
-      "id": "system",
-      "title": "System",
-      "advanced": true,
-      "_advancedNote": "Both settings here have exactly one correct value on this device and the manifest already knows it: esync is the only Wine sync that works without /dev/ntsync, and this chip has no efficiency cluster for a core restriction to avoid. Neither changes anything a user would notice, which is the test for staying on the default screen.",
-      "params": [
         {
           "key": "wine.sync",
           "title": "Thread synchronisation",
@@ -143,17 +154,6 @@
           "type": "enum",
           "options": ["esync", "fsync", "none"],
           "default": "esync"
-        },
-        {
-          "key": "system.cpuAffinity",
-          "title": "CPU cores",
-          "help": "This phone has no slow cores, so restricting to the two fastest only helps programs that use a single core.",
-          "_note": "Verified on device: cpu0-5 run at 3.32 GHz and cpu6-7 at 3.80 GHz, all Oryon. There is no efficiency cluster, so the usual 'pin to cores 4-7' advice from big.LITTLE devices does not apply. Leave on 'all' until profiling says otherwise.",
-          "type": "enum",
-          "options": ["all", "prime"],
-          "optionLabels": { "all": "All 8 cores", "prime": "Fastest 2 (cpu6-7)" },
-          "default": "all",
-          "advanced": true
         }
       ]
     }

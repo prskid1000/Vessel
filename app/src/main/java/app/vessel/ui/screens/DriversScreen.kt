@@ -31,7 +31,6 @@ import app.vessel.ui.components.VTag
 import app.vessel.ui.components.VTagTone
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
-import app.vessel.ui.theme.vCard
 import app.vessel.ui.vm.DriverAssignment
 import app.vessel.ui.vm.DriverRow
 import app.vessel.ui.vm.DriversUiState
@@ -114,15 +113,19 @@ private fun DriversContent(state: DriversUiState, onBack: () -> Unit) {
     }
 }
 
-/** One installed package, with its provenance and who is using it. */
+/**
+ * One installed package, with its provenance and who is using it.
+ *
+ * Flat, like every other list row in the product: this screen is three short
+ * lists of facts under three section headers, and wrapping each entry in a card
+ * put a panel around information that was already grouped by its heading.
+ */
 @Composable
 private fun InstalledDriver(row: DriverRow) {
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = Vessel.metrics.s8)
-            .vCard()
-            .padding(Vessel.metrics.s11),
+            .padding(vertical = Vessel.metrics.s8),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
     ) {
         Row(
@@ -162,9 +165,7 @@ private fun Assignment(assignment: DriverAssignment) {
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = Vessel.metrics.s8)
-            .vCard()
-            .padding(Vessel.metrics.s11),
+            .padding(vertical = Vessel.metrics.s8),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
     ) {
         Text(assignment.containerName, style = Vessel.type.body)
@@ -201,9 +202,7 @@ private fun SystemDriver(system: SystemGpu?, kgsl: DeviceNode) {
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = Vessel.metrics.s8)
-            .vCard()
-            .padding(Vessel.metrics.s11),
+            .padding(vertical = Vessel.metrics.s8),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
     ) {
         if (system?.error != null) {

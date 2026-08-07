@@ -1,0 +1,34 @@
+<!--
+  Monochrome layer for Android 13+ themed icons.
+
+  Same geometry as ic_launcher_foreground, drawn in white: the system reads only
+  the alpha and tints it to whatever the user's wallpaper palette produces. A
+  colour here would be ignored, so white keeps the intent obvious.
+
+  Kept as a separate file rather than reusing the foreground because the
+  foreground's accent colour is deliberate and should not drift to match this
+  one — the two happen to share a path today and are allowed to diverge.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M44,30 H64 A14,14 0 0 1 78,44 V64 A14,14 0 0 1 64,78 H44 A14,14 0 0 1 30,64 V44 A14,14 0 0 1 44,30 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6.5"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:pathData="M42,48 H66"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M42,60 H58"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+</vector>

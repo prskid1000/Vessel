@@ -1,146 +1,256 @@
 package app.vessel.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
-import app.vessel.ui.theme.vCard
 import app.vessel.ui.theme.vRing
+import kotlin.math.roundToInt
 
 /**
- * One setting from the manifest: title, control, and the sentence that says what
- * it does.
+ * One setting from the manifest: a label line, its control directly beneath, and
+ * the sentence that says what the control does.
+ *
+ * **The row is flat.** It used to be wrapped in `vCard()`, which boxed every
+ * setting on the container editor and turned a list of ten knobs into ten
+ * separate panels — boxes inside a screen that is itself a box, with the eye
+ * spending its attention on the frames rather than on the settings. Rows now sit
+ * directly on `bg` and are separated by vertical rhythm alone (`s8`), which is
+ * both denser and calmer. The only ruled or bordered things left on the screen
+ * are the *controls*: a dropdown, a text field, a stepper button.
+ *
+ * The right-aligned [value] is the other half of that: with every row's value
+ * ending on the same edge, the whole configuration can be read down the right
+ * side of the screen without touching a control. Use [valueIsMachine] where the
+ * value is a machine string — a package id, a selector, a version — so it is set
+ * in mono like every other machine fact in the product.
  *
  * The sentence is the point of the container editor, not garnish. Every other
  * app in this space shows a wall of raw environment variables and assumes you
  * already know; DESIGN.md's rule is that a knob which cannot be explained in one
  * plain sentence does not ship. So [help] renders under the control rather than
- * behind an info affordance, and nothing calls this without one.
+ * behind an info affordance, is never truncated, and wraps to as many lines as
+ * it needs.
  *
  * [note] is for a fact about the control's *bounds* — a clamp that is currently
  * active, or a component selector that resolved to nothing — and [warning] for a
  * value that is dangerous right now.
+ *
+ * [trailing] sits on the label line itself, at the right edge; it is where a
+ * boolean's switch goes. [control] sits under the line and spans the width.
  */
 @Composable
 fun VParamRow(
     title: String,
     help: String?,
     modifier: Modifier = Modifier,
+    value: String? = null,
+    valueIsMachine: Boolean = false,
     note: String? = null,
     warning: String? = null,
-    control: @Composable () -> Unit,
+    trailing: (@Composable () -> Unit)? = null,
+    control: (@Composable () -> Unit)? = null,
 ) {
-    Column(
-        modifier
-            .fillMaxWidth()
-            .padding(bottom = Vessel.metrics.s8)
-            .vCard()
-            .padding(Vessel.metrics.s11),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-    ) {
-        Text(title, style = Vessel.type.body)
-        control()
+    Column(modifier.fillMaxWidth().padding(bottom = Vessel.metrics.s8)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Weighted, so a long title wraps rather than shrinking the type or
+            // clipping. The value is unweighted and capped instead: it measures
+            // first, keeps the right edge of every row in one column, and cannot
+            // grow far enough to squeeze the title out.
+            Text(title, style = Vessel.type.body, modifier = Modifier.weight(1f))
+            if (value != null) {
+                Text(
+                    value,
+                    style = if (valueIsMachine) Vessel.type.mono else Vessel.type.body,
+                    color = Vessel.colors.textPrimary,
+                    textAlign = TextAlign.End,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = VALUE_MAX_WIDTH),
+                )
+            }
+            trailing?.invoke()
+        }
+
+        if (control != null) {
+            Box(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s6)) { control() }
+        }
         if (help != null) {
-            Text(help, style = Vessel.type.bodySmall, color = Vessel.colors.textMuted)
+            Text(
+                help,
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.textMuted,
+                modifier = Modifier.padding(top = Vessel.metrics.s3),
+            )
         }
         if (note != null) {
-            Text(note, style = Vessel.type.bodySmall, color = Vessel.colors.accent2)
+            Text(
+                note,
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.accent2,
+                modifier = Modifier.padding(top = Vessel.metrics.s3),
+            )
         }
         if (warning != null) {
-            Text(warning, style = Vessel.type.bodySmall, color = Vessel.colors.warn)
+            Text(
+                warning,
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.warn,
+                modifier = Modifier.padding(top = Vessel.metrics.s3),
+            )
         }
     }
 }
 
 /**
- * The `enum` control: one chip per option, wrapping.
+ * How wide the right-hand value column may grow.
  *
- * `FlowRow` is still experimental in this Compose version, so the wrap is done
- * by hand — options come in twos and threes and a fixed two-per-row reads more
- * evenly than a ragged flow anyway.
+ * Not a spacing token, because it is not spacing: it is the ceiling that stops a
+ * long value from eating the title's line. Every value the manifest can produce
+ * is far shorter than this, and the cap only ever fires on a pathological one.
+ */
+private val VALUE_MAX_WIDTH = 140.dp
+
+/** The height of a field, a dropdown and a stepper button — they align in a column. */
+private val FIELD_HEIGHT = 40.dp
+
+/**
+ * The `enum` control: a full-width bordered box showing the current label, with
+ * a chevron at the right edge and a menu behind it.
+ *
+ * This replaced a grid of chips. Two chips per row over four options is four
+ * boxes, and once every row on the screen went flat those boxes were the only
+ * thing left drawing panels — a control that reads as a set of buttons in a
+ * screen that has no other buttons. One field with one value in it also matches
+ * the text field and the component readout above and below it, which is what
+ * makes the left and right edges of the whole screen line up.
  */
 @Composable
-fun VChoiceRow(
+fun VDropdownField(
     options: List<String>,
     labelFor: (String) -> String,
     selected: String?,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
+    placeholder: String = "Choose…",
 ) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
-        options.chunked(2).forEach { pair ->
-            Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
-                pair.forEach { option ->
-                    VChoiceChip(
-                        label = labelFor(option),
-                        selected = option == selected,
-                        onClick = { onSelect(option) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                // The odd option out keeps its half-width rather than stretching
-                // across the row, so a three-option control still reads as a grid.
-                if (pair.size == 1) Box(Modifier.weight(1f))
+    var expanded by remember { mutableStateOf(false) }
+    val shape = Vessel.metrics.shapeMd
+
+    Box(modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = FIELD_HEIGHT)
+                .background(Vessel.colors.surface, shape)
+                .vRing(if (expanded) Vessel.colors.accent else Vessel.colors.divider, shape)
+                .clickable { expanded = true }
+                .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                selected?.let(labelFor) ?: placeholder,
+                style = Vessel.type.body,
+                color = if (selected == null) Vessel.colors.textMuted else Vessel.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                tint = Vessel.colors.textMuted,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            // The menu is its own window, outside the app's surface, so it has
+            // to be told the palette or it arrives in Material's default tone.
+            containerColor = Vessel.colors.surfaceRaised,
+            shape = shape,
+        ) {
+            options.forEach { option ->
+                val isSelected = option == selected
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            labelFor(option),
+                            style = Vessel.type.body,
+                            color = if (isSelected) {
+                                Vessel.colors.accent
+                            } else {
+                                Vessel.colors.textPrimary
+                            },
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        if (!isSelected) onSelect(option)
+                    },
+                )
             }
         }
     }
 }
 
-/** `.seg-opt` — transparent ground, a ring, and the accent doing the selecting. */
-@Composable
-fun VChoiceChip(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val shape = Vessel.metrics.shapeMd
-    val fill = if (selected) Vessel.colors.accentSoft else Color.Transparent
-    val stroke = if (selected) Vessel.colors.accent else Vessel.colors.divider
-    val ink = if (selected) Vessel.colors.accent else Vessel.colors.textLabel
-
-    Box(
-        modifier
-            .background(fill, shape)
-            .vRing(stroke, shape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Text(label, style = Vessel.type.control, color = ink)
-    }
-}
-
 /**
- * The `bool` control.
+ * The `bool` control: a pill switch on the right of the label line.
  *
- * Hand-built rather than Material's `Switch`, which arrives with its own palette
- * and its own spring. This is a ring, a token fill and one 150 ms slide — the
- * motion rule in DESIGN.md is confirmation, never decoration.
+ * Hand-built rather than Material's `Switch`, which is 52×32 with a shadowed
+ * thumb and its own spring — a control a third taller than every field beside
+ * it, and the one thing on the screen that would still be casting a shadow. This
+ * is the reference app's geometry exactly: a 40×23 track, a 17 dp thumb, a
+ * `divider` hairline, and one 150 ms slide, because DESIGN.md's motion rule is
+ * confirmation and never decoration.
  */
 @Composable
 fun VToggle(
@@ -149,50 +259,48 @@ fun VToggle(
     modifier: Modifier = Modifier,
 ) {
     val shape = Vessel.metrics.shapePill
-    val track = if (checked) Vessel.colors.accentSoft else Color.Transparent
-    val stroke = if (checked) Vessel.colors.accent else Vessel.colors.divider
-    val thumb = if (checked) Vessel.colors.accent else Vessel.colors.textMuted
+    val motion = tween<Color>(Vessel.metrics.durationStandardMs)
+    val track by animateColorAsState(
+        if (checked) Vessel.colors.accent700 else Vessel.colors.neutral900,
+        motion,
+        label = "track",
+    )
+    val thumb by animateColorAsState(
+        if (checked) Vessel.colors.accent200 else Vessel.colors.neutral600,
+        motion,
+        label = "thumb",
+    )
     val thumbOffset by animateDpAsState(
-        targetValue = if (checked) 20.dp else 2.dp,
+        targetValue = if (checked) 17.dp else 0.dp,
         animationSpec = tween(Vessel.metrics.durationStandardMs),
         label = "toggle",
     )
 
-    Row(
-        modifier.clickable { onCheckedChange(!checked) },
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        modifier
+            .size(width = 40.dp, height = 23.dp)
+            .background(track, shape)
+            .vRing(Vessel.colors.divider, shape)
+            .clickable { onCheckedChange(!checked) }
+            .padding(2.dp),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Box(
-            Modifier
-                .width(42.dp)
-                .height(24.dp)
-                .background(track, shape)
-                .vRing(stroke, shape),
-        ) {
-            Box(
-                Modifier
-                    .offset(x = thumbOffset, y = 2.dp)
-                    .size(18.dp)
-                    .background(thumb, Vessel.metrics.shapePill),
-            )
-        }
-        Text(
-            if (checked) "on" else "off",
-            style = Vessel.type.mono,
-            color = if (checked) Vessel.colors.accent else Vessel.colors.textMuted,
-        )
+        Box(Modifier.offset(x = thumbOffset).size(17.dp).background(thumb, shape))
     }
 }
 
 /**
- * The `int` control.
+ * The `int` control: minus, slider, plus.
  *
- * A stepper, not a slider: every integer param in the manifest spans three to
- * five steps, each of which is a documented behaviour change rather than a
- * position on a continuum, and a slider would invite dragging past the one that
- * works. The range is printed in mono next to the value so the ceiling is
- * visible before it is hit — which matters most when a clamp has lowered it.
+ * It was a bare stepper, on the reasoning that every integer param spans a
+ * handful of documented steps and a slider would invite dragging past the one
+ * that works. Both halves are here now for the same reason the reference app
+ * pairs them: a slider alone cannot be aimed — spread a range across 500 px of
+ * phone and each value is a few pixels wide, narrower than the part of a
+ * fingertip the screen resolves — and a stepper alone makes a wide range a
+ * hundred taps. The buttons make every value reachable; the track makes the
+ * position readable at a glance. The number itself is on the row's label line,
+ * where every other param's value is.
  */
 @Composable
 fun VStepper(
@@ -202,42 +310,120 @@ fun VStepper(
     onChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // An unbounded param would otherwise ask Material for a two-billion-wide
+    // track. Nothing in the manifest declares one today; this is the guard that
+    // keeps that from being a layout bug rather than a missing bound.
+    val high = if (max > min) max else min + 1
     Row(
-        modifier,
+        modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        VStepperButton("−", enabled = value > min) { onChange(value - 1) }
-        Text(
-            value.toString(),
-            style = Vessel.type.metric,
-            color = Vessel.colors.textPrimary,
-            modifier = Modifier.width(32.dp),
+        VStepperButton("−", "Decrease", enabled = value > min) { onChange(value - 1) }
+        VSlider(
+            value = value.toFloat(),
+            onValueChange = { onChange(it.roundToInt().coerceIn(min, high)) },
+            valueRange = min.toFloat()..high.toFloat(),
+            // Material counts ticks strictly between the ends, so a grid of N
+            // whole numbers is N-2. Capped because it allocates the list.
+            steps = (high - min - 1).coerceIn(0, 200),
+            modifier = Modifier.weight(1f),
         )
-        VStepperButton("+", enabled = value < max) { onChange(value + 1) }
-        Text(
-            "$min…$max",
-            style = Vessel.type.mono,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.padding(start = Vessel.metrics.s6),
-        )
+        VStepperButton("+", "Increase", enabled = value < max) { onChange(value + 1) }
     }
 }
 
+/** `VButton`'s outlined form, square and glyph-only. */
 @Composable
-private fun VStepperButton(glyph: String, enabled: Boolean, onClick: () -> Unit) {
+private fun VStepperButton(
+    glyph: String,
+    contentDescription: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
     val shape = Vessel.metrics.shapeMd
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Box(
         Modifier
-            .size(36.dp)
+            .size(FIELD_HEIGHT)
             .vRing(Vessel.colors.divider.copy(alpha = Vessel.colors.divider.alpha * alpha), shape)
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled, onClickLabel = contentDescription, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(glyph, style = Vessel.type.subtitle, color = Vessel.colors.textPrimary.copy(alpha = alpha))
+        Text(glyph, style = Vessel.type.subtitle, color = Vessel.colors.accent.copy(alpha = alpha))
     }
 }
+
+/**
+ * The range control, in Nocturne's palette.
+ *
+ * Material's `Slider` is kept for the drag mechanics and the accessibility
+ * semantics, and given a track and thumb of our own: a 4 dp `neutral-800` rail
+ * with an `accent` fill and a flat 16 dp `accent` thumb. The default is a purple
+ * pill with a shadow, which is the wrong system.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun VSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    modifier: Modifier = Modifier,
+    steps: Int = 0,
+    enabled: Boolean = true,
+) {
+    val colors = Vessel.colors
+    Slider(
+        value = value.coerceIn(valueRange.start, valueRange.endInclusive),
+        onValueChange = onValueChange,
+        valueRange = valueRange,
+        steps = steps,
+        enabled = enabled,
+        modifier = modifier.height(FIELD_HEIGHT),
+        colors = SliderDefaults.colors(
+            thumbColor = colors.accent,
+            activeTrackColor = colors.accent,
+            inactiveTrackColor = colors.neutral800,
+            activeTickColor = Color.Transparent,
+            inactiveTickColor = Color.Transparent,
+            disabledThumbColor = colors.neutral600,
+            disabledActiveTrackColor = colors.neutral700,
+            disabledInactiveTrackColor = colors.neutral900,
+        ),
+        thumb = {
+            Box(
+                Modifier
+                    .size(16.dp)
+                    .background(
+                        if (enabled) colors.accent else colors.neutral600,
+                        Vessel.metrics.shapePill,
+                    ),
+            )
+        },
+        track = { state ->
+            val span = state.valueRange.endInclusive - state.valueRange.start
+            val fraction = if (span > 0f) (state.value - state.valueRange.start) / span else 0f
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(TRACK_HEIGHT)
+                    .background(colors.neutral800, Vessel.metrics.shapePill),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                        .height(TRACK_HEIGHT)
+                        .background(
+                            if (enabled) colors.accent else colors.neutral700,
+                            Vessel.metrics.shapePill,
+                        ),
+                )
+            }
+        },
+    )
+}
+
+private val TRACK_HEIGHT: Dp = 4.dp
 
 /** One line of the `multi` control: a box, a tick, and the option's label. */
 @Composable
@@ -267,16 +453,22 @@ fun VCheckRow(
                 Text("✓", style = Vessel.type.monoSmall, color = Vessel.colors.accent)
             }
         }
-        Text(label, style = Vessel.type.bodySmall, color = Vessel.colors.textLabel)
+        Text(
+            label,
+            style = Vessel.type.body,
+            color = if (checked) Vessel.colors.textPrimary else Vessel.colors.textLabel,
+        )
     }
 }
 
 /**
  * A single-line text input.
  *
- * `BasicTextField` and a box we draw, because Material's `TextField` brings a
+ * `BasicTextField` in a box we draw, because Material's `TextField` brings a
  * container tone, an indicator line and a label animation that are all from a
- * different design system. The cursor is the accent; nothing else is coloured.
+ * different design system. Same ground, same ring and same height as
+ * [VDropdownField], so a name field and an enum field line up down the screen.
+ * The ring goes accent while focused; nothing else is coloured but the cursor.
  */
 @Composable
 fun VTextField(
@@ -285,11 +477,16 @@ fun VTextField(
     modifier: Modifier = Modifier,
     placeholder: String? = null,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     val shape = Vessel.metrics.shapeMd
+
     Box(
         modifier
             .fillMaxWidth()
-            .vRing(Vessel.colors.divider, shape)
+            .defaultMinSize(minHeight = FIELD_HEIGHT)
+            .background(Vessel.colors.surface, shape)
+            .vRing(if (focused) Vessel.colors.accent else Vessel.colors.divider, shape)
             .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -302,9 +499,8 @@ fun VTextField(
             singleLine = true,
             textStyle = Vessel.type.body.copy(color = Vessel.colors.textPrimary),
             cursorBrush = SolidColor(Vessel.colors.accent),
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                imeAction = ImeAction.Done,
-            ),
+            interactionSource = interaction,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -316,7 +512,9 @@ fun VTextField(
  * There is nothing to pick. Vessel ships one current build of each component
  * compiled for this device, so a selector is a readout of what `@latest`
  * resolved to — and when it resolved to nothing, the row says that rather than
- * showing an empty field the user would try to fill.
+ * showing an empty field the user would try to fill. It takes the field's box
+ * anyway, without the chevron, so the column of controls keeps one left and one
+ * right edge all the way down the screen.
  */
 @Composable
 fun VComponentReadout(
@@ -324,19 +522,26 @@ fun VComponentReadout(
     resolvedId: String?,
     modifier: Modifier = Modifier,
 ) {
+    val shape = Vessel.metrics.shapeMd
     Row(
-        modifier,
+        modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = FIELD_HEIGHT)
+            .background(Vessel.colors.surface, shape)
+            .vRing(Vessel.colors.divider, shape)
+            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        VTag(selector, tone = VTagTone.Outline)
         Text(
             resolvedId ?: "nothing installed",
             style = Vessel.type.mono,
             color = if (resolvedId != null) Vessel.colors.textLabel else Vessel.colors.textMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
+        VTag(selector, tone = VTagTone.Outline)
     }
 }
 
@@ -344,33 +549,67 @@ fun VComponentReadout(
 @Composable
 private fun VParamRowPreview() {
     VesselTheme {
-        Column(Modifier.padding(18.dp)) {
+        Column(Modifier.padding(Vessel.metrics.s11)) {
+            VSectionHeader("Display")
+            VParamRow(
+                title = "Resolution",
+                help = "Lower resolutions gain a lot of performance on this phone; it has a " +
+                    "smaller GPU cache than the full-size chip.",
+                value = "1280x720",
+                control = {
+                    VDropdownField(
+                        options = listOf("1280x720", "1600x900", "1920x1080", "native"),
+                        labelFor = { it },
+                        selected = "1280x720",
+                        onSelect = {},
+                    )
+                },
+            )
+            VParamRow(
+                title = "Frame rate limit",
+                help = "Capping frame rate keeps the phone cool, which keeps performance steady " +
+                    "over a long session.",
+                value = "60",
+                control = {
+                    VDropdownField(
+                        options = listOf("30", "45", "60", "unlimited"),
+                        labelFor = { it },
+                        selected = "60",
+                        onSelect = {},
+                    )
+                },
+            )
+
+            VSectionHeader("Graphics")
+            VParamRow(
+                title = "GPU driver",
+                help = "Turnip is the open driver this app builds for your Adreno 829.",
+                value = "@latest",
+                valueIsMachine = true,
+                note = "Nothing installed for this component yet.",
+                control = { VComponentReadout("@latest", null) },
+            )
+            VParamRow(
+                title = "Worker threads",
+                help = "How many cores the translator may compile on at once.",
+                value = "4",
+                control = { VStepper(value = 4, min = 1, max = 8, onChange = {}) },
+            )
+
+            VSectionHeader("Compatibility")
             VParamRow(
                 title = "Strict memory ordering",
                 help = "Keep this on: turning it off is faster but breaks most multi-threaded " +
                     "programs.",
                 warning = "Most programs will crash or corrupt data with this off.",
-            ) {
-                VToggle(checked = false, onCheckedChange = {})
-            }
+                trailing = { VToggle(checked = false, onCheckedChange = {}) },
+            )
             VParamRow(
-                title = "Rendering mode preference",
-                help = "Nudges the driver toward direct rendering, which fixes most corruption.",
-            ) {
-                VChoiceRow(
-                    listOf("default", "prefer_sysmem"),
-                    { if (it == "default") "Automatic" else "Prefer direct rendering" },
-                    "default",
-                    {},
-                )
-            }
-            VParamRow(
-                title = "GPU driver",
-                help = "Turnip is the open driver this app builds.",
-                note = "Nothing installed for this component yet.",
-            ) {
-                VComponentReadout("@latest", null)
-            }
+                title = "Cheap ordering barriers",
+                help = "Uses a lighter method to enforce memory ordering; leave on unless a " +
+                    "program misbehaves.",
+                trailing = { VToggle(checked = true, onCheckedChange = {}) },
+            )
         }
     }
 }
