@@ -1,9 +1,14 @@
 /*
- * D3D12 through vkd3d, headless.
+ * D3D12 through vkd3d, rendering to a texture with no swapchain.
  *
  * D3D12CreateDevice takes an adapter and nothing else — no window, no
- * swapchain — so like D3D11 this runs today. It is also the probe with the most
- * moving parts, and that is the point: D3D12 has no immediate context to hide
+ * swapchain. That much is true, but the adapter comes from DXGI, DXGI here is
+ * DXVK's, and DXVK cannot build a Vulkan instance without VK_KHR_win32_surface,
+ * which Wine only offers when a display driver is loaded. So this is blocked on
+ * the X server today for the same non-obvious reason D3D11 is; see d3d11probe.c
+ * and gfx_wsi_ready().
+ *
+ * It is also the probe with the most moving parts, and that is the point: D3D12 has no immediate context to hide
  * behind, so a pass here means the command queue, the command allocator, an
  * explicit resource barrier, a root signature, a full PSO and a fence all
  * survived the trip through vkd3d to Vulkan and back.
@@ -129,10 +134,10 @@ int main(void)
     void *mapped = NULL;
     unsigned in, out_a, out_b;
     HRESULT hr;
-    int verdict;
+    int verdict, blocked = 0;
 
-    d3d12_dll = gfx_load(API, "d3d12.dll");
-    if (!d3d12_dll) return GFX_EXIT_FAIL;
+    d3d12_dll = gfx_load_ex(API, "d3d12.dll", &blocked);
+    if (!d3d12_dll) return blocked ? GFX_EXIT_BLOCKED : GFX_EXIT_FAIL;
     create_device = (PFN_D3D12_CREATE_DEVICE_T)(void *)GetProcAddress(d3d12_dll, "D3D12CreateDevice");
     serialize_rs = (PFN_D3D12_SERIALIZE_ROOT_SIGNATURE_T)(void *)GetProcAddress(d3d12_dll, "D3D12SerializeRootSignature");
     if (!create_device || !serialize_rs)
@@ -143,15 +148,21 @@ int main(void)
      * the adapter description to print, and IDXGIAdapter1 tells us whether
      * something handed us a software adapter, which would explain a pass that
      * means nothing. */
-    dxgi_dll = gfx_load(API, "dxgi.dll");
-    if (!dxgi_dll) return GFX_EXIT_FAIL;
+    dxgi_dll = gfx_load_ex(API, "dxgi.dll", &blocked);
+    if (!dxgi_dll) return blocked ? GFX_EXIT_BLOCKED : GFX_EXIT_FAIL;
     create_factory = (PFN_CREATE_DXGI_FACTORY1)(void *)GetProcAddress(dxgi_dll, "CreateDXGIFactory1");
     if (!create_factory)
         return gfx_fail(API, "getprocaddress", E_FAIL, "dxgi.dll exports no CreateDXGIFactory1");
 
+    /* DXGI here is DXVK's, and DXVK builds its Vulkan instance inside the
+     * factory — so this is where the missing WSI extension surfaces for D3D12,
+     * one call earlier than it does for D3D11. */
     hr = create_factory(&IID_IDXGIFactory1, (void **)&factory);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        if (gfx_wsi_ready() == 0)
+            return gfx_blocked_no_wsi(API, "createfactory");
         return gfx_fail(API, "createfactory", hr, "CreateDXGIFactory1 failed");
+    }
 
     hr = IDXGIFactory1_EnumAdapters1(factory, 0, &adapter);
     if (FAILED(hr)) {

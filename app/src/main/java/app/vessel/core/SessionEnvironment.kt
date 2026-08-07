@@ -27,6 +27,18 @@ const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+load
  *
  * `opengl32` is in the list because a Mesa/Zink `opengl32.dll` replaces WGL, not
  * Direct3D — see the `OpenGL` package type in `build/package_wcp.py`.
+ *
+ * **This list must name only DLLs we actually ship.** `=n` means native *only*:
+ * Wine's `loader.c` turns a missing native file into `STATUS_DLL_NOT_FOUND`
+ * rather than falling back to its builtin. So `d3d10` and `d3d10_1` are absent
+ * on purpose — DXVK 2.7.1 ships `d3d10core.dll` and no `d3d10.dll`, and adding
+ * the names "for completeness" would break every D3D10 title outright.
+ *
+ * The overrides are not optional, either, and it is worth knowing why the
+ * obvious alternative does not work: Wine only prefers a native DLL by default
+ * when the builtin was linked with `-Wl,--prefer-native`, and not one of d3d8,
+ * d3d9, d3d10core, d3d11, d3d12, d3d12core, dxgi or wined3d carries it. Without
+ * the override the builtin silently wins and the DXVK we shipped never loads.
  */
 val D3D_DLL_OVERRIDES: List<String> = listOf(
     "d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi", "opengl32",
@@ -87,6 +99,21 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "FEX_TSOENABLED",
     "FEX_HALFBARRIERTSOENABLED",
     "FEX_VECTORTSOENABLED",
+
+    // FEX's log destination, for the same reason as WINEDEBUG: docs/LOGGING.md
+    // says everything diagnostic arrives on fd 2, and FEX's defaults send it
+    // somewhere else.
+    "FEX_SILENTLOG",
+    "FEX_OUTPUTLOG",
+
+    // The shader caches point at container-owned directories this layer chose.
+    // A manifest param naming one could send a cache outside the container, or
+    // share it between two containers on different driver builds.
+    "MESA_SHADER_CACHE_DISABLE",
+    "MESA_SHADER_CACHE_DIR",
+    "DXVK_STATE_CACHE_PATH",
+    "VKD3D_SHADER_CACHE_PATH",
+    "VKD3D_CONFIG",
 )
 
 /**
@@ -134,6 +161,21 @@ data class SessionPaths(
     val prefix: File,
     /** `DXVK_LOG_PATH` — `files/logs/<id>`. Insurance only — see below. */
     val logs: File,
+    /**
+     * Where the three shader caches live, per container.
+     *
+     * Defaulted so existing callers keep working, but it should be passed: on a
+     * phone this is the difference between compiling every pipeline on every
+     * launch and compiling it once. Mesa's cache in particular is **disabled by
+     * default under Wine** — `MESA_SHADER_CACHE_DISABLE` defaults to true when
+     * Mesa thinks it is running under a translation layer — so leaving this
+     * unset is not "the usual behaviour", it is off.
+     *
+     * Per container rather than shared, because each of the three caches keys on
+     * a driver/layer build and none of them is safe to share across a component
+     * upgrade. Note vkd3d's cache has no pruning and no size cap of its own.
+     */
+    val caches: File = File(prefix.parentFile ?: prefix, "caches"),
 )
 
 /**
@@ -188,6 +230,17 @@ fun sessionEnvironment(
     // The names are all-caps with no internal underscores because FEX derives
     // them as `FEX_` + the JSON key uppercased: `TSOEnabled` becomes
     // `FEX_TSOENABLED` and never `FEX_TSOEnabled`. See docs/ARCHITECTURE.md.
+    // FEX's own diagnostics reach the same pipe as everything else.
+    //
+    // Both defaults work against docs/LOGGING.md: SILENTLOG is true and
+    // OUTPUTLOG is "server", so nothing FEX says lands on fd 2. That hides more
+    // than crash messages — FEX_HOSTFEATURES parsing skips tokens it does not
+    // recognise with only a log line to say so, so with the default a typo in a
+    // host-feature override is completely invisible. Same failure shape as the
+    // WINEDEBUG traps that document already catalogues.
+    environment["FEX_SILENTLOG"] = "0"
+    environment["FEX_OUTPUTLOG"] = "stderr"
+
     environment["FEX_TSOENABLED"] = "1"
     environment["FEX_HALFBARRIERTSOENABLED"] = "1"
     environment["FEX_VECTORTSOENABLED"] = "0"
@@ -200,6 +253,32 @@ fun sessionEnvironment(
 
     environment["VKD3D_DEBUG"] = "warn"
     environment["VKD3D_SHADER_DEBUG"] = "warn"
+
+    // Ray tracing is not reachable here, so stop games from trying.
+    //
+    // Turnip exposes VK_KHR_ray_query but not VK_KHR_ray_tracing_pipeline, and
+    // vkd3d's tier ladder requires rayTracingPipeline even for Tier 1.0 — so
+    // there is no DXR through this stack whatever a title asks for. On KGSL it
+    // is worse than absent: raytracing is gated on a hardware fuse read through
+    // KGSL_PROP_IS_RAYTRACING_ENABLED, so the acceleration-structure extension
+    // may not appear at all.
+    //
+    // Deliberately NOT here: `force_raw_va_cbv`. vkd3d skips raw-VA CBVs on
+    // Qualcomm on purpose — state.c calls the difference "profound (~15% in some
+    // cases)" — and setting the flag would undo that. Tiler mode needs no flag
+    // either; device.c turns it on for VK_DRIVER_ID_MESA_TURNIP by itself.
+    environment["VKD3D_CONFIG"] = "nodxr"
+
+    // The shader caches, all three, pointed at the container.
+    //
+    // Mesa's is the one that matters and the one most easily missed: it disables
+    // itself when it detects a translation layer, so under Wine the default is
+    // *off*, and every pipeline is recompiled on every launch. On a phone that
+    // is the largest avoidable cost in the whole stack.
+    environment["MESA_SHADER_CACHE_DISABLE"] = "false"
+    environment["MESA_SHADER_CACHE_DIR"] = File(paths.caches, "mesa").absolutePath
+    environment["DXVK_STATE_CACHE_PATH"] = File(paths.caches, "dxvk").absolutePath
+    environment["VKD3D_SHADER_CACHE_PATH"] = File(paths.caches, "vkd3d").absolutePath
 
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
 

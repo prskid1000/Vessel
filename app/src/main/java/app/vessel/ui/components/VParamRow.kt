@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -38,6 +39,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -179,7 +182,20 @@ fun VDropdownField(
     var expanded by remember { mutableStateOf(false) }
     val shape = Vessel.metrics.shapeMd
 
-    Box(modifier.fillMaxWidth()) {
+    // The menu is a separate window and sizes itself to its widest item, so left
+    // alone it is narrower than the field it drops out of and its right edge
+    // lands nowhere — the one vertical line every other control on the screen
+    // shares. Measuring the field is the only way to match it: DropdownMenu has
+    // no "same width as anchor" option, and Material's ExposedDropdownMenuBox,
+    // which does, brings a TextField and its whole look with it.
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    val density = LocalDensity.current
+
+    Box(
+        modifier
+            .fillMaxWidth()
+            .onSizeChanged { fieldWidth = with(density) { it.width.toDp() } },
+    ) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -219,7 +235,9 @@ fun VDropdownField(
             // buries the row it belongs to and gives no sense of where the
             // current value sits in the range. DropdownMenu already scrolls; all
             // it needs is a ceiling.
-            modifier = Modifier.heightIn(max = MENU_MAX_HEIGHT),
+            modifier = Modifier
+                .width(fieldWidth)
+                .heightIn(max = MENU_MAX_HEIGHT),
         ) {
             options.forEach { option ->
                 val isSelected = option == selected

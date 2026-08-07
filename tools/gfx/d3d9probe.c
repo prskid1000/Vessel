@@ -51,7 +51,7 @@ int main(void)
     const char *reason = NULL;
     unsigned in, out_a, out_b;
     HRESULT hr;
-    int verdict;
+    int verdict, blocked = 0;
 
     static const struct vtx verts[3] = {
         { SX(GFX_TRI_X0), SY(GFX_TRI_Y0), 0.5f, 1.0f, 0xffff0000 },
@@ -59,16 +59,22 @@ int main(void)
         { SX(GFX_TRI_X2), SY(GFX_TRI_Y2), 0.5f, 1.0f, 0xffff0000 },
     };
 
-    d3d9_dll = gfx_load(API, "d3d9.dll");
-    if (!d3d9_dll) return GFX_EXIT_FAIL;
+    d3d9_dll = gfx_load_ex(API, "d3d9.dll", &blocked);
+    if (!d3d9_dll) return blocked ? GFX_EXIT_BLOCKED : GFX_EXIT_FAIL;
     create9 = (PFN_DIRECT3DCREATE9)(void *)GetProcAddress(d3d9_dll, "Direct3DCreate9");
     if (!create9)
         return gfx_fail(API, "getprocaddress", E_FAIL, "d3d9.dll exports no Direct3DCreate9");
 
-    /* Direct3DCreate9 itself needs no display — it is CreateDevice that does.
-     * Doing it before the window means the adapter identifier gets printed even
-     * on a blocked run, which is free information about whether DXVK's D3D9 is
-     * loading at all. */
+    /* Checked BEFORE Direct3DCreate9, not after it fails.
+     *
+     * When DXVK cannot build a Vulkan instance it throws DxvkError out of this
+     * very call, and because the entry point is `extern "C"` with no handler,
+     * libc++abi calls std::terminate and the process dies — no return value, no
+     * chance to print anything. Measured on device: the probe produced no output
+     * at all until this check moved above the call. */
+    if (gfx_wsi_ready() == 0)
+        return gfx_blocked_no_wsi(API, "direct3dcreate9");
+
     d3d = create9(D3D_SDK_VERSION);
     if (!d3d)
         return gfx_fail(API, "direct3dcreate9", E_FAIL, "Direct3DCreate9 returned NULL");

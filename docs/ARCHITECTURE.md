@@ -235,22 +235,29 @@ the wrong guess — `/data/user/0` is mounted `rw`, SELinux logs
 | Turnip (`libvulkan_freedreno.so`) | host bionic ELF | `.wcp`, `dlopen`ed from `filesDir` |
 | FEX DLLs, DXVK, vkd3d, Wine's PE DLLs | Windows PE | `.wcp`; Android's loader never sees them — Wine opens them as data |
 
-### Turnip may not need adrenotools
+### Turnip does need adrenotools — measured
 
-In Winlator, Turnip is *not* loaded through adrenotools — it is extracted into
-the glibc container rootfs and loaded by the container's glibc loader.
-Adrenotools is used only on Winlator's Vortek path, to replace the **host**
-`/system/lib64/libvulkan.so`.
+This section used to say "spike this before adopting adrenotools", on the
+reasoning that Mesa's Turnip talks to `/dev/kgsl` directly and has no vendor-blob
+dependency, so a plain `dlopen` might do. The spike is done and the answer is no.
 
-Vessel has no glibc container, so our Turnip is host-side bionic — structurally
-Winlator's Vortek case. But adrenotools is a large piece of machinery (it
-recovers bionic's hidden `__loader_android_create_namespace` by disassembling
-`dlopen` for its `BL` instruction, then preloads a hook to interpose
-`android_dlopen_ext`, and that hook early-outs unless the filename contains
-`vulkan.`). Mesa's Turnip talks to `/dev/kgsl` directly and has no vendor-blob
-dependencies, so it may load with a plain `dlopen`. **Spike this before adopting
-adrenotools.** If the unix-side Wine `.so` files need soname resolution rather
-than absolute paths, `liblinkernsbypass` alone provides that.
+`libvulkan_freedreno.so` exports exactly one symbol, `HMI`. Nothing can load it
+but Android's own Vulkan loader, and the loader will only load a driver from a
+path it trusts — which is what libadrenotools' `android_dlopen_ext` hook exists
+to arrange. Without that hook the driver is inert, and nothing says so.
+
+Confirmed on the device by asking Vulkan what answered:
+
+```
+driver_id=8  driver="Qualcomm Technologies Inc. Adreno Vulkan Driver"
+name="Adreno (TM) 829"  api=1.4.295  vendor=0x5143
+```
+
+That is the stock Qualcomm blob, not our build. The APK ships no adrenotools
+hook libraries, so **every Vulkan call so far has gone to the vendor driver**,
+and every claim in this document about Turnip on this device describes a binary
+that has not yet run. `TU_DEBUG=startup` remains the ground truth, and its
+absence from a session log is the signal.
 
 ### Wine is three toolchains, not one
 

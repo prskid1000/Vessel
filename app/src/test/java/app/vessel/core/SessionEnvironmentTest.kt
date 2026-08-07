@@ -28,7 +28,8 @@ class SessionEnvironmentTest {
 
     private val prefix = File("/data/user/0/app.vessel/files/containers/c1/prefix")
     private val logs = File("/data/user/0/app.vessel/files/logs/c1")
-    private val paths = SessionPaths(prefix = prefix, logs = logs)
+    private val caches = File("/data/user/0/app.vessel/files/containers/c1/caches")
+    private val paths = SessionPaths(prefix = prefix, logs = logs, caches = caches)
 
     /**
      * A manifest that still declares the three FEX params, which the shipped one
@@ -473,10 +474,17 @@ class SessionEnvironmentTest {
                 "DXVK_LOG_PATH" to logs.absolutePath,
                 "VKD3D_DEBUG" to "warn",
                 "VKD3D_SHADER_DEBUG" to "warn",
+                "VKD3D_CONFIG" to "nodxr",
+                "MESA_SHADER_CACHE_DISABLE" to "false",
+                "MESA_SHADER_CACHE_DIR" to File(caches, "mesa").absolutePath,
+                "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
+                "VKD3D_SHADER_CACHE_PATH" to File(caches, "vkd3d").absolutePath,
                 "TU_DEBUG" to "startup",
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to "libvulkan_freedreno.so",
+                "FEX_SILENTLOG" to "0",
+                "FEX_OUTPUTLOG" to "stderr",
                 "FEX_TSOENABLED" to "1",
                 "FEX_HALFBARRIERTSOENABLED" to "1",
                 "FEX_VECTORTSOENABLED" to "0",

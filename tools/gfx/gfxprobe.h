@@ -196,16 +196,104 @@ GFX_HELPER const char *gfx_narrow(const WCHAR *w, char *buf, int len)
     return buf;
 }
 
-/* A module the probe cannot continue without. Reported by name so that
- * "d3d12core.dll missing" and "the override kept the builtin" are
- * distinguishable in the log without guessing. */
-GFX_HELPER HMODULE gfx_load(const char *api, const char *dll)
+/*
+ * A module the probe cannot continue without.
+ *
+ * Two failure codes here mean very different things and the caller must be able
+ * to tell them apart:
+ *
+ *   ERROR_MOD_NOT_FOUND (126)  the DLL, or something it imports, is not there.
+ *   ERROR_BAD_EXE_FORMAT (193) the DLL is there and is the wrong machine.
+ *
+ * 193 is the one that surprises people. DXVK, vkd3d and Zink are built with
+ * arm64ec-w64-mingw32-clang, which emits a *pure* ARM64EC image — machine type
+ * AMD64 with CHPE metadata — not an ARM64X image with both halves linked in the
+ * way Wine builds its own DLLs. A pure-ARM64 process therefore cannot load
+ * them, while an x86-64 process (which on this stack *is* an ARM64EC process)
+ * loads them fine. That is a property of how the packages are built, not a
+ * fault, so it is reported as BLOCKED with its own stage rather than as a
+ * failure of the component.
+ *
+ * Returns NULL having already printed the verdict line; *blocked is set when
+ * the caller should exit BLOCKED rather than FAIL.
+ */
+GFX_HELPER HMODULE gfx_load_ex(const char *api, const char *dll, int *blocked)
 {
     HMODULE h = LoadLibraryA(dll);
-    if (!h)
-        gfx_fail(api, "loadlibrary", (HRESULT)(DWORD_PTR)GetLastError(),
-                 "cannot load %s", dll);
-    return h;
+    DWORD err;
+
+    if (blocked) *blocked = 0;
+    if (h) return h;
+
+    err = GetLastError();
+    if (err == ERROR_BAD_EXE_FORMAT) {
+        if (blocked) *blocked = 1;
+        gfx_blocked(api, "arch",
+                    "%s is the wrong machine for a %d-bit %s process — the DXVK/vkd3d/Zink "
+                    "packages are pure ARM64EC, which only an ARM64EC (x86-64) process can load",
+                    dll, (int)(sizeof(void *) * 8),
+                    sizeof(void *) == 8 ? "native ARM64" : "i386");
+        return NULL;
+    }
+    gfx_fail(api, "loadlibrary", (HRESULT)(DWORD_PTR)err, "cannot load %s", dll);
+    return NULL;
+}
+
+/* The common case, where the caller has nothing useful to do with the
+ * distinction and just stops. */
+GFX_HELPER HMODULE gfx_load(const char *api, const char *dll)
+{
+    int ignored;
+    return gfx_load_ex(api, dll, &ignored);
+}
+
+/*
+ * Is Wine's Vulkan able to offer window-system integration?
+ *
+ * This exists because of a measured surprise. `D3D11CreateDevice` needs no
+ * window, so the D3D10/11/12 probes were expected to run headless — but DXVK
+ * enables VK_KHR_win32_surface unconditionally at *instance* creation, whether
+ * or not anything will ever be presented, and Wine only advertises that
+ * extension when a display driver is loaded. With no X server the extension is
+ * absent, vkCreateInstance returns VK_ERROR_EXTENSION_NOT_PRESENT (-7), and
+ * every DXVK entry point fails before it can look at the GPU.
+ *
+ * So DXVK is blocked by the display path exactly as D3D9 and OpenGL are, just
+ * for a less obvious reason. Detecting it here is what stops the whole suite
+ * reading as "DXVK is broken" when nothing is wrong with DXVK.
+ *
+ * Returns 1 = present, 0 = absent, -1 = could not tell.
+ */
+GFX_HELPER int gfx_wsi_ready(void)
+{
+    typedef int(__stdcall * PFN_enum_exts)(const char *, unsigned int *, void *);
+    struct { char name[256]; unsigned int spec; } exts[128];
+    HMODULE vk;
+    PFN_enum_exts enum_exts;
+    unsigned int n = 128, i;
+    int result = 0;
+
+    vk = LoadLibraryA("vulkan-1.dll");
+    if (!vk) return -1;
+    enum_exts = (PFN_enum_exts)(void *)GetProcAddress(vk, "vkEnumerateInstanceExtensionProperties");
+    if (!enum_exts) return -1;
+    if (enum_exts(NULL, &n, exts) < 0) return -1;
+
+    for (i = 0; i < n && i < 128; i++)
+        if (!strcmp(exts[i].name, "VK_KHR_win32_surface")) { result = 1; break; }
+    return result;
+}
+
+/* Print the BLOCKED line for the case above. Kept in one place so all five
+ * DXVK/vkd3d probes word it identically and a reader can see at a glance that
+ * they share one cause. */
+GFX_HELPER int gfx_blocked_no_wsi(const char *api, const char *stage)
+{
+    return gfx_blocked(api, stage,
+                       "Vulkan does not advertise VK_KHR_win32_surface, so DXVK/vkd3d cannot "
+                       "create a Vulkan instance at all. Wine only offers that extension when a "
+                       "display driver is loaded, and there is no X server yet — this is the "
+                       "display path, not the renderer");
 }
 
 /* --- HLSL ----------------------------------------------------------------- */

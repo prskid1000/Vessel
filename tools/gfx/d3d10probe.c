@@ -1,5 +1,8 @@
 /*
- * D3D10 through DXVK, headless.
+ * D3D10 through DXVK, rendering to a texture with no swapchain.
+ *
+ * Blocked on the display path today for the same reason as D3D11 and D3D12 —
+ * DXVK's instance needs VK_KHR_win32_surface. See d3d11probe.c.
  *
  * Cheap to add next to the D3D11 probe and worth having, because the D3D10 path
  * is not simply "D3D11 with fewer features": DXVK ships only d3d10core.dll, and
@@ -71,17 +74,20 @@ int main(void)
     const float clear[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
     unsigned in, out_a, out_b;
     HRESULT hr;
-    int verdict;
+    int verdict, blocked = 0;
 
-    d3d10 = gfx_load(API, "d3d10.dll");
-    if (!d3d10) return GFX_EXIT_FAIL;
+    d3d10 = gfx_load_ex(API, "d3d10.dll", &blocked);
+    if (!d3d10) return blocked ? GFX_EXIT_BLOCKED : GFX_EXIT_FAIL;
     create_device = (PFN_D3D10_CREATE_DEVICE)(void *)GetProcAddress(d3d10, "D3D10CreateDevice");
     if (!create_device)
         return gfx_fail(API, "getprocaddress", E_FAIL, "d3d10.dll exports no D3D10CreateDevice");
 
     hr = create_device(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, 0, D3D10_SDK_VERSION, &device);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        if (gfx_wsi_ready() == 0)
+            return gfx_blocked_no_wsi(API, "createdevice");
         return gfx_fail(API, "createdevice", hr, "D3D10CreateDevice(HARDWARE) failed");
+    }
 
     /* D3D10 has no feature levels; the version is the level. Saying so keeps
      * the info lines uniform across probes. */

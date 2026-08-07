@@ -183,6 +183,30 @@ int main(void)
     else
         gfx_info(API, "loader_api=1.0 (no vkEnumerateInstanceVersion)");
 
+    /* Which instance extensions does Wine's Vulkan actually advertise? On this
+     * device the answer decides everything downstream, because DXVK treats its
+     * four as mandatory and aborts the instance if any is absent. */
+    {
+        PFN_vkEnumerateInstanceExtensionProperties enum_exts =
+            (PFN_vkEnumerateInstanceExtensionProperties)(void *)
+                GetProcAddress(vk, "vkEnumerateInstanceExtensionProperties");
+        VkExtensionProperties exts[128];
+        unsigned int n = 128, j, k;
+
+        if (enum_exts && enum_exts(NULL, &n, exts) >= VK_SUCCESS) {
+            gfx_info(API, "instance_extensions=%u", n);
+            for (k = 0; k < sizeof(DXVK_INSTANCE_EXTS) / sizeof(DXVK_INSTANCE_EXTS[0]); k++) {
+                int found = 0;
+                for (j = 0; j < n; j++)
+                    if (!strcmp(exts[j].extensionName, DXVK_INSTANCE_EXTS[k])) { found = 1; break; }
+                gfx_info(API, "dxvk_needs %-34s %s", DXVK_INSTANCE_EXTS[k],
+                         found ? "present" : "MISSING");
+            }
+        } else {
+            gfx_info(API, "instance_extensions=unavailable");
+        }
+    }
+
     memset(&app, 0, sizeof(app));
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "vessel-vkprobe";
@@ -260,6 +284,32 @@ int main(void)
                  (props.apiVersion >> 22) & 0x7f, (props.apiVersion >> 12) & 0x3ff,
                  props.apiVersion & 0xfff, props.driverVersion,
                  props.vendorID, props.deviceID);
+    }
+
+    /*
+     * Finally, reproduce DXVK's instance creation exactly.
+     *
+     * Listing the extensions above says what is advertised; this says what
+     * happens when you ask for them together, which is not the same question —
+     * an extension can be enumerated and still be refused. VkResult -7 is
+     * VK_ERROR_EXTENSION_NOT_PRESENT and -9 is VK_ERROR_INCOMPATIBLE_DRIVER.
+     */
+    {
+        VkInstance dxvk_like = NULL;
+        VkInstanceCreateInfo dci;
+        VkResult dvr;
+
+        memset(&dci, 0, sizeof(dci));
+        dci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        dci.pApplicationInfo = &app;
+        dci.enabledExtensionCount = sizeof(DXVK_INSTANCE_EXTS) / sizeof(DXVK_INSTANCE_EXTS[0]);
+        dci.ppEnabledExtensionNames = DXVK_INSTANCE_EXTS;
+
+        dvr = create_instance(&dci, NULL, &dxvk_like);
+        gfx_info(API, "dxvk_style_instance vr=%d (%s)", dvr,
+                 dvr == VK_SUCCESS ? "created" : "REFUSED — this is why every DXVK probe fails");
+        if (dvr == VK_SUCCESS && destroy_instance)
+            destroy_instance(dxvk_like, NULL);
     }
 
     printf("VESSEL-GFX api=%s bits=%d result=PASS gpus=%u\n", API, gfx_bits(), count);

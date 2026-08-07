@@ -1,12 +1,20 @@
 /*
- * D3D11 through DXVK, headless.
+ * D3D11 through DXVK, rendering to a texture with no swapchain.
  *
- * The only D3D API in the suite that needs nothing from the display path:
- * D3D11CreateDevice with a NULL swapchain description creates a device that can
- * render to a texture and never presents. So this is the probe that can be run
- * today, and the one that decides whether DXVK works at all on this phone —
- * D3D10 goes through the same DXVK backend, and D3D9's differences from this
- * are mostly above the Vulkan layer.
+ * This was written as the one probe guaranteed to run today, on the reasoning
+ * that D3D11CreateDevice with a NULL swapchain description needs no window. The
+ * D3D part of that is true. It still does not run, and the reason is worth
+ * stating at the top of the file because it was a genuine surprise:
+ *
+ *   DXVK enables VK_KHR_win32_surface at *instance* creation unconditionally,
+ *   whether or not anything will ever be presented. Wine only advertises that
+ *   extension when a display driver is loaded. With no X server the extension
+ *   is absent, vkCreateInstance returns VK_ERROR_EXTENSION_NOT_PRESENT, and
+ *   D3D11CreateDevice fails with E_FAIL before it ever looks at the GPU.
+ *
+ * So "headless D3D11" is headless as far as D3D is concerned and not headless
+ * as far as DXVK is concerned. gfx_wsi_ready() detects exactly that case and
+ * the probe reports BLOCKED, because nothing here is wrong with DXVK.
  *
  * WINEDLLOVERRIDES must name d3d11 and dxgi as native or Wine's builtins win
  * and this quietly measures wined3d instead. The probe cannot detect that from
@@ -95,7 +103,7 @@ int main(void)
     const float clear[4] = { 0.0f, 0.0f, 1.0f, 1.0f }; /* GFX_CLEAR, as RGBA floats */
     unsigned in, out_a, out_b;
     HRESULT hr;
-    int verdict;
+    int verdict, blocked = 0;
 
     /* Feature levels highest first: D3D11CreateDevice walks the list and takes
      * the first the adapter supports, so this asks "what is the best you have"
@@ -106,8 +114,8 @@ int main(void)
         D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
     };
 
-    d3d11 = gfx_load(API, "d3d11.dll");
-    if (!d3d11) return GFX_EXIT_FAIL;
+    d3d11 = gfx_load_ex(API, "d3d11.dll", &blocked);
+    if (!d3d11) return blocked ? GFX_EXIT_BLOCKED : GFX_EXIT_FAIL;
     create_device = (PFN_D3D11_CREATE_DEVICE)(void *)GetProcAddress(d3d11, "D3D11CreateDevice");
     if (!create_device)
         return gfx_fail(API, "getprocaddress", E_FAIL, "d3d11.dll exports no D3D11CreateDevice");
@@ -115,8 +123,13 @@ int main(void)
     hr = create_device(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
                        levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
                        &device, &level, &ctx);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        /* Distinguish "DXVK is broken" from "DXVK could not get a Vulkan
+         * instance because there is no display driver" — see gfx_wsi_ready. */
+        if (gfx_wsi_ready() == 0)
+            return gfx_blocked_no_wsi(API, "createdevice");
         return gfx_fail(API, "createdevice", hr, "D3D11CreateDevice(HARDWARE) failed");
+    }
 
     gfx_info(API, "feature_level=%s", feature_level_name(level));
 

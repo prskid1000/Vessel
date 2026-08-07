@@ -93,13 +93,26 @@ because making a *modified* private file mapping executable needs SELinux
 `execmod`, which apps are not granted and parts of the policy `dontaudit` — so
 it fails with `EACCES` and no log line at all.
 
-**The graphics stack is the whole of what is left.** The X server is vendored
-into the app but is not yet wired to a host, so every session still ends with
-"Application tried to create a window, but no driver could be loaded". Until
-that lands, none of DXVK, vkd3d or Zink has executed a single draw call, and any
-claim about their performance here would be invented. `tools/gfx/` holds probes
-that render and verify a readback for each D3D version and OpenGL, ready to run
-the moment there is a display.
+**The graphics stack is the whole of what is left**, and probing it turned up
+three things worth stating plainly:
+
+- **Every D3D version is blocked on the display path, not just the windowed
+  ones.** DXVK enables `VK_KHR_win32_surface` at *instance* creation
+  unconditionally, and Wine only advertises it once a display driver is loaded,
+  so `vkCreateInstance` fails before any device exists. "D3D11 and D3D12 can run
+  headless" is true of D3D and false of DXVK.
+- **Turnip is not loaded yet.** `libvulkan_freedreno.so` exports only `HMI`, so
+  it needs libadrenotools' `android_dlopen_ext` hook, and the APK ships none.
+  Vulkan on the device currently answers `"Qualcomm Technologies Inc. Adreno
+  Vulkan Driver"` — the stock blob. Everything this README says about Turnip
+  describes a binary that has not run.
+- **DXVK, vkd3d and Zink are pure ARM64EC, not ARM64X**, so a native ARM64
+  process cannot load them (`ERROR_BAD_EXE_FORMAT`). That is fine for real
+  Windows programs, which run as ARM64EC, but it rules out a native control.
+
+`tools/gfx/` holds probes for D3D8/9/10/11/12 and OpenGL — 21 binaries across
+three architectures, each clearing to blue, drawing one red triangle and
+asserting three specific pixels. They compile; none has rendered anything.
 
 Also unfinished: the AHardwareBuffer present path that would let DXVK bypass X11
 entirely, and `patches/wine/0005`, which implements MIT-SHM over the app's
