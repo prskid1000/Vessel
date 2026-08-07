@@ -8,6 +8,7 @@ import androidx.datastore.dataStoreFile
 import app.vessel.data.CONTAINERS_FILE
 import app.vessel.data.ContainerDocument
 import app.vessel.data.ContainerDocumentSerializer
+import app.vessel.data.ContainerPaths
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -50,6 +51,19 @@ object DataModule {
         prettyPrint = true
         encodeDefaults = true
     }
+
+    /**
+     * The on-disk layout, rooted at the app's private files directory.
+     *
+     * Provided rather than `@Inject`-constructed so [ContainerPaths] itself takes
+     * a `File` and knows nothing about Android — the layout rules are then
+     * testable against a temporary directory, which is the only way the path
+     * traversal guard in [app.vessel.data.WcpInstaller] can be exercised at all.
+     */
+    @Provides
+    @Singleton
+    fun containerPaths(@ApplicationContext context: Context): ContainerPaths =
+        ContainerPaths(context.filesDir)
 
     /**
      * The container document.

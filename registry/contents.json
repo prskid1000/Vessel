@@ -3,20 +3,6 @@
   "generator": "vessel/gen_registry.py",
   "components": [
     {
-      "id": "box64-0.4.4-canoe",
-      "type": "Box64",
-      "name": "Box64 0.4.4 (canoe)",
-      "description": "Box64 0.4.4 built for Snapdragon SM8845 (Oryon) / Adreno 829 with -mcpu=oryon-1",
-      "versionName": "0.4.4",
-      "versionCode": 404,
-      "sizeBytes": 3245722,
-      "sha256": "99c596691bbe76fa5f5f48686f48e89a3db70c8405a5831712afbd04c5322293",
-      "url": "https://github.com/OWNER/vessel/releases/download/components/box64-0.4.4-canoe.wcp",
-      "target": "canoe",
-      "sourceSha": "2f130fab1d6e1a4ee8a71dc60cfdfcc839ad192a",
-      "cpuFlags": "-mcpu=oryon-1"
-    },
-    {
       "id": "dxvk-2.7.1-canoe",
       "type": "DXVK",
       "name": "DXVK 2.7.1 ARM64EC (canoe)",
@@ -25,7 +11,7 @@
       "versionCode": 20701,
       "sizeBytes": 4117645,
       "sha256": "79c96ae63c6e81e14edf62ce6f9efba7c4c091993bca1abbe82273e6b2ff184e",
-      "url": "https://github.com/OWNER/vessel/releases/download/components/dxvk-2.7.1-canoe.wcp",
+      "url": "https://github.com/prskid1000/Vessel/releases/download/components/dxvk-2.7.1-canoe.wcp",
       "target": "canoe",
       "sourceSha": "c3dd74be6baec53786d4e064a572185b70347a17",
       "cpuFlags": "-mcpu=oryon-1"
@@ -39,7 +25,7 @@
       "versionCode": 2608,
       "sizeBytes": 1340342,
       "sha256": "77a774a700307cff275bb2daaf7e214acd212b2831b39c7e0547fea58d6eaac4",
-      "url": "https://github.com/OWNER/vessel/releases/download/components/fex-2608-canoe.wcp",
+      "url": "https://github.com/prskid1000/Vessel/releases/download/components/fex-2608-canoe.wcp",
       "target": "canoe",
       "sourceSha": "e869aa644a16e4332cdc15c1ea0b4d13d482385d",
       "cpuFlags": "none (JIT detects host CPU at runtime)"
@@ -53,7 +39,7 @@
       "versionCode": 260300,
       "sizeBytes": 2006613,
       "sha256": "f169490739b39c333228d7a966407a8bcc50f3dbf71351359b0432f5ed3be753",
-      "url": "https://github.com/OWNER/vessel/releases/download/components/turnip-26.3.0-devel-9c51ede5-canoe.wcp",
+      "url": "https://github.com/prskid1000/Vessel/releases/download/components/turnip-26.3.0-devel-9c51ede5-canoe.wcp",
       "target": "canoe",
       "sourceSha": "9c51ede50f987aa76a7b1155e2b3610cf31c991a",
       "cpuFlags": "-mcpu=oryon-1"
@@ -65,11 +51,39 @@
       "description": "vkd3d-proton 3.0.1, arm64ec system32 + i386 syswow64, built for Snapdragon SM8845 (Oryon) / Adreno 829",
       "versionName": "3.0.1",
       "versionCode": 30001,
-      "sizeBytes": 1624794,
-      "sha256": "14157851edb9f0bc393df9d0aef0378ae90d5dad9e93b4a321f49592ea5cec44",
-      "url": "https://github.com/OWNER/vessel/releases/download/components/vkd3d-3.0.1-canoe.wcp",
+      "sizeBytes": 3092866,
+      "sha256": "d828503d7b441fb3715ab74999673c7956b6132f47f78598e2f30fea294cfe6f",
+      "url": "https://github.com/prskid1000/Vessel/releases/download/components/vkd3d-3.0.1-canoe.wcp",
       "target": "canoe",
       "sourceSha": "3b10bd7a7ec6a7347e616cf8bea59333afec2255",
+      "cpuFlags": "-mcpu=oryon-1"
+    },
+    {
+      "id": "wine-10.13-canoe",
+      "type": "Wine",
+      "name": "Wine 10.13 ARM64EC (canoe)",
+      "description": "Wine 10.13 with arm64ec/aarch64/i386 PE modules and a bionic aarch64 unix side, from upstream-arm64ec @ a6844d10622f",
+      "versionName": "10.13",
+      "versionCode": 1013,
+      "sizeBytes": 74830296,
+      "sha256": "d88ad63bb4d2012caad34d3172e9cde52b7ad49045053de65f165240e00dd7ee",
+      "url": "https://github.com/prskid1000/Vessel/releases/download/components/wine-10.13-canoe.wcp",
+      "target": "canoe",
+      "sourceSha": "a6844d10622fc1a973ec1f22fc4f78a0fcd6cb29",
+      "cpuFlags": "none"
+    },
+    {
+      "id": "zink-26.3.0-devel-9c51ede5-canoe",
+      "type": "OpenGL",
+      "name": "Zink 26.3.0-devel-9c51ede5 ARM64EC (canoe)",
+      "description": "Mesa Zink desktop OpenGL over Vulkan as an ARM64EC opengl32.dll, built from turnip/gen8 @ 9c51ede50f98 for Snapdragon SM8845 (Oryon) / Adreno 829",
+      "versionName": "26.3.0-devel-9c51ede5",
+      "versionCode": 260300,
+      "sizeBytes": 3697480,
+      "sha256": "00132d3c78ae2f9a79bc3f39778174968f2e0c13cdce72f0770cb115cfb77524",
+      "url": "https://github.com/prskid1000/Vessel/releases/download/components/zink-26.3.0-devel-9c51ede5-canoe.wcp",
+      "target": "canoe",
+      "sourceSha": "9c51ede50f987aa76a7b1155e2b3610cf31c991a",
       "cpuFlags": "-mcpu=oryon-1"
     }
   ]

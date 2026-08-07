@@ -3,14 +3,13 @@ package app.vessel.data
 import android.content.Context
 import app.vessel.core.ComponentPackage
 import app.vessel.core.ComponentType
+import app.vessel.core.WcpProfile
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import javax.inject.Inject
@@ -110,7 +109,7 @@ class InstalledComponents @Inject constructor(
         // `type` is the `.wcp` wire string, and a package carrying anything
         // outside the known set is skipped rather than shown as "unknown": the
         // app has no code path that could load it.
-        val type = ComponentType.entries.firstOrNull { it.wire == profile.type } ?: return null
+        val type = profile.componentType ?: return null
 
         return ComponentPackage(
             id = directory.name,
@@ -143,32 +142,9 @@ data class ComponentResolution(
     val note: String?,
 )
 
-/**
- * `profile.json` inside a `.wcp`, exactly as `build/package_wcp.py` writes it.
- *
- * Only the fields the app reads are declared; `files`, `description` and
- * `builtAt` are ignored, which is also why decoding is lenient — this format is
- * shared with the wider Winlator ecosystem and a package from another producer
- * must not fail to read because it carries a key we do not know.
- */
-@Serializable
-private data class WcpProfile(
-    val type: String,
-    val versionName: String,
-    val versionCode: Int,
-    val name: String? = null,
-    val vessel: WcpVessel? = null,
-)
-
-@Serializable
-private data class WcpVessel(
-    val provenance: WcpProvenance? = null,
-)
-
-/** `write_provenance` in `build/common.sh`. */
-@Serializable
-private data class WcpProvenance(
-    val target: String? = null,
-    val sourceSha: String? = null,
-    @SerialName("cpuFlags") val cpuFlags: String? = null,
-)
+// `profile.json` itself is declared once, in `app.vessel.core.WcpProfile`, and
+// shared with `WcpInstaller`. It used to be duplicated here as a private model
+// with a subset of the fields, which is the shape of bug this project can least
+// afford: decoding is lenient by design, so the copy that was not updated when
+// the packager gained a field would have gone on reading successfully and
+// silently dropping it.

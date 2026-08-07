@@ -91,25 +91,27 @@ component:
 
 ```bash
 docker build -t vessel-build .
-./build/box64.sh          # -> dist/box64-0.4.4-canoe.wcp
+./build/fex.sh            # -> dist/fex-2608-canoe.wcp
 ```
 
 Full instructions, including the Windows/WSL2 path: [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Status
 
-**Not usable yet — Wine does not build, so nothing can launch a Windows
-application.** Everything underneath it does, though.
+**Every native component now builds. Nothing has been run yet.** The gap is no
+longer a missing component — it is the session launcher that puts them together.
 
-Four of five components produce verified packages, all compiled for this chip:
+**All six components produce verified packages**, every one compiled for this
+chip:
 
 | Component | Package | Verified |
 |---|---|---|
-| FEX | `fex-2608-canoe.wcp` | Both PE modules carry hybrid (CHPE) metadata — genuine ARM64EC |
-| Turnip | `turnip-26.3.0-devel-9c51ede5-canoe.wcp` | Binary carries an explicit `Adreno (TM) 829` entry |
-| DXVK | `dxvk-2.7.1-canoe.wcp` | ARM64EC `system32/` + 32-bit `syswow64/` |
-| vkd3d-proton | `vkd3d-3.0.1-canoe.wcp` | Same layout, D3D12 |
-| Wine | — | **Does not build.** See `build/wine.sh` |
+| Wine 10.13 | `wine-10.13-canoe.wcp` | `wineserver`/`ntdll.so`/`winex11.so` are aarch64 Android ELF; `ntdll.dll` carries CHPE |
+| FEX 2608 | `fex-2608-canoe.wcp` | Both PE modules carry hybrid (CHPE) metadata — genuine ARM64EC |
+| Turnip | `turnip-…-canoe.wcp` | Binary carries an explicit `Adreno (TM) 829` entry |
+| DXVK 2.7.1 | `dxvk-2.7.1-canoe.wcp` | ARM64EC `system32/` + 32-bit `syswow64/` |
+| vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Same layout, D3D12 |
+| Zink (OpenGL) | `zink-…-canoe.wcp` | `IMAGE_FILE_MACHINE_ARM64EC` (0xA641) with CHPE; exports all five WGL entry points |
 
 `build/gen_registry.py` reads the packages back and writes
 `registry/contents.json` with hashes, so the chain is closed from source to
@@ -123,16 +125,26 @@ build. It is recoverable from git history if the ARM64EC path ever proves
 insufficient, which production use of ARM64EC in Winlator-Ludashi on this same
 device suggests it will not.
 
-The app builds, installs, and runs: containers can be created, configured,
-persisted across restarts, and deleted, with the settings UI generated from
-`params-manifest.json`. Diagnostics reads real device capabilities. The screens
-that need a running Wine session — session view, benchmark, app library — say
-so rather than pretending.
+The app builds, installs and runs. Containers can be created, configured,
+persisted across restarts and deleted, with the settings surface generated from
+`params-manifest.json`. Per-container session logging is implemented — storage,
+rotation, rate limiting and a viewer — and waiting for something to log. The
+screens that need a running session say so rather than pretending.
 
-Wine is the gap, and it is not a small one: its Unix half must be
-cross-compiled against bionic with the NDK while its PE half uses llvm-mingw,
-and it needs an X11 client stack the NDK does not ship. The reasoning is
-recorded at the top of `build/wine.sh`.
+**What is missing is the session launcher**: create the Wine prefix, install the
+components into a container, start the X server, set the environment from
+[docs/LOGGING.md](docs/LOGGING.md), launch an executable and drain its stderr
+into the log. Until that exists the packages sit on disk and Launch does
+nothing.
+
+Two honest caveats. **Nothing has been tested together** — six components built
+in isolation is not a working stack, and the first real session is where
+mismatches surface, which is exactly why the logging went in first. And the
+**X server does not exist in our app yet**: `winex11.so` links against our
+libX11 and expects a display to connect to. That is Winlator-lineage code, and
+it carries the open licensing question in
+[docs/LICENSING.md](docs/LICENSING.md) — worth resolving before it is committed
+rather than after.
 
 Roadmap: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap).
 

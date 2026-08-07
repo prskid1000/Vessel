@@ -21,6 +21,23 @@ enum class ComponentType(val wire: String, val label: String) {
     VKD3D("VKD3D", "vkd3d"),
     D8VK("D8VK", "D8VK"),
     TURNIP("Turnip", "Turnip"),
+
+    /**
+     * Desktop OpenGL as a native `opengl32.dll` (Mesa/Zink over Vulkan).
+     *
+     * Not a Winlator-family type — we added it, and `package_wcp.py` carries a
+     * matching entry. It is deliberately not labelled DXVK: it replaces WGL
+     * rather than Direct3D, and reusing an existing type to avoid inventing one
+     * would make this screen lie about what is installed.
+     *
+     * It exists because our Wine builds with no GLX — there is no desktop libGL
+     * in the Android sysroot — so without this, OpenGL applications have no
+     * renderer at all. Wine's `gdi32` resolves the WGL entry points from
+     * whatever `opengl32.dll` is loaded, which is what makes the substitution
+     * work, exactly as DXVK substitutes `d3d11.dll`.
+     */
+    OPENGL("OpenGL", "OpenGL"),
+
     TOOLS("Tools", "Tools"),
 }
 

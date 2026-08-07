@@ -30,6 +30,13 @@ from pathlib import Path
 KNOWN_TYPES = {
     "Wine", "Proton", "Box64", "WOWBox64", "FEXCore",
     "DXVK", "VKD3D", "D8VK", "Turnip", "Tools",
+    # Vessel addition: a desktop-OpenGL implementation installed as a DLL
+    # override, i.e. a native opengl32.dll (Mesa/Zink). It is not a DXVK-shaped
+    # thing — it replaces WGL rather than Direct3D — and labelling it "DXVK" to
+    # reuse an existing type would make the Components screen lie about what is
+    # installed. Winlator-family apps ignore package types they do not know, so
+    # adding one costs compatibility nothing.
+    "OpenGL",
 }
 
 

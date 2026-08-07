@@ -383,11 +383,12 @@ class SessionLogStore @Inject constructor(
      * A container id is a UUID today, but it arrives here as a string and a
      * string that reaches the filesystem gets sanitised. One separator in the
      * wrong place is a write outside the app's own directory.
+     *
+     * Delegated to [ContainerPaths], which owns the layout, so this store and
+     * [ContainerLayout.logs] can never disagree about which directory a given
+     * container id names.
      */
-    private fun safeName(containerId: String): String =
-        containerId.map { if (it.isLetterOrDigit() || it == '-' || it == '_') it else '_' }
-            .joinToString("")
-            .ifBlank { "unnamed" }
+    private fun safeName(containerId: String): String = ContainerPaths.safeName(containerId)
 
     private fun key(containerId: String, startedAt: Long) = "$containerId/$startedAt"
 

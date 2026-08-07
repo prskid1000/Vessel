@@ -93,5 +93,9 @@ private val SECTION_TYPES: List<Pair<String, Set<ComponentType>>> = listOf(
     "Wine builds" to setOf(ComponentType.WINE, ComponentType.PROTON),
     "GPU drivers" to setOf(ComponentType.TURNIP),
     "D3D layers" to setOf(ComponentType.DXVK, ComponentType.VKD3D, ComponentType.D8VK),
+    // OpenGL is its own section rather than sitting under "D3D layers": it
+    // replaces WGL, not Direct3D, and filing it under D3D would misdescribe the
+    // one component a user might reasonably wonder about the presence of.
+    "OpenGL" to setOf(ComponentType.OPENGL),
     "Tools" to setOf(ComponentType.TOOLS),
 )

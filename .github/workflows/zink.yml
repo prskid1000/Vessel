@@ -1,0 +1,25 @@
+name: zink
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - native/pins.env
+      - patches/mesa/**
+      - patches/mesa-zink/**
+      - build/zink.sh
+      - build/common.sh
+      - build/package_wcp.py
+      - build/targets/**
+      - Dockerfile
+
+jobs:
+  build:
+    uses: ./.github/workflows/_component.yml
+    with:
+      component: zink
+      # Zink shares the Turnip checkout, so MESA_REF is what versions it.
+      # If ZINK_MESA_REF is ever set in pins.env, change this to match — the
+      # reusable workflow only rebuilds when the named key actually moves.
+      ref_var: MESA_REF

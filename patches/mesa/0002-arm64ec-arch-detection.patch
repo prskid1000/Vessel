@@ -1,0 +1,95 @@
+Subject: [PATCH] util: treat clang's arm64ec target as AArch64, not x86-64
+
+Mesa already knows about ARM64EC, but only as MSVC spells it. detect_arch.h
+carries `!defined(_M_ARM64EC)` on the x86-64 branch and `_M_ARM64EC` on the
+AArch64 one, and src/util/blake3/blake3_impl.h does the same. Nothing there
+handles the GNU-mode spelling, because until now nobody had built Mesa with an
+arm64ec-w64-mingw32 toolchain.
+
+clang targeting arm64ec-w64-mingw32 predefines, verified with
+`arm64ec-w64-mingw32-clang -dM -E -x c /dev/null`:
+
+    __AARCH64EL__ 1
+    __amd64 1
+    __amd64__ 1
+    __arm64ec__ 1
+    __x86_64 1
+    __x86_64__ 1
+
+and notably NOT __aarch64__. That is correct and deliberate — ARM64EC code is
+x64-ABI-compatible by construction, so the x64 macros are the truthful answer
+to "what ABI is this" — but it means Mesa's `defined(__x86_64__) /* gcc */`
+test fires on a target whose backend is AArch64. Everything downstream then
+picks the x86 path: half_float.h includes <xmmintrin.h> (which fails inside
+clang's own mmintrin.h, because __v2di has no meaning on an ARM64 backend),
+bitscan.h emits `popcnt %1, %0` as inline asm, and blake3 defines IS_X86 and
+dispatches to SSE2/AVX2 entry points that meson never compiled — it selected
+blake3_neon.c from host_machine.cpu_family() == 'aarch64'.
+
+    src/util/half_float.h:38:
+      In file included from /opt/llvm-mingw/lib/clang/21/include/xmmintrin.h:17:
+      mmintrin.h:165:12: error: invalid conversion between vector type
+        '__v2di' (vector of 2 'long long' values) and integer type 'int'
+        of different size
+
+The fix is the one upstream already chose for MSVC, extended to the macro
+clang uses. It is a no-op on every other target, including our Android/Turnip
+build out of this same tree, where __arm64ec__ is never defined.
+
+Upstreamable as-is; drop this patch once Mesa carries the __arm64ec__ spelling.
+
+diff --git a/src/util/blake3/blake3_impl.h b/src/util/blake3/blake3_impl.h
+index 0dd387c7f77..ff0c1bd3a66 100644
+--- a/src/util/blake3/blake3_impl.h
++++ b/src/util/blake3/blake3_impl.h
+@@ -38,7 +38,8 @@ enum blake3_flags {
+ #define NOEXCEPT
+ #endif
+ 
+-#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_M_ARM64EC)
++#if (defined(__x86_64__) || defined(_M_X64)) && \
++    !defined(_M_ARM64EC) && !defined(__arm64ec__)
+ #define IS_X86
+ #define IS_X86_64
+ #endif
+@@ -48,7 +49,8 @@ enum blake3_flags {
+ #define IS_X86_32
+ #endif
+ 
+-#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
++#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC) || \
++    defined(__arm64ec__)
+ #define IS_AARCH64
+ #endif
+ 
+diff --git a/src/util/detect_arch.h b/src/util/detect_arch.h
+index e32de8d5009..e0ceaaf8c12 100644
+--- a/src/util/detect_arch.h
++++ b/src/util/detect_arch.h
+@@ -58,9 +58,9 @@
+ #define DETECT_ARCH_X86 1
+ #endif
+ 
+-#if defined(__x86_64__) /* gcc */ || \
++#if (defined(__x86_64__) && !defined(__arm64ec__)) /* gcc */ || \
+     ((defined(_M_X64) || defined(_M_AMD64)) && !defined(_M_ARM64EC)) /* msvc */ || \
+-    defined(__x86_64) /* Sun cc */
++    (defined(__x86_64) && !defined(__arm64ec__)) /* Sun cc */
+ #define DETECT_ARCH_X86_64 1
+ #endif
+ 
+@@ -87,11 +87,12 @@
+ #define DETECT_ARCH_ARM 1
+ #endif
+ 
+-#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
++#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC) || \
++    defined(__arm64ec__) /* clang / llvm-mingw */
+ #define DETECT_ARCH_AARCH64 1
+ #endif
+ 
+-#if defined(_M_ARM64EC)
++#if defined(_M_ARM64EC) || defined(__arm64ec__)
+ #define DETECT_ARCH_ARM64EC 1
+ #endif
+ 
