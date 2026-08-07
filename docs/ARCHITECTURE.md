@@ -165,14 +165,41 @@ Two consequences worth stating plainly:
 
 ## Roadmap
 
-| Phase | Deliverable | Why first |
+| Phase | Deliverable | Status |
 |---|---|---|
-| 1 | Repo, pipeline, benchmark harness | Nothing else is measurable without it |
-| 2 | Custom Box64 (`SD8EG5`/`oryon-1`) | Simplest build; proves the pipeline end to end |
-| 3 | Custom FEX PE DLLs | The primary engine |
-| 4 | Custom Turnip gen8 + matched DXVK/vkd3d | Largest expected gain; driver and D3D layer must ship as a pair |
-| 5 | Custom Wine 11 ARM64EC | Turns "runs games" into "runs any laptop app" |
-| 6 | App shell: containers, components, telemetry | The product |
+| 1 | Repo, pipeline, Docker toolchain | **Done** |
+| 2 | Custom Box64 (`SD8EG5`/`oryon-1`) | **Done** — runs on device, translates x86-64 |
+| 3 | Custom FEX PE DLLs | **Done** — CHPE-verified ARM64EC |
+| 4 | Custom Turnip gen8 + matched DXVK/vkd3d | **Done** — a829 support confirmed in the binary |
+| 5 | Custom Wine ARM64EC | **Blocked** — see below |
+| 6 | App shell: containers, components, diagnostics | **Done** for everything not needing a session |
+| 7 | Benchmark harness | Not started; needs a running session to measure |
 
-Phases 2–5 each produce something installable and benchmarkable on its own,
-against the phase-1 baseline.
+### The one blocker
+
+Wine does not build, and until it does nothing can launch a Windows
+application. The failure is not the missing X11 headers `configure` complains
+about — that is a symptom. Wine is two halves:
+
+- the **PE side** (arm64ec / aarch64 / i386 Windows modules) via llvm-mingw,
+  which is already correct;
+- the **Unix side** — `wineserver`, `ntdll.so`, `winex11.drv.so` — which are
+  ELF binaries that run on the phone and must therefore be cross-compiled
+  against **bionic with the NDK**, not the build machine's glibc.
+
+Satisfying the X11 error by installing host headers would produce a Unix side
+linked against x86-64 glibc that cannot run on the device at all.
+`--without-x` is not a way out either: the container's display path *is* Wine's
+X11 driver talking to the app's built-in X server, so a Wine without X has no
+way to put a window on screen. The X11 client stack has to be cross-compiled
+for Android as well.
+
+Full reasoning is at the top of `build/wine.sh`.
+
+### What "done" means here
+
+Phases 2–4 each produce an installable `.wcp` whose provenance records the
+source commit and the exact compiler flags used, so any claim this project
+makes about a component can be checked against the package rather than taken on
+trust. Phase 7 is deliberately last: a benchmark harness cannot measure
+anything until phase 5 lands.

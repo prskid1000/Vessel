@@ -78,8 +78,38 @@ Full instructions, including the Windows/WSL2 path: [docs/BUILDING.md](docs/BUIL
 
 ## Status
 
-Early scaffolding. Nothing is usable yet. See the roadmap in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap).
+**Not usable yet — Wine does not build, so nothing can launch a Windows
+application.** Everything underneath it does, though.
+
+Five of six components produce verified packages, all compiled for this chip:
+
+| Component | Package | Verified |
+|---|---|---|
+| Box64 | `box64-0.4.4-canoe.wcp` | Runs on the target device and translates x86-64 |
+| FEX | `fex-2608-canoe.wcp` | Both PE modules carry hybrid (CHPE) metadata — genuine ARM64EC |
+| Turnip | `turnip-26.3.0-devel-9c51ede5-canoe.wcp` | Binary carries an explicit `Adreno (TM) 829` entry |
+| DXVK | `dxvk-2.7.1-canoe.wcp` | ARM64EC `system32/` + 32-bit `syswow64/` |
+| vkd3d-proton | `vkd3d-3.0.1-canoe.wcp` | Same layout, D3D12 |
+| Wine | — | **Does not build.** See `build/wine.sh` |
+
+The strongest evidence the pipeline is real: a statically linked x86-64 binary
+the phone refuses to execute natively (`not executable: 64-bit ELF file`) runs
+correctly under our Box64 build. `build/gen_registry.py` reads all five
+packages back and writes `registry/contents.json` with hashes, so the chain is
+closed from source to registry.
+
+The app builds, installs, and runs: containers can be created, configured,
+persisted across restarts, and deleted, with the settings UI generated from
+`params-manifest.json`. Diagnostics reads real device capabilities. The screens
+that need a running Wine session — session view, benchmark, app library — say
+so rather than pretending.
+
+Wine is the gap, and it is not a small one: its Unix half must be
+cross-compiled against bionic with the NDK while its PE half uses llvm-mingw,
+and it needs an X11 client stack the NDK does not ship. The reasoning is
+recorded at the top of `build/wine.sh`.
+
+Roadmap: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap).
 
 ## Credits and licensing
 
