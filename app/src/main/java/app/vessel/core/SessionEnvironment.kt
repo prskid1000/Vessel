@@ -71,6 +71,11 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "VKD3D_SHADER_DEBUG",
     "VKD3D_LOG_FILE",
     "TU_DEBUG",
+    // Owned by the display server, which is the only thing that knows whether a
+    // shared-memory socket got bound and where. A manifest param naming it would
+    // point winex11 at a socket nothing is listening on, and patch 0005 answers
+    // that with a connect(2) failure per damaged region rather than an error.
+    SYSVSHM_SOCKET_ENV,
     "ADRENOTOOLS_DRIVER_PATH",
     "ADRENOTOOLS_HOOKS_PATH",
     "ADRENOTOOLS_DRIVER_NAME",

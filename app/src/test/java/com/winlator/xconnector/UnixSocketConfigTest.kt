@@ -49,4 +49,42 @@ class UnixSocketConfigTest {
         assertTrue(stale.isDirectory)
         assertFalse(staleSocket.exists())
     }
+
+    /**
+     * VESSEL: the abstract factory, which is what makes `DISPLAY=:0` work here.
+     *
+     * [UnixSocketConfig.create] relocates the well-known path under a root the
+     * guest sees as "/", which needs a proot rootfs Vessel does not have — and
+     * Android has no `/tmp` for the real path either. An abstract name has no
+     * filesystem at all, and the guest's libxcb tries it first, so this is the
+     * one form that needs neither a rootfs nor a patch to Wine.
+     */
+    @Test
+    fun `an abstract config is the same name with an at-sign and no filesystem`() {
+        val config = UnixSocketConfig.createAbstract(UnixSocketConfig.XSERVER_PATH)
+
+        assertEquals("@" + UnixSocketConfig.XSERVER_PATH, config.path)
+        assertEquals(UnixSocketConfig.XSERVER_PATH, config.path.substring(1))
+    }
+
+    /**
+     * Nothing is deleted, which is the half that is easy to lose in a refactor.
+     *
+     * The filesystem factory wipes the socket's parent directory. Doing that for
+     * an abstract name would mean deleting a real directory that merely shares
+     * the name — and an abstract socket cannot go stale in the first place, so
+     * there is nothing the wipe would buy.
+     */
+    @Test
+    fun `an abstract config leaves an existing directory of the same name alone`() {
+        val root = temp.newFolder("prefix")
+        val occupied = File(root, "tmp/.X11-unix")
+        assertTrue(occupied.mkdirs())
+        val bystander = File(occupied, "X0")
+        bystander.writeText("not really a socket")
+
+        UnixSocketConfig.createAbstract(File(root, UnixSocketConfig.XSERVER_PATH).path)
+
+        assertTrue(bystander.exists())
+    }
 }

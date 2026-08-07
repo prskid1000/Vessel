@@ -98,13 +98,37 @@ typedef struct VkPhysicalDeviceDriverProperties {
     VkConformanceVersion conformanceVersion;
 } VkPhysicalDeviceDriverProperties;
 
+typedef struct VkExtensionProperties {
+    char extensionName[256];
+    unsigned int specVersion;
+} VkExtensionProperties;
+
 typedef void *(__stdcall *PFN_vkGetInstanceProcAddr)(VkInstance, const char *);
+typedef VkResult(__stdcall *PFN_vkEnumerateInstanceExtensionProperties)(const char *, unsigned int *,
+                                                                        VkExtensionProperties *);
 typedef VkResult(__stdcall *PFN_vkCreateInstance)(const VkInstanceCreateInfo *, const void *, VkInstance *);
 typedef void(__stdcall *PFN_vkDestroyInstance)(VkInstance, const void *);
 typedef VkResult(__stdcall *PFN_vkEnumeratePhysicalDevices)(VkInstance, unsigned int *, VkPhysicalDevice *);
 typedef void(__stdcall *PFN_vkGetPhysicalDeviceProperties)(VkPhysicalDevice, VkPhysicalDeviceProperties *);
 typedef void(__stdcall *PFN_vkGetPhysicalDeviceProperties2)(VkPhysicalDevice, VkPhysicalDeviceProperties2 *);
 typedef VkResult(__stdcall *PFN_vkEnumerateInstanceVersion)(unsigned int *);
+
+/*
+ * The exact instance extension set DXVK 2.7 asks for.
+ *
+ * Measured, not guessed: this is what DXVK prints as "Enabled instance
+ * extensions" immediately before `DxvkInstance::createInstance: Failed to
+ * create Vulkan instance` on this device. A bare vkCreateInstance with no
+ * extensions succeeds here, so the difference between the two is the entire
+ * reason every D3D probe fails, and naming which of the four is missing is the
+ * difference between a usable finding and "DXVK does not work".
+ */
+static const char *const DXVK_INSTANCE_EXTS[] = {
+    "VK_KHR_surface",
+    "VK_KHR_win32_surface",
+    "VK_KHR_get_surface_capabilities2",
+    "VK_EXT_surface_maintenance1",
+};
 
 static const char *device_type_name(unsigned int t)
 {

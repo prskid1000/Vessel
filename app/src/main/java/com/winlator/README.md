@@ -66,7 +66,18 @@ At time of vendoring there are these:
    and a long comment recording the bionic shared-memory decision.
 7. **`FileUtils.getDirname`** — guarded against a path with no separator, which
    upstream lets throw.
-8. **Trimmed support classes** — `core/{AppUtils,ArrayUtils,FileUtils,ImageUtils,StringUtils}`
+8. **`UnixSocketConfig.createAbstract`** — a second factory that names an
+   *abstract* unix socket instead of a filesystem one, and touches no disk.
+   Upstream only needs the filesystem form because Winlator's guest runs inside
+   a proot rootfs where `/tmp/.X11-unix/X0` is a real directory it owns. Vessel's
+   guest is a plain child process of the app: no rootfs, and Android has no
+   `/tmp`. The abstract namespace is what makes `DISPLAY=:0` reach this server
+   with an unmodified Wine — libxcb (built here with `HAVE_ABSTRACT_SOCKETS`)
+   tries `"\0/tmp/.X11-unix/X0"` before the filesystem path.
+9. **`xconnector_epoll.c: createServerSocket`** — binds into the abstract
+   namespace when the path starts with `@`, which is what the factory above
+   produces. Filesystem paths behave exactly as upstream, `unlink` included.
+10. **Trimmed support classes** — `core/{AppUtils,ArrayUtils,FileUtils,ImageUtils,StringUtils}`
    and `inputcontrols/ExternalController` are subsets, each with a header
    comment listing what survived. Diffs to those files will not apply cleanly;
    diffs to everything else should.
@@ -91,9 +102,10 @@ xServer.setWinHandler(myWinHandler);                    // optional, see below
 XServerView view = new XServerView(context, xServer);
 xServer.setRenderer(view.getRenderer());
 
-// Two sockets, both under the container root that becomes the guest's "/".
+// Two sockets. The X one is abstract — see local modification 8; there is no
+// container root to relocate it into and Android has no /tmp.
 XConnectorEpoll xConnector = new XConnectorEpoll(
-    UnixSocketConfig.create(containerRoot, UnixSocketConfig.XSERVER_PATH),
+    UnixSocketConfig.createAbstract("/tmp/.X11-unix/X0"),
     new XClientConnectionHandler(xServer),
     new XClientRequestHandler());
 
@@ -107,7 +119,13 @@ XConnectorEpoll shmConnector = new XConnectorEpoll(
 
 - `UnixSocketConfig.create` **wipes and recreates** the socket's parent
   directory, so call it before binding and after any previous session.
-- The guest needs `DISPLAY=:0`; that is the only thing `XSERVER_PATH` buys.
+  `createAbstract` does neither, and needs to do neither: an abstract name lives
+  only as long as its socket, so it cannot go stale.
+- The guest needs `DISPLAY=:0`, and that works because the abstract name matches
+  the one `_xcb_open()` compiles in. Nothing configures it; a name one byte
+  different is `cannot open display`.
+- `app.vessel.display.XServerDisplay` is the adapter, and the only file in
+  `app.vessel` that imports from here.
 - `WinHandler` is an interface here, not an implementation. Leave it unset and
   relative-mouse mode and Win32 window activation are inert but harmless.
 - Nothing here reads container config, spawns processes or touches

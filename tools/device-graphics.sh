@@ -63,6 +63,14 @@ in_app_bg() {
   adb shell "run-as $PKG sh -c '( $1 ) > $2 2>&1 </dev/null; cat $2'" | tr -d '\r'
 }
 
+# `in_app` ends in a pipe, so its exit status is `tr`'s and is always 0 — every
+# `in_app "test -f ..." || die` reads as success no matter what the phone said.
+# Conditions therefore travel back as text, not as a status. This matters most
+# for the libadrenotools check further down: getting it wrong would make the
+# script claim Turnip is loaded when the stock driver is answering, which is
+# precisely the confusion this suite exists to remove.
+in_app_test() { [ "$(in_app "if $1; then echo yes; fi")" = yes ]; }
+
 # --- arguments -------------------------------------------------------------
 # --reuse exists because bootstrapping the prefix is the slow part (two full
 # wineboot passes) and is completely independent of the probes. Iterating on one
@@ -81,7 +89,7 @@ done
 
 command -v adb >/dev/null || die "adb not on PATH"
 adb get-state >/dev/null 2>&1 || die "no device"
-in_app 'true' >/dev/null 2>&1 || die "run-as $PKG failed — is the debug build installed?"
+in_app_test 'true' || die "run-as $PKG failed — is the debug build installed?"
 
 # Newest by mtime: alphabetically wine-10.13 sorts before wine-11.14.
 newest() { ls -t "$REPO"/dist/$1-*.wcp 2>/dev/null | head -1; }
@@ -137,8 +145,12 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$REPO_MOUNT:/src" -v "$STAGE_MOUNT:/out" 
       for p in $PROBE_SRCS; do
         # -ldxguid supplies IID_ID3D12Device and friends; the probes call COM
         # through the C macros, so there is no __uuidof to fall back on.
-        \"\$MINGW_BIN/\$t-w64-mingw32-clang\" -O1 -o \"/out/probes/\$p-\$t.exe\" \
-          \"/src/tools/gfx/\$p.c\" -I/src/tools/gfx -ldxguid -luuid -lgdi32 -luser32
+        # -Wall -Wextra here rather than only in a separate check: tools/gfx is
+        # warning-clean today, so anything new is a regression and the runner is
+        # where it will actually be seen.
+        \"\$MINGW_BIN/\$t-w64-mingw32-clang\" -O1 -Wall -Wextra -Wno-unused-parameter \
+          -o \"/out/probes/\$p-\$t.exe\" \"/src/tools/gfx/\$p.c\" \
+          -I/src/tools/gfx -ldxguid -luuid -lgdi32 -luser32
       done
     done
     tar -cf /out/probes.tar -C /out/probes .
@@ -173,7 +185,7 @@ unpack "$TURNIP_WCP" turnip
 ok "decompressed"
 
 if [ "$REUSE" -eq 1 ]; then
-  in_app "test -s $APP_DIR/prefix/system.reg" \
+  in_app_test "test -s $APP_DIR/prefix/system.reg" \
     || die "--reuse but there is no prefix at $APP_DIR — run without it once"
   say "reusing the existing prefix at $APP_DIR"
 else
@@ -195,7 +207,7 @@ else
           tar -xf /data/local/tmp/turnip.tar -C $APP_DIR/turnip"
   adb shell "rm -f /data/local/tmp/wine.tar /data/local/tmp/fex.tar /data/local/tmp/dxvk.tar \
              /data/local/tmp/vkd3d.tar /data/local/tmp/zink.tar /data/local/tmp/turnip.tar"
-  in_app "test -f $APP_DIR/fex/libarm64ecfex.dll && test -f $APP_DIR/fex/libwow64fex.dll" \
+  in_app_test "test -f $APP_DIR/fex/libarm64ecfex.dll && test -f $APP_DIR/fex/libwow64fex.dll" \
     || die "the FEX package did not contain both DLLs"
   ok "installed"
 fi
@@ -237,7 +249,10 @@ mkdir -p run prefix"
 # Applied only to the probe runs, not to wineboot: forcing native d3d during
 # prefix creation would have wineboot's own DLL registration trip over files
 # that are not in place yet.
-ENV_GFX="export WINEDLLOVERRIDES='$OVERRIDES' \
+# Unquoted on purpose. in_app already wraps the whole command in single quotes
+# for `sh -c`, so a nested pair here would terminate that string early; the
+# override list has no spaces, so it needs no quoting of its own.
+ENV_GFX="export WINEDLLOVERRIDES=$OVERRIDES \
 DXVK_LOG_LEVEL=info \
 DXVK_LOG_PATH=none \
 VKD3D_DEBUG=warn \
@@ -339,7 +354,7 @@ done
 # Zink ships an ARM64EC opengl32.dll and nothing for i386, so there is no
 # 32-bit desktop GL at all. Saying so here means the i686 opengl result reads as
 # a packaging gap rather than as a rendering failure.
-in_app "test -f $APP_DIR/pkg/zink/syswow64/opengl32.dll" 2>/dev/null \
+in_app_test "test -f $APP_DIR/pkg/zink/syswow64/opengl32.dll" \
   || warn "the Zink package has no syswow64/opengl32.dll — 32-bit OpenGL cannot work"
 ok "graphics DLLs installed"
 
@@ -351,9 +366,11 @@ ok "graphics DLLs installed"
 # every Vulkan call — quietly, which is exactly the failure mode the Winlator
 # lineage is known for. So the check is explicit and the answer is printed.
 say "5/6  checking whether Turnip can be loaded"
-APK_DIR="$(adb shell "pm path $PKG" 2>/dev/null | tr -d '\r' | head -1 | sed 's|^package:||;s|/[^/]*$||')"
+# `|| true`: pm exits non-zero for an unknown package, and pipefail would turn
+# that into an errexit here rather than into the "no hooks" branch below.
+APK_DIR="$(adb shell "pm path $PKG" 2>/dev/null | tr -d '\r' | head -1 | sed 's|^package:||;s|/[^/]*$||' || true)"
 HOOKS="$APK_DIR/lib/arm64"
-if [ -n "$APK_DIR" ] && in_app "test -f $HOOKS/libmain_hook.so" 2>/dev/null; then
+if [ -n "$APK_DIR" ] && in_app_test "test -f $HOOKS/libmain_hook.so"; then
   ENV_GFX="$ENV_GFX ADRENOTOOLS_DRIVER_PATH=\$PWD/turnip/ ADRENOTOOLS_HOOKS_PATH=$HOOKS/ ADRENOTOOLS_DRIVER_NAME=libvulkan_freedreno.so"
   ok "libadrenotools hooks found — Turnip will be loaded from $APP_DIR/turnip"
 else
@@ -374,7 +391,7 @@ run_probe() { # $1 = api name, $2 = source stem, $3 = headless|windowed, $4 = ta
   local bits=64
   [ "$target" = i686 ] && bits=32
 
-  printf '\n  \033[1m%s\033[0m  %s (%s-bit)\n' "$api" "$target" "$bits"
+  printf '\n  \033[1m%s\033[0m  %s (%s-bit, %s)\n' "$api" "$target" "$bits" "$kind"
 
   out="$(in_app_bg "$ENV_PREFIX && $ENV_GFX && timeout 300 $WINE/wine \$PWD/$exe" \
         "$APP_DIR/probe.log" || true)"
@@ -383,7 +400,10 @@ run_probe() { # $1 = api name, $2 = source stem, $3 = headless|windowed, $4 = ta
   # that then fails; they are usually the most informative part.
   printf '%s\n' "$out" | grep -E 'VESSEL-GFX-INFO' | sed 's/^/       /' || true
 
-  line="$(printf '%s\n' "$out" | grep -E "^VESSEL-GFX api=" | head -1)"
+  # `|| true` is load-bearing. Under `set -o pipefail` a grep that matches
+  # nothing fails the whole substitution, and errexit would kill the run before
+  # the "no result line" branch below ever got to report the interesting case.
+  line="$(printf '%s\n' "$out" | grep -E "^VESSEL-GFX api=" | head -1 || true)"
   if [ -z "$line" ]; then
     # No verdict line at all: the process did not reach main, or died. The tail
     # of the raw log is the only evidence, so print it.
@@ -413,7 +433,6 @@ run_probe() { # $1 = api name, $2 = source stem, $3 = headless|windowed, $4 = ta
       bad "$api/$target failed"
       fail=$((fail + 1)); SUMMARY="$SUMMARY\n  FAIL      $api $target" ;;
   esac
-  [ "$kind" = windowed ] || true
 }
 
 for entry in $PROBES; do

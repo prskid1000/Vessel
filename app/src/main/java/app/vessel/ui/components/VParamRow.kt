@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -146,6 +147,16 @@ private val VALUE_MAX_WIDTH = 140.dp
 private val FIELD_HEIGHT = 40.dp
 
 /**
+ * How tall an open dropdown may get: three items, and then it scrolls.
+ *
+ * Material's `DropdownMenuItem` has a 48 dp minimum height and the menu adds
+ * 8 dp of padding at each end, so three rows and the padding is 160 dp. The
+ * fourth item is cut rather than hidden, which is what tells you there is more
+ * without needing a scrollbar.
+ */
+private val MENU_MAX_HEIGHT = 160.dp
+
+/**
  * The `enum` control: a full-width bordered box showing the current label, with
  * a chevron at the right edge and a menu behind it.
  *
@@ -203,6 +214,12 @@ fun VDropdownField(
             // to be told the palette or it arrives in Material's default tone.
             containerColor = Vessel.colors.surfaceRaised,
             shape = shape,
+            // Three items, then scroll. The resolution ladder is fourteen rungs
+            // and an unbounded menu grows until it is the whole screen, which
+            // buries the row it belongs to and gives no sense of where the
+            // current value sits in the range. DropdownMenu already scrolls; all
+            // it needs is a ceiling.
+            modifier = Modifier.heightIn(max = MENU_MAX_HEIGHT),
         ) {
             options.forEach { option ->
                 val isSelected = option == selected

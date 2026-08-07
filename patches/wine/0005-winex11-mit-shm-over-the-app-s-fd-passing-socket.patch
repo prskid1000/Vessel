@@ -13,9 +13,9 @@ Android app has to be fd-passing.
 The app already runs the server half (com.winlator.sysvshm): a unix socket where
 SHMGET allocates ashmem and GET_FD returns the descriptor over SCM_RIGHTS, with
 the server keeping its own id table so the id in XShmAttach resolves. Three
-requests, native byte order, one connection per operation -- the server does not
-release anything when a client disconnects, so no connection has to be held
-open:
+requests, native byte order, one connection per allocation and per release --
+the server does not release anything when a client disconnects, so no connection
+has to be held open:
 
     SHMGET  0  u32 size   -> i32 shmid
     GET_FD  1  i32 shmid  -> u8 status, descriptor via SCM_RIGHTS
@@ -36,22 +36,43 @@ Two behavioural differences from the SysV path, both handled:
 Gated on WINE_SYSVSHM_SOCKET naming the socket. Unset, every path here is
 bypassed and the behaviour is exactly upstream's.
 
-NOT YET EXERCISED. The X server is in the app but not wired to a host, so this
-has been compiled and reasoned about, not run. It is off by default for that
-reason; setting the variable is the switch that turns it on.
+Three one-shot winediag lines report what happened, because the answer is
+otherwise unobservable: every failure in here falls back to XPutImage, which is
+correct and silent, so a log with no MIT-SHM in it cannot be told from a log
+where MIT-SHM was never tried. winediag is on in a default WINEDEBUG, so this
+costs nothing to read.
 
 Not suitable upstream as-is: the protocol is specific to this app's helper.
 
 --- a/dlls/winex11.drv/bitblt.c
 +++ b/dlls/winex11.drv/bitblt.c
-@@ -1602,6 +1602,131 @@
+@@ -29,6 +29,11 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/un.h>
+ 
+ #include <X11/Xlib.h>
+ #include <X11/Xresource.h>
+@@ -51,6 +56,10 @@
+ #include "wine/debug.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(bitblt);
++/* Whether MIT-SHM engaged is invisible otherwise: every failure here falls back
++ * to XPutImage, correctly and silently. winediag is the channel that is on in
++ * a normal run, so the answer lands in an ordinary log. */
++WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
+ 
+ #define DST 0   /* Destination drawable */
+@@ -1602,6 +1611,138 @@ static int xshm_error_handler( Display *display, XErrorEvent *event, void *arg )
      return 1;  /* FIXME: should check event contents */
  }
  
-+#include <sys/socket.h>
-+#include <sys/un.h>
-+#include <sys/mman.h>
-+
 +/* MIT-SHM without System V shared memory.
 + *
 + * bionic exports shmget and friends but Android refuses them -- the NDK header
@@ -64,17 +85,18 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 + * segment in the kernel IPC namespace, and the X server on the other end is a
 + * Java process inside the app that can only mmap a descriptor. So the app runs
 + * a tiny fd-passing service (com.winlator.sysvshm) and hands out its own ids.
-+ * Three requests, native byte order, one connection each -- the server keeps a
-+ * process-wide table and does not free anything when a client disconnects:
++ * Three requests, native byte order, and the id that comes back is what goes
++ * into XShmAttach -- the server matches it against its own table:
 + *
 + *     SHMGET  0  u32 size   -> i32 shmid
 + *     GET_FD  1  i32 shmid  -> u8 status, descriptor via SCM_RIGHTS
 + *     DELETE  2  i32 shmid  -> nothing
 + *
-+ * The id that comes back is what goes into XShmAttach, and the server matches
-+ * it against that table. Winlator solves the same problem by patching glibc to
-+ * redirect shmget; on bionic there is no libc to patch, so the client half
-+ * lives here instead.
++ * The server frees nothing when a client disconnects, so no connection has to
++ * be held open; one is opened per allocation and per release.
++ *
++ * Winlator solves the same problem by patching glibc to redirect shmget; on
++ * bionic there is no libc to patch, so the client half lives here instead.
 + *
 + * Inert unless WINE_SYSVSHM_SOCKET names the socket, so a build that does not
 + * set it behaves exactly as upstream.
@@ -88,6 +110,8 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 +    {
 +        path = getenv( "WINE_SYSVSHM_SOCKET" );
 +        enabled = (path && path[0]);
++        if (enabled) ERR_(winediag)( "vessel: MIT-SHM over %s\n", path );
++        else TRACE( "vessel: WINE_SYSVSHM_SOCKET is unset, MIT-SHM stays off\n" );
 +    }
 +    return enabled;
 +}
@@ -123,7 +147,14 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 +/* Returns the server's shmid and maps it, or -1. */
 +static int vessel_shm_alloc( size_t size, void **addr )
 +{
-+    char control[CMSG_SPACE(sizeof(int))];
++    /* A char array is only byte-aligned, and the kernel writes a size_t at the
++     * head of the control message. The union is what forces the alignment
++     * cmsg(3) requires. */
++    union
++    {
++        struct cmsghdr align;
++        char buffer[CMSG_SPACE(sizeof(int))];
++    } control;
 +    struct msghdr msg;
 +    struct cmsghdr *cmsg;
 +    struct iovec iov;
@@ -153,8 +184,8 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 +    iov.iov_len = sizeof(status);
 +    msg.msg_iov = &iov;
 +    msg.msg_iovlen = 1;
-+    msg.msg_control = control;
-+    msg.msg_controllen = sizeof(control);
++    msg.msg_control = control.buffer;
++    msg.msg_controllen = sizeof(control.buffer);
 +    if (recvmsg( sock, &msg, 0 ) != sizeof(status)) goto fail;
 +    if (!(cmsg = CMSG_FIRSTHDR( &msg )) || cmsg->cmsg_level != SOL_SOCKET ||
 +        cmsg->cmsg_type != SCM_RIGHTS || cmsg->cmsg_len != CMSG_LEN(sizeof(fd)))
@@ -173,10 +204,11 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 +    close( sock );
 +    return shmid;
 +}
++
  static XImage *create_shm_image( const XVisualInfo *vis, int width, int height, x11drv_xshm_info_t *shminfo )
  {
      XImage *image;
-@@ -1611,10 +1736,21 @@
+@@ -1611,10 +1752,31 @@ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height,
      if (!image) return NULL;
      if (image->bytes_per_line & 3) goto failed;  /* we need 32-bit alignment */
  
@@ -187,7 +219,17 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 +        void *addr;
 +
 +        shminfo->shmid = vessel_shm_alloc( (size_t)image->bytes_per_line * height, &addr );
-+        if (shminfo->shmid == -1) goto failed;
++        if (shminfo->shmid == -1)
++        {
++            static BOOL reported;
++            if (!reported)
++            {
++                reported = TRUE;
++                ERR_(winediag)( "vessel: the shm server refused a %d byte segment; "
++                                "falling back to XPutImage\n", image->bytes_per_line * height );
++            }
++            goto failed;
++        }
 +        shminfo->shmaddr = addr;
 +    }
 +    else
@@ -201,7 +243,7 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
      if (shminfo->shmaddr != (char *)-1)
      {
          BOOL ok;
-@@ -1626,12 +1762,17 @@
+@@ -1626,12 +1788,36 @@ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height,
          if (!X11DRV_check_error() && ok)
          {
              image->data = shminfo->shmaddr;
@@ -209,11 +251,30 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
 +            /* A SysV segment is removed immediately so it dies with the last
 +             * detach. The socket server has no such rule -- it holds the
 +             * segment until DELETE, which destroy_shm_image sends. */
-+            if (!vessel_shm_enabled()) shmctl( shminfo->shmid, IPC_RMID, 0 );
++            if (vessel_shm_enabled())
++            {
++                static BOOL reported;
++                if (!reported)
++                {
++                    reported = TRUE;
++                    ERR_(winediag)( "vessel: MIT-SHM is live, first segment %d of %d bytes\n",
++                                    shminfo->shmid, image->bytes_per_line * height );
++                }
++            }
++            else shmctl( shminfo->shmid, IPC_RMID, 0 );
              return image;
          }
 -        shmdt( shminfo->shmaddr );
-+        if (vessel_shm_enabled()) munmap( shminfo->shmaddr, (size_t)image->bytes_per_line * height );
++        if (vessel_shm_enabled())
++        {
++            static BOOL reported;
++            if (!reported)
++            {
++                reported = TRUE;
++                ERR_(winediag)( "vessel: XShmAttach was refused; falling back to XPutImage\n" );
++            }
++            munmap( shminfo->shmaddr, (size_t)image->bytes_per_line * height );
++        }
 +        else shmdt( shminfo->shmaddr );
      }
 -    shmctl( shminfo->shmid, IPC_RMID, 0 );
@@ -222,7 +283,7 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
      shminfo->shmid = -1;
  
  failed:
-@@ -1644,7 +1785,14 @@
+@@ -1644,7 +1830,14 @@ static BOOL destroy_shm_image( XImage *image, x11drv_xshm_info_t *shminfo )
      if (shminfo->shmid == -1) return FALSE;
  
      XShmDetach( gdi_display, shminfo );

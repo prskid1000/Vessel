@@ -25,7 +25,8 @@ that; the decisions that move the needle are architectural:
 - **Turnip built for Adreno gen8** — the stock Qualcomm driver lacks extensions
   DXVK 2.x requires, so this is enablement, not optimisation.
 - **A KGSL timeline-semaphore patch** the community gen8 builds do not carry.
-- **Memory-ordering defaults** chosen for a core without `FEAT_TSO`.
+- **Memory-ordering defaults** measured on this core, not guessed: there is no
+  hardware TSO mode to fall back on, and FEX's cheap barrier path is worth 21%.
 
 `-mcpu=oryon-1` reaches Turnip, DXVK and vkd3d-proton, but deliberately not FEX
 (its JIT detects CPU features at runtime) and not Wine (one `CROSSCFLAGS` covers
@@ -41,7 +42,7 @@ the APK, so bumping a version in `native/pins.env` needs no new APK. Details in
 |---|---|
 | SoC | Snapdragon SM8845 (`canoe`) |
 | CPU | 8× Qualcomm Oryon — 6× 3.32 GHz + 2× 3.80 GHz |
-| ISA | ARMv8.7+, SVE2 (128-bit), SME, i8mm, bf16, LSE, LRCPC3, PAuth/BTI — **no FEAT_TSO** |
+| ISA | ARMv8.7+, SVE2 (128-bit), SME, i8mm, bf16, LSE, LRCPC2/3, PAuth/BTI — **no hardware TSO mode** |
 | GPU | Adreno 829 (gen8) on KGSL |
 | Memory | 16 GB, 4 KB pages |
 | OS | Android 16, kernel 6.12.38 (GKI, **no `/dev/ntsync`**) |
@@ -61,33 +62,52 @@ docker build -t vessel-build .
 
 ## Status
 
-**Every native component builds and produces a verified package. On the device,
-Wine's loader starts inside the app's own sandbox; nothing has been run together
-yet.**
+**Windows programs run on the phone. Nothing has drawn a pixel yet.**
+
+All three CPU paths are verified on the device — inside the app's own uid and
+SELinux domain, not as the adb shell user — by `./tools/device-session.sh`,
+which checks the arithmetic each program produces rather than that it started:
+
+```
+ok prefix built (system.reg 1861 KB)
+ok emulator keys are in system.reg
+ok syswow64 has 885 entries
+VESSEL-OK bits=64 sum=333338333350000   ARM64, no translation
+VESSEL-OK bits=64 sum=333338333350000   x86-64 via libarm64ecfex
+VESSEL-OK bits=32 sum=333338333350000   x86-32 via WoW64 + libwow64fex
+```
 
 | Component | Package | Verified |
 |---|---|---|
-| Wine 11.14 | `wine-11.14-canoe.wcp` | `wineserver`/`ntdll.so`/`winex11.so` are aarch64 Android ELF; `ntdll.dll` carries CHPE |
-| FEX 2608 | `fex-2608-canoe.wcp` | Both PE modules carry hybrid (CHPE) metadata — genuine ARM64EC |
+| Wine 11.14 | `wine-11.14-canoe.wcp` | Builds a real prefix on the device and runs programs |
+| FEX 2608 | `fex-2608-canoe.wcp` | Translates x86-64 and x86-32 correctly on the device |
 | Turnip | `turnip-…-canoe.wcp` | Binary carries an explicit `Adreno (TM) 829` entry |
-| DXVK 2.7.1 | `dxvk-2.7.1-canoe.wcp` | ARM64EC `system32/` + 32-bit `syswow64/` |
-| vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Same layout, D3D12 |
-| Zink (OpenGL) | `zink-…-canoe.wcp` | `IMAGE_FILE_MACHINE_ARM64EC` (0xA641) with CHPE; exports all five WGL entry points |
+| DXVK 2.7.1 | `dxvk-2.7.1-canoe.wcp` | ARM64EC `system32/` + 32-bit `syswow64/` — **not yet run** |
+| vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Same layout, D3D12 — **not yet run** |
+| Zink (OpenGL) | `zink-…-canoe.wcp` | ARM64EC with CHPE, exports all five WGL entry points — **not yet run** |
 
-The app builds, installs and runs. Containers can be created, configured,
-persisted and deleted; per-container session logging works; the session launcher
-and an X server are both in the tree. **None of it has driven a Windows program
-yet** — the launcher's argv and environment come from reading Wine's source and
-from what has been run by hand on the device, not from a completed session, and
-the X server is not wired to a host.
+Getting there took four Wine patches, all in `patches/`, and the reason each
+exists is recorded in its header. The one that mattered most: a PE image
+relocated away from its ImageBase can never be made executable on Android,
+because making a *modified* private file mapping executable needs SELinux
+`execmod`, which apps are not granted and parts of the policy `dontaudit` — so
+it fails with `EACCES` and no log line at all.
 
-Three things are known to be missing rather than merely untested: the
-AHardwareBuffer present path that lets DXVK bypass X11, a `winex11.drv` patch so
-MIT-SHM uses the app's fd-passing shim instead of `shmget` (bionic exports it but
-SELinux refuses it, so Wine falls back to `XPutImage` and copies), and a licence
-for Vessel itself — LGPL-2.1 code is now in the APK, which makes
-[docs/LICENSING.md](docs/LICENSING.md) a blocking decision rather than an open
-question.
+**The graphics stack is the whole of what is left.** The X server is vendored
+into the app but is not yet wired to a host, so every session still ends with
+"Application tried to create a window, but no driver could be loaded". Until
+that lands, none of DXVK, vkd3d or Zink has executed a single draw call, and any
+claim about their performance here would be invented. `tools/gfx/` holds probes
+that render and verify a readback for each D3D version and OpenGL, ready to run
+the moment there is a display.
+
+Also unfinished: the AHardwareBuffer present path that would let DXVK bypass X11
+entirely, and `patches/wine/0005`, which implements MIT-SHM over the app's
+fd-passing socket and has been compiled but never executed — it is inert unless
+`WINE_SYSVSHM_SOCKET` is set, deliberately.
+
+Vessel is **LGPL-2.1-or-later**; see [LICENSE](LICENSE) for why that was the only
+available choice and why "or later" is load-bearing.
 
 Roadmap: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap).
 
@@ -118,5 +138,6 @@ Vessel will not work on a 16 KB-page device even though the APK is correctly
 
 Vessel is downstream of Wine, FEX-Emu, Mesa/Turnip, DXVK, vkd3d-proton and the
 Winlator lineage. [CREDITS.md](CREDITS.md) has the attribution;
-[docs/LICENSING.md](docs/LICENSING.md) has the license obligations that apply
-before this repository is published.
+[docs/LICENSING.md](docs/LICENSING.md) has the licence obligations, and
+[LICENSE](LICENSE) is Vessel's own — LGPL-2.1-or-later, forced by the X server
+vendored into the APK.

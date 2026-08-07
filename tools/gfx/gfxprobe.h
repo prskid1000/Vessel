@@ -80,19 +80,28 @@
 #define GFX_EXIT_FAIL    2
 #define GFX_EXIT_BLOCKED 3
 
+/*
+ * Every helper below is used by some probes and not others — glprobe never
+ * reads a BGRA buffer, the headless probes never report BLOCKED — so -Wall's
+ * unused-function warning fires on every build for helpers that are perfectly
+ * correct. Marking them keeps the build silent, which is the only state in
+ * which a *new* warning is worth reading.
+ */
+#define GFX_HELPER static __attribute__((unused))
+
 /* --- reporting ------------------------------------------------------------ */
 
 /* Every probe prints exactly one VESSEL-GFX line and any number of
  * VESSEL-GFX-INFO lines. The runner greps the former for a verdict and echoes
  * the latter so we learn what the driver claims to be. */
 
-static void gfx_flush(void)
+GFX_HELPER void gfx_flush(void)
 {
     fflush(stdout);
     fflush(stderr);
 }
 
-static void gfx_info(const char *api, const char *fmt, ...)
+GFX_HELPER void gfx_info(const char *api, const char *fmt, ...)
 {
     va_list ap;
     printf("VESSEL-GFX-INFO api=%s ", api);
@@ -103,7 +112,7 @@ static void gfx_info(const char *api, const char *fmt, ...)
     gfx_flush();
 }
 
-static int gfx_bits(void)
+GFX_HELPER int gfx_bits(void)
 {
     return (int)(sizeof(void *) * 8);
 }
@@ -112,7 +121,7 @@ static int gfx_bits(void)
  * these are UNORM8 clears and a flat-shaded triangle, so there is no filtering,
  * no blending and no gamma in the path. A value that is close but not equal
  * means something is converting, and we want to be told. */
-static int gfx_verdict(const char *api, unsigned in, unsigned out_a, unsigned out_b)
+GFX_HELPER int gfx_verdict(const char *api, unsigned in, unsigned out_a, unsigned out_b)
 {
     int pass = (in == GFX_TRI) && (out_a == GFX_CLEAR) && (out_b == GFX_CLEAR);
 
@@ -127,7 +136,7 @@ static int gfx_verdict(const char *api, unsigned in, unsigned out_a, unsigned ou
 /* A real failure: the API said no. hr is printed even when it is S_OK, because
  * "stage=map hr=0x00000000" tells you the call succeeded and the data was
  * wrong, which is a different bug from the call failing. */
-static int gfx_fail(const char *api, const char *stage, HRESULT hr, const char *fmt, ...)
+GFX_HELPER int gfx_fail(const char *api, const char *stage, HRESULT hr, const char *fmt, ...)
 {
     va_list ap;
     printf("VESSEL-GFX api=%s bits=%d result=FAIL stage=%s hr=0x%08lx msg=",
@@ -144,7 +153,7 @@ static int gfx_fail(const char *api, const char *stage, HRESULT hr, const char *
  * Today that is always "there is no display", which is what separates the D3D9,
  * D3D8 and OpenGL probes from the headless ones. The runner counts these
  * separately so a missing X server never reads as a broken DXVK. */
-static int gfx_blocked(const char *api, const char *stage, const char *fmt, ...)
+GFX_HELPER int gfx_blocked(const char *api, const char *stage, const char *fmt, ...)
 {
     va_list ap;
     printf("VESSEL-GFX api=%s bits=%d result=BLOCKED stage=%s msg=",
@@ -162,7 +171,7 @@ static int gfx_blocked(const char *api, const char *stage, const char *fmt, ...)
 /* All the D3D probes render to DXGI_FORMAT_B8G8R8A8_UNORM (or D3DFMT_X8R8G8B8,
  * which is the same bytes), so a pixel is B,G,R,A in memory and this
  * reassembles it into the 0xAARRGGBB the constants are written in. */
-static unsigned gfx_pixel_bgra(const void *base, int pitch, int x, int y)
+GFX_HELPER unsigned gfx_pixel_bgra(const void *base, int pitch, int x, int y)
 {
     const unsigned char *p = (const unsigned char *)base + (size_t)y * (size_t)pitch + (size_t)x * 4;
     return ((unsigned)p[3] << 24) | ((unsigned)p[2] << 16) | ((unsigned)p[1] << 8) | (unsigned)p[0];
@@ -170,7 +179,7 @@ static unsigned gfx_pixel_bgra(const void *base, int pitch, int x, int y)
 
 /* glReadPixels(GL_RGBA) instead. Kept separate rather than parameterised so
  * neither path can silently acquire the other's byte order. */
-static unsigned gfx_pixel_rgba(const void *base, int pitch, int x, int y)
+GFX_HELPER unsigned gfx_pixel_rgba(const void *base, int pitch, int x, int y)
 {
     const unsigned char *p = (const unsigned char *)base + (size_t)y * (size_t)pitch + (size_t)x * 4;
     return ((unsigned)p[3] << 24) | ((unsigned)p[0] << 16) | ((unsigned)p[1] << 8) | (unsigned)p[2];
@@ -179,7 +188,7 @@ static unsigned gfx_pixel_rgba(const void *base, int pitch, int x, int y)
 /* --- misc ----------------------------------------------------------------- */
 
 /* Adapter names come back as UTF-16 and the log is a byte pipe. */
-static const char *gfx_narrow(const WCHAR *w, char *buf, int len)
+GFX_HELPER const char *gfx_narrow(const WCHAR *w, char *buf, int len)
 {
     if (!w) { buf[0] = '\0'; return buf; }
     if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, len, NULL, NULL))
@@ -190,7 +199,7 @@ static const char *gfx_narrow(const WCHAR *w, char *buf, int len)
 /* A module the probe cannot continue without. Reported by name so that
  * "d3d12core.dll missing" and "the override kept the builtin" are
  * distinguishable in the log without guessing. */
-static HMODULE gfx_load(const char *api, const char *dll)
+GFX_HELPER HMODULE gfx_load(const char *api, const char *dll)
 {
     HMODULE h = LoadLibraryA(dll);
     if (!h)
@@ -211,20 +220,20 @@ static HMODULE gfx_load(const char *api, const char *dll)
  * d3dcompiler_47, i.e. by vkd3d-shader's HLSL front end — the point of the
  * probe is DXVK and vkd3d, so the shader must not be the interesting part.
  */
-static const char GFX_VS_SRC[] =
+GFX_HELPER const char GFX_VS_SRC[] =
     "float4 main(float2 pos : POSITION) : SV_Position\n"
     "{\n"
     "    return float4(pos, 0.0, 1.0);\n"
     "}\n";
 
-static const char GFX_PS_SRC[] =
+GFX_HELPER const char GFX_PS_SRC[] =
     "float4 main() : SV_Target\n"
     "{\n"
     "    return float4(1.0, 0.0, 0.0, 1.0);\n"
     "}\n";
 
 /* The three vertices as the vertex buffer sees them: two floats each. */
-static const float GFX_VERTS[6] = {
+GFX_HELPER const float GFX_VERTS[6] = {
     GFX_TRI_X0, GFX_TRI_Y0,
     GFX_TRI_X1, GFX_TRI_Y1,
     GFX_TRI_X2, GFX_TRI_Y2,

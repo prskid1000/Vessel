@@ -26,7 +26,7 @@
 
 #define GFX_WNDCLASS "VesselGfxProbe"
 
-static LRESULT CALLBACK gfx_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+GFX_HELPER LRESULT CALLBACK gfx_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -43,7 +43,7 @@ static LRESULT CALLBACK gfx_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  * Returns NULL on failure, with *reason set to a short stage name so the caller
  * can label the BLOCKED line.
  */
-static HWND gfx_window(const char **reason)
+GFX_HELPER HWND gfx_window(const char **reason)
 {
     WNDCLASSEXA wc;
     RECT rect;
@@ -87,7 +87,7 @@ static HWND gfx_window(const char **reason)
  * ERROR_CLASS_DOES_NOT_EXIST / ERROR_CANNOT_FIND_WND_CLASS here when the driver
  * is absent, and prints "no driver could be loaded" to stderr, which the runner
  * captures alongside. */
-static DWORD gfx_window_error(void)
+GFX_HELPER DWORD gfx_window_error(void)
 {
     return GetLastError();
 }
