@@ -23,7 +23,6 @@
     "Package ids are build outputs (dxvk-2.7.1-canoe) and must never be",
     "hardcoded here, or a version bump would silently break every default."
   ],
-
   "groups": [
     {
       "id": "display",
@@ -35,7 +34,12 @@
           "title": "Resolution",
           "help": "Lower resolutions gain a lot of performance on this phone; it has a smaller GPU cache than the full-size chip.",
           "type": "enum",
-          "options": ["1280x720", "1600x900", "1920x1080", "native"],
+          "options": [
+            "1280x720",
+            "1600x900",
+            "1920x1080",
+            "native"
+          ],
           "default": "1280x720"
         },
         {
@@ -43,82 +47,20 @@
           "title": "Frame rate limit",
           "help": "Capping frame rate keeps the phone cool, which keeps performance steady over a long session.",
           "type": "enum",
-          "options": ["30", "45", "60", "unlimited"],
+          "options": [
+            "30",
+            "45",
+            "60",
+            "unlimited"
+          ],
           "default": "60"
         }
       ]
     },
-
-    {
-      "id": "graphics",
-      "title": "Graphics",
-      "help": "Which graphics driver and Direct3D translation this container loads; both are the one build Vessel compiled for this device.",
-      "params": [
-        {
-          "key": "gpu.driver",
-          "title": "GPU driver",
-          "help": "Turnip is the open driver this app builds for your Adreno 829; the system driver is missing features that most games need.",
-          "type": "component",
-          "componentType": "Turnip",
-          "default": "@latest"
-        },
-        {
-          "key": "gpu.d3dLayer",
-          "title": "Direct3D translation",
-          "help": "Converts the game's Direct3D calls to Vulkan; must match your GPU driver.",
-          "_note": "'@latest' resolves to the one DXVK build published for this device, and the only other honest value is a pin to an older one for a rollback. There is nothing to choose here, which is why the control is a readout rather than a picker.",
-          "type": "component",
-          "componentType": "DXVK",
-          "default": "@latest"
-        }
-      ]
-    },
-
-    {
-      "id": "rendering",
-      "title": "Rendering",
-      "help": "How the driver decides to draw each frame; worth touching only when a game looks wrong, and the nudge is always a better first move than the override.",
-      "params": [
-        {
-          "key": "turnip.TU_AUTOTUNE_ALGO",
-          "title": "Rendering mode preference",
-          "help": "Nudges the driver toward direct rendering, which fixes most corruption, while still letting it use the faster tiled path when it is confident.",
-          "_note": "Preferred over forcing TU_DEBUG=sysmem: Turnip's own docs note this still allows the other mode in high-confidence cases, so it is a nudge rather than a veto. It is declared before turnip.TU_DEBUG for that reason — order is the only hierarchy this screen has.",
-          "type": "enum",
-          "options": ["default", "prefer_sysmem"],
-          "optionLabels": {
-            "default": "Automatic",
-            "prefer_sysmem": "Prefer direct rendering"
-          },
-          "default": "default",
-          "env": "TU_AUTOTUNE_ALGO"
-        },
-        {
-          "key": "turnip.TU_DEBUG",
-          "title": "Driver mode",
-          "help": "Leave this alone unless a game shows corruption; forcing a mode is a troubleshooting step, not a speed-up.",
-          "_note": "CORRECTION (verified in Turnip source, 2026-08-07). An earlier version of this file said GMEM was broken on this GPU and sysmem was mandatory. That is wrong, and it was wrong in both directions. The GMEM page-fault report is scoped to Adreno *830*, not 829, and Turnip does not set disable_gmem for a829 — so forcing sysmem here would give up tiled rendering the hardware can actually do. The Chinese-guide advice to force gmem is equally unfounded: it is Adreno 710/720 guidance. Neither forcing is justified without measuring on this device. Prefer turnip.TU_AUTOTUNE_ALGO, which keeps both modes available and lets the driver choose.",
-          "type": "multi",
-          "options": ["sysmem", "gmem", "forcecb", "nolrz", "noubwc", "noconform", "deck_emu"],
-          "optionLabels": {
-            "sysmem": "Force direct rendering",
-            "gmem": "Force tiled rendering",
-            "forcecb": "Re-enable concurrent binning",
-            "nolrz": "Disable low-resolution Z",
-            "noubwc": "Disable bandwidth compression",
-            "noconform": "Relax conformance workarounds",
-            "deck_emu": "Report as Steam Deck"
-          },
-          "default": [],
-          "env": "TU_DEBUG"
-        }
-      ]
-    },
-
     {
       "id": "compatibility",
       "title": "Compatibility",
-      "help": "Every setting here is already correct for this phone; change one only when a specific program misbehaves, and change it back if it does not help.",
+      "help": "These enforce the memory-ordering rules x86 programs assume. This CPU has no hardware mode for it, so the translator does it in software, and every default here is already the safe one.",
       "_note": "This is the old 'memory' group plus wine.sync, and the rename is the point. What these four have in common is not that they touch memory or the system — it is that each one trades correctness for speed in a program that is already running badly. Grouping them by what they are FOR is what lets them sit last on the screen without a disclosure hiding them.",
       "params": [
         {
@@ -146,16 +88,9 @@
           "type": "bool",
           "default": false,
           "env": "FEX_VECTORTSOENABLED"
-        },
-        {
-          "key": "wine.sync",
-          "title": "Thread synchronisation",
-          "help": "esync is the working option on this phone; ntsync needs kernel support Android does not ship yet.",
-          "type": "enum",
-          "options": ["esync", "fsync", "none"],
-          "default": "esync"
         }
-      ]
+      ],
+      "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP — so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations."
     }
   ]
 }

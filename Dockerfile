@@ -103,6 +103,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/bin/x86_64-w64-mingw32-widl
 
+# --- FreeType, for Wine's host-side font tools -----------------------------------
+# Wine ships its core bitmap fonts (System, Fixedsys, Terminal, Courier, ...) as
+# .fon files generated at build time by tools/sfnt2fon from the bundled TTFs.
+# That tool is a HOST tool, so it needs the HOST's FreeType — the aarch64 one in
+# the Android sysroot is no use to it. Built without it, sfnt2fon compiles to a
+# stub whose whole body is an error message, and the cross build dies late:
+#   tools/sfnt2fon/sfnt2fon needs to be built with FreeType support
+#   make: *** [fonts/coue1255.fon] Error 1
+# after an hour of work, because fonts/ is near the end of the build.
+#
+# Late layer on purpose: adding it to the apt block at the top would invalidate
+# the NDK layer and re-download 700 MB.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libfreetype-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pkg-config --exists freetype2
+
 # --- Meson ---------------------------------------------------------------------
 # Ubuntu 24.04 ships meson 1.3.2 and Mesa requires >= 1.4, so the apt version
 # cannot configure Turnip at all. pip's copy lands in /usr/local/bin and shadows

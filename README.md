@@ -136,6 +136,66 @@ recorded at the top of `build/wine.sh`.
 
 Roadmap: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap).
 
+## Known limitations
+
+### ntsync is not reachable, and an Android upgrade will not change that
+
+Wine 10+ can use `ntsync`, a kernel driver that implements NT synchronisation
+primitives properly instead of emulating them with eventfd (`esync`) or futexes
+(`fsync`). Vessel uses **esync**, fixed, not configurable.
+
+It is worth writing down why ntsync is out of reach, because the intuitive
+assumption — "it will arrive with the next Android version" — is wrong. Three
+independent blockers, each sufficient on its own (verified 2026-08-07 against
+android.googlesource.com):
+
+1. **The kernel will not move.** The complete driver is Linux 6.14. This device
+   runs `android16-6.12`. Android's GKI is backward-compatible by design: a
+   device that launches on a given kernel **keeps it across Android upgrades**.
+   The Signature is in Motorola's Android 17 beta, and it will still be on
+   6.12 afterwards.
+2. **Google has not enabled it anywhere.** `CONFIG_NTSYNC` is absent from the
+   arm64 `gki_defconfig` on *every* branch checked, including `android17-6.18`
+   and `android-mainline`. On `android16-6.12` the Kconfig entry is still
+   `depends on BROKEN` — an incomplete 6.10-era stub. So it is both
+   unselectable and unselected.
+3. **SELinux would block it regardless.** `ntsync` appears nowhere in AOSP's
+   `file_contexts` or `device.te`, so a `/dev/ntsync` node would take the
+   generic `device` label, which `untrusted_app` has no allow rule for. Even
+   on a kernel that had the driver, an ordinary app could not open it.
+
+Getting ntsync here needs root and a custom kernel. The emulation community
+reached the same conclusion — the Winlator-Ludashi request for it was closed
+two days after it was opened, for exactly these reasons.
+
+**Recheck is one command**, if the situation ever changes:
+
+```bash
+adb shell ls -l /dev/ntsync
+```
+
+Temper expectations even then. The widely quoted ntsync speedups are Linux
+desktop figures measured mostly against *wineserver* sync, not against esync,
+which already recovers most of the benefit — and on this device the bottleneck
+is FEX translation and the GPU, not synchronisation.
+
+### fsync would crash, not degrade
+
+Not offered as an option, and this one is a trap worth naming. Proton's fsync
+probes for the `futex_waitv` syscall and disables itself on `ENOSYS`. The
+kernel here has `futex_waitv`, so that looks fine — but Android's seccomp
+allowlist for apps does not include it, and the default action is
+`SECCOMP_RET_TRAP`, which raises `SIGSYS` and kills the process. Proton's
+graceful fallback never runs, because the probe itself is fatal. An fsync
+toggle in the UI would have shipped a crash rather than a slow path.
+
+### 4 KB pages only
+
+FEX requires a 4 KB page kernel. This device qualifies (verified via
+`getconf PAGESIZE`), but Vessel will not work on a 16 KB-page device even
+though the APK is correctly 16 KB-aligned for Play. Packaging compliance and
+runtime capability are different things here.
+
 ## Credits and licensing
 
 Vessel is downstream of a large amount of other people's work — Wine, Box64,

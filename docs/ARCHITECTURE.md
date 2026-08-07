@@ -105,7 +105,7 @@ Runtime defaults live in exactly one place — `app/src/main/assets/params-manif
 | FEX `TSOEnabled` | on | required for correctness |
 | FEX `HalfBarrierTSOEnabled` | on | cheap ordering, no `FEAT_TSO` on Oryon |
 | FEX `VectorTSOEnabled` | off | severe cost on vector-heavy workloads |
-| Wine sync | esync | kernel 6.12 GKI has no `/dev/ntsync` |
+| Wine sync | esync | fixed, not a setting — see README, Known limitations |
 
 **On forcing a rendering mode — a correction.** An earlier version of this
 document stated that GMEM is broken on Adreno 829 and `TU_DEBUG=sysmem` is

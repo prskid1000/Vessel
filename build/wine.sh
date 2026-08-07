@@ -103,7 +103,30 @@ done
 # The tools tree is configured with everything optional switched off: none of it
 # affects the generators, and every probe it skips is one fewer host library
 # that has to be present in the image.
-if [ -x "$TOOLS/tools/winebuild/winebuild" ] && [ -e "$TOOLS/nls/locale.nls" ]; then
+#
+# FreeType is the one exception, and it is NOT optional here. Wine generates its
+# core bitmap fonts — System, Fixedsys, Terminal, the Courier/MS Sans codepage
+# variants — at build time with tools/sfnt2fon, and that is a host tool reading
+# the bundled TTFs, so it needs the HOST's FreeType. The aarch64 copy in the
+# Android sysroot is invisible to it. Configured --without-freetype, sfnt2fon
+# still builds and still installs; its entire body is
+#     fprintf( stderr, "%s needs to be built with FreeType support\n", argv[0] );
+# so the failure lands in the cross build's fonts/ rules, which run near the very
+# end — an hour of work discarded for a missing host -dev package.
+#
+# sfnt2fon is probed rather than stamped because that is the property we actually
+# depend on, and it also catches a tools tree left behind by an older revision of
+# this script that did pass --without-freetype.
+tools_sfnt2fon_has_freetype() {
+  local exe="$TOOLS/tools/sfnt2fon/sfnt2fon"
+  [ -x "$exe" ] || return 1
+  # No arguments: with FreeType it prints its usage, without it prints the stub
+  # message above. Either way it exits non-zero, so match on the text.
+  ! "$exe" 2>&1 | grep -q 'needs to be built with FreeType support'
+}
+
+if [ -x "$TOOLS/tools/winebuild/winebuild" ] && [ -e "$TOOLS/nls/locale.nls" ] \
+   && tools_sfnt2fon_has_freetype; then
   info "reusing native tools in $TOOLS"
 else
   log "pass 1/2: native build tools (host gcc)"
@@ -113,8 +136,7 @@ else
       --enable-win64 \
       --disable-tests \
       --without-mingw \
-      --without-x \
-      --without-freetype ) \
+      --without-x ) \
     || die "native tools configure failed (see $TOOLS/config.log)"
   make -C "$TOOLS" -j"$(build_jobs 1)" __tooldeps__ \
     || die "native tools build failed"
@@ -132,13 +154,23 @@ else
     || die "native tools build produced no winebuild (looked in $TOOLS/tools/winebuild)"
   [ -e "$TOOLS/nls/locale.nls" ] \
     || die "native tools tree has no nls/locale.nls; wrc will not be able to run"
+  tools_sfnt2fon_has_freetype \
+    || die "the host tools tree built sfnt2fon without FreeType, so Wine's bitmap
+     fonts cannot be generated and the cross build will fail in fonts/.
+     The image needs a host FreeType: check that libfreetype-dev is installed and
+     that 'pkg-config --exists freetype2' succeeds, then rebuild the image with
+     'docker build -t vessel-build .'. Look for 'checking for -lfreetype' in
+     $TOOLS/config.log."
   ok "native tools ready"
 fi
 
 # --- Pass 2: the cross build ---------------------------------------------------
 
-rm -rf "$BUILD" "$STAGE"
-mkdir -p "$BUILD" "$STAGE"
+# The staging tree is always rebuilt from scratch — it is cheap, and a leftover
+# file from a previous run is exactly how a partial Wine gets packaged. The
+# *build* tree is a different matter; see the configure stamp below.
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
 
 HOST_TRIPLE="aarch64-linux-android$NDK_API"
 
@@ -272,9 +304,31 @@ CONFIGURE_ARGS=(
 # libvulkan.so, so it configures cleanly and is the whole point of shipping
 # DXVK. inotify likewise — bionic has inotify natively.
 
-log "configuring $COMPONENT for $HOST_TRIPLE (arm64ec + aarch64 + i386)"
-( cd "$BUILD" && "$SRC/configure" "${CONFIGURE_ARGS[@]}" ) \
-  || die "cross configure failed (see $BUILD/config.log)"
+# Reconfiguring means recompiling, and recompiling Wine is an hour. So the build
+# tree survives between runs unless something that would actually change its
+# contents has changed: the stamp is the whole argument vector plus the upstream
+# commit. Anything else and the tree is wiped, because a Makefile regenerated
+# under different options is the sort of half-state that produces a build which
+# links but does not run.
+#
+# Patches are deliberately NOT in the stamp. apply_patches works on the source
+# tree without moving HEAD, so adding one leaves the configured tree valid and
+# make rebuilds exactly the objects the patch touched — which is what makes
+# bring-up iteration possible at all. Set VESSEL_WINE_CLEAN=1 to force a wipe.
+CONF_STAMP="$BUILD/.vessel-configure"
+CONF_ID="$(printf '%s\n' "${CONFIGURE_ARGS[@]}" "$SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+
+if [ -z "${VESSEL_WINE_CLEAN:-}" ] && [ -f "$BUILD/config.status" ] \
+   && [ -f "$CONF_STAMP" ] && [ "$(cat "$CONF_STAMP")" = "$CONF_ID" ]; then
+  info "reusing the configured cross tree in $BUILD (same configure args, same source)"
+else
+  log "configuring $COMPONENT for $HOST_TRIPLE (arm64ec + aarch64 + i386)"
+  rm -rf "$BUILD"
+  mkdir -p "$BUILD"
+  ( cd "$BUILD" && "$SRC/configure" "${CONFIGURE_ARGS[@]}" ) \
+    || die "cross configure failed (see $BUILD/config.log)"
+  echo "$CONF_ID" > "$CONF_STAMP"
+fi
 
 # Fail now, not in an hour. configure records every module it decided to skip in
 # DISABLED_SUBDIRS, and a winex11.drv in that list means the X11 sysroot was
