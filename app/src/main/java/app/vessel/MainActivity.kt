@@ -1,6 +1,7 @@
 package app.vessel
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -10,6 +11,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import app.vessel.ui.VesselApp
 import app.vessel.ui.theme.Vessel
@@ -34,6 +38,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        openSession = intent?.getStringExtra(EXTRA_OPEN_SESSION)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -46,8 +51,30 @@ class MainActivity : ComponentActivity() {
             VesselTheme {
                 VesselApp(
                     modifier = Modifier.fillMaxSize().background(Vessel.colors.bg),
+                    openSession = openSession,
                 )
             }
         }
+    }
+
+    /**
+     * A second intent for the same task, which is what the notification sends.
+     *
+     * `FLAG_ACTIVITY_SINGLE_TOP` means the activity is reused rather than
+     * recreated, so `onCreate` does not run again and the new extra would be
+     * dropped. Recording it and letting the state read it is what makes tapping
+     * the notification while the app is already open land on the session.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openSession = intent.getStringExtra(EXTRA_OPEN_SESSION)
+    }
+
+    private var openSession by mutableStateOf<String?>(null)
+
+    companion object {
+        /** A container id; opens the Session screen on it. See `VesselApp`. */
+        const val EXTRA_OPEN_SESSION: String = "openSession"
     }
 }

@@ -74,6 +74,14 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "ADRENOTOOLS_DRIVER_PATH",
     "ADRENOTOOLS_HOOKS_PATH",
     "ADRENOTOOLS_DRIVER_NAME",
+
+    // The FEX memory-ordering flags are listed for the same reason as WINEESYNC:
+    // they stopped being settings. Reserving them is what makes that stick —
+    // a container document saved while they were still switches still carries
+    // the old values, and without this the manifest merge would hand them back.
+    "FEX_TSOENABLED",
+    "FEX_HALFBARRIERTSOENABLED",
+    "FEX_VECTORTSOENABLED",
 )
 
 /**
@@ -88,7 +96,15 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
  * accident.
  */
 data class TurnipDriver(
-    /** The directory holding the driver `.so` — the installed Turnip component. */
+    /**
+     * The directory holding the driver `.so` — the installed Turnip component,
+     * in the shared store at `files/components/Turnip/<versionCode>/`.
+     *
+     * Resolved by `ComponentStore.directoryFor(containerId, Turnip)`, never
+     * assembled here: this function is pure and has no disk, and the container
+     * does not own the bytes — it records which version it references, and one
+     * store directory is shared by every container on that version.
+     */
     val driverDir: File,
     /** `libraryName` from the package's `meta.json`, e.g. `libvulkan_freedreno.so`. */
     val libraryName: String,
@@ -100,11 +116,18 @@ data class TurnipDriver(
     val hooksDir: File,
 )
 
-/** The two container directories the environment names. */
+/**
+ * The two container directories the environment names.
+ *
+ * Both are still per container — the prefix is the container, and the logs are
+ * its history. Everything *shared* between containers, which is every installed
+ * component, is reached through [TurnipDriver] and its siblings rather than from
+ * here.
+ */
 data class SessionPaths(
-    /** `WINEPREFIX`. */
+    /** `WINEPREFIX` — `files/containers/<id>/prefix`. */
     val prefix: File,
-    /** `DXVK_LOG_PATH`. Insurance only — see below. */
+    /** `DXVK_LOG_PATH` — `files/logs/<id>`. Insurance only — see below. */
     val logs: File,
 )
 
@@ -139,8 +162,32 @@ fun sessionEnvironment(
 
     environment["WINEPREFIX"] = paths.prefix.absolutePath
     environment["WINEESYNC"] = "1"
+
+    // FEX's memory-ordering behaviour is fixed here, not offered as settings.
+    //
+    // These were three switches in the container editor until it became clear
+    // that every one of them had exactly one correct value and no user could
+    // reach a better one by guessing:
+    //
+    //   TSOENABLED=1           x86 assumes Total Store Order and Arm does not
+    //                          guarantee it. Off is faster and breaks any
+    //                          multi-threaded program, quietly and at random.
+    //   HALFBARRIERTSOENABLED=1  Measured on this device: the cheap path costs
+    //                          21% less than the alternative (tools/tso/run.sh).
+    //   VECTORTSOENABLED=0     Upstream calls the accurate version a "HUGE"
+    //                          performance hit, and the hardware feature that
+    //                          would make it cheap (FEAT_LRCPC3) is reported by
+    //                          this CPU but not yet used by FEX's code
+    //                          generator, so paying for it buys nothing.
+    //
+    // The names are all-caps with no internal underscores because FEX derives
+    // them as `FEX_` + the JSON key uppercased: `TSOEnabled` becomes
+    // `FEX_TSOENABLED` and never `FEX_TSOEnabled`. See docs/ARCHITECTURE.md.
+    environment["FEX_TSOENABLED"] = "1"
+    environment["FEX_HALFBARRIERTSOENABLED"] = "1"
+    environment["FEX_VECTORTSOENABLED"] = "0"
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
-    environment["WINEDLLOVERRIDES"] = D3D_DLL_OVERRIDES.joinToString(",") + "=n"
+    environment["WINEDLLOVERRIDES"] = dllOverrides(profile, manifest)
     environment["DISPLAY"] = display
 
     environment["DXVK_LOG_LEVEL"] = "info"
@@ -174,6 +221,48 @@ fun sessionEnvironment(
  * `DXVK_FRAME_RATE` for the latter because it looks like it should exist is the
  * fabrication the manifest exists to prevent.
  */
+/**
+ * `WINEDLLOVERRIDES`: the D3D and WGL set this build ships, then whatever the
+ * container adds.
+ *
+ * The graphics half is not negotiable — without it Wine loads its own builtin
+ * `d3d11` and the DXVK we shipped never runs, which is a silent and very large
+ * performance loss rather than an error. So it is composed here rather than
+ * exposed as a value the user could delete.
+ *
+ * The container's own list is appended after, and appending is the point: Wine
+ * parses the string left to right and a later entry wins, so a user who really
+ * does need `d3d9=b` to work around one program can have it without being able
+ * to break the defaults for everything else by accident.
+ *
+ * `wine.dllOverrides` carries no `env` in the manifest precisely so that
+ * [manifestEnvironment] leaves it alone and this function is the only writer.
+ */
+internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): String {
+    val base = D3D_DLL_OVERRIDES.joinToString(",") + "=n"
+    val extra = manifest?.allParams.orEmpty()
+        .firstOrNull { it.key == DLL_OVERRIDES_KEY }
+        ?.let { spec -> profile.params[spec.key] ?: spec.defaultValue() }
+        ?.let { it as? ParamValue.Text }
+        ?.value
+        .orEmpty()
+        .trim()
+        .trim(';')
+    return if (extra.isEmpty()) base else "$base;$extra"
+}
+
+/**
+ * The one key this file looks up by name.
+ *
+ * Everywhere else the manifest drives the environment through `env`, and a
+ * `when (key)` is exactly what that design forbids. This is the exception
+ * because the value is *composed* with a built-in list rather than copied, and
+ * there is no way to express "append to this variable" in the manifest schema.
+ * If a second one of these ever appears, the schema needs the feature, not
+ * another constant here.
+ */
+private const val DLL_OVERRIDES_KEY = "wine.dllOverrides"
+
 internal fun manifestEnvironment(
     profile: ContainerProfile,
     manifest: ParamManifest?,

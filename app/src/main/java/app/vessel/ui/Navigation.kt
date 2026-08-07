@@ -5,6 +5,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
@@ -15,10 +16,8 @@ import androidx.navigation.compose.rememberNavController
 import app.vessel.ui.components.VNavDestination
 import app.vessel.ui.screens.AppProfileScreen
 import app.vessel.ui.screens.AppsScreen
-import app.vessel.ui.screens.ComponentsScreen
 import app.vessel.ui.screens.ContainerEditorScreen
 import app.vessel.ui.screens.ContainersScreen
-import app.vessel.ui.screens.DriversScreen
 import app.vessel.ui.screens.FilesScreen
 import app.vessel.ui.screens.SessionLogScreen
 import app.vessel.ui.screens.SessionLogsScreen
@@ -28,12 +27,10 @@ import app.vessel.ui.vm.NEW_CONTAINER
 object Routes {
     const val CONTAINERS = "containers"
     const val APPS = "apps"
-    const val COMPONENTS = "components"
 
     const val CONTAINER_EDITOR = "containerEditor/{containerId}"
     const val SESSION = "session/{containerId}"
     const val APP_PROFILE = "appProfile/{appId}"
-    const val DRIVERS = "drivers"
     const val FILES = "files"
 
     /**
@@ -68,14 +65,15 @@ object Routes {
 /**
  * Two roots and no more.
  *
- * Everything else — the editor, the session, components, drivers, files — is
- * pushed on top of one of these. The two here are the two things a user comes to
- * this app to do: pick a container, or pick a program.
+ * Everything else — the editor, the session, files — is pushed on top of one of
+ * these. The two here are the two things a user comes to this app to do: pick a
+ * container, or pick a program.
  *
- * Settings and Components are deliberately not roots. Settings became a
- * destination whose only content was the names of other destinations, so its
- * links hang off the Containers overflow instead; Components has one current
- * build of each component and therefore nothing to browse.
+ * There is no Settings, Components or GPU drivers destination. Each was a screen
+ * whose content the user could not act on: this build compiles in exactly one
+ * version of each component and one driver, so those screens could only recite
+ * what was already decided at build time. Settings went the same way earlier —
+ * a destination whose only content was the names of other destinations.
  *
  * TODO: Material icons stand in for the bespoke set DESIGN.md implies.
  */
@@ -88,9 +86,25 @@ val BottomDestinations = listOf(
 fun VesselApp(
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController(),
+    /**
+     * A container to open the Session screen on straight away.
+     *
+     * This is how the running-session notification gets back to the thing it is
+     * a notification *for*: without it, tapping it lands on the container list
+     * and the user has to find the session that is already running. It is also
+     * the only way to reach a session from `adb`, which is what the device
+     * scripts under `tools/` need.
+     */
+    openSession: String? = null,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+
+    // Keyed on the id, so a second intent for a different container navigates
+    // and a recomposition does not push the same screen twice.
+    LaunchedEffect(openSession) {
+        if (!openSession.isNullOrBlank()) navController.navigate(Routes.session(openSession))
+    }
 
     NavHost(
         navController = navController,
@@ -104,8 +118,6 @@ fun VesselApp(
                 onOpenContainer = { navController.navigate(Routes.containerEditor(it)) },
                 onCreateContainer = { navController.navigate(Routes.containerEditor()) },
                 onLaunch = { navController.navigate(Routes.session(it)) },
-                onOpenComponents = { navController.navigate(Routes.COMPONENTS) },
-                onOpenDrivers = { navController.navigate(Routes.DRIVERS) },
             )
         }
         composable(Routes.APPS) {
@@ -117,14 +129,6 @@ fun VesselApp(
         }
 
         // — pushes —
-        composable(Routes.COMPONENTS) {
-            ComponentsScreen(
-                onBack = { navController.popBackStack() },
-                // TODO: hands off to the download service once it does anything.
-                onInstall = {},
-            )
-        }
-
         // The editor takes no id argument: it reads `containerId` off the route
         // through its SavedStateHandle, which is also how it survives the
         // process being killed with the screen open.
@@ -151,9 +155,22 @@ fun VesselApp(
             SessionLogScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.SESSION) { entry ->
+            val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
             SessionScreen(
-                containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty(),
+                containerId = containerId,
                 onBack = { navController.popBackStack() },
+                // The running session's own log where there is one, and the
+                // container's history where the session never got far enough to
+                // open a file.
+                onOpenLogs = { startedAt ->
+                    navController.navigate(
+                        if (startedAt == null) {
+                            Routes.sessionLogs(containerId)
+                        } else {
+                            Routes.sessionLog(containerId, startedAt)
+                        },
+                    )
+                },
             )
         }
         composable(Routes.APP_PROFILE) { entry ->
@@ -162,7 +179,6 @@ fun VesselApp(
                 onBack = { navController.popBackStack() },
             )
         }
-        composable(Routes.DRIVERS) { DriversScreen(onBack = { navController.popBackStack() }) }
         composable(Routes.FILES) { FilesScreen(onBack = { navController.popBackStack() }) }
     }
 }

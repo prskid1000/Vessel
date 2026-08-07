@@ -139,13 +139,33 @@ internal enum class TarEntryKind {
     FILE,
     DIRECTORY,
 
-    /** Type flags `1` and `2`. Never extracted — a link is a way out of the destination. */
-    LINK,
+    /**
+     * Type flag `2`. Extracted, but only after [TarEntry.linkTarget] has been
+     * proved to stay inside the destination — see `WcpInstaller.resolveLink`.
+     *
+     * The Wine package contains twelve of these, all in `bin/` and all pointing
+     * at `wine` beside them. They are not aliases: Wine dispatches on `argv[0]`,
+     * so `bin/wineboot` *is* how a prefix is initialised. Dropping them installs
+     * a Wine that cannot be provisioned, and reports success doing it.
+     */
+    SYMLINK,
+
+    /**
+     * Type flag `1`. Never extracted.
+     *
+     * A hard link names an existing archive member by path and is a second way
+     * to reach a file the extractor has already placed; nothing we publish
+     * contains one, and it has no legitimate use in a `.wcp`.
+     */
+    HARDLINK,
 
     /** GNU `L`: the next entry's name, too long for the 100-byte field, held in this body. */
     LONG_NAME,
 
-    /** PAX `x`/`g` metadata, and GNU `K` long link names. Skipped. */
+    /** GNU `K`: the next entry's *link target*, too long for the 100-byte field. */
+    LONG_LINK,
+
+    /** PAX `x`/`g` metadata. Skipped. */
     METADATA,
 
     /** Character device, block device, fifo. Never extracted. */
@@ -158,6 +178,8 @@ internal data class TarEntry(
     val size: Long,
     val kind: TarEntryKind,
     val mode: Int,
+    /** The `linkname` field, empty for everything that is not a link. */
+    val linkTarget: String = "",
 )
 
 /**
@@ -185,6 +207,7 @@ internal class TarReader(private val input: InputStream) : AutoCloseable {
         skipBody()
 
         var pendingLongName: String? = null
+        var pendingLongLink: String? = null
         while (true) {
             val header = ByteArray(BLOCK)
             val read = input.readFullyUpTo(header)
@@ -205,6 +228,17 @@ internal class TarReader(private val input: InputStream) : AutoCloseable {
             remaining = size
             padding = ((BLOCK - (size % BLOCK)) % BLOCK).toInt()
 
+            if (kind == TarEntryKind.LONG_LINK) {
+                // GNU `K`: the next entry's link target, too long for the
+                // 100-byte field. Reading it matters even though our own
+                // packages have none — falling back to the truncated field
+                // would build a link pointing at something that was never in
+                // the archive.
+                pendingLongLink = readBody().toString(Charsets.UTF_8).takeWhile { it.code != 0 }
+                skipBody()
+                continue
+            }
+
             if (kind == TarEntryKind.LONG_NAME) {
                 pendingLongName = readBody().toString(Charsets.UTF_8).trimEnd('\u0000')
                 // readBody consumes the body but not the block padding after it,
@@ -222,6 +256,7 @@ internal class TarReader(private val input: InputStream) : AutoCloseable {
                 size = size,
                 kind = kind,
                 mode = parseOctal(header, MODE_OFFSET, MODE_LENGTH).toInt(),
+                linkTarget = pendingLongLink ?: header.asciiField(LINK_OFFSET, LINK_LENGTH),
             )
         }
     }
@@ -264,9 +299,11 @@ internal class TarReader(private val input: InputStream) : AutoCloseable {
     private fun kindOf(flag: Byte): TarEntryKind = when (flag.toInt().toChar()) {
         '0', '\u0000', '7' -> TarEntryKind.FILE
         '5' -> TarEntryKind.DIRECTORY
-        '1', '2' -> TarEntryKind.LINK
+        '1' -> TarEntryKind.HARDLINK
+        '2' -> TarEntryKind.SYMLINK
         'L' -> TarEntryKind.LONG_NAME
-        'x', 'g', 'K' -> TarEntryKind.METADATA
+        'K' -> TarEntryKind.LONG_LINK
+        'x', 'g' -> TarEntryKind.METADATA
         else -> TarEntryKind.SPECIAL
     }
 
@@ -347,6 +384,8 @@ internal class TarReader(private val input: InputStream) : AutoCloseable {
         const val CHECKSUM_OFFSET = 148
         const val CHECKSUM_LENGTH = 8
         const val TYPE_FLAG = 156
+        const val LINK_OFFSET = 157
+        const val LINK_LENGTH = 100
         const val PREFIX_OFFSET = 345
         const val PREFIX_LENGTH = 155
     }

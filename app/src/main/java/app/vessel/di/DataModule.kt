@@ -8,7 +8,10 @@ import androidx.datastore.dataStoreFile
 import app.vessel.data.CONTAINERS_FILE
 import app.vessel.data.ContainerDocument
 import app.vessel.data.ContainerDocumentSerializer
+import app.vessel.core.SessionDisplayServer
 import app.vessel.data.ContainerPaths
+import app.vessel.data.FreeSpace
+import app.vessel.display.XServerDisplay
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -60,6 +63,32 @@ object DataModule {
     @Singleton
     fun containerPaths(@ApplicationContext context: Context): ContainerPaths =
         ContainerPaths(context.filesDir)
+
+    /**
+     * How much room is left on the filesystem a component is unpacking into.
+     *
+     * Bound rather than constructed inside [app.vessel.data.WcpInstaller] so a
+     * test can answer "400 MB" — there is no way to make a real filesystem small,
+     * and refusing a 912 MB extract that will not fit is the behaviour under
+     * test.
+     */
+    @Provides
+    @Singleton
+    fun freeSpace(): FreeSpace = FreeSpace.Filesystem
+
+    /**
+     * The X server a session draws into.
+     *
+     * [XServerDisplay] is the adapter over the vendored `com.winlator` server and
+     * the only file in this project that imports from that package — the seam
+     * exists so swapping it is this one line. [SessionDisplayServer.Absent] is
+     * still a working configuration and is what to bind here to run a session
+     * headless: a Wine failure that happens before any window exists reads far
+     * better without a compositor in the way.
+     */
+    @Provides
+    @Singleton
+    fun displayServer(server: XServerDisplay): SessionDisplayServer = server
 
     /**
      * The container document.

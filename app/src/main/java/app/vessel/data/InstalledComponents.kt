@@ -1,47 +1,38 @@
 package app.vessel.data
 
-import android.content.Context
 import app.vessel.core.ComponentPackage
 import app.vessel.core.ComponentType
-import app.vessel.core.WcpProfile
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * What is actually unpacked on this device, read from disk.
  *
- * A `.wcp` installs to `files/components/<id>/`, and `build/package_wcp.py`
- * writes a `profile.json` at the root of every one of them. This class reads
- * those and nothing else: there is no seeded list, so before anything has been
- * downloaded it returns empty and every screen that asks says so. That is the
- * honest answer on a fresh install, and a screen that instead showed a driver
- * the device does not have would be worse than an empty one.
+ * The disk in question is the shared [ComponentStore] —
+ * `files/components/<Type>/<versionCode>/`, one copy for every container — and
+ * this class is the read-only view of it that the screens use. There is no
+ * seeded list, so before anything has been downloaded it returns empty and every
+ * screen that asks says so. That is the honest answer on a fresh install, and a
+ * screen that instead showed a driver the device does not have would be worse
+ * than an empty one.
  */
 @Singleton
 class InstalledComponents @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val json: Json,
+    private val store: ComponentStore,
 ) {
-    private val root: File get() = File(context.filesDir, DIRECTORY)
-
     private val _packages = MutableStateFlow<List<ComponentPackage>>(emptyList())
     val packages: Flow<List<ComponentPackage>> = _packages.asStateFlow()
 
-    /** Re-read the install directory. Cheap: a handful of small files at most. */
+    /** Re-read the store. Cheap: a handful of small files at most. */
     suspend fun refresh(): List<ComponentPackage> = withContext(Dispatchers.IO) {
-        val found = root.listFiles()
-            ?.filter { it.isDirectory }
-            ?.mapNotNull { read(it) }
-            ?.sortedWith(compareBy({ it.type.ordinal }, { -it.versionCode }))
-            .orEmpty()
+        val found = store.installed()
+            .map { it.toPackage() }
+            .sortedWith(compareBy({ it.type.ordinal }, { -it.versionCode }))
         _packages.value = found
         found
     }
@@ -99,39 +90,8 @@ class InstalledComponents @Inject constructor(
         return resolution.resolved?.id ?: "$selector · not installed"
     }
 
-    private fun read(directory: File): ComponentPackage? {
-        val profileFile = File(directory, PROFILE)
-        if (!profileFile.isFile) return null
-        val profile = runCatching {
-            json.decodeFromString(WcpProfile.serializer(), profileFile.readText())
-        }.getOrNull() ?: return null
-
-        // `type` is the `.wcp` wire string, and a package carrying anything
-        // outside the known set is skipped rather than shown as "unknown": the
-        // app has no code path that could load it.
-        val type = profile.componentType ?: return null
-
-        return ComponentPackage(
-            id = directory.name,
-            type = type,
-            name = profile.name ?: directory.name,
-            versionName = profile.versionName,
-            versionCode = profile.versionCode,
-            sizeBytes = directory.walkTopDown().filter { it.isFile }.sumOf { it.length() },
-            installed = true,
-            target = profile.vessel?.provenance?.target ?: UNRECORDED,
-            sourceSha = profile.vessel?.provenance?.sourceSha ?: UNRECORDED,
-            cpuFlags = profile.vessel?.provenance?.cpuFlags ?: UNRECORDED,
-        )
-    }
-
     private companion object {
-        const val DIRECTORY = "components"
-        const val PROFILE = "profile.json"
         const val LATEST = "@latest"
-
-        /** Said out loud rather than left blank, per the provenance argument in DESIGN.md. */
-        const val UNRECORDED = "not recorded in the package"
     }
 }
 
@@ -141,6 +101,37 @@ data class ComponentResolution(
     val resolved: ComponentPackage?,
     val note: String?,
 )
+
+/** Said out loud rather than left blank, per the provenance argument in DESIGN.md. */
+private const val UNRECORDED = "not recorded in the package"
+
+/**
+ * One stored version as the screens show it.
+ *
+ * [ComponentPackage.id] is the registry's id — `dxvk-2.7.1-canoe` — which is
+ * what a pinned `component` selector names and what the container card shows.
+ * `profile.json` has no field for it, so it comes from the store's own
+ * [ComponentRecord]. The fallback is for a version that reached the store
+ * without one, in practice a migrated install from a container whose
+ * `provisioned.json` had no matching record: it is reconstructed from the type
+ * and version rather than left blank, and it will not match a pin, which is the
+ * honest outcome when the id was never recorded.
+ */
+private fun StoredComponent.toPackage(): ComponentPackage {
+    val id = packageId ?: "${type.wire.lowercase()}-${profile.versionName}"
+    return ComponentPackage(
+        id = id,
+        type = type,
+        name = profile.name ?: id,
+        versionName = profile.versionName,
+        versionCode = versionCode,
+        sizeBytes = directory.walkTopDown().filter { it.isFile }.sumOf { it.length() },
+        installed = true,
+        target = profile.vessel?.provenance?.target ?: UNRECORDED,
+        sourceSha = profile.vessel?.provenance?.sourceSha ?: UNRECORDED,
+        cpuFlags = profile.vessel?.provenance?.cpuFlags ?: UNRECORDED,
+    )
+}
 
 // `profile.json` is declared once, in `app.vessel.core.WcpProfile`, and shared
 // with `WcpInstaller`. Do not add a second private copy: decoding is lenient by

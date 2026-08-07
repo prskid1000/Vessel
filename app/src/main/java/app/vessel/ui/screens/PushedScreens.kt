@@ -2,7 +2,6 @@ package app.vessel.ui.screens
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -13,7 +12,7 @@ import app.vessel.ui.components.VScaffold
 import app.vessel.ui.theme.VesselTheme
 
 /**
- * The three destinations that are routed but not built.
+ * The two destinations that are routed but not built.
  *
  * Each says, in the first clause, that it is not implemented — and then what it
  * will do. That order matters. A screen that only describes its future reads as
@@ -38,20 +37,6 @@ private fun NotBuiltYet(
     ) {
         VEmptyState(icon = icon, message = message)
     }
-}
-
-@Composable
-fun SessionScreen(containerId: String, onBack: () -> Unit) {
-    NotBuiltYet(
-        title = "Session",
-        subtitle = containerId,
-        icon = Icons.Filled.PlayArrow,
-        message = "Not built yet. Launching a container will open the Vulkan surface for the " +
-            "running Windows desktop here, with an edge-swipe overlay carrying the metric " +
-            "strip, the performance profile switch, input mode and a kill switch. Nothing " +
-            "starts when you press Launch today.",
-        onBack = onBack,
-    )
 }
 
 @Composable

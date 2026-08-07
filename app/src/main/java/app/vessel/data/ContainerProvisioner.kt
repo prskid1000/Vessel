@@ -90,8 +90,12 @@ data class InstalledRecord(val packageId: String, val versionCode: Int)
  * directory.
  *
  * Per container rather than in the shared document on purpose: it describes the
- * files under `containers/<id>/`, so deleting that directory has to invalidate
- * it, and the only way to guarantee that is for the record to live inside it.
+ * container, so deleting `containers/<id>/` has to invalidate it, and the only
+ * way to guarantee that is for the record to live inside it.
+ *
+ * It is also the **reference list** the shared component store counts against —
+ * see [ComponentStore]. A container owns no component bytes; it owns this file
+ * saying which versions it uses.
  */
 @Serializable
 data class ProvisionedState(
@@ -100,9 +104,30 @@ data class ProvisionedState(
     val registrySeedVersion: Int = 0,
     /** Keyed by [ComponentType.wire]. */
     val components: Map<String, InstalledRecord> = emptyMap(),
+
+    /**
+     * Which shared-store version of each type this container uses, keyed by
+     * [ComponentType.wire]. `Wine -> 1013` means `components/Wine/1013/`.
+     *
+     * Defaulted rather than required, and that is doing real work: a
+     * `provisioned.json` written before this field existed simply has no such
+     * key, and kotlinx.serialization fills a missing field from its default —
+     * which is a different mechanism from `ignoreUnknownKeys`, and would throw
+     * `MissingFieldException` without it. Every schema-1 file on a device
+     * decodes as referencing nothing here, which is why [ComponentStore] also
+     * counts [components] (whose records carry a `versionCode`) as references.
+     * Reading only this field would make a pre-upgrade container look unused and
+     * let `prune` delete the Wine it is running on.
+     */
+    val componentVersions: Map<String, Int> = emptyMap(),
 )
 
-const val CURRENT_PROVISION_SCHEMA: Int = 1
+/** 2 added [ProvisionedState.componentVersions], when components moved to the shared store. */
+const val CURRENT_PROVISION_SCHEMA: Int = 2
+
+/** This container, now referencing [versionCode] of [type] in the shared store. */
+fun ProvisionedState.withReference(type: ComponentType, versionCode: Int): ProvisionedState =
+    copy(componentVersions = componentVersions + (type.wire to versionCode))
 
 /** The outcome of asking something outside this layer to touch a live prefix. */
 sealed interface BootstrapOutcome {
@@ -163,11 +188,16 @@ interface PrefixBootstrap {
  * an unchanged container skips every step. Bumping one component re-runs that
  * component and nothing else — no re-extracting three gigabytes of Wine because
  * DXVK moved.
+ *
+ * Components go into the shared [ComponentStore], not into the container. The
+ * second container asking for a Wine build the first already installed does no
+ * work at all: its step records the reference and skips. What this class writes
+ * per container is the *reference*, in [ProvisionedState.componentVersions].
  */
 @Singleton
 class ContainerProvisioner @Inject constructor(
     private val paths: ContainerPaths,
-    private val installer: WcpInstaller,
+    private val store: ComponentStore,
     private val json: Json,
 ) {
 
@@ -196,12 +226,13 @@ class ContainerProvisioner @Inject constructor(
         containerId: String,
         components: List<ComponentInstall>,
     ): Boolean = withContext(Dispatchers.IO) {
+        store.migrate()
         val layout = paths.of(containerId)
         val state = readState(layout)
         layout.directoriesExist() &&
             state.registrySeedVersion == PrefixRegistry.SEED_VERSION &&
             layout.registrySeed.isFile &&
-            components.all { upToDate(layout, state, it) }
+            components.all { upToDate(state, it) }
     }
 
     /** Forget everything, so the next [provision] redoes all of it. */
@@ -223,6 +254,7 @@ class ContainerProvisioner @Inject constructor(
         components: List<ComponentInstall>,
         bootstrap: PrefixBootstrap = PrefixBootstrap.Deferred,
     ): Flow<ProvisionProgress> = flow {
+        store.migrate()
         val layout = paths.of(containerId)
         var state = readState(layout)
         var steps = plan(components)
@@ -255,12 +287,24 @@ class ContainerProvisioner @Inject constructor(
         // — components --------------------------------------------------------
         for (component in components) {
             val id = componentStepId(component.type)
-            if (upToDate(layout, state, component)) {
+            if (upToDate(state, component)) {
+                // The reference is written even on a skip. A container
+                // provisioned before the shared store existed has an
+                // `InstalledRecord` and no `componentVersions` entry, and the
+                // store counts the record too — but leaving the two disagreeing
+                // is how they drift.
+                state = state.withReference(component.type, component.versionCode)
+                writeState(layout, state)
                 mark(id, ProvisionStatus.SKIPPED, "${component.packageId} already installed")
                 continue
             }
             mark(id, ProvisionStatus.RUNNING)
-            when (val result = installer.install(component.archive, layout, component.sha256)) {
+            val result = store.install(
+                archive = component.archive,
+                packageId = component.packageId,
+                expectedSha256 = component.sha256,
+            )
+            when (result) {
                 is WcpInstallResult.Installed -> {
                     if (result.type != component.type) {
                         mark(
@@ -277,7 +321,7 @@ class ContainerProvisioner @Inject constructor(
                                 versionCode = result.profile.versionCode,
                             )
                             ),
-                    )
+                    ).withReference(component.type, result.profile.versionCode)
                     writeState(layout, state)
                     mark(id, ProvisionStatus.DONE, result.summary)
                 }
@@ -339,20 +383,20 @@ class ContainerProvisioner @Inject constructor(
      * Whether this component can be skipped.
      *
      * Both halves matter. The record has to match — a version bump changes
-     * [ComponentInstall.versionCode] and re-runs the step — and the directory has
-     * to still be there, because a record claiming an install that a failed swap
-     * or a user clearing storage removed is the one case where trusting the
-     * record silently produces a container with no Wine in it.
+     * [ComponentInstall.versionCode] and re-runs the step — and the version has
+     * to still be in the shared store, because a record claiming an install that
+     * a failed swap, a `prune`, or a user clearing storage removed is the one
+     * case where trusting the record silently produces a container with no Wine
+     * in it.
      */
     private fun upToDate(
-        layout: ContainerLayout,
         state: ProvisionedState,
         component: ComponentInstall,
     ): Boolean {
         val record = state.components[component.type.wire] ?: return false
         if (record.packageId != component.packageId) return false
         if (record.versionCode != component.versionCode) return false
-        return layout.component(component.type).isDirectory
+        return store.layout.isInstalled(component.type, record.versionCode)
     }
 
     private fun readState(layout: ContainerLayout): ProvisionedState {
@@ -372,7 +416,10 @@ class ContainerProvisioner @Inject constructor(
         runCatching {
             layout.base.mkdirs()
             layout.provisionState.writeText(
-                json.encodeToString(ProvisionedState.serializer(), state),
+                json.encodeToString(
+                    ProvisionedState.serializer(),
+                    state.copy(schemaVersion = CURRENT_PROVISION_SCHEMA),
+                ),
             )
         }
     }

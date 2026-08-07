@@ -30,7 +30,14 @@ class SessionEnvironmentTest {
     private val logs = File("/data/user/0/app.vessel/files/logs/c1")
     private val paths = SessionPaths(prefix = prefix, logs = logs)
 
-    /** The three FEX params the shipped `assets/params-manifest.json` declares. */
+    /**
+     * A manifest that still declares the three FEX params, which the shipped one
+     * no longer does.
+     *
+     * Kept deliberately stale: these tests are about what happens when a
+     * manifest *tries* to set a reserved variable, and a manifest that has
+     * already been cleaned up cannot test that.
+     */
     private val fexManifest = ParamManifest(
         schemaVersion = 1,
         groups = listOf(
@@ -88,8 +95,14 @@ class SessionEnvironmentTest {
         params = params,
     )
 
+    /**
+     * The driver comes from the shared store — `files/components/Turnip/<code>`
+     * — not from `containers/c1/components/Turnip`. One directory, however many
+     * containers are on that Turnip build, which is the whole point of the
+     * store; the container records the version, not the bytes.
+     */
     private val turnip = TurnipDriver(
-        driverDir = File("/data/user/0/app.vessel/files/containers/c1/components/Turnip"),
+        driverDir = File("/data/user/0/app.vessel/files/components/Turnip/260300"),
         libraryName = "libvulkan_freedreno.so",
         hooksDir = File("/data/app/app.vessel/lib/arm64"),
     )
@@ -204,7 +217,8 @@ class SessionEnvironmentTest {
     fun `an installed Turnip sets all three, with a trailing separator on the paths`() {
         val environment = env(driver = turnip)
         assertEquals(
-            turnip.driverDir.absolutePath + File.separator,
+            File("/data/user/0/app.vessel/files/components/Turnip/260300").absolutePath +
+                File.separator,
             environment["ADRENOTOOLS_DRIVER_PATH"],
         )
         assertEquals(
@@ -238,10 +252,58 @@ class SessionEnvironmentTest {
         )
     }
 
+    @Test
+    fun `a container's own DLL overrides are appended after the shipped ones`() {
+        // After, not before, and that ordering is the whole safety property:
+        // Wine reads the string left to right and the last entry for a DLL wins,
+        // so a user can override a default deliberately but cannot lose the D3D
+        // set by writing something unrelated.
+        val manifest = fexManifest.withDllOverrides()
+        val environment = env(
+            params = mapOf("wine.dllOverrides" to ParamValue.Text("winhttp=n,b")),
+            manifest = manifest,
+        )
+        assertEquals(
+            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n;winhttp=n,b",
+            environment["WINEDLLOVERRIDES"],
+        )
+    }
+
+    @Test
+    fun `an empty DLL override list leaves the shipped ones alone`() {
+        // Including the trailing separator: "…=n;" is not the same string, and a
+        // stray semicolon is the kind of thing Wine parses as an empty entry.
+        val manifest = fexManifest.withDllOverrides()
+        for (blank in listOf("", "   ", ";")) {
+            assertEquals(
+                "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n",
+                env(mapOf("wine.dllOverrides" to ParamValue.Text(blank)), manifest)["WINEDLLOVERRIDES"],
+            )
+        }
+    }
+
+    /** [fexManifest] plus the free-text override param, as the shipped manifest has it. */
+    private fun ParamManifest.withDllOverrides(): ParamManifest = copy(
+        groups = groups.map { group ->
+            if (group.id != "compatibility") {
+                group
+            } else {
+                group.copy(
+                    params = group.params + ParamSpec(
+                        key = "wine.dllOverrides",
+                        title = "Extra DLL overrides",
+                        type = ParamType.TEXT,
+                        default = JsonPrimitive(""),
+                    ),
+                )
+            }
+        },
+    )
+
     // — manifest params -------------------------------------------------------
 
     @Test
-    fun `FEX flags come from the manifest defaults as 1 and 0`() {
+    fun `FEX memory ordering is fixed, not a setting`() {
         val environment = env()
         assertEquals("1", environment["FEX_TSOENABLED"])
         assertEquals("1", environment["FEX_HALFBARRIERTSOENABLED"])
@@ -249,9 +311,14 @@ class SessionEnvironmentTest {
     }
 
     @Test
-    fun `a container's own value beats the manifest default`() {
+    fun `a container cannot change the memory ordering flags`() {
+        // The three toggles were removed from the manifest, and this is the
+        // guard that they do not come back through a stale container document:
+        // an old container still has fex.VectorTSOEnabled=true saved in it, and
+        // honouring that would silently reintroduce a setting whose only effect
+        // is to make the container much slower.
         val environment = env(params = mapOf("fex.VectorTSOEnabled" to ParamValue.Flag(true)))
-        assertEquals("1", environment["FEX_VECTORTSOENABLED"])
+        assertEquals("0", environment["FEX_VECTORTSOENABLED"])
         assertEquals("1", environment["FEX_TSOENABLED"])
     }
 
@@ -299,7 +366,10 @@ class SessionEnvironmentTest {
         val environment = env(manifest = null)
         assertEquals(WINEDEBUG_CHANNELS, environment["WINEDEBUG"])
         assertEquals("startup", environment["TU_DEBUG"])
-        assertTrue(environment.keys.none { it.startsWith("FEX_") })
+        // The FEX flags survive a missing manifest because they no longer come
+        // from it — they are fixed in sessionEnvironment beside WINEESYNC.
+        assertEquals("1", environment["FEX_TSOENABLED"])
+        assertEquals("0", environment["FEX_VECTORTSOENABLED"])
     }
 
     // — TU_DEBUG composition --------------------------------------------------

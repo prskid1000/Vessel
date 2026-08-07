@@ -23,8 +23,6 @@ import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VContainerCard
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VIconButton
-import app.vessel.ui.components.VMenuItem
-import app.vessel.ui.components.VOverflowMenu
 import app.vessel.ui.components.VRootToolbar
 import app.vessel.ui.components.VScaffold
 import app.vessel.ui.theme.Vessel
@@ -50,8 +48,6 @@ fun ContainersScreen(
     onOpenContainer: (String) -> Unit,
     onCreateContainer: () -> Unit,
     onLaunch: (String) -> Unit,
-    onOpenComponents: () -> Unit,
-    onOpenDrivers: () -> Unit,
     viewModel: ContainersViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -63,8 +59,6 @@ fun ContainersScreen(
         onCreateContainer = onCreateContainer,
         onLaunch = onLaunch,
         onDelete = viewModel::delete,
-        onOpenComponents = onOpenComponents,
-        onOpenDrivers = onOpenDrivers,
     )
 }
 
@@ -77,8 +71,6 @@ private fun ContainersContent(
     onCreateContainer: () -> Unit,
     onLaunch: (String) -> Unit,
     onDelete: (String) -> Unit,
-    onOpenComponents: () -> Unit = {},
-    onOpenDrivers: () -> Unit = {},
 ) {
     // The row a long press is asking about, held here rather than in the view
     // model: it is a question the screen is asking, and it should not survive
@@ -91,21 +83,11 @@ private fun ContainersContent(
                 title = "Containers",
                 subtitle = "${state.rows.size} configured",
                 trailing = {
+                    // No overflow. Both entries it used to hold — Components and
+                    // GPU drivers — listed things this build compiles in and the
+                    // user cannot change, so the menu was a route to two screens
+                    // that could only ever report what was already decided.
                     VIconButton(Icons.Filled.Add, "New container", onCreateContainer)
-                    VOverflowMenu(
-                        items = listOf(
-                            VMenuItem(
-                                "Components",
-                                "one current build of each, compiled for this device",
-                                onOpenComponents,
-                            ),
-                            VMenuItem(
-                                "GPU drivers",
-                                "installed drivers and per-container assignment",
-                                onOpenDrivers,
-                            ),
-                        ),
-                    )
                 },
             )
         },
@@ -134,7 +116,6 @@ private fun ContainersContent(
                 items(state.rows, key = { it.profile.id }) { row ->
                     VContainerCard(
                         container = row.profile,
-                        lastRunLabel = row.lastRunLabel,
                         onOpen = { onOpenContainer(row.profile.id) },
                         onLaunch = { onLaunch(row.profile.id) },
                         onLongPress = { pendingDelete = row },

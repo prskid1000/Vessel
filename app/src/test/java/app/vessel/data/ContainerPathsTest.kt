@@ -34,7 +34,6 @@ class ContainerPathsTest {
         val layout = paths.of("abc")
         assertEquals(File(filesDir, "containers/abc"), layout.base)
         assertEquals(File(filesDir, "containers/abc/prefix"), layout.prefix)
-        assertEquals(File(filesDir, "containers/abc/components"), layout.components)
         assertEquals(File(filesDir, "containers/abc/tmp"), layout.tmp)
         assertEquals(File(filesDir, "containers/abc/provisioned.json"), layout.provisionState)
         assertEquals(File(filesDir, "containers/abc/prefix-seed.reg"), layout.registrySeed)
@@ -49,13 +48,51 @@ class ContainerPathsTest {
     }
 
     @Test
-    fun `a component lives under its type`() {
+    fun `a component lives in the shared store under its type and version`() {
+        // Outside the container directory on purpose: Wine is 912 MB, and three
+        // containers on the same build must not be three copies of it.
+        val store = paths.components
+        assertEquals(File(filesDir, "components"), store.root)
+        assertEquals(File(filesDir, "components/Wine/1013"), store.version(ComponentType.WINE, 1013))
+        assertEquals(File(filesDir, "components/FEXCore/2608"), store.version(ComponentType.FEXCORE, 2608))
+        assertEquals(File(filesDir, "components/Turnip/260300"), store.version(ComponentType.TURNIP, 260300))
+        assertEquals(File(filesDir, "components/DXVK/20701"), store.version(ComponentType.DXVK, 20701))
+        assertEquals(File(filesDir, "components/VKD3D/30001"), store.version(ComponentType.VKD3D, 30001))
+
+        assertEquals(File(filesDir, "components/DXVK/20701.json"), store.record(ComponentType.DXVK, 20701))
+        assertEquals(File(filesDir, "components/DXVK/20701/profile.json"), store.profile(ComponentType.DXVK, 20701))
+        assertEquals(File(filesDir, "components/.staging"), store.staging)
+    }
+
+    @Test
+    fun `no container path can reach a component, so deleting one cannot delete the other`() {
         val layout = paths.of("abc")
-        assertEquals(File(filesDir, "containers/abc/components/Wine"), layout.component(ComponentType.WINE))
-        assertEquals(File(filesDir, "containers/abc/components/FEXCore"), layout.component(ComponentType.FEXCORE))
-        assertEquals(File(filesDir, "containers/abc/components/Turnip"), layout.component(ComponentType.TURNIP))
-        assertEquals(File(filesDir, "containers/abc/components/DXVK"), layout.component(ComponentType.DXVK))
-        assertEquals(File(filesDir, "containers/abc/components/VKD3D"), layout.component(ComponentType.VKD3D))
+        val wine = paths.components.version(ComponentType.WINE, 1013)
+        assertFalse(wine.path.startsWith(layout.base.path + File.separator))
+    }
+
+    @Test
+    fun `two versions of one type sit alongside each other`() {
+        val store = paths.components
+        store.version(ComponentType.WINE, 1013).mkdirs()
+        store.version(ComponentType.WINE, 1100).mkdirs()
+        // Neither is a package until a profile proves it is one.
+        assertEquals(emptyList<Int>(), store.versions(ComponentType.WINE))
+
+        File(store.version(ComponentType.WINE, 1013), "profile.json").writeText("{}")
+        File(store.version(ComponentType.WINE, 1100), "profile.json").writeText("{}")
+        assertEquals(listOf(1100, 1013), store.versions(ComponentType.WINE))
+    }
+
+    @Test
+    fun `the staging directory is not mistaken for a component`() {
+        val store = paths.components
+        assertTrue(store.createDirectories())
+        // `.staging` is a directory directly under the store root, and the only
+        // thing stopping it being read as a type is that listing is driven by
+        // ComponentType rather than by the filesystem.
+        assertTrue(store.staging.isDirectory)
+        assertEquals(emptyList<ComponentVersion>(), store.installed())
     }
 
     @Test
@@ -90,8 +127,10 @@ class ContainerPathsTest {
         assertFalse(layout.directoriesExist())
         assertTrue(layout.createDirectories())
         assertTrue(layout.directoriesExist())
-        listOf(layout.base, layout.prefix, layout.components, layout.tmp, layout.logs)
+        listOf(layout.base, layout.prefix, layout.tmp, layout.logs)
             .forEach { assertTrue("$it should exist", it.isDirectory) }
+        // The container does not get a components directory any more.
+        assertFalse(layout.legacyComponents.exists())
         assertTrue(layout.createDirectories())
     }
 

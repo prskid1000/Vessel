@@ -39,8 +39,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the ARM64EC and WoW64 emulator keys name the FEX modules`() {
-        // dlls/ntdll/loader.c:4237 and dlls/wow64/syscall.c:754 read these as the
-        // key's default value and require REG_SZ.
+        // load_arm64ec_module (dlls/ntdll/loader.c:4275) and get_cpu_dll_name
+        // (dlls/wow64/syscall.c:909), in Wine 11.14, read these as the key's
+        // default value and require REG_SZ. Both are load-bearing: the built-in
+        // fallbacks are Microsoft's xtajit64.dll and xtajit.dll, which we do not
+        // ship.
         assertEquals(
             """HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\amd64""",
             PrefixRegistry.arm64ecEmulator.path,
@@ -57,6 +60,19 @@ class PrefixRegistryTest {
             listOf(RegistryValue("", "libwow64fex.dll")),
             PrefixRegistry.x86Emulator.values,
         )
+    }
+
+    @Test
+    fun `the seed never leaves Wine on Microsoft's own translators`() {
+        // The failure this guards is silent and total. Absent these keys, Wine
+        // loads C:\windows\system32\xtajit64.dll, does not find it, and
+        // load_arm64ec_module terminates the process — every process, including
+        // a native ARM64 one, because it runs before kernel32 in ntdll init.
+        val rendered = PrefixRegistry.render().lowercase()
+        assertTrue(!rendered.contains("xtajit"))
+        assertTrue(!rendered.contains("wow64cpu"))
+        assertTrue(rendered.contains("libarm64ecfex.dll"))
+        assertTrue(rendered.contains("libwow64fex.dll"))
     }
 
     @Test

@@ -26,6 +26,8 @@ class ContainerRepository @Inject constructor(
     private val store: DataStore<ContainerDocument>,
     private val manifests: ParamManifestStore,
     private val components: InstalledComponents,
+    private val componentStore: ComponentStore,
+    private val paths: ContainerPaths,
     private val sessionLogs: SessionLogStore,
 ) {
     val containers: Flow<List<ContainerProfile>> = store.data.map { it.containers }
@@ -70,19 +72,34 @@ class ContainerRepository @Inject constructor(
     }
 
     /**
-     * Remove a container, and its session logs with it.
+     * Remove a container, its directory, and its session logs.
      *
      * The logs go because they are a property of the container and of nothing
      * else: keeping them would leave up to eighty megabytes on the device
      * belonging to something the user has just said they are finished with, and
      * reachable from no screen, since every route into the viewer starts at a
      * container that no longer exists.
+     *
+     * **Components do not go.** They are not in the container directory any more
+     * — they are in the shared [ComponentStore], where another container may be
+     * using the same 912 MB Wine tree. Dropping the container's directory drops
+     * its `provisioned.json`, which is what stops it counting as a reference;
+     * whether that makes anything deletable is [ComponentStore.prune]'s question
+     * and it is deliberately not asked here. A bug in the counting should cost
+     * disk, not somebody's Wine install.
+     *
+     * The migration runs first for the same reason: on a device that has not
+     * been read since the upgrade, `containers/<id>/components/` is still where
+     * the only copy of a component lives, and deleting the directory before
+     * moving it out would take that copy with it.
      */
     suspend fun delete(id: String) {
+        componentStore.migrate()
         store.updateData { document ->
             document.copy(containers = document.containers.filterNot { it.id == id })
         }
         sessionLogs.deleteAll(id)
+        paths.of(id).base.deleteRecursively()
     }
 
     /**

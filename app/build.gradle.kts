@@ -31,7 +31,26 @@ android {
         // Renaming the product is PRODUCT_NAME plus applicationId, and nothing
         // else — no strings.xml to keep in step.
         resValue("string", "app_name", productName)
+
+        // libwinlator: the JNI half of the vendored X server (epoll connector,
+        // wire-format streams, software blitter, AHardwareBuffer import). See
+        // app/src/main/java/com/winlator/README.md.
+        externalNativeBuild {
+            cmake { arguments += "-DANDROID_STL=none" }
+        }
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    // Pinned rather than left to AGP's default so a toolchain bump cannot
+    // silently change the compiler that builds libwinlator. Gradle downloads
+    // this NDK if the machine does not have it.
+    ndkVersion = "27.0.12077973"
 
     // Two channels from one source, as in the reference app: `sideload` may
     // download and install .wcp components itself; `play` cannot, because Play

@@ -4,23 +4,33 @@ import app.vessel.core.ComponentType
 import java.io.File
 
 /**
- * The on-disk layout of a container, in one place.
+ * The on-disk layout, in one place.
  *
  * Every other class asks this one where something lives. A container directory
  * is deleted wholesale, so a path assembled independently elsewhere is a
  * gigabyte of Wine prefix that survives the delete and no screen can reach.
  *
  * ```
+ * filesDir/components/<Type>/<versionCode>/   installed .wcp payloads, shared
+ * filesDir/components/<Type>/<versionCode>.json  the store's own record
+ * filesDir/components/.staging/               install staging
  * filesDir/containers/<id>/
  *   prefix/                the Wine prefix (drive_c, system.reg, …)
- *   components/<Type>/     installed .wcp payloads, one directory per type
- *   tmp/                   scratch, including install staging
+ *   tmp/                   scratch
  *   provisioned.json       what [ContainerProvisioner] has already done
  *   prefix-seed.reg        the rendered [app.vessel.core.PrefixRegistry] seed
  * filesDir/logs/<id>/      session logs
  * ```
  *
- * **Logs are the one thing not under the container directory.**
+ * **Components are outside the container directory and that is the point.**
+ * Wine is 912 MB unpacked; three containers on the same build used to be three
+ * byte-identical copies of it. A container now records *which* versions it uses
+ * — see [ProvisionedState.componentVersions] — and [ComponentStore] owns the
+ * bytes. The corollary is that deleting a container must never delete a
+ * component: [ComponentStore.prune] is the only thing that removes one, it is
+ * explicit, and it refuses to touch a version any container still references.
+ *
+ * **Logs are the other thing not under the container directory.**
  * [SessionLogStore] has owned `filesDir/logs/<id>/` since before this class
  * existed and is the writer; moving the tree would orphan every log already on a
  * device. [safeName] is shared with it so the two cannot disagree about which
@@ -35,6 +45,9 @@ class ContainerPaths(private val filesDir: File) {
 
     val logsRoot: File get() = File(filesDir, LOGS_DIRECTORY)
 
+    /** The shared component store — `filesDir/components/`. */
+    val components: ComponentStoreLayout get() = ComponentStoreLayout(File(filesDir, COMPONENTS_DIRECTORY))
+
     fun of(containerId: String): ContainerLayout {
         val safe = safeName(containerId)
         return ContainerLayout(
@@ -48,9 +61,19 @@ class ContainerPaths(private val filesDir: File) {
     fun existing(): List<File> =
         containersRoot.listFiles().orEmpty().filter { it.isDirectory }
 
+    /**
+     * [existing], as layouts.
+     *
+     * The directory name is already a [safeName], so it round-trips through
+     * [of] unchanged — which is what lets [ComponentStore] read every
+     * container's `provisioned.json` without assembling that path itself.
+     */
+    fun existingLayouts(): List<ContainerLayout> = existing().map { of(it.name) }
+
     companion object {
         const val CONTAINERS_DIRECTORY = "containers"
         const val LOGS_DIRECTORY = "logs"
+        const val COMPONENTS_DIRECTORY = "components"
 
         /**
          * A container id turned into one path segment.
@@ -81,10 +104,7 @@ data class ContainerLayout(
     /** The Wine prefix. Empty until something runs `wineboot`, which is not this layer. */
     val prefix: File get() = File(base, PREFIX)
 
-    /** Installed `.wcp` payloads, one subdirectory per [ComponentType]. */
-    val components: File get() = File(base, COMPONENTS)
-
-    /** Scratch. Install staging happens here so a rename into place stays on one filesystem. */
+    /** Scratch belonging to this container. Component staging is the store's, not this. */
     val tmp: File get() = File(base, TMP)
 
     /** [ContainerProvisioner]'s record of what is already done. */
@@ -93,22 +113,106 @@ data class ContainerLayout(
     /** The rendered registry seed. Written here; applying it needs a process. */
     val registrySeed: File get() = File(base, REGISTRY_SEED)
 
-    /** Where a `.wcp` of [type] is installed. One version of each type per container. */
-    fun component(type: ComponentType): File = File(components, type.wire)
+    /**
+     * Where components used to be installed, before the shared store existed.
+     *
+     * Only [ComponentStore.migrate] should ever look at this. It is not part of
+     * the layout any more — it is the thing being migrated out of, and it is
+     * named here rather than assembled inside the migration so that this class
+     * stays the only place that knows the shape of a container directory.
+     */
+    val legacyComponents: File get() = File(base, LEGACY_COMPONENTS)
 
     /** Every directory the layout promises, created if absent. */
     fun createDirectories(): Boolean =
-        listOf(base, prefix, components, tmp, logs).all { it.isDirectory || it.mkdirs() }
+        listOf(base, prefix, tmp, logs).all { it.isDirectory || it.mkdirs() }
 
     /** True when every directory the layout promises is already there. */
     fun directoriesExist(): Boolean =
-        listOf(base, prefix, components, tmp, logs).all { it.isDirectory }
+        listOf(base, prefix, tmp, logs).all { it.isDirectory }
 
     private companion object {
         const val PREFIX = "prefix"
-        const val COMPONENTS = "components"
         const val TMP = "tmp"
         const val PROVISION_STATE = "provisioned.json"
         const val REGISTRY_SEED = "prefix-seed.reg"
+        const val LEGACY_COMPONENTS = "components"
+    }
+}
+
+/** The manifest `build/package_wcp.py` writes at the root of every `.wcp`. */
+const val WCP_PROFILE: String = "profile.json"
+
+/** One version of one component: the shared store's key, and a container's reference. */
+data class ComponentVersion(val type: ComponentType, val versionCode: Int) {
+    override fun toString(): String = "${type.wire}/$versionCode"
+}
+
+/**
+ * The shared component store's layout — `filesDir/components/`.
+ *
+ * Keyed by type *and* version, not by type alone. Two containers on different
+ * Wine builds is a case the app has to support, and a store keyed by type would
+ * make installing the second one silently break the first.
+ *
+ * The version directory is exactly what the package contained, plus its
+ * `profile.json`. Everything the store itself needs to remember lives *beside*
+ * it in `<versionCode>.json` ([ComponentRecord]), so a directory listing of a
+ * version is a listing of the package and nothing else.
+ */
+data class ComponentStoreLayout(
+    /** `filesDir/components/`. */
+    val root: File,
+) {
+    /**
+     * Install staging, so the rename into place stays on one filesystem.
+     *
+     * The leading dot keeps it out of the type namespace: no [ComponentType.wire]
+     * can start with one, so this can never be mistaken for a component.
+     */
+    val staging: File get() = File(root, STAGING)
+
+    /** `components/<Type>/` — every installed version of one type. */
+    fun type(type: ComponentType): File = File(root, type.wire)
+
+    /** `components/<Type>/<versionCode>/` — the payload. */
+    fun version(type: ComponentType, versionCode: Int): File =
+        File(type(type), versionCode.toString())
+
+    /** `components/<Type>/<versionCode>.json` — [ComponentRecord]. */
+    fun record(type: ComponentType, versionCode: Int): File =
+        File(type(type), "$versionCode$RECORD_SUFFIX")
+
+    /** The unpacked package's own manifest, which is what proves it is one. */
+    fun profile(type: ComponentType, versionCode: Int): File =
+        File(version(type, versionCode), WCP_PROFILE)
+
+    /** True when [version] holds an unpacked package rather than a stray directory. */
+    fun isInstalled(type: ComponentType, versionCode: Int): Boolean =
+        profile(type, versionCode).isFile
+
+    /** Installed versions of [type], newest first. */
+    fun versions(type: ComponentType): List<Int> =
+        type(type).listFiles().orEmpty()
+            .filter { it.isDirectory }
+            .mapNotNull { it.name.toIntOrNull() }
+            .filter { isInstalled(type, it) }
+            .sortedDescending()
+
+    /**
+     * Every installed version of every known type.
+     *
+     * Driven by [ComponentType.entries] rather than by a directory listing, so a
+     * directory whose name is not a type this app can load — a stray, or the
+     * staging directory — is never mistaken for a component.
+     */
+    fun installed(): List<ComponentVersion> =
+        ComponentType.entries.flatMap { type -> versions(type).map { ComponentVersion(type, it) } }
+
+    fun createDirectories(): Boolean = listOf(root, staging).all { it.isDirectory || it.mkdirs() }
+
+    private companion object {
+        const val STAGING = ".staging"
+        const val RECORD_SUFFIX = ".json"
     }
 }

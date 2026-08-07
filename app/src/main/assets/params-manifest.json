@@ -27,70 +27,87 @@
     {
       "id": "display",
       "title": "Display",
-      "help": "How large the Windows desktop is and how fast it may run — on this phone the resolution is the single biggest thing you can change for performance.",
+      "help": "How large the Windows desktop is and how fast it may run \u2014 on this phone the resolution is the single biggest thing you can change for performance.",
       "params": [
         {
           "key": "display.resolution",
           "title": "Resolution",
-          "help": "Lower resolutions gain a lot of performance on this phone; it has a smaller GPU cache than the full-size chip.",
+          "help": "Lower is much faster on this phone. Every step up is more work for the GPU, and the top of the slider is the screen's own 2780 x 1264 -- there is nothing above it worth rendering.",
           "type": "enum",
           "options": [
+            "640x480",
+            "800x600",
+            "1024x768",
             "1280x720",
+            "1280x800",
+            "1366x768",
+            "1440x900",
             "1600x900",
+            "1680x1050",
             "1920x1080",
-            "native"
+            "2048x1152",
+            "2340x1080",
+            "2560x1180",
+            "2780x1264"
           ],
-          "default": "1280x720"
+          "default": "1280x720",
+          "optionLabels": {
+            "640x480": "640 x 480",
+            "800x600": "800 x 600",
+            "1024x768": "1024 x 768",
+            "1280x720": "1280 x 720  (720p)",
+            "1280x800": "1280 x 800",
+            "1366x768": "1366 x 768",
+            "1440x900": "1440 x 900",
+            "1600x900": "1600 x 900",
+            "1680x1050": "1680 x 1050",
+            "1920x1080": "1920 x 1080  (1080p)",
+            "2048x1152": "2048 x 1152",
+            "2340x1080": "2340 x 1080",
+            "2560x1180": "2560 x 1180",
+            "2780x1264": "2780 x 1264  (native)"
+          }
         },
         {
           "key": "display.fpsLimit",
           "title": "Frame rate limit",
-          "help": "Capping frame rate keeps the phone cool, which keeps performance steady over a long session.",
+          "help": "Only rates this screen can actually show. Capping lower keeps the phone cool, which keeps performance steady over a long session.",
           "type": "enum",
           "options": [
+            "24",
             "30",
-            "45",
             "60",
-            "unlimited"
+            "90",
+            "120",
+            "165"
           ],
-          "default": "60"
+          "default": "60",
+          "optionLabels": {
+            "24": "24 fps",
+            "30": "30 fps",
+            "60": "60 fps",
+            "90": "90 fps",
+            "120": "120 fps",
+            "165": "165 fps  (panel maximum)"
+          }
         }
       ]
     },
     {
       "id": "compatibility",
       "title": "Compatibility",
-      "help": "These enforce the memory-ordering rules x86 programs assume. This CPU has no hardware mode for it, so the translator does it in software, and every default here is already the safe one.",
-      "_note": "This is the old 'memory' group plus wine.sync, and the rename is the point. What these four have in common is not that they touch memory or the system — it is that each one trades correctness for speed in a program that is already running badly. Grouping them by what they are FOR is what lets them sit last on the screen without a disclosure hiding them.",
+      "help": "One escape hatch, for working around a single misbehaving program. Everything else about how programs run is fixed, because there is one right answer for this device and it is already set.",
       "params": [
         {
-          "key": "fex.TSOEnabled",
-          "title": "Strict memory ordering",
-          "help": "Keep this on: turning it off is faster but breaks most multi-threaded programs.",
-          "type": "bool",
-          "default": true,
-          "env": "FEX_TSOENABLED",
-          "warnWhen": false,
-          "warnText": "Most programs will crash or corrupt data with this off."
-        },
-        {
-          "key": "fex.HalfBarrierTSOEnabled",
-          "title": "Cheap ordering barriers",
-          "help": "Uses a lighter method to enforce memory ordering; leave on unless a program misbehaves.",
-          "type": "bool",
-          "default": true,
-          "env": "FEX_HALFBARRIERTSOENABLED"
-        },
-        {
-          "key": "fex.VectorTSOEnabled",
-          "title": "Ordering for vector memory",
-          "help": "Very slow in games and rarely needed; turn on only to fix a specific graphical or audio corruption.",
-          "type": "bool",
-          "default": false,
-          "env": "FEX_VECTORTSOENABLED"
+          "key": "wine.dllOverrides",
+          "title": "Extra DLL overrides",
+          "help": "Wine's WINEDLLOVERRIDES, for working around one program. Leave empty unless you are following specific advice: the Direct3D and OpenGL DLLs are already set correctly and do not need listing here.",
+          "type": "text",
+          "default": ""
         }
       ],
-      "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP — so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations."
+      "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP \u2014 so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations.",
+      "_note": "The three FEX memory-ordering toggles (TSOEnabled, HalfBarrierTSOEnabled, VectorTSOEnabled) used to live here and are now fixed in SessionEnvironment.kt alongside WINEESYNC. They were removed for the same reason as the Settings, Components and GPU-drivers screens: every default was already the only correct one, and each was a trade a user would be making blind. Measured on this device (tools/tso/run.sh, and see docs/ARCHITECTURE.md 'Why memory ordering dominates on this chip'): strict ordering is required for correctness, the half-barrier path is a 21% win over disabling LRCPC2, and vector ordering is a severe cost that fixes nothing on hardware without FEAT_LRCPC3 codegen. Nothing a user could learn from the UI would change any of those. If a future device or FEX release changes the answer, the value changes in code -- it does not come back as a switch."
     }
   ]
 }

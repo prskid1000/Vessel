@@ -239,6 +239,12 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
                         onSelect = { onParam(spec.key, ParamValue.Text(it)) },
                     )
 
+                    ParamType.TEXT -> VTextField(
+                        value = (value as? ParamValue.Text)?.value.orEmpty(),
+                        onValueChange = { onParam(spec.key, ParamValue.Text(it)) },
+                        placeholder = "none",
+                    )
+
                     ParamType.INT -> VStepper(
                         value = (value as? ParamValue.Count)?.value ?: 0,
                         min = param.resolved.min ?: 0,
@@ -301,6 +307,9 @@ private fun summarise(spec: ParamSpec, value: ParamValue): String? = when (spec.
     ParamType.INT -> (value as? ParamValue.Count)?.value?.toString()
     ParamType.ENUM -> (value as? ParamValue.Text)?.value?.let(spec::label)
     ParamType.COMPONENT -> (value as? ParamValue.Text)?.value
+    // The field itself already shows the text, and an override list is far too
+    // long for the value column — it would ellipsise to nothing useful.
+    ParamType.TEXT -> null
     ParamType.MULTI -> (value as? ParamValue.Choices)?.values.orEmpty()
         .let { if (it.isEmpty()) "none" else "${it.size} on" }
 }
@@ -385,7 +394,7 @@ private val PreviewGroups = listOf(
                     help = "Lower resolutions gain a lot of performance on this phone; it has " +
                         "a smaller GPU cache than the full-size chip.",
                     type = ParamType.ENUM,
-                    options = listOf("1280x720", "1600x900", "1920x1080", "native"),
+                    options = listOf("1280x720", "1920x1080", "2780x1264"),
                 ),
                 ParamValue.Text("1280x720"),
             ),
@@ -396,7 +405,7 @@ private val PreviewGroups = listOf(
                     help = "Capping frame rate keeps the phone cool, which keeps performance " +
                         "steady over a long session.",
                     type = ParamType.ENUM,
-                    options = listOf("30", "45", "60", "unlimited"),
+                    options = listOf("24", "30", "60", "90", "120", "165"),
                 ),
                 ParamValue.Text("60"),
             ),

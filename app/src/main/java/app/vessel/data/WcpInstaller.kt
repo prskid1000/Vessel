@@ -4,16 +4,37 @@ import app.vessel.core.ComponentType
 import app.vessel.core.WcpProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * What happened when a `.wcp` was installed into a container.
+ * What the store remembers about an installed version that the package itself
+ * does not say.
+ *
+ * Exactly one field, and it exists because there is nothing in `profile.json` to
+ * derive it from: `build/gen_registry.py` sets a package's id from the archive's
+ * filename (`wcp.stem`), so `dxvk-2.7.1-canoe` is knowable only from whoever
+ * handed the archive over. Without it the Components screen and any pinned
+ * `component` selector would be talking about different names for the same
+ * build.
+ *
+ * Kept *beside* the version directory rather than inside it, so a listing of
+ * `components/<Type>/<versionCode>/` is a listing of the package and nothing
+ * this app added.
+ */
+@Serializable
+data class ComponentRecord(val packageId: String)
+
+/**
+ * What happened when a `.wcp` was installed into the shared store.
  *
  * A sealed result rather than an exception, because every one of these is a
  * thing the Preparing checklist has to *say* — DESIGN.md's fourth session state
@@ -33,10 +54,23 @@ sealed interface WcpInstallResult {
         val compression: WcpCompression,
         /** False when no `.sha256` sidecar existed and no digest was supplied. */
         val checksumVerified: Boolean,
+        /**
+         * True when this version was already in the store and nothing was
+         * extracted.
+         *
+         * The store is keyed by type *and* `versionCode`, so the same version is
+         * the same bytes — a second container asking for the Wine that is
+         * already there gets it for free rather than re-extracting 912 MB.
+         */
+        val reused: Boolean = false,
     ) : WcpInstallResult {
         override val summary: String
-            get() = "${profile.versionName} — $fileCount file(s)" +
-                if (checksumVerified) "" else ", checksum not verified (no sidecar)"
+            get() = if (reused) {
+                "${profile.versionName} — already in the shared store ($fileCount file(s))"
+            } else {
+                "${profile.versionName} — $fileCount file(s)" +
+                    if (checksumVerified) "" else ", checksum not verified (no sidecar)"
+            }
     }
 
     /** Every failure. Nothing is written to the component directory when one occurs. */
@@ -74,6 +108,24 @@ sealed interface WcpInstallResult {
         override val summary get() = "Refusing unsafe archive entry '$entryName': $why"
     }
 
+    /**
+     * There is not enough room for the unpacked payload.
+     *
+     * Reported before anything is extracted wherever possible. Wine is 63 MB
+     * compressed and 912 MB unpacked, and failing nine tenths of the way through
+     * that with a bare `IOException` tells the user nothing they can act on.
+     */
+    data class InsufficientSpace(
+        val requiredBytes: Long,
+        val freeBytes: Long,
+        /** True when extraction had already begun, so [requiredBytes] is a floor. */
+        val partway: Boolean = false,
+    ) : Failure {
+        override val summary
+            get() = "Not enough space: needs ${if (partway) "at least " else ""}" +
+                "${megabytes(requiredBytes)}, ${megabytes(freeBytes)} free"
+    }
+
     data class UnknownType(val wire: String) : Failure {
         override val summary
             get() = "Package type '$wire' is not one this app can load"
@@ -84,40 +136,75 @@ sealed interface WcpInstallResult {
     }
 }
 
+private fun megabytes(bytes: Long): String = "${bytes / (1024 * 1024)} MB"
+
 /**
- * Installs a `.wcp` into one container's `components/<Type>/` directory.
+ * How much room is left where a component is being unpacked.
+ *
+ * An interface only so a test can say "400 MB". There is no way to make a real
+ * filesystem small, and the refusal is the whole point of the check.
+ */
+fun interface FreeSpace {
+    fun usableBytes(directory: File): Long
+
+    companion object {
+        /**
+         * The real answer. Walks up to the nearest directory that exists,
+         * because the store's own directories may not have been created yet and
+         * `getUsableSpace` on a path that is not there returns zero — which
+         * would refuse every first install on the device.
+         */
+        val Filesystem: FreeSpace = FreeSpace { directory ->
+            var candidate: File? = directory.absoluteFile
+            while (candidate != null && !candidate.exists()) candidate = candidate.parentFile
+            candidate?.usableSpace ?: 0L
+        }
+    }
+}
+
+/**
+ * Installs a `.wcp` into the shared component store.
  *
  * The order is the whole point, and it is: identify the codec, **verify the
- * digest**, read `profile.json`, extract to a staging directory inside the same
- * container, and only then swap it into place. Nothing touches the live
- * component directory until an archive has proved it is the one that was
- * published and that every entry in it stays inside its destination.
+ * digest**, read `profile.json`, check there is room, extract to a staging
+ * directory on the same filesystem, and only then swap it into place. Nothing
+ * touches the live component directory until an archive has proved it is the one
+ * that was published and that every entry in it stays inside its destination.
  *
- * Idempotent by construction. Installing over an existing version replaces the
- * directory wholesale rather than merging into it, so a file that a new build
- * dropped cannot survive as a stale copy the loader would still find.
+ * **Install once, keyed by type and `versionCode`.** The destination is
+ * `components/<Type>/<versionCode>/`, shared by every container. Installing a
+ * version that is already there extracts nothing and reports success; installing
+ * a *different* version of the same type puts it alongside, so two containers on
+ * two Wine builds both work.
  *
  * Three passes over the file: hash, `profile.json`, extract. The hash pass reads
  * compressed bytes and the profile pass stops at the first entry, so it is two
- * decompressions in practice, on a local file, once per component per container.
+ * decompressions in practice, on a local file, once per component per *device*
+ * rather than per container.
  */
 @Singleton
-class WcpInstaller @Inject constructor(private val json: Json) {
+class WcpInstaller @Inject constructor(
+    private val json: Json,
+    private val space: FreeSpace = FreeSpace.Filesystem,
+) {
 
     suspend fun install(
         archive: File,
-        into: ContainerLayout,
+        into: ComponentStoreLayout,
         /** Overrides the sidecar. Supply the digest the registry published. */
         expectedSha256: String? = null,
+        /** The registry's id for this build. Recorded beside the payload. */
+        packageId: String? = null,
     ): WcpInstallResult = withContext(Dispatchers.IO) {
-        installBlocking(archive, into, expectedSha256)
+        installBlocking(archive, into, expectedSha256, packageId)
     }
 
     /** The whole of [install], synchronously. Separated so tests need no dispatcher. */
     internal fun installBlocking(
         archive: File,
-        into: ContainerLayout,
+        into: ComponentStoreLayout,
         expectedSha256: String? = null,
+        packageId: String? = null,
     ): WcpInstallResult {
         if (!archive.isFile) return WcpInstallResult.NotFound(archive)
 
@@ -136,20 +223,40 @@ class WcpInstaller @Inject constructor(private val json: Json) {
 
         val profileBytes = runCatching { readProfileBytes(archive, compression) }
             .getOrElse { return WcpInstallResult.Malformed(it.message ?: "unreadable archive") }
-            ?: return WcpInstallResult.Malformed("no $PROFILE at the root of the archive")
+            ?: return WcpInstallResult.Malformed("no $WCP_PROFILE at the root of the archive")
 
         val profile = runCatching {
             json.decodeFromString(WcpProfile.serializer(), profileBytes.toString(Charsets.UTF_8))
-        }.getOrElse { return WcpInstallResult.Malformed("$PROFILE is not valid JSON") }
+        }.getOrElse { return WcpInstallResult.Malformed("$WCP_PROFILE is not valid JSON") }
 
         val type = profile.componentType
             ?: return WcpInstallResult.UnknownType(profile.type)
 
-        if (!into.createDirectories()) {
-            return WcpInstallResult.Malformed("could not create ${into.base}")
+        val destination = into.version(type, profile.versionCode)
+
+        // Already there. Same type and same versionCode is the same build, so
+        // there is nothing to do but say so — and record the package id, which a
+        // migrated install or an earlier caller may not have supplied.
+        if (into.isInstalled(type, profile.versionCode)) {
+            writeRecord(into, type, profile.versionCode, packageId)
+            return WcpInstallResult.Installed(
+                profile = profile,
+                type = type,
+                directory = destination,
+                fileCount = countFiles(destination),
+                compression = compression,
+                checksumVerified = expected != null,
+                reused = true,
+            )
         }
 
-        val staging = File(into.tmp, "install-${type.wire}-${System.nanoTime()}")
+        if (!into.createDirectories()) {
+            return WcpInstallResult.Malformed("could not create ${into.root}")
+        }
+
+        estimateSpace(archive, into.root)?.let { return it }
+
+        val staging = File(into.staging, "install-${type.wire}-${System.nanoTime()}")
         try {
             if (!staging.mkdirs()) {
                 return WcpInstallResult.Malformed("could not create staging directory")
@@ -159,12 +266,12 @@ class WcpInstaller @Inject constructor(private val json: Json) {
                 is ExtractOutcome.Ok -> outcome.fileCount
             }
 
-            File(staging, PROFILE).writeBytes(profileBytes)
+            File(staging, WCP_PROFILE).writeBytes(profileBytes)
 
-            val destination = into.component(type)
             if (!swapIntoPlace(staging, destination)) {
                 return WcpInstallResult.Malformed("could not replace ${destination.name}")
             }
+            writeRecord(into, type, profile.versionCode, packageId)
 
             return WcpInstallResult.Installed(
                 profile = profile,
@@ -181,11 +288,36 @@ class WcpInstaller @Inject constructor(private val json: Json) {
         }
     }
 
+    /**
+     * Refuse, before extracting anything, when the payload plainly will not fit.
+     *
+     * `profile.json` lists the files but not their sizes, so the only figure
+     * available up front is the archive's own. The multiplier is taken from the
+     * measured set — Wine expands 63.1 MB to 912 MB, which is 14.5× and the
+     * worst of the six — plus headroom so the device is not left with nothing.
+     *
+     * Deliberately an estimate and deliberately not the only check: [extract]
+     * watches the real figure as it goes, because an estimate that is too low is
+     * exactly the case this is here to make legible.
+     */
+    private fun estimateSpace(archive: File, root: File): WcpInstallResult.InsufficientSpace? {
+        val required = archive.length() * EXPANSION_ESTIMATE + HEADROOM_BYTES
+        val free = space.usableBytes(root)
+        return if (free < required) {
+            WcpInstallResult.InsufficientSpace(requiredBytes = required, freeBytes = free)
+        } else {
+            null
+        }
+    }
+
     /** How [extract] ended: a file count, or the failure that stopped it. */
     private sealed interface ExtractOutcome {
         data class Ok(val fileCount: Int) : ExtractOutcome
         data class Refused(val failure: WcpInstallResult.Failure) : ExtractOutcome
     }
+
+    /** A symlink whose target has been checked, waiting for that target to exist. */
+    private data class PendingLink(val link: File, val target: String, val resolved: File)
 
     /**
      * Extract every payload entry into [destination].
@@ -193,6 +325,11 @@ class WcpInstaller @Inject constructor(private val json: Json) {
      * The first unsafe entry aborts the whole extraction. [destination] is a
      * staging directory the caller throws away on any failure, so a partial
      * extraction never reaches the live component directory.
+     *
+     * Symlinks are created **last**, after every regular file is in place: a
+     * relative link written before its target would dangle, and a dangling link
+     * is indistinguishable from a broken install by anything that later looks at
+     * it.
      */
     private fun extract(
         archive: File,
@@ -200,21 +337,33 @@ class WcpInstaller @Inject constructor(private val json: Json) {
         destination: File,
     ): ExtractOutcome {
         var files = 0
+        var written = 0L
+        var checkedAt = 0L
+        val links = mutableListOf<PendingLink>()
+
         TarReader(WcpArchive.open(archive, compression)).use { tar ->
             while (true) {
                 val entry = tar.next() ?: break
                 when (entry.kind) {
-                    TarEntryKind.METADATA, TarEntryKind.LONG_NAME -> continue
+                    TarEntryKind.METADATA, TarEntryKind.LONG_NAME, TarEntryKind.LONG_LINK -> continue
 
-                    TarEntryKind.LINK -> return refuse(
+                    TarEntryKind.HARDLINK -> return refuse(
                         entry.name,
-                        "links are never extracted — a link is a way out of the destination",
+                        "hard links are never extracted — nothing we publish contains one",
                     )
 
                     TarEntryKind.SPECIAL -> return refuse(
                         entry.name,
-                        "only regular files and directories are extracted",
+                        "only regular files, directories and relative symlinks are extracted",
                     )
+
+                    TarEntryKind.SYMLINK -> {
+                        val link = resolveEntry(destination, entry.name)
+                            ?: return refuse(entry.name, TRAVERSAL)
+                        val resolved = resolveLink(destination, entry.name, entry.linkTarget)
+                            ?: return refuse(entry.name, LINK_TRAVERSAL)
+                        links += PendingLink(link, entry.linkTarget, resolved)
+                    }
 
                     TarEntryKind.DIRECTORY -> {
                         val target = resolveEntry(destination, entry.name)
@@ -229,16 +378,39 @@ class WcpInstaller @Inject constructor(private val json: Json) {
                     TarEntryKind.FILE -> {
                         // `profile.json` is written from the bytes already read and
                         // validated, so the copy in the archive is not extracted twice.
-                        if (entry.name == PROFILE) continue
+                        if (entry.name == WCP_PROFILE) continue
                         val target = resolveEntry(destination, entry.name)
                             ?: return refuse(entry.name, TRAVERSAL)
                         target.parentFile?.let { if (!it.isDirectory) it.mkdirs() }
                         target.outputStream().buffered().use { tar.copyBodyTo(it) }
                         if (entry.mode and OWNER_EXECUTE != 0) target.setExecutable(true, true)
                         files++
+                        written += entry.size
+                        if (written - checkedAt >= SPACE_CHECK_INTERVAL) {
+                            checkedAt = written
+                            val free = space.usableBytes(destination)
+                            if (free < HEADROOM_BYTES) {
+                                return ExtractOutcome.Refused(
+                                    WcpInstallResult.InsufficientSpace(
+                                        requiredBytes = written + HEADROOM_BYTES,
+                                        freeBytes = free,
+                                        partway = true,
+                                    ),
+                                )
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        for (link in links) {
+            if (!createLink(link.link, link.target, link.resolved)) {
+                return ExtractOutcome.Refused(
+                    WcpInstallResult.Malformed("could not create the link ${link.link.name}"),
+                )
+            }
+            files++
         }
         return ExtractOutcome.Ok(files)
     }
@@ -247,11 +419,39 @@ class WcpInstaller @Inject constructor(private val json: Json) {
         ExtractOutcome.Refused(WcpInstallResult.UnsafeEntry(entryName, why))
 
     /**
+     * Create one symlink, or copy its target when the filesystem cannot.
+     *
+     * The link is relative, exactly as the archive wrote it, because that is what
+     * makes `bin/wineboot -> wine` keep working after the store directory is
+     * renamed into place.
+     *
+     * The copy is a fallback for a filesystem with no symlink support — a JVM on
+     * Windows without the create-symlink privilege, which is where these tests
+     * run. It costs disk rather than correctness: Wine dispatches on `argv[0]`,
+     * so a real file named `wineboot` behaves the same as a link to `wine`.
+     */
+    private fun createLink(link: File, target: String, resolved: File): Boolean {
+        link.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) return false }
+        if (link.exists() || Files.isSymbolicLink(link.toPath())) link.delete()
+
+        val linked = runCatching {
+            Files.createSymbolicLink(
+                link.toPath(),
+                Paths.get(target.replace('/', File.separatorChar)),
+            )
+        }.isSuccess
+        if (linked) return true
+
+        if (!resolved.isFile) return false
+        return runCatching { resolved.copyTo(link, overwrite = true) }.isSuccess
+    }
+
+    /**
      * Replace [destination] with [staging], leaving nothing of the old version.
      *
-     * A rename, because staging lives in the same container directory and so on
-     * the same filesystem. The recursive copy is the fallback for the case where
-     * it does not, which on internal storage it should not.
+     * A rename, because staging lives under the store root and so on the same
+     * filesystem. The recursive copy is the fallback for the case where it does
+     * not, which on internal storage it should not.
      */
     private fun swapIntoPlace(staging: File, destination: File): Boolean {
         destination.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) return false }
@@ -285,6 +485,51 @@ class WcpInstaller @Inject constructor(private val json: Json) {
         if (segments.isEmpty()) return null
         if (segments.any { it == ".." }) return null
 
+        return within(destination, segments)
+    }
+
+    /**
+     * Where a symlink points, or null when it points anywhere this app will not
+     * follow.
+     *
+     * Resolved against the link's *own* directory, which is what a relative
+     * symlink means: `bin/wineboot -> wine` is `bin/wine`, not `wine`. The
+     * `..` walk is done lexically and refuses the moment it would step above the
+     * extraction root, so an escape is rejected rather than clamped — and the
+     * canonical containment check underneath catches anything the walk missed.
+     *
+     * Absolute targets are refused outright, POSIX and Windows alike. There is
+     * no such thing as a legitimate absolute link in a relocatable package: the
+     * store directory it lands in is not the directory it was built in.
+     */
+    internal fun resolveLink(destination: File, entryName: String, linkTarget: String): File? {
+        if (linkTarget.isBlank()) return null
+        if (linkTarget.contains('\\')) return null
+        if (linkTarget.startsWith('/')) return null
+        if (linkTarget.length >= 2 && linkTarget[1] == ':') return null
+
+        val linkSegments = entryName.split('/').filter { it.isNotEmpty() && it != "." }
+        if (linkSegments.isEmpty() || linkSegments.any { it == ".." }) return null
+
+        val segments = linkSegments.dropLast(1).toMutableList()
+        for (segment in linkTarget.split('/')) {
+            when {
+                segment.isEmpty() || segment == "." -> continue
+                segment == ".." -> {
+                    if (segments.isEmpty()) return null
+                    segments.removeAt(segments.size - 1)
+                }
+
+                else -> segments += segment
+            }
+        }
+        if (segments.isEmpty()) return null
+
+        return within(destination, segments)
+    }
+
+    /** [segments] under [destination], or null when the canonical path escapes it. */
+    private fun within(destination: File, segments: List<String>): File? {
         val root = destination.canonicalFile
         val target = File(root, segments.joinToString(File.separator))
         val canonical = runCatching { target.canonicalFile }.getOrNull() ?: return null
@@ -306,12 +551,29 @@ class WcpInstaller @Inject constructor(private val json: Json) {
         TarReader(WcpArchive.open(archive, compression)).use { tar ->
             while (true) {
                 val entry = tar.next() ?: return null
-                if (entry.kind == TarEntryKind.FILE && entry.name == PROFILE) {
+                if (entry.kind == TarEntryKind.FILE && entry.name == WCP_PROFILE) {
                     return tar.readBody()
                 }
             }
         }
     }
+
+    private fun writeRecord(
+        into: ComponentStoreLayout,
+        type: ComponentType,
+        versionCode: Int,
+        packageId: String?,
+    ) {
+        if (packageId == null) return
+        runCatching {
+            val file = into.record(type, versionCode)
+            file.parentFile?.let { if (!it.isDirectory) it.mkdirs() }
+            file.writeText(json.encodeToString(ComponentRecord.serializer(), ComponentRecord(packageId)))
+        }
+    }
+
+    private fun countFiles(directory: File): Int =
+        directory.walkTopDown().count { it.isFile }
 
     /**
      * The digest published beside the package.
@@ -352,10 +614,20 @@ class WcpInstaller @Inject constructor(private val json: Json) {
     }
 
     private companion object {
-        const val PROFILE = "profile.json"
         const val SIDECAR_SUFFIX = ".sha256"
         const val SHA256_HEX_LENGTH = 64
         const val OWNER_EXECUTE = 0b001_000_000
         const val TRAVERSAL = "the path escapes the component directory"
+        const val LINK_TRAVERSAL =
+            "a link target must be relative and stay inside the component directory"
+
+        /** Wine, the worst of the measured set, expands 14.5×. */
+        const val EXPANSION_ESTIMATE = 15L
+
+        /** Never fill the device: 64 MiB stays free whatever the package needs. */
+        const val HEADROOM_BYTES = 64L * 1024 * 1024
+
+        /** How much is written between two `usableSpace` calls during extraction. */
+        const val SPACE_CHECK_INTERVAL = 64L * 1024 * 1024
     }
 }

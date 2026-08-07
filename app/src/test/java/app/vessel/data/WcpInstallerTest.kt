@@ -1,5 +1,6 @@
 package app.vessel.data
 
+import app.vessel.core.ComponentType
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -11,16 +12,19 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.nio.file.Files
 
 /**
  * The installer, against archives that are real tars.
  *
- * Two things here are worth more than the rest. The xz tests are the ones that
+ * Three things here are worth more than the rest. The xz tests are the ones that
  * say the app can install a package at all — xz is what `build/package_wcp.py`
  * produces, so an xz package that installs end to end is the difference between
- * a working app and one whose every download is refused. And the traversal tests
- * are the security boundary: a `.wcp` is downloaded content, and every one of
- * these entry shapes is a way out of the destination directory.
+ * a working app and one whose every download is refused. The traversal tests are
+ * the security boundary: a `.wcp` is downloaded content, and every one of these
+ * entry shapes is a way out of the destination directory. And the symlink tests
+ * are both at once — the Wine package's twelve `bin/` links are how `wineboot`
+ * exists at all, and a link target is another way out.
  */
 class WcpInstallerTest {
 
@@ -31,13 +35,16 @@ class WcpInstallerTest {
     private val installer = WcpInstaller(json)
 
     private lateinit var paths: ContainerPaths
-    private lateinit var layout: ContainerLayout
+    private lateinit var store: ComponentStoreLayout
     private lateinit var packages: File
+
+    /** Where `TestWcp.standard`'s default package lands. */
+    private val dxvk: File get() = store.version(ComponentType.DXVK, 20701)
 
     @Before
     fun setUp() {
         paths = ContainerPaths(temp.newFolder("files"))
-        layout = paths.of("container-a")
+        store = paths.components
         packages = temp.newFolder("packages")
     }
 
@@ -50,11 +57,11 @@ class WcpInstallerTest {
         archive.writeBytes(byteArrayOf(0x28, 0xB5.toByte(), 0x2F, 0xFD.toByte()) + ByteArray(64))
 
         assertEquals(WcpCompression.ZSTD, WcpArchive.detect(archive))
-        val result = installer.installBlocking(archive, layout)
+        val result = installer.installBlocking(archive, store)
         val failure = result as WcpInstallResult.UnsupportedCompression
         assertEquals(WcpCompression.ZSTD, failure.compression)
         assertTrue(failure.summary.contains("zstd"))
-        assertFalse(layout.components.exists())
+        assertFalse(store.root.exists())
     }
 
     @Test
@@ -78,7 +85,7 @@ class WcpInstallerTest {
         archive.writeBytes("this is not an archive".toByteArray())
         assertEquals(WcpCompression.UNKNOWN, WcpArchive.detect(archive))
         assertTrue(
-            installer.installBlocking(archive, layout)
+            installer.installBlocking(archive, store)
                 is WcpInstallResult.UnsupportedCompression,
         )
     }
@@ -94,17 +101,16 @@ class WcpInstallerTest {
         )
 
         assertEquals(WcpCompression.XZ, WcpArchive.detect(archive))
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
 
         assertEquals(WcpCompression.XZ, installed.compression)
         assertEquals(2, installed.fileCount)
         assertEquals("2.7.1", installed.profile.versionName)
 
-        val destination = File(layout.components, "DXVK")
-        assertEquals(destination, installed.directory)
-        assertEquals("dxgi", File(destination, "x64/dxgi.dll").readText())
-        assertEquals("d3d11", File(destination, "x64/d3d11.dll").readText())
-        assertTrue(File(destination, "profile.json").isFile)
+        assertEquals(dxvk, installed.directory)
+        assertEquals("dxgi", File(dxvk, "x64/dxgi.dll").readText())
+        assertEquals("d3d11", File(dxvk, "x64/d3d11.dll").readText())
+        assertTrue(File(dxvk, "profile.json").isFile)
     }
 
     @Test
@@ -117,15 +123,15 @@ class WcpInstallerTest {
             codec = TestCodec.XZ,
         )
         assertEquals(WcpCompression.XZ, WcpArchive.detect(archive))
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
-        assertEquals(File(layout.components, "Turnip"), installed.directory)
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
+        assertEquals(store.version(ComponentType.TURNIP, 20701), installed.directory)
     }
 
     @Test
     fun `an xz package is gated on its sha256 sidecar like any other`() {
         val good = TestWcp.standard(File(packages, "dxvk.wcp"), codec = TestCodec.XZ)
         TestWcp.writeSidecar(good)
-        val installed = installer.installBlocking(good, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(good, store) as WcpInstallResult.Installed
         assertTrue(installed.checksumVerified)
         assertEquals(WcpCompression.XZ, installed.compression)
 
@@ -133,9 +139,9 @@ class WcpInstallerTest {
         // perfectly well is still refused when it is not the one published.
         val wrong = TestWcp.standard(File(packages, "wine.wcp"), type = "Wine", codec = TestCodec.XZ)
         TestWcp.writeSidecar(wrong, digest = "0".repeat(64))
-        val failure = installer.installBlocking(wrong, layout) as WcpInstallResult.ChecksumMismatch
+        val failure = installer.installBlocking(wrong, store) as WcpInstallResult.ChecksumMismatch
         assertEquals("0".repeat(64), failure.expected)
-        assertFalse(File(layout.components, "Wine").exists())
+        assertFalse(store.type(ComponentType.WINE).exists())
     }
 
     @Test
@@ -146,7 +152,7 @@ class WcpInstallerTest {
         val archive = File(packages, "wine.wcp")
         archive.writeBytes(TestWcp.compress(bulkTar(), TestCodec.XZ))
 
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
         assertEquals(1, installed.fileCount)
         assertArrayEquals(bulkPayload, File(installed.directory, "x64/dxgi.dll").readBytes())
     }
@@ -159,7 +165,7 @@ class WcpInstallerTest {
         archive.writeBytes(full.copyOfRange(0, full.size * 2 / 3))
 
         assertEquals(WcpCompression.XZ, WcpArchive.detect(archive))
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.Malformed)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.Malformed)
         assertNoResidue()
     }
 
@@ -175,7 +181,7 @@ class WcpInstallerTest {
         archive.writeBytes(bytes)
 
         assertEquals(WcpCompression.XZ, WcpArchive.detect(archive))
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.Malformed)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.Malformed)
         assertNoResidue()
     }
 
@@ -198,21 +204,21 @@ class WcpInstallerTest {
 
     /** Nothing installed, and no staging directory left behind. */
     private fun assertNoResidue() {
-        assertFalse(File(layout.components, "DXVK").exists())
-        assertEquals(emptyList<File>(), layout.tmp.listFiles()?.toList().orEmpty())
+        assertFalse(dxvk.exists())
+        assertEquals(emptyList<File>(), store.staging.listFiles()?.toList().orEmpty())
     }
 
     // — the happy path --------------------------------------------------------
 
     @Test
-    fun `a gzip package installs under its type and keeps its profile`() {
+    fun `a gzip package installs under its type and version, and keeps its profile`() {
         val archive = TestWcp.standard(
             File(packages, "dxvk.wcp"),
             payload = mapOf("x64/dxgi.dll" to "dxgi", "x64/d3d11.dll" to "d3d11"),
             codec = TestCodec.GZIP,
         )
 
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
 
         assertEquals(WcpCompression.GZIP, installed.compression)
         assertEquals(2, installed.fileCount)
@@ -222,25 +228,36 @@ class WcpInstallerTest {
         assertEquals("-mcpu=oryon-1", installed.profile.vessel?.provenance?.cpuFlags)
         assertEquals("9c51ede5", installed.profile.vessel?.provenance?.sourceSha)
 
-        val destination = File(layout.components, "DXVK")
-        assertEquals(destination, installed.directory)
-        assertEquals("dxgi", File(destination, "x64/dxgi.dll").readText())
-        assertEquals("d3d11", File(destination, "x64/d3d11.dll").readText())
-        assertTrue(File(destination, "profile.json").isFile)
+        assertEquals(dxvk, installed.directory)
+        assertEquals("dxgi", File(dxvk, "x64/dxgi.dll").readText())
+        assertEquals("d3d11", File(dxvk, "x64/d3d11.dll").readText())
+        assertTrue(File(dxvk, "profile.json").isFile)
     }
 
     @Test
     fun `an uncompressed package installs the same way`() {
         val archive = TestWcp.standard(File(packages, "turnip.wcp"), type = "Turnip")
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
-        assertEquals(File(layout.components, "Turnip"), installed.directory)
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
+        assertEquals(store.version(ComponentType.TURNIP, 20701), installed.directory)
     }
 
     @Test
-    fun `staging is cleaned up, so tmp does not accumulate`() {
+    fun `the package id is recorded beside the version, not inside it`() {
         val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
-        installer.installBlocking(archive, layout)
-        assertEquals(emptyList<File>(), layout.tmp.listFiles()?.toList().orEmpty())
+        installer.installBlocking(archive, store, packageId = "dxvk-2.7.1-canoe")
+
+        val record = store.record(ComponentType.DXVK, 20701)
+        assertTrue(record.isFile)
+        assertTrue(record.readText().contains("dxvk-2.7.1-canoe"))
+        // The version directory holds the package and nothing this app added.
+        assertFalse(File(dxvk, "20701.json").exists())
+    }
+
+    @Test
+    fun `staging is cleaned up, so the store does not accumulate`() {
+        val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
+        installer.installBlocking(archive, store)
+        assertEquals(emptyList<File>(), store.staging.listFiles()?.toList().orEmpty())
     }
 
     @Test
@@ -257,9 +274,184 @@ class WcpInstallerTest {
             ),
         )
 
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
         assertEquals(1, installed.fileCount)
         assertEquals("payload", File(installed.directory, longName).readText())
+    }
+
+    // — symlinks, which the Wine package cannot work without ------------------
+
+    /**
+     * Twelve of these ship in the Wine package, all in `bin/` and all pointing
+     * at `wine` beside them. Wine dispatches on `argv[0]`, so `bin/wineboot` is
+     * not an alias for convenience — it is the only way to initialise a prefix.
+     * An installer that drops them reports success and produces a Wine that can
+     * never provision a container.
+     */
+    @Test
+    fun `a relative symlink survives installation and resolves to the real file`() {
+        val archive = TestWcp.write(
+            File(packages, "wine.wcp"),
+            listOf(
+                TestTarEntry("profile.json", wineProfile()),
+                TestTarEntry("bin/wine", "the real binary".toByteArray()),
+                TestTarEntry("bin/wineboot", typeFlag = '2', linkTarget = "wine"),
+                TestTarEntry("bin/winecfg", typeFlag = '2', linkTarget = "wine"),
+            ),
+        )
+
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
+        val wine = store.version(ComponentType.WINE, 1013)
+        assertEquals(wine, installed.directory)
+        assertEquals(3, installed.fileCount)
+
+        assertEquals("the real binary", File(wine, "bin/wineboot").readText())
+        assertEquals("the real binary", File(wine, "bin/winecfg").readText())
+        if (symlinksSupported) {
+            assertTrue(Files.isSymbolicLink(File(wine, "bin/wineboot").toPath()))
+            // Relative, so it keeps working after the staging directory is
+            // renamed into place — which it already has been by now.
+            assertEquals("wine", Files.readSymbolicLink(File(wine, "bin/wineboot").toPath()).toString())
+        }
+    }
+
+    @Test
+    fun `a symlink into a sibling directory is allowed and resolved against its own directory`() {
+        val archive = TestWcp.write(
+            File(packages, "wine.wcp"),
+            listOf(
+                TestTarEntry("profile.json", wineProfile()),
+                TestTarEntry("lib/wine/libwine.so", "library".toByteArray()),
+                TestTarEntry("bin/libwine.so", typeFlag = '2', linkTarget = "../lib/wine/libwine.so"),
+            ),
+        )
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
+        assertEquals("library", File(installed.directory, "bin/libwine.so").readText())
+    }
+
+    @Test
+    fun `an absolute symlink target is refused`() {
+        val failure = installLink("/system/lib64/libc.so") as WcpInstallResult.UnsafeEntry
+        assertEquals("bin/wineboot", failure.entryName)
+        assertTrue(failure.why.contains("relative"))
+        assertFalse(store.version(ComponentType.WINE, 1013).exists())
+    }
+
+    @Test
+    fun `a Windows absolute symlink target is refused too`() {
+        assertTrue(installLink("""C:\windows\system32\bad.dll""") is WcpInstallResult.UnsafeEntry)
+        assertTrue(installLink("""windows\bad.dll""") is WcpInstallResult.UnsafeEntry)
+    }
+
+    @Test
+    fun `a symlink that escapes the component directory is refused`() {
+        assertTrue(installLink("../../../etc/passwd") is WcpInstallResult.UnsafeEntry)
+        assertTrue(installLink("../../escaped.so") is WcpInstallResult.UnsafeEntry)
+        assertFalse(store.version(ComponentType.WINE, 1013).exists())
+    }
+
+    @Test
+    fun `an empty symlink target is refused rather than guessed at`() {
+        assertTrue(installLink("") is WcpInstallResult.UnsafeEntry)
+    }
+
+    @Test
+    fun `a hard link is still refused outright`() {
+        val archive = TestWcp.write(
+            File(packages, "hard.wcp"),
+            listOf(
+                TestTarEntry("profile.json", wineProfile()),
+                TestTarEntry("bin/wine", "the real binary".toByteArray()),
+                TestTarEntry("bin/wineboot", typeFlag = '1', linkTarget = "bin/wine"),
+            ),
+        )
+        val failure = installer.installBlocking(archive, store) as WcpInstallResult.UnsafeEntry
+        assertTrue(failure.why.contains("hard link"))
+        assertFalse(store.version(ComponentType.WINE, 1013).exists())
+    }
+
+    @Test
+    fun `a device node is still refused`() {
+        val archive = TestWcp.write(
+            File(packages, "dev.wcp"),
+            listOf(
+                TestTarEntry("profile.json", TestWcp.profileJson().toByteArray()),
+                TestTarEntry("dev/null", ByteArray(0), typeFlag = '3'),
+            ),
+        )
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.UnsafeEntry)
+    }
+
+    @Test
+    fun `the link guard accepts what the Wine package contains and rejects every escape`() {
+        val destination = temp.newFolder("dest")
+
+        assertEquals(
+            File(destination, "bin${File.separator}wine").canonicalFile,
+            installer.resolveLink(destination, "bin/wineboot", "wine"),
+        )
+        assertEquals(
+            File(destination, "lib${File.separator}libwine.so").canonicalFile,
+            installer.resolveLink(destination, "bin/libwine.so", "../lib/libwine.so"),
+        )
+        // `.` is the link's own directory, not the extraction root.
+        assertEquals(
+            File(destination, "bin${File.separator}wine").canonicalFile,
+            installer.resolveLink(destination, "bin/wineboot", "./wine"),
+        )
+        assertEquals(
+            File(destination, "wine").canonicalFile,
+            installer.resolveLink(destination, "wineboot", "./wine"),
+        )
+
+        assertNull(installer.resolveLink(destination, "bin/wineboot", ""))
+        assertNull(installer.resolveLink(destination, "bin/wineboot", "  "))
+        assertNull(installer.resolveLink(destination, "bin/wineboot", "/etc/passwd"))
+        assertNull(installer.resolveLink(destination, "bin/wineboot", "C:/windows/bad.dll"))
+        assertNull(installer.resolveLink(destination, "bin/wineboot", """..\..\escaped"""))
+        assertNull(installer.resolveLink(destination, "bin/wineboot", "../../escaped"))
+        assertNull(installer.resolveLink(destination, "bin/wineboot", "../wine/../../escaped"))
+        assertNull(installer.resolveLink(destination, "wineboot", "../escaped"))
+        // A link to the extraction root itself names nothing to link to.
+        assertNull(installer.resolveLink(destination, "bin/wineboot", ".."))
+    }
+
+    /** A `.wcp` whose only link is `bin/wineboot -> [target]`. */
+    private fun installLink(target: String): WcpInstallResult {
+        val archive = TestWcp.write(
+            File(packages, "link-${target.hashCode()}.wcp"),
+            listOf(
+                TestTarEntry("profile.json", wineProfile()),
+                TestTarEntry("bin/wine", "the real binary".toByteArray()),
+                TestTarEntry("bin/wineboot", typeFlag = '2', linkTarget = target),
+            ),
+        )
+        return installer.installBlocking(archive, store)
+    }
+
+    private fun wineProfile(): ByteArray = TestWcp.profileJson(
+        type = "Wine",
+        versionName = "10.13",
+        versionCode = 1013,
+        name = "Wine 10.13 (canoe)",
+        files = listOf("bin/wine"),
+    ).toByteArray()
+
+    /**
+     * Whether this JVM may create a symlink at all.
+     *
+     * Windows refuses without the create-symlink privilege, which is why the
+     * installer falls back to copying the target. The observable outcome — the
+     * name resolves to the target's bytes — is asserted either way; only the
+     * mechanism is conditional.
+     */
+    private val symlinksSupported: Boolean by lazy {
+        runCatching {
+            val probe = temp.newFolder("symlink-probe")
+            File(probe, "target").writeText("x")
+            Files.createSymbolicLink(File(probe, "link").toPath(), java.nio.file.Paths.get("target"))
+            true
+        }.getOrDefault(false)
     }
 
     // — checksums -------------------------------------------------------------
@@ -269,10 +461,10 @@ class WcpInstallerTest {
         val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
         TestWcp.writeSidecar(archive, digest = "0".repeat(64))
 
-        val failure = installer.installBlocking(archive, layout)
+        val failure = installer.installBlocking(archive, store)
             as WcpInstallResult.ChecksumMismatch
         assertEquals("0".repeat(64), failure.expected)
-        assertFalse(File(layout.components, "DXVK").exists())
+        assertFalse(dxvk.exists())
     }
 
     @Test
@@ -280,7 +472,7 @@ class WcpInstallerTest {
         val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
         TestWcp.writeSidecar(archive)
 
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
         assertTrue(installed.checksumVerified)
     }
 
@@ -289,14 +481,14 @@ class WcpInstallerTest {
         val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
         TestWcp.writeSidecar(archive)
 
-        val failure = installer.installBlocking(archive, layout, expectedSha256 = "f".repeat(64))
+        val failure = installer.installBlocking(archive, store, expectedSha256 = "f".repeat(64))
         assertTrue(failure is WcpInstallResult.ChecksumMismatch)
     }
 
     @Test
     fun `no sidecar installs but says so, rather than claiming verification`() {
         val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
-        val installed = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
+        val installed = installer.installBlocking(archive, store) as WcpInstallResult.Installed
         assertFalse(installed.checksumVerified)
         assertTrue(installed.summary.contains("checksum not verified"))
     }
@@ -306,6 +498,41 @@ class WcpInstallerTest {
         val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
         TestWcp.writeSidecar(archive)
         assertEquals(TestWcp.sha256(archive), installer.readSidecar(archive))
+    }
+
+    // — free space ------------------------------------------------------------
+
+    @Test
+    fun `an install that will not fit is refused before anything is extracted`() {
+        // 40 MB free against a 4 MiB package. Wine is 63 MB compressed and
+        // 912 MB unpacked, so the archive's own size is the only figure
+        // available before extracting and it is multiplied by the worst
+        // measured expansion. The number the user is shown is one they can act
+        // on; an IOException nine tenths of the way through is not.
+        val cramped = WcpInstaller(json) { 40L * 1024 * 1024 }
+        val archive = TestWcp.write(
+            File(packages, "wine.wcp"),
+            listOf(
+                TestTarEntry("profile.json", wineProfile()),
+                TestTarEntry("bin/wine", ByteArray(4 * 1024 * 1024)),
+            ),
+        )
+
+        val failure = cramped.installBlocking(archive, store) as WcpInstallResult.InsufficientSpace
+        assertEquals(40L * 1024 * 1024, failure.freeBytes)
+        assertTrue(failure.requiredBytes > failure.freeBytes)
+        assertTrue(failure.summary.contains("40 MB free"))
+        assertFalse("nothing was extracted, so the figure is not a floor", failure.partway)
+        assertFalse(failure.summary.contains("at least"))
+        assertFalse(store.version(ComponentType.WINE, 1013).exists())
+        assertEquals(emptyList<File>(), store.staging.listFiles()?.toList().orEmpty())
+    }
+
+    @Test
+    fun `a package that fits is not refused`() {
+        val roomy = WcpInstaller(json) { 8L * 1024 * 1024 * 1024 }
+        val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
+        assertTrue(roomy.installBlocking(archive, store) is WcpInstallResult.Installed)
     }
 
     // — the traversal guard ---------------------------------------------------
@@ -320,10 +547,10 @@ class WcpInstallerTest {
             ),
         )
 
-        val failure = installer.installBlocking(archive, layout) as WcpInstallResult.UnsafeEntry
+        val failure = installer.installBlocking(archive, store) as WcpInstallResult.UnsafeEntry
         assertEquals("../../escaped.so", failure.entryName)
-        assertFalse(File(layout.components, "DXVK").exists())
-        assertFalse(File(layout.base.parentFile, "escaped.so").exists())
+        assertFalse(dxvk.exists())
+        assertFalse(File(store.root, "escaped.so").exists())
     }
 
     @Test
@@ -335,7 +562,7 @@ class WcpInstallerTest {
                 TestTarEntry("x64/../../../escaped.so", "pwned".toByteArray()),
             ),
         )
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.UnsafeEntry)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.UnsafeEntry)
     }
 
     @Test
@@ -347,32 +574,7 @@ class WcpInstallerTest {
                 TestTarEntry("/data/data/app.vessel/files/owned.so", "pwned".toByteArray()),
             ),
         )
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.UnsafeEntry)
-    }
-
-    @Test
-    fun `a symlink entry is refused rather than followed`() {
-        val archive = TestWcp.write(
-            File(packages, "link.wcp"),
-            listOf(
-                TestTarEntry("profile.json", TestWcp.profileJson().toByteArray()),
-                TestTarEntry("x64/dxgi.dll", ByteArray(0), typeFlag = '2'),
-            ),
-        )
-        val failure = installer.installBlocking(archive, layout) as WcpInstallResult.UnsafeEntry
-        assertTrue(failure.why.contains("link"))
-    }
-
-    @Test
-    fun `a device node is refused`() {
-        val archive = TestWcp.write(
-            File(packages, "dev.wcp"),
-            listOf(
-                TestTarEntry("profile.json", TestWcp.profileJson().toByteArray()),
-                TestTarEntry("dev/null", ByteArray(0), typeFlag = '3'),
-            ),
-        )
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.UnsafeEntry)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.UnsafeEntry)
     }
 
     @Test
@@ -398,43 +600,66 @@ class WcpInstallerTest {
         assertNull(installer.resolveEntry(destination, "."))
     }
 
-    // — idempotency -----------------------------------------------------------
+    // — the shared store ------------------------------------------------------
 
     @Test
-    fun `installing over an existing version replaces it, leaving no stale files`() {
-        val first = TestWcp.standard(
+    fun `installing a version that is already there extracts nothing and succeeds`() {
+        val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
+        val once = installer.installBlocking(archive, store) as WcpInstallResult.Installed
+        assertFalse(once.reused)
+
+        val marker = File(dxvk, "x64/dxgi.dll")
+        val stamp = marker.lastModified()
+
+        val twice = installer.installBlocking(archive, store) as WcpInstallResult.Installed
+        assertTrue("the same version is the same bytes", twice.reused)
+        assertEquals(once.directory, twice.directory)
+        assertEquals(stamp, marker.lastModified())
+        assertTrue(twice.summary.contains("already in the shared store"))
+    }
+
+    @Test
+    fun `a different version of the same type is installed alongside, not over`() {
+        val old = TestWcp.standard(
             File(packages, "dxvk-2.7.1.wcp"),
             versionName = "2.7.1",
             versionCode = 20701,
-            payload = mapOf("x64/dxgi.dll" to "old", "x64/gone.dll" to "removed next version"),
+            payload = mapOf("x64/dxgi.dll" to "old"),
         )
-        installer.installBlocking(first, layout)
-        val destination = File(layout.components, "DXVK")
-        assertTrue(File(destination, "x64/gone.dll").isFile)
-
-        val second = TestWcp.standard(
+        val new = TestWcp.standard(
             File(packages, "dxvk-2.8.0.wcp"),
             versionName = "2.8.0",
             versionCode = 20800,
             payload = mapOf("x64/dxgi.dll" to "new"),
         )
-        val installed = installer.installBlocking(second, layout) as WcpInstallResult.Installed
+        installer.installBlocking(old, store)
+        installer.installBlocking(new, store)
 
-        assertEquals("2.8.0", installed.profile.versionName)
-        assertEquals("new", File(destination, "x64/dxgi.dll").readText())
-        assertFalse(
-            "a file the new build dropped must not survive as a stale copy",
-            File(destination, "x64/gone.dll").exists(),
-        )
+        // Two containers on two DXVK builds both work.
+        assertEquals("old", File(store.version(ComponentType.DXVK, 20701), "x64/dxgi.dll").readText())
+        assertEquals("new", File(store.version(ComponentType.DXVK, 20800), "x64/dxgi.dll").readText())
+        assertEquals(listOf(20800, 20701), store.versions(ComponentType.DXVK))
     }
 
     @Test
-    fun `installing the same package twice is stable`() {
-        val archive = TestWcp.standard(File(packages, "dxvk.wcp"))
-        val once = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
-        val twice = installer.installBlocking(archive, layout) as WcpInstallResult.Installed
-        assertEquals(once.fileCount, twice.fileCount)
-        assertEquals(once.directory, twice.directory)
+    fun `re-installing one version leaves no stale file from a failed earlier attempt`() {
+        // Same versionCode, different contents: only reachable by clearing the
+        // version out first, which is what a re-download after corruption does.
+        val first = TestWcp.standard(
+            File(packages, "dxvk-a.wcp"),
+            payload = mapOf("x64/dxgi.dll" to "old", "x64/gone.dll" to "removed next build"),
+        )
+        installer.installBlocking(first, store)
+        assertTrue(File(dxvk, "x64/gone.dll").isFile)
+        dxvk.deleteRecursively()
+
+        val second = TestWcp.standard(
+            File(packages, "dxvk-b.wcp"),
+            payload = mapOf("x64/dxgi.dll" to "new"),
+        )
+        installer.installBlocking(second, store)
+        assertEquals("new", File(dxvk, "x64/dxgi.dll").readText())
+        assertFalse(File(dxvk, "x64/gone.dll").exists())
     }
 
     // — malformed packages ----------------------------------------------------
@@ -443,9 +668,9 @@ class WcpInstallerTest {
     fun `an unknown package type is refused by name`() {
         // Box64 is a real Winlator type this app deliberately cannot load.
         val archive = TestWcp.standard(File(packages, "box64.wcp"), type = "Box64")
-        val failure = installer.installBlocking(archive, layout) as WcpInstallResult.UnknownType
+        val failure = installer.installBlocking(archive, store) as WcpInstallResult.UnknownType
         assertEquals("Box64", failure.wire)
-        assertFalse(layout.components.listFiles()?.isNotEmpty() ?: false)
+        assertFalse(store.root.listFiles()?.isNotEmpty() ?: false)
     }
 
     @Test
@@ -454,7 +679,7 @@ class WcpInstallerTest {
             File(packages, "bare.wcp"),
             listOf(TestTarEntry("x64/dxgi.dll", "no manifest".toByteArray())),
         )
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.Malformed)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.Malformed)
     }
 
     @Test
@@ -463,12 +688,12 @@ class WcpInstallerTest {
             File(packages, "broken.wcp"),
             listOf(TestTarEntry("profile.json", "{not json".toByteArray())),
         )
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.Malformed)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.Malformed)
     }
 
     @Test
     fun `a missing file is reported as missing`() {
-        val result = installer.installBlocking(File(packages, "nope.wcp"), layout)
+        val result = installer.installBlocking(File(packages, "nope.wcp"), store)
         assertTrue(result is WcpInstallResult.NotFound)
     }
 
@@ -483,6 +708,6 @@ class WcpInstallerTest {
         // Keep the ustar magic intact so it is still detected as a tar.
         archive.writeBytes(bytes)
 
-        assertTrue(installer.installBlocking(archive, layout) is WcpInstallResult.Malformed)
+        assertTrue(installer.installBlocking(archive, store) is WcpInstallResult.Malformed)
     }
 }

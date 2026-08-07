@@ -22,10 +22,14 @@ data class RegistryKey(val path: String, val values: List<RegistryValue>)
 /**
  * The registry a fresh prefix needs, as data and as a `.reg` file.
  *
- * Applying it needs `regedit` in a running prefix, so
- * [app.vessel.data.ContainerProvisioner] renders this to `prefix-seed.reg` and
- * stops. The split keeps the seed's *content* reviewable and testable now,
- * independently of how the app eventually executes anything.
+ * [app.vessel.data.ContainerProvisioner] renders it to `prefix-seed.reg`;
+ * `app.vessel.data.SessionRuntime` runs `regedit` on that file once the prefix
+ * has been booted. The split keeps the seed's *content* reviewable and testable
+ * without a device, which is why it survived the launcher being written.
+ *
+ * Two of the four keys are load-bearing rather than advisory: without
+ * [arm64ecEmulator] and [x86Emulator] Wine looks for Microsoft's `xtajit64.dll`
+ * and `xtajit.dll`, finds neither, and no translated code runs at all.
  */
 object PrefixRegistry {
 
@@ -74,11 +78,25 @@ object PrefixRegistry {
     /**
      * Where Wine looks for the ARM64EC emulator, i.e. FEX.
      *
-     * Read by `load_arm64ec_module()` (`dlls/ntdll/loader.c:4233`), which appends
-     * the default value to `C:\windows\system32\`. Absent, it falls back to
-     * `libarm64ecfex.dll` — the same answer — so this asserts the value Wine
-     * would pick anyway rather than repairing anything. `wine.inf.in:436` writes
-     * it during `wineboot` with NOCLOBBER, so either ordering lands correctly.
+     * **Required, not an assertion.** Read by `load_arm64ec_module()`
+     * (`dlls/ntdll/loader.c:4275` in Wine 11.14), which starts from the literal
+     * `C:\windows\system32\xtajit64.dll` and overwrites only the filename with
+     * this value. Absent, Wine looks for Microsoft's `xtajit64.dll`, which we do
+     * not ship — and the miss is *fatal*: `load_arm64ec_module` ends in
+     * `NtTerminateProcess`, so every x86-64 program dies at load with nothing but
+     * `could not load …xtajit64.dll` to go on.
+     *
+     * An earlier version of this comment claimed the built-in fallback was
+     * already `libarm64ecfex.dll`, and that has not been true on any tree this
+     * project builds. The value must be written.
+     *
+     * The data must be a bare filename — the reader substitutes it into a fixed
+     * `system32` path — and `REG_SZ`, which `info->Type == REG_SZ` enforces.
+     * `loader/wine.inf.in:400` writes the key during `wineboot` with NOCLOBBER
+     * (`FLG_ADDREG_NOCLOBBER`), so applying this seed *after* `wineboot`
+     * overwrites Wine's default and applying it before is preserved: either
+     * ordering lands correctly, which is what lets `SessionRuntime` boot the
+     * prefix first and apply the registry second.
      */
     val arm64ecEmulator: RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\amd64""",
@@ -88,15 +106,18 @@ object PrefixRegistry {
     /**
      * Where Wine looks for the 32-bit x86 emulator under WoW64, i.e. FEX again.
      *
-     * Read by `get_cpu_dll_name()` (`dlls/wow64/syscall.c:741`). Its built-in
-     * fallback is already `libwow64fex.dll` on an ARM64 native machine; recorded
-     * for the same reason as [arm64ecEmulator].
+     * **Also required.** Read by `get_cpu_dll_name()`
+     * (`dlls/wow64/syscall.c:909` in Wine 11.14). Its built-in fallback on an
+     * ARM64 host is `xtajit.dll`, *not* `libwow64fex.dll` — the previous comment
+     * here had that backwards, and with the key unwritten no 32-bit x86 program
+     * can start. `loader/wine.inf.in:402` writes `xtajit.dll` during `wineboot`,
+     * which is exactly the value this has to replace.
      *
-     * TODO: confirm on a booted prefix that these two are the *only* keys the
-     *  ARM64EC path consults. Reading `dlls/ntdll/loader.c` and
-     *  `dlls/wow64/syscall.c` found nothing else — FEX is configured entirely
-     *  through the environment, not the registry — but neither has been
-     *  exercised at runtime.
+     * The DLL is loaded by `load_64bit_module`, which resolves it against
+     * `get_machine_wow64_dir(IMAGE_FILE_MACHINE_TARGET_HOST)` — `system32`, the
+     * *64-bit* directory, not `syswow64`. `libwow64fex.dll` therefore deploys
+     * alongside `libarm64ecfex.dll`, which is what `SessionRuntime`'s root-level
+     * `.dll` rule already does for the FEX package.
      */
     val x86Emulator: RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\x86""",

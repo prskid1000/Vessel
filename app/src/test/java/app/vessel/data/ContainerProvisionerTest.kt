@@ -31,6 +31,7 @@ class ContainerProvisionerTest {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private lateinit var paths: ContainerPaths
+    private lateinit var store: ComponentStore
     private lateinit var provisioner: ContainerProvisioner
     private lateinit var packages: File
 
@@ -39,9 +40,14 @@ class ContainerProvisionerTest {
     @Before
     fun setUp() {
         paths = ContainerPaths(temp.newFolder("files"))
-        provisioner = ContainerProvisioner(paths, WcpInstaller(json), json)
+        store = ComponentStore(paths, WcpInstaller(json), json)
+        provisioner = ContainerProvisioner(paths, store, json)
         packages = temp.newFolder("packages")
     }
+
+    /** Where a component ends up now: the shared store, not the container. */
+    private fun stored(type: ComponentType, versionCode: Int = 1): File =
+        paths.components.version(type, versionCode)
 
     private fun component(
         type: ComponentType,
@@ -114,15 +120,18 @@ class ContainerProvisionerTest {
         assertEquals(1f, last.fraction, 0.0f)
         assertEquals(null, last.failedStep)
 
-        val layout = paths.of(containerId)
         assertEquals(
             "wine-10.13-canoe",
-            File(layout.component(ComponentType.WINE), "payload.bin").readText(),
+            File(stored(ComponentType.WINE), "payload.bin").readText(),
         )
         assertEquals(
             "dxvk-2.7.1-canoe",
-            File(layout.component(ComponentType.DXVK), "payload.bin").readText(),
+            File(stored(ComponentType.DXVK), "payload.bin").readText(),
         )
+        // The container owns none of those bytes; it owns a reference to them.
+        val state = runBlocking { provisioner.state(containerId) }
+        assertEquals(mapOf("Wine" to 1, "DXVK" to 1), state.componentVersions)
+        assertFalse(paths.of(containerId).legacyComponents.exists())
     }
 
     @Test
@@ -262,7 +271,14 @@ class ContainerProvisionerTest {
         )
         assertEquals(
             "dxvk-2.8.0-canoe",
-            File(paths.of(containerId).component(ComponentType.DXVK), "payload.bin").readText(),
+            File(stored(ComponentType.DXVK, 20800), "payload.bin").readText(),
+        )
+        // The old version is still in the store — nothing prunes it here — and
+        // the container's reference has moved to the new one.
+        assertTrue(stored(ComponentType.DXVK, 20701).isDirectory)
+        assertEquals(
+            20800,
+            runBlocking { provisioner.state(containerId) }.componentVersions["DXVK"],
         )
     }
 
@@ -270,7 +286,7 @@ class ContainerProvisionerTest {
     fun `a recorded install whose directory has gone is redone`() {
         val components = listOf(component(ComponentType.DXVK, "dxvk-2.7.1-canoe"))
         run(components)
-        paths.of(containerId).component(ComponentType.DXVK).deleteRecursively()
+        stored(ComponentType.DXVK).deleteRecursively()
 
         assertFalse(runBlocking { provisioner.isProvisioned(containerId, components) })
         val last = run(components).last()
@@ -293,6 +309,39 @@ class ContainerProvisionerTest {
         assertEquals(PrefixRegistry.SEED_VERSION, state.registrySeedVersion)
         assertEquals(InstalledRecord("wine-10.13-canoe", 1013), state.components["Wine"])
         assertEquals(InstalledRecord("dxvk-2.7.1-canoe", 20701), state.components["DXVK"])
+        assertEquals(mapOf("Wine" to 1013, "DXVK" to 20701), state.componentVersions)
+    }
+
+    @Test
+    fun `a second container on the same versions installs nothing and shares the store`() {
+        val components = listOf(
+            component(ComponentType.WINE, "wine-10.13-canoe", versionCode = 1013),
+            component(ComponentType.DXVK, "dxvk-2.7.1-canoe", versionCode = 20701),
+        )
+        run(components)
+        val wine = stored(ComponentType.WINE, 1013)
+        val stamp = File(wine, "payload.bin").lastModified()
+
+        val second = runBlocking {
+            provisioner.provision("c2", components).toList()
+        }.last()
+
+        assertEquals(ProvisionPhase.PROVISIONED, second.phase)
+        assertEquals(
+            ProvisionStatus.DONE,
+            second.steps.single { it.id == "component:Wine" }.status,
+        )
+        // Nothing was re-extracted: 912 MB of Wine is written once per device.
+        assertEquals(stamp, File(wine, "payload.bin").lastModified())
+        assertTrue(
+            second.steps.single { it.id == "component:Wine" }.detail
+                .orEmpty().contains("already in the shared store"),
+        )
+        // And both containers now reference it.
+        assertEquals(
+            setOf("c1", "c2"),
+            runBlocking { store.references() }[ComponentVersion(ComponentType.WINE, 1013)],
+        )
     }
 
     @Test

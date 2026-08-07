@@ -544,7 +544,7 @@ private fun VParamRowPreview() {
                 value = "1280x720",
                 control = {
                     VDropdownField(
-                        options = listOf("1280x720", "1600x900", "1920x1080", "native"),
+                        options = listOf("1280x720", "1920x1080", "2780x1264"),
                         labelFor = { it },
                         selected = "1280x720",
                         onSelect = {},
@@ -558,7 +558,7 @@ private fun VParamRowPreview() {
                 value = "60",
                 control = {
                     VDropdownField(
-                        options = listOf("30", "45", "60", "unlimited"),
+                        options = listOf("24", "30", "60", "90", "120", "165"),
                         labelFor = { it },
                         selected = "60",
                         onSelect = {},

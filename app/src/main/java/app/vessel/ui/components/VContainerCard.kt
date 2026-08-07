@@ -25,21 +25,21 @@ import app.vessel.ui.theme.vCard
 /**
  * The Containers home tile.
  *
- * Everything on it is a machine fact except the name, so everything but the
- * name is mono. [lastRunLabel] arrives already formatted — the card does no
- * clock arithmetic, which also makes it previewable and testable.
+ * The name and the launch action, and nothing else. Everything the card used to
+ * carry — the Wine build, the driver, the D3D layer, the last-run time — was
+ * either identical on every card in a build that compiles in one of each, or a
+ * fact the user could not act on from here.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VContainerCard(
     container: ContainerProfile,
-    lastRunLabel: String,
     onOpen: () -> Unit,
     onLaunch: () -> Unit,
     modifier: Modifier = Modifier,
     onLongPress: (() -> Unit)? = null,
 ) {
-    Column(
+    Row(
         modifier
             .fillMaxWidth()
             .vCard()
@@ -48,67 +48,34 @@ fun VContainerCard(
             // advertises cannot be the sole route to a destructive action.
             .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
             .padding(Vessel.metrics.s17),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // No architecture badge: there is one kind of container, so a pill here
-        // would say the same thing on every card.
+        // Name and launch, and nothing else.
+        //
+        // The card used to list the Wine build, driver and D3D layer, on the
+        // reasoning that they decide whether a program runs. They do — but this
+        // build compiles in exactly one of each, so every card carried three
+        // identical lines that no user could act on. Same argument as the
+        // architecture badge, which was dropped for the same reason.
         Text(
             container.name,
             style = Vessel.type.cardTitle,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.weight(1f),
         )
 
-        // Wine, driver and D3D layer are what actually decides whether a given
-        // program runs, so they sit on the tile rather than behind an edit.
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            VContainerFact("wine", container.wineBuild)
-            VContainerFact("driver", container.driver)
-            VContainerFact("d3d", container.d3dLayer)
-        }
-
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                lastRunLabel,
-                style = Vessel.type.monoSmall,
-                color = Vessel.colors.textMuted,
-                modifier = Modifier.weight(1f),
-            )
-            // Outlined and unlabelled, like every primary action in the system.
-            // A play triangle on a card that has already named the container is
-            // unambiguous, and the row is worth more to the last-run time. The
-            // content description carries the label for screen readers.
-            VIconAction(
-                icon = Icons.Filled.PlayArrow,
-                contentDescription = "Launch ${container.name}",
-                onClick = onLaunch,
-                style = VButtonStyle.Primary,
-            )
-        }
-    }
-}
-
-@Composable
-private fun VContainerFact(key: String, value: String) {
-    Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
-        Text(
-            key,
-            style = Vessel.type.monoSmall,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.width(48.dp),
+        // Outlined and unlabelled, like every primary action in the system. A
+        // play triangle beside a named container is unambiguous; the content
+        // description carries the label for screen readers.
+        VIconAction(
+            icon = Icons.Filled.PlayArrow,
+            contentDescription = "Launch ${container.name}",
+            onClick = onLaunch,
+            style = VButtonStyle.Primary,
         )
-        Text(
-            value,
-            style = Vessel.type.mono,
-            color = Vessel.colors.textLabel,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+
     }
 }
 
@@ -129,7 +96,6 @@ private fun VContainerCardPreview() {
                     d3dLayer = "dxvk-2.7.1",
                     lastRun = null,
                 ),
-                lastRunLabel = "ran 12 minutes ago",
                 onOpen = {},
                 onLaunch = {},
             )

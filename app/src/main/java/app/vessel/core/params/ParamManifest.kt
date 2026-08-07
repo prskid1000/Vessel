@@ -68,6 +68,17 @@ data class ParamGroup(
 @Serializable
 enum class ParamType {
     @SerialName("enum") ENUM,
+
+    /**
+     * Free text, for the one kind of setting whose valid values cannot be
+     * enumerated: a DLL override list names DLLs we have never heard of.
+     *
+     * Everything else in this file is a closed set on purpose — a control the
+     * user cannot get wrong. This type is the deliberate exception, not a
+     * loophole to reach for when writing options is tedious.
+     */
+    @SerialName("text") TEXT,
+
     @SerialName("bool") BOOL,
     @SerialName("int") INT,
     @SerialName("multi") MULTI,
@@ -137,7 +148,8 @@ data class ParamSpec(
         return when (type) {
             ParamType.BOOL -> raw.jsonPrimitive.booleanOrNull?.let(ParamValue::Flag)
             ParamType.INT -> raw.jsonPrimitive.intOrNull?.let(ParamValue::Count)
-            ParamType.ENUM, ParamType.COMPONENT -> ParamValue.Text(raw.jsonPrimitive.content)
+            ParamType.ENUM, ParamType.TEXT, ParamType.COMPONENT ->
+                ParamValue.Text(raw.jsonPrimitive.content)
             ParamType.MULTI -> ParamValue.Choices(raw.jsonArray.map { it.jsonPrimitive.content })
         }
     }
@@ -148,7 +160,8 @@ data class ParamSpec(
         val triggerValue = when (type) {
             ParamType.BOOL -> trigger.jsonPrimitive.booleanOrNull?.let(ParamValue::Flag)
             ParamType.INT -> trigger.jsonPrimitive.intOrNull?.let(ParamValue::Count)
-            ParamType.ENUM, ParamType.COMPONENT -> ParamValue.Text(trigger.jsonPrimitive.content)
+            ParamType.ENUM, ParamType.TEXT, ParamType.COMPONENT ->
+                ParamValue.Text(trigger.jsonPrimitive.content)
             ParamType.MULTI -> ParamValue.Choices(trigger.jsonArray.map { it.jsonPrimitive.content })
         }
         return triggerValue != null && triggerValue == value
