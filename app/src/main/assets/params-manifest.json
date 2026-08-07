@@ -7,8 +7,8 @@
     "and mirror build/targets/canoe.env.",
     "",
     "'help' is shown next to the control. It must be one plain sentence that a",
-    "user who does not know what a dynarec is can act on. If a setting cannot",
-    "be explained that way, it belongs in Diagnostics, not here.",
+    "user who does not know what a translator is can act on. If a setting",
+    "cannot be explained that way, it does not belong in this file at all.",
     "",
     "For params of type 'component', the default is a selector, not a package",
     "id: '@latest' resolves to the newest installed package of componentType.",
@@ -18,35 +18,9 @@
 
   "groups": [
     {
-      "id": "engine",
-      "title": "Engine",
-      "help": "How x86 code is translated to run on this phone.",
-      "params": [
-        {
-          "key": "engine.x64",
-          "title": "64-bit engine",
-          "help": "FEX runs alongside native ARM64 Wine and is usually faster; Box64 emulates everything and sometimes fixes apps FEX cannot run.",
-          "type": "enum",
-          "options": ["FEX", "BOX64"],
-          "default": "FEX",
-          "appliesTo": ["UNIVERSAL"]
-        },
-        {
-          "key": "engine.x86",
-          "title": "32-bit engine",
-          "help": "Which translator handles older 32-bit programs.",
-          "type": "enum",
-          "options": ["FEX_WOW64", "WOWBOX64"],
-          "default": "FEX_WOW64",
-          "appliesTo": ["UNIVERSAL"]
-        }
-      ]
-    },
-
-    {
       "id": "memory",
       "title": "Memory ordering",
-      "help": "This phone's CPU does not have the hardware mode that makes x86 memory rules free, so these settings trade speed against the risk of glitches in multi-threaded programs. They matter more here than anywhere else.",
+      "help": "This phone's CPU does not have the hardware mode that makes x86 memory rules free, so FEX has to enforce them itself. These settings trade speed against the risk of glitches in multi-threaded programs, and they matter more here than anywhere else.",
       "advanced": true,
       "_advancedNote": "Every default in this group is the safe one, and every change to any of them is a trade the user is asked to make blind — 'raise this if a program hangs at random' is a debugging instruction, not a setting. It stays in the product because a maintainer chasing a specific hang needs it, and it stays behind the disclosure because nobody else should meet it.",
       "params": [
@@ -58,8 +32,7 @@
           "default": true,
           "env": "FEX_TSOENABLED",
           "warnWhen": false,
-          "warnText": "Most programs will crash or corrupt data with this off.",
-          "appliesTo": ["UNIVERSAL"]
+          "warnText": "Most programs will crash or corrupt data with this off."
         },
         {
           "key": "fex.HalfBarrierTSOEnabled",
@@ -67,8 +40,7 @@
           "help": "Uses a lighter method to enforce memory ordering; leave on unless a program misbehaves.",
           "type": "bool",
           "default": true,
-          "env": "FEX_HALFBARRIERTSOENABLED",
-          "appliesTo": ["UNIVERSAL"]
+          "env": "FEX_HALFBARRIERTSOENABLED"
         },
         {
           "key": "fex.VectorTSOEnabled",
@@ -77,89 +49,7 @@
           "type": "bool",
           "default": false,
           "env": "FEX_VECTORTSOENABLED",
-          "advanced": true,
-          "appliesTo": ["UNIVERSAL"]
-        },
-        {
-          "key": "box64.STRONGMEM",
-          "title": "Memory ordering strictness",
-          "help": "Raise this one step at a time if a program hangs, desyncs, or crashes at random; each step costs speed.",
-          "type": "int",
-          "min": 0,
-          "max": 4,
-          "default": 0,
-          "env": "BOX64_DYNAREC_STRONGMEM",
-          "appliesTo": ["COMPATIBILITY"]
-        },
-        {
-          "key": "box64.WEAKBARRIER",
-          "title": "Cheaper ordering barriers",
-          "help": "Recovers most of the speed lost to the setting above; raise it before giving up on stricter ordering.",
-          "type": "int",
-          "min": 0,
-          "max": 2,
-          "default": 1,
-          "env": "BOX64_DYNAREC_WEAKBARRIER",
-          "dependsOn": "box64.STRONGMEM",
-          "appliesTo": ["COMPATIBILITY"]
-        }
-      ]
-    },
-
-    {
-      "id": "dynarec",
-      "title": "Translation tuning",
-      "help": "Box64 code-generation options.",
-      "advanced": true,
-      "params": [
-        {
-          "key": "box64.BIGBLOCK",
-          "title": "Translation block size",
-          "help": "Larger blocks are faster but can make some programs unstable.",
-          "type": "int",
-          "min": 0,
-          "max": 3,
-          "default": 2,
-          "env": "BOX64_DYNAREC_BIGBLOCK",
-          "appliesTo": ["COMPATIBILITY"]
-        },
-        {
-          "key": "box64.SAFEFLAGS",
-          "title": "CPU flag accuracy",
-          "help": "Lowering this is faster but can break programs that depend on exact CPU flag behaviour.",
-          "type": "int",
-          "min": 0,
-          "max": 2,
-          "default": 1,
-          "env": "BOX64_DYNAREC_SAFEFLAGS",
-          "appliesTo": ["COMPATIBILITY"]
-        },
-        {
-          "key": "box64.CALLRET",
-          "title": "Call/return optimisation",
-          "help": "Speeds up function calls; lower it if a program crashes on startup.",
-          "type": "int",
-          "min": 0,
-          "max": 2,
-          "default": 2,
-          "env": "BOX64_DYNAREC_CALLRET",
-          "clamp": [
-            {
-              "when": { "engine.x86": "WOWBOX64" },
-              "max": 1,
-              "reason": "Box64 documents level 2 as not working under WowBox64."
-            }
-          ],
-          "appliesTo": ["COMPATIBILITY"]
-        },
-        {
-          "key": "box64.DYNACACHE",
-          "title": "Reuse translated code",
-          "help": "Saves translated code to storage so a program starts faster the second time.",
-          "type": "bool",
-          "default": true,
-          "env": "BOX64_DYNACACHE",
-          "appliesTo": ["COMPATIBILITY"]
+          "advanced": true
         }
       ]
     },

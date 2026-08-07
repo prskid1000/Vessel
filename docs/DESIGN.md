@@ -11,12 +11,12 @@ software: dense, precise, calm, and confident. Not gamer chrome, not a toy.
 from the Winlator lineage — container setup, the X server, driver loading — but
 none of its interface. No screen here is a restyled Winlator screen. Those apps
 grew by accretion: settings scattered across nested dialogs, terminology that
-assumes you already know what Box64 is, and layouts that expose the
+assumes you already know what an ARM64EC thunk is, and layouts that expose the
 implementation rather than the task. Vessel starts from what the user is trying
 to do — run a program — and works backward. Depth is available on every screen,
 but never in the way.
 
-Concretely, that means: four bottom-nav destinations and no more; the common
+Concretely, that means: two bottom-nav destinations and no more; the common
 path (open the app, launch a program) is two taps from cold start; every
 advanced knob is explained in one plain sentence next to itself; and defaults
 are correct for this device so a new container needs zero configuration.
@@ -147,14 +147,13 @@ solid.
 |---|---|
 | `VScaffold` | Root/push toolbars, bottom nav, sheet host |
 | `VArchBadge` | Mono pill: `ARM64` / `x64` / `x86`, architecture palette |
-| `VEngineChip` | `FEX 2608`, `Box64 0.4.4` — mono, tappable to switch |
-| `VContainerCard` | Container tile: name, arch profile, Wine, driver, last run, launch |
+| `VEngineChip` | `FEX 2608` — mono; the build actually loaded |
+| `VContainerCard` | Container tile: name, Wine, driver, D3D layer, last run, launch |
 | `VAppTile` | Windows app: icon, name, arch badge, container |
 | `VParamRow` | One setting from the manifest: label, description, control |
 | `VMetricStrip` | Live FPS / frametime / CPU / GPU / thermal, `metric` type |
 | `VSparkline` | Compact frametime history |
 | `VProgressCard` | Download/build/install progress with speed and ETA |
-| `VLogPane` | `surfaceSunken`, mono, level-colored, follow-tail |
 | `VEmptyState` | Icon, one sentence, one action |
 | `VConfirmSheet` | Destructive confirmation |
 
@@ -162,83 +161,79 @@ solid.
 
 Single activity, `NavHost`, string routes in `ui/Navigation.kt`.
 
-Bottom navigation has four roots; everything else is pushed.
+**Two bottom-nav roots.** Everything else is pushed, and the technical screens
+are reached from an overflow menu on Containers rather than the bar. The count
+came down from four as the product's scope sharpened: each removal is recorded
+below, because a deleted screen is a design decision and the reasoning is worth
+more than the screen was.
 
 ### Roots
 
-**1. Containers** — the home screen. `VContainerCard` list. Each card shows the
-architecture profile (Universal / Compatibility), Wine build, GPU driver, and
-last run, with a prominent launch affordance. Empty state guides to creating
-the first container.
+**1. Containers** — the home screen. `VContainerCard` list showing Wine build,
+GPU driver, D3D layer and last run, with a prominent launch affordance. Empty
+state guides to creating the first container. The toolbar carries `+` and the
+overflow.
 
 **2. Apps** — every Windows application detected across all containers, with
-icons extracted from the PE resources and a `VArchBadge` on each tile. Filter
-by architecture and container. Long-press to pin to the Android home screen.
-
-**3. Components** — the `.wcp` store, and the piece most directly borrowed from
-the On-Device AI model manager. Sections for Engines, Wine builds, GPU drivers,
-and D3D layers; each entry shows version, build tag, size, and whether it is
-installed.
-
-**Only components built for this device are listed, and only the newest of
-each.** This is the deliberate difference from every other app in this space.
-Those apps ship a catalogue — a dozen Wine versions, DXVK 1.x through 2.x, a
-Turnip build for every Adreno generation — and leave the user to guess. Vessel
-has exactly one current build per component, compiled for this chip, so there
-is nothing to guess about. No A7xx drivers, no Wine 9.x, no legacy D3D layers:
-if it is in the list, we built it for this phone.
-
-Older builds remain installable as a rollback path, but they live behind an
-explicit "previous builds" disclosure, not in the main list.
-
-Each entry shows its provenance from the `.wcp` — source commit and the actual
-compiler flags used — so the claim "compiled for your device" is verifiable in
-the UI rather than just asserted. Matched sets are understood: a Turnip build
-and the DXVK version validated against it are offered together, and a mismatch
-is flagged rather than silently allowed. Downloads are resumable and verified
-by hash before install.
-
-**4. Settings** — storage location, theme, and an entry point to Diagnostics.
-
-Deliberately *not* here: registry URL, update channel, and an About page. The
-first two are build-plumbing that a user has no reason to change and no way to
-evaluate; they belong in Diagnostics if anywhere. Credits live in the
-repository, which is where anyone who cares about them already is.
+icons extracted from the PE resources and a `VArchBadge` on each tile. Filter by
+architecture. Long-press to pin to the Android home screen.
 
 ### Pushed
 
-**5. Container editor** — create/edit. Architecture profile picker with a plain
-explanation of each choice, Wine build, GPU driver, D3D layer, resolution, and
-the full parameter surface rendered by `VParamRow` from a JSON manifest
-(`assets/params-manifest.json`), exactly like the On-Device AI `ParamRenderer`.
-Adding a new `BOX64_DYNAREC_*` or FEX TSO knob means adding a manifest entry,
-never touching UI code. Parameters are grouped (Engine, Memory ordering,
-Graphics, Audio, Input) and each carries a one-line explanation of what it
-actually does.
+**Container editor** — create/edit. The default view is short by design: name,
+engine, GPU driver, resolution, frame-rate limit. Everything else sits behind a
+single "Show advanced" disclosure. The whole surface is rendered by `VParamRow`
+from `assets/params-manifest.json`, exactly like the On-Device AI
+`ParamRenderer`, so adding a knob is a data change and never a UI one. Each
+parameter carries a one-sentence explanation of what it actually does.
 
-**6. Session** — the running Windows desktop. Vulkan surface plus an
-edge-swipe overlay: `VMetricStrip`, performance profile switch, input mode,
-on-screen controls, and a kill switch. The overlay is the only place the design
-allows translucency.
+**Session** — the running Windows desktop. Vulkan surface plus an edge-swipe
+overlay: `VMetricStrip`, input mode, on-screen controls, and a kill switch. The
+overlay is the only place the design allows translucency.
 
-**7. App profile** — per-executable overrides: engine, component pins, memory
-ordering, launch arguments. Shows the detected architecture and how it was
-determined.
+**App profile** — per-executable overrides: component pins, memory ordering,
+launch arguments. Shows the detected architecture and how it was determined.
 
-**8. Benchmark** — run a standard workload against the current container
-configuration, store results, and compare runs side by side. This is what turns
-"which engine is faster" from an argument into a measurement, and it writes
-winning configurations back into app profiles.
+**Components** — one current build of each component, all compiled for this
+device, with provenance from the `.wcp` (source commit and the compiler flags
+actually used) shown on each row. That provenance is the point: "compiled for
+your device" is the product's central claim, and a claim you cannot check is
+just an assertion.
 
-**9. Driver manager** — installed GPU drivers, what each reports at runtime,
-per-container assignment, and a warning when a driver does not claim support
-for this GPU.
+This is the deliberate difference from every other app in this space. Those ship
+a catalogue — a dozen Wine versions, DXVK 1.x through 2.x, a Turnip build for
+every Adreno generation — and leave the user to guess. Here there is one build
+per component, so there is nothing to guess about. Reached from the overflow,
+not the nav bar, because with nothing to choose it is a status view rather than
+a store.
 
-**10. Diagnostics** — `VLogPane` over Wine/FEX/Box64/Turnip output, device
-capability report (the same facts recorded in `build/targets/canoe.env`), and
-a one-tap export bundle for bug reports.
+**Driver manager** — installed GPU drivers, what each reports at runtime,
+per-container assignment, and a warning when a driver does not claim support for
+this GPU.
 
-**11. File manager** — browse container drives, import/export, shared folders.
+**File manager** — browse container drives, import/export, shared folders.
+
+### Removed, and why
+
+**Settings.** Storage and theme were readouts, not controls — the product is
+dark-only and stores containers in one place. The registry URL and update
+channel were build plumbing a user cannot evaluate, and the update channel read
+`BuildConfig`, so it could not be changed at all. A control that controls
+nothing teaches the user that the whole screen is decorative. Credits live in
+`CREDITS.md`, which is where anyone who cares about them already is.
+
+**Diagnostics** and **Benchmark.** Both were built and both worked —
+Diagnostics read live CPU features, page size and driver state off the device;
+Benchmark was to turn "which configuration is faster" into a measurement. They
+were cut because this product is for running programs, not for instrumenting
+the thing that runs them. The cost is real and worth naming: without
+Diagnostics, a bug report is harder to produce, and without Benchmark, tuning
+claims go back to being arguments. Both are recoverable from git history if
+that trade turns out wrong.
+
+**The architecture-profile picker.** Removed with Box64 — see
+[ARCHITECTURE.md](ARCHITECTURE.md). There is one kind of container now, so
+there is nothing to pick.
 
 ## Reused patterns from the On-Device AI app
 

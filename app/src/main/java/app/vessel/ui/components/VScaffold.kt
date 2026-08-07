@@ -318,11 +318,11 @@ data class VMenuItem(
 /**
  * The way to the screens a user never needs and a maintainer occasionally does.
  *
- * Vessel has two roots, and the technical screens — Components, GPU drivers,
- * Benchmark, Diagnostics — hang off this rather than off a Settings tab. They are
- * still ordinary pushed routes; only the door moved. A tab would spend a fifth of
- * the bottom bar on a menu, and a bottom bar that is one-third menu is telling
- * the user that configuring the app is one of the three things it is for.
+ * Vessel has two roots, and the technical screens — Components, GPU drivers —
+ * hang off this rather than off a Settings tab. They are still ordinary pushed
+ * routes; only the door moved. A tab would spend a third of the bottom bar on a
+ * menu, and a bottom bar that is one-third menu is telling the user that
+ * configuring the app is one of the three things it is for.
  *
  * Drawn with a [Popup] rather than Material's `DropdownMenu`: that arrives with
  * its own container tone, its own corner radius and a drop shadow, and this

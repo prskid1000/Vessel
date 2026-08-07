@@ -36,10 +36,10 @@ import app.vessel.ui.theme.vRing
  * it does.
  *
  * The sentence is the point of the container editor, not garnish. Every other
- * app in this space shows a wall of `BOX64_DYNAREC_*` and assumes you already
- * know; DESIGN.md's rule is that a knob which cannot be explained in one plain
- * sentence belongs in Diagnostics instead. So [help] renders under the control
- * rather than behind an info affordance, and nothing calls this without one.
+ * app in this space shows a wall of raw environment variables and assumes you
+ * already know; DESIGN.md's rule is that a knob which cannot be explained in one
+ * plain sentence does not ship. So [help] renders under the control rather than
+ * behind an info affordance, and nothing calls this without one.
  *
  * [note] is for a fact about the control's *bounds* — a clamp that is currently
  * active, or a component selector that resolved to nothing — and [warning] for a
@@ -354,16 +354,21 @@ private fun VParamRowPreview() {
                 VToggle(checked = false, onCheckedChange = {})
             }
             VParamRow(
-                title = "Call/return optimisation",
-                help = "Speeds up function calls; lower it if a program crashes on startup.",
-                note = "Box64 documents level 2 as not working under WowBox64.",
+                title = "Rendering mode preference",
+                help = "Nudges the driver toward direct rendering, which fixes most corruption.",
             ) {
-                VStepper(value = 1, min = 0, max = 1, onChange = {})
+                VChoiceRow(
+                    listOf("default", "prefer_sysmem"),
+                    { if (it == "default") "Automatic" else "Prefer direct rendering" },
+                    "default",
+                    {},
+                )
             }
-            VParamRow(title = "64-bit engine", help = "Which translator handles the program.") {
-                VChoiceRow(listOf("FEX", "BOX64"), { it }, "FEX", {})
-            }
-            VParamRow(title = "GPU driver", help = "Turnip is the open driver this app builds.") {
+            VParamRow(
+                title = "GPU driver",
+                help = "Turnip is the open driver this app builds.",
+                note = "Nothing installed for this component yet.",
+            ) {
                 VComponentReadout("@latest", null)
             }
         }

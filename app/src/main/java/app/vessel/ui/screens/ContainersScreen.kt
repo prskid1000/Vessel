@@ -38,11 +38,10 @@ import app.vessel.ui.vm.SampleContainerRows
  * Root 1 — the home screen, and the only place the technical screens are reached
  * from.
  *
- * The four callbacks after `onLaunch` are the ones Settings used to own. They
- * live behind the overflow in this toolbar now: Components, GPU drivers,
- * Benchmark and Diagnostics are things a maintainer opens on purpose and a user
- * never has to find, which is exactly what an overflow is for and exactly what a
- * bottom-nav tab is not.
+ * The two callbacks after `onLaunch` are the ones Settings used to own. They
+ * live behind the overflow in this toolbar now: Components and GPU drivers are
+ * things a maintainer opens on purpose and a user never has to find, which is
+ * exactly what an overflow is for and exactly what a bottom-nav tab is not.
  */
 @Composable
 fun ContainersScreen(
@@ -53,8 +52,6 @@ fun ContainersScreen(
     onLaunch: (String) -> Unit,
     onOpenComponents: () -> Unit,
     onOpenDrivers: () -> Unit,
-    onOpenBenchmark: () -> Unit,
-    onOpenDiagnostics: () -> Unit,
     viewModel: ContainersViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -68,8 +65,6 @@ fun ContainersScreen(
         onDelete = viewModel::delete,
         onOpenComponents = onOpenComponents,
         onOpenDrivers = onOpenDrivers,
-        onOpenBenchmark = onOpenBenchmark,
-        onOpenDiagnostics = onOpenDiagnostics,
     )
 }
 
@@ -84,8 +79,6 @@ private fun ContainersContent(
     onDelete: (String) -> Unit,
     onOpenComponents: () -> Unit = {},
     onOpenDrivers: () -> Unit = {},
-    onOpenBenchmark: () -> Unit = {},
-    onOpenDiagnostics: () -> Unit = {},
 ) {
     // The row a long press is asking about, held here rather than in the view
     // model: it is a question the screen is asking, and it should not survive
@@ -110,16 +103,6 @@ private fun ContainersContent(
                                 "GPU drivers",
                                 "installed drivers and per-container assignment",
                                 onOpenDrivers,
-                            ),
-                            VMenuItem(
-                                "Benchmark",
-                                "measure a configuration instead of arguing about it",
-                                onOpenBenchmark,
-                            ),
-                            VMenuItem(
-                                "Diagnostics",
-                                "device report, storage, export bundle",
-                                onOpenDiagnostics,
                             ),
                         ),
                     )

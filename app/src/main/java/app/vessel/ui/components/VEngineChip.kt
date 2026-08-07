@@ -17,7 +17,7 @@ import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vRing
 
 /**
- * A named engine build — `FEX 2608`, `Box64 0.4.4`.
+ * A named engine build — `FEX 2608`.
  *
  * Mono, because the version is a machine fact and the whole point of the chip
  * is that you can read which build you are actually running. Tappable where
@@ -62,7 +62,7 @@ private fun VEngineChipPreview() {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             VEngineChip("FEX", "2608", selected = true, onClick = {})
-            VEngineChip("Box64", "0.4.4", onClick = {})
+            VEngineChip("FEX", "2606", onClick = {})
         }
     }
 }

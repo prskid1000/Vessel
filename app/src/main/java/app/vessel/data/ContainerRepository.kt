@@ -1,7 +1,6 @@
 package app.vessel.data
 
 import androidx.datastore.core.DataStore
-import app.vessel.core.ArchProfile
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
 import app.vessel.core.params.ParamType
@@ -36,10 +35,11 @@ class ContainerRepository @Inject constructor(
     /**
      * A new container, not yet persisted.
      *
-     * Universal, because it is the profile that runs everything except the
-     * installers Compatibility exists for, and the one where DXVK and vkd3d are
-     * native. The name is numbered off the containers that already exist so two
-     * taps never produce two identically named tiles.
+     * There is one kind of container — Wine, DXVK and vkd3d are ARM64EC and FEX
+     * translates the application's own x86 code inside the process — so there is
+     * nothing to choose here beyond the manifest defaults. The name is numbered
+     * off the containers that already exist so two taps never produce two
+     * identically named tiles.
      */
     suspend fun draft(): ContainerProfile {
         val existing = store.data.first().containers
@@ -48,7 +48,6 @@ class ContainerRepository @Inject constructor(
             ContainerProfile(
                 id = UUID.randomUUID().toString(),
                 name = nextName(existing.map { it.name }),
-                archProfile = ArchProfile.UNIVERSAL,
                 wineBuild = "",
                 driver = "",
                 d3dLayer = "",

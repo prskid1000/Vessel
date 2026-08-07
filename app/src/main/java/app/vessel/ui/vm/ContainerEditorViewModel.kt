@@ -3,7 +3,6 @@ package app.vessel.ui.vm
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import app.vessel.core.ArchProfile
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
 import app.vessel.core.params.ParamManifest
@@ -27,8 +26,8 @@ import javax.inject.Inject
 const val NEW_CONTAINER: String = "new"
 
 /**
- * One group as the editor draws it — the manifest's own grouping, filtered to
- * what applies right now.
+ * One group as the editor draws it — the manifest's own grouping, with whatever
+ * the advanced disclosure is currently hiding taken out.
  */
 data class EditorGroup(
     val id: String,
@@ -57,10 +56,9 @@ data class EditorUiState(
     /** True for a container that has not been saved yet. */
     val creating: Boolean = false,
     val name: String = "",
-    val archProfile: ArchProfile = ArchProfile.UNIVERSAL,
     val groups: List<EditorGroup> = emptyList(),
     val showAdvanced: Boolean = false,
-    /** Whether the disclosure has anything behind it for this architecture. */
+    /** Whether the disclosure has anything behind it at all. */
     val hasAdvanced: Boolean = false,
     /** Set when the manifest or the container could not be read. Shown, not swallowed. */
     val error: String? = null,
@@ -74,8 +72,8 @@ data class EditorUiState(
  * Everything the screen draws is computed here, including the clamps and the
  * component resolutions, so `ContainerEditorScreen` has exactly one `when` in it
  * — over [ParamType] — and no knowledge of any individual key. That boundary is
- * the whole promise of the manifest: adding a `BOX64_DYNAREC_*` knob is a data
- * change, and if a key ever needs code, it has leaked.
+ * the whole promise of the manifest: adding a `FEX_*` knob is a data change, and
+ * if a key ever needs code, it has leaked.
  */
 @HiltViewModel
 class ContainerEditorViewModel @Inject constructor(
@@ -133,7 +131,6 @@ class ContainerEditorViewModel @Inject constructor(
                 loading = false,
                 creating = creating,
                 name = profile.name,
-                archProfile = profile.archProfile,
             )
         }
         rebuild()
@@ -146,26 +143,11 @@ class ContainerEditorViewModel @Inject constructor(
         _state.update { it.copy(name = name) }
     }
 
-    /**
-     * Only meaningful while creating.
-     *
-     * ARCHITECTURE.md is explicit that the profile decides what Wine itself is
-     * compiled as, which cannot change once a container's tree exists — so the
-     * editor shows it as a fact after the first save rather than as a control
-     * that would silently do nothing.
-     */
-    fun setArchProfile(profile: ArchProfile) {
-        if (!_state.value.creating) return
-        draft = draft?.copy(archProfile = profile)
-        _state.update { it.copy(archProfile = profile) }
-        rebuild()
-    }
-
     fun setParam(key: String, value: ParamValue) {
         val current = draft ?: return
         draft = current.copy(params = current.params + (key to value))
-        // A rebuild rather than a targeted update, because one param can move
-        // another's ceiling: choosing WowBox64 drops box64.CALLRET to 1.
+        // A rebuild rather than a targeted update, because a manifest clamp lets
+        // one param move another's ceiling.
         rebuild()
     }
 
@@ -203,19 +185,25 @@ class ContainerEditorViewModel @Inject constructor(
     /**
      * Store what the editor was showing, not what was underneath it.
      *
-     * A clamp can start holding after a value was set — pick WowBox64 with
-     * `box64.CALLRET` already at 2 and the control drops to 1 — and writing the
-     * stale 2 would mean the file disagreed with the screen, which is the sort of
-     * gap that surfaces much later as a container behaving unlike its settings.
-     * Running every value back through [resolve] is generic: it clamps whatever
-     * the manifest says to clamp and touches nothing else.
+     * A clamp can start holding after a value was set, because the param its
+     * condition names was changed afterwards, and writing the stale value would
+     * mean the file disagreed with the screen — the sort of gap that surfaces
+     * much later as a container behaving unlike its settings. Running every value
+     * back through [resolve] is generic: it clamps whatever the manifest says to
+     * clamp and touches nothing else.
+     *
+     * Keys the manifest no longer declares are dropped rather than carried
+     * forward. A container saved before Box64 was removed still has its
+     * `box64.*` values in the document, and re-writing settings for an engine
+     * that is not in the build would keep them alive forever.
      */
     private fun clampedParams(profile: ContainerProfile): Map<String, ParamValue> {
         val currentManifest = manifest ?: return profile.params
         val values = currentManifest.defaults() + profile.params
-        return values.mapValues { (key, value) ->
-            currentManifest.spec(key)?.resolve(values)?.value ?: value
-        }
+        return values.mapNotNull { (key, value) ->
+            val spec = currentManifest.spec(key) ?: return@mapNotNull null
+            key to (spec.resolve(values)?.value ?: value)
+        }.toMap()
     }
 
     // — rendering model ------------------------------------------------------
@@ -226,19 +214,15 @@ class ContainerEditorViewModel @Inject constructor(
         val showAdvanced = _state.value.showAdvanced
         val values = currentManifest.defaults() + current.params
 
-        // Every param that applies to this architecture, advanced or not. The
-        // disclosure only exists if hiding something, so this is computed before
-        // the advanced filter rather than after it.
-        val applicable = currentManifest.groups.map { group ->
-            group to group.params.filter { it.appliesTo(current.archProfile) }
-        }
-        val hasAdvanced = applicable.any { (group, params) ->
-            (group.advanced && params.isNotEmpty()) || params.any { it.advanced }
+        // The disclosure only exists if it is hiding something, so this is
+        // computed before the advanced filter rather than after it.
+        val hasAdvanced = currentManifest.groups.any { group ->
+            (group.advanced && group.params.isNotEmpty()) || group.params.any { it.advanced }
         }
 
-        val groups = applicable.mapNotNull { (group, params) ->
+        val groups = currentManifest.groups.mapNotNull { group ->
             if (group.advanced && !showAdvanced) return@mapNotNull null
-            val visible = params
+            val visible = group.params
                 .filter { showAdvanced || !it.advanced }
                 .mapNotNull { spec -> spec.resolve(values)?.let { toEditorParam(it) } }
             if (visible.isEmpty()) {

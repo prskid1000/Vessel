@@ -1,6 +1,5 @@
 package app.vessel.ui.screens
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,7 +23,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import app.vessel.core.ArchProfile
 import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
 import app.vessel.ui.components.VButton
@@ -46,7 +44,6 @@ import app.vessel.ui.components.VToggle
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
-import app.vessel.ui.theme.vRing
 import app.vessel.ui.vm.ContainerEditorViewModel
 import app.vessel.ui.vm.EditorGroup
 import app.vessel.ui.vm.EditorParam
@@ -55,16 +52,21 @@ import app.vessel.ui.vm.EditorUiState
 /**
  * Pushed 5 — create and edit a container.
  *
- * The parameter surface below the architecture picker is rendered entirely from
+ * Below the name, the whole screen is rendered from
  * `assets/params-manifest.json`. There is one `when` on this screen and it is
  * over [ParamType]; no key appears anywhere in this file. That is the boundary
- * DESIGN.md draws: adding a `BOX64_DYNAREC_*` or FEX TSO knob means adding a
- * manifest entry, never touching UI code, and the moment a key needs a special
- * case here the promise has quietly stopped being true.
+ * DESIGN.md draws: adding a FEX TSO or Turnip knob means adding a manifest
+ * entry, never touching UI code, and the moment a key needs a special case here
+ * the promise has quietly stopped being true.
  *
- * Everything that decides *what* to draw — which params apply to this
- * architecture, which clamp is active, what a component selector resolved to —
- * is worked out in [ContainerEditorViewModel]. This file only draws.
+ * There used to be an architecture-profile picker above the parameters, choosing
+ * between an ARM64EC Wine tree and an x86-64 one under Box64. Wine is built
+ * `arm64ec,aarch64,i386` and no x86-64 tree exists, so the second option had
+ * nothing to run: there is one kind of container now and no choice to present.
+ *
+ * Everything that decides *what* to draw — which clamp is active, what a
+ * component selector resolved to — is worked out in
+ * [ContainerEditorViewModel]. This file only draws.
  */
 @Composable
 fun ContainerEditorScreen(
@@ -81,7 +83,6 @@ fun ContainerEditorScreen(
         state = state,
         onBack = onBack,
         onName = viewModel::setName,
-        onArchProfile = viewModel::setArchProfile,
         onParam = viewModel::setParam,
         onToggleAdvanced = viewModel::toggleAdvanced,
         onSave = viewModel::save,
@@ -94,7 +95,6 @@ private fun ContainerEditorContent(
     state: EditorUiState,
     onBack: () -> Unit,
     onName: (String) -> Unit,
-    onArchProfile: (ArchProfile) -> Unit,
     onParam: (String, ParamValue) -> Unit,
     onToggleAdvanced: () -> Unit,
     onSave: () -> Unit,
@@ -106,7 +106,7 @@ private fun ContainerEditorContent(
         toolbar = {
             VPushToolbar(
                 title = if (state.creating) "New container" else state.name.ifBlank { "Container" },
-                subtitle = if (state.loading) "reading settings" else state.archProfile.label,
+                subtitle = if (state.loading) "reading settings" else null,
                 onBack = onBack,
                 trailing = {
                     if (state.error == null && !state.loading) {
@@ -127,11 +127,6 @@ private fun ContainerEditorContent(
                 item(key = "name") {
                     VSectionHeader("Name")
                     VTextField(state.name, onName, placeholder = "Container")
-                }
-
-                item(key = "arch") {
-                    VSectionHeader("Architecture profile")
-                    ArchProfilePicker(state.archProfile, state.creating, onArchProfile)
                 }
 
                 state.groups.forEach { group ->
@@ -174,60 +169,6 @@ private fun ContainerEditorContent(
             },
             onDismiss = { confirmingDelete = false },
         )
-    }
-}
-
-/**
- * The one setting that is not in the manifest, because it is not a setting.
- *
- * The profile decides what Wine itself is compiled as, which cannot change once
- * the tree exists — so after the first save it is a fact with its explanation
- * rather than a control. Both choices carry the paragraph from `ArchProfile`,
- * because "Universal" and "Compatibility" mean nothing on their own.
- */
-@Composable
-private fun ArchProfilePicker(
-    selected: ArchProfile,
-    editable: Boolean,
-    onSelect: (ArchProfile) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
-        ArchProfile.entries.forEach { profile ->
-            val chosen = profile == selected
-            if (!editable && !chosen) return@forEach
-            val shape = Vessel.metrics.shapeMd
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(
-                        if (chosen) Vessel.colors.accentSoft else Vessel.colors.surface,
-                        shape,
-                    )
-                    .vRing(if (chosen) Vessel.colors.accent else Vessel.colors.neutral800, shape)
-                    .let { if (editable) it.clickable { onSelect(profile) } else it }
-                    .padding(Vessel.metrics.s11),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
-            ) {
-                Text(
-                    profile.label,
-                    style = Vessel.type.body,
-                    color = if (chosen) Vessel.colors.accent else Vessel.colors.textPrimary,
-                )
-                Text(
-                    profile.explanation,
-                    style = Vessel.type.bodySmall,
-                    color = Vessel.colors.textMuted,
-                )
-            }
-        }
-        if (!editable) {
-            Text(
-                "Chosen when the container was created. Wine is compiled as one or the other, " +
-                    "so changing it would mean a different container.",
-                style = Vessel.type.bodySmall,
-                color = Vessel.colors.textMuted,
-            )
-        }
     }
 }
 
@@ -351,7 +292,6 @@ private fun ContainerEditorErrorPreview() {
             ),
             onBack = {},
             onName = {},
-            onArchProfile = {},
             onParam = { _, _ -> },
             onToggleAdvanced = {},
             onSave = {},

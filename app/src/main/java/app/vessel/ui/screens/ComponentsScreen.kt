@@ -333,15 +333,6 @@ private val PreviewSections = listOf(
                 sizeBytes = 43_400_000,
                 sourceSha = "c17ae5039f6b",
             ),
-            previewPackage(
-                id = "box64-0.4.4-canoe",
-                type = ComponentType.BOX64,
-                name = "Box64",
-                version = "0.4.4",
-                versionCode = 4004,
-                sizeBytes = 9_300_000,
-                sourceSha = "8f2c1d4a9b03",
-            ),
         ),
     ),
     ComponentSection(

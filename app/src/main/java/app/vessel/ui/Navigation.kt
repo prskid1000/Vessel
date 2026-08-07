@@ -15,11 +15,9 @@ import androidx.navigation.compose.rememberNavController
 import app.vessel.ui.components.VNavDestination
 import app.vessel.ui.screens.AppProfileScreen
 import app.vessel.ui.screens.AppsScreen
-import app.vessel.ui.screens.BenchmarkScreen
 import app.vessel.ui.screens.ComponentsScreen
 import app.vessel.ui.screens.ContainerEditorScreen
 import app.vessel.ui.screens.ContainersScreen
-import app.vessel.ui.screens.DiagnosticsScreen
 import app.vessel.ui.screens.DriversScreen
 import app.vessel.ui.screens.FilesScreen
 import app.vessel.ui.screens.SessionScreen
@@ -33,9 +31,7 @@ object Routes {
     const val CONTAINER_EDITOR = "containerEditor/{containerId}"
     const val SESSION = "session/{containerId}"
     const val APP_PROFILE = "appProfile/{appId}"
-    const val BENCHMARK = "benchmark"
     const val DRIVERS = "drivers"
-    const val DIAGNOSTICS = "diagnostics"
     const val FILES = "files"
 
     /** Null is "create one", which the editor is told by [NEW_CONTAINER] rather than by a flag. */
@@ -53,19 +49,19 @@ object Routes {
 /**
  * Two roots and no more.
  *
- * Everything else in the product — the editor, the session, components,
- * benchmarks, drivers, diagnostics, files — is pushed on top of one of these. A
- * third tab is the first sign that a screen has been added instead of designed.
+ * Everything else in the product — the editor, the session, components, drivers,
+ * files — is pushed on top of one of these. A third tab is the first sign that a
+ * screen has been added instead of designed.
  *
  * The two that are here are the two things a user comes to this app to do: pick
  * a container, or pick a program. Nothing else is a place you go on purpose.
  *
  * **Settings was a root and is now gone**, which is the clearest case of the
  * rule. It held two readouts that could not be changed — storage location and a
- * container count — and four links onward. Once the readouts were removed for
+ * container count — and the links onward. Once the readouts were removed for
  * being decoration, what was left was a menu with a tab of its own: a whole
- * destination whose only content was the names of four other destinations. Those
- * four now hang off the overflow in the Containers toolbar, which is where a
+ * destination whose only content was the names of other destinations. Those
+ * links now hang off the overflow in the Containers toolbar, which is where a
  * maintainer looks for them and where a user never has to.
  *
  * Components deliberately is not a root either. Vessel ships one current build
@@ -102,8 +98,6 @@ fun VesselApp(
                 onLaunch = { navController.navigate(Routes.session(it)) },
                 onOpenComponents = { navController.navigate(Routes.COMPONENTS) },
                 onOpenDrivers = { navController.navigate(Routes.DRIVERS) },
-                onOpenBenchmark = { navController.navigate(Routes.BENCHMARK) },
-                onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
             )
         }
         composable(Routes.APPS) {
@@ -141,9 +135,7 @@ fun VesselApp(
                 onBack = { navController.popBackStack() },
             )
         }
-        composable(Routes.BENCHMARK) { BenchmarkScreen(onBack = { navController.popBackStack() }) }
         composable(Routes.DRIVERS) { DriversScreen(onBack = { navController.popBackStack() }) }
-        composable(Routes.DIAGNOSTICS) { DiagnosticsScreen(onBack = { navController.popBackStack() }) }
         composable(Routes.FILES) { FilesScreen(onBack = { navController.popBackStack() }) }
     }
 }

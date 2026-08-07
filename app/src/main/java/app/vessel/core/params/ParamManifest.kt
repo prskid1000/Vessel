@@ -1,6 +1,5 @@
 package app.vessel.core.params
 
-import app.vessel.core.ArchProfile
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -14,7 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
  *
  * This file is the whole reason the container editor has no per-setting code in
  * it. The editor renders one composable per [ParamType] and nothing per key, so
- * adding a `BOX64_DYNAREC_*` knob is a data change to the manifest and never a
+ * adding a `FEX_*` or `TU_*` knob is a data change to the manifest and never a
  * UI change — which is the promise `docs/DESIGN.md` makes about this screen and
  * the one most easily broken by a single `when (key)`.
  *
@@ -34,11 +33,10 @@ data class ParamManifest(
 
     /**
      * The starting values for a new container: every param's manifest default,
-     * including the ones the container's architecture profile will hide.
+     * including the ones sitting behind the advanced disclosure.
      *
-     * Storing the hidden ones too is deliberate. A Universal container carries
-     * correct Box64 values it is not currently showing, so switching a container
-     * to Compatibility — or reading its values back for an export bundle — never
+     * Storing the hidden ones too is deliberate. Reading a container's values
+     * back — for an export bundle, or to build the launch environment — never
      * finds a hole where a setting should be.
      */
     fun defaults(): Map<String, ParamValue> =
@@ -75,9 +73,9 @@ enum class ParamType {
  * One setting.
  *
  * [help] is not optional in spirit even though it is in the schema: the manifest
- * says a setting that cannot be explained in one plain sentence belongs in
- * Diagnostics rather than here, and the editor renders the sentence under every
- * control it draws.
+ * says a setting that cannot be explained in one plain sentence does not belong
+ * in the file at all, and the editor renders the sentence under every control it
+ * draws.
  */
 @Serializable
 data class ParamSpec(
@@ -107,20 +105,18 @@ data class ParamSpec(
     /** [ParamType.COMPONENT]: which `.wcp` type the selector resolves against. */
     val componentType: String? = null,
 
-    /**
-     * Which architecture profiles this applies to, by [ArchProfile] name. Absent
-     * means all of them — most graphics and system settings are profile-neutral.
-     */
-    val appliesTo: List<String>? = null,
-
     /** Behind the "Show advanced" disclosure, collapsed by default. */
     val advanced: Boolean = false,
 
     /**
-     * Bounds that only hold in some configurations. The one live case is
-     * `box64.CALLRET`, which Box64 documents as broken at level 2 under
-     * WowBox64 — so the ceiling drops to 1 when the 32-bit engine is WowBox64,
-     * and the editor says why rather than silently refusing the third step.
+     * Bounds that only hold in some configurations: a ceiling that drops when
+     * another param takes a particular value, with the reason shown next to the
+     * control rather than the step silently refusing to move.
+     *
+     * No manifest entry declares one today — the last case was a Box64 dynarec
+     * level, and Box64 is gone. The mechanism stays because it is generic and
+     * the alternative is a `when (key)` in the editor the first time a real
+     * conditional bound turns up.
      */
     val clamp: List<ParamClamp> = emptyList(),
 
@@ -131,9 +127,6 @@ data class ParamSpec(
     val warnWhen: JsonElement? = null,
     val warnText: String? = null,
 ) {
-    fun appliesTo(profile: ArchProfile): Boolean =
-        appliesTo == null || profile.name in appliesTo
-
     /** The label for one option, falling back to the wire value. */
     fun label(option: String): String = optionLabels[option] ?: option
 
@@ -248,8 +241,8 @@ fun ParamSpec.resolve(values: Map<String, ParamValue>): ResolvedParam? {
     val high = listOfNotNull(max, rule?.max).minOrNull()
 
     // The stored value can sit outside a clamp that has only just started
-    // holding — the user lowered the 32-bit engine to WowBox64 after setting
-    // CALLRET to 2 — so it is pulled into range for display as well as on save.
+    // holding, because the param it depends on was changed afterwards — so it is
+    // pulled into range for display as well as on save.
     val clamped = if (value is ParamValue.Count && (low != null || high != null)) {
         ParamValue.Count(value.value.coerceIn(low ?: Int.MIN_VALUE, high ?: Int.MAX_VALUE))
     } else {

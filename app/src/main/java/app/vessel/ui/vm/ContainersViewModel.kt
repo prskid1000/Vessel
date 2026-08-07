@@ -3,7 +3,6 @@ package app.vessel.ui.vm
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import app.vessel.core.ArchProfile
 import app.vessel.core.ContainerProfile
 import app.vessel.data.ContainerRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -97,7 +96,6 @@ internal val SampleContainerRows = listOf(
         profile = ContainerProfile(
             id = "default",
             name = "Default",
-            archProfile = ArchProfile.UNIVERSAL,
             wineBuild = "wine-11.0-arm64ec",
             driver = "turnip-gen8-25.2.0",
             d3dLayer = "dxvk-2.7.1",

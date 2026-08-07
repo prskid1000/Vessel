@@ -13,7 +13,7 @@ import app.vessel.ui.components.VScaffold
 import app.vessel.ui.theme.VesselTheme
 
 /**
- * The four destinations that are routed but not built.
+ * The three destinations that are routed but not built.
  *
  * Each says, in the first clause, that it is not implemented — and then what it
  * will do. That order matters. A screen that only describes its future reads as
@@ -21,8 +21,10 @@ import app.vessel.ui.theme.VesselTheme
  * either way the person holding the phone spends time deciding whether the app
  * is broken. Saying "not built yet" costs one clause and settles the question.
  *
- * These are the last four. The container editor, drivers and diagnostics used to
- * be here too and are now real screens in their own files.
+ * These are the last three. The container editor and drivers used to be here too
+ * and are now real screens in their own files. A stub earns its place only while
+ * something real is coming; where that stopped being true the route was deleted
+ * rather than left as a screen whose only content is an apology.
  */
 @Composable
 private fun NotBuiltYet(
@@ -67,20 +69,6 @@ fun AppProfileScreen(appId: String, onBack: () -> Unit) {
 }
 
 @Composable
-fun BenchmarkScreen(onBack: () -> Unit) {
-    NotBuiltYet(
-        title = "Benchmark",
-        subtitle = null,
-        icon = Icons.Filled.PlayArrow,
-        message = "Not built yet. It will run a standard workload against the current " +
-            "container configuration, store the result, and compare runs side by side — " +
-            "which is what turns an engine argument into a measurement. It needs a session " +
-            "that can actually run something first.",
-        onBack = onBack,
-    )
-}
-
-@Composable
 fun FilesScreen(onBack: () -> Unit) {
     NotBuiltYet(
         title = "Files",
@@ -97,6 +85,6 @@ fun FilesScreen(onBack: () -> Unit) {
 @Composable
 private fun NotBuiltYetPreview() {
     VesselTheme {
-        BenchmarkScreen(onBack = {})
+        FilesScreen(onBack = {})
     }
 }

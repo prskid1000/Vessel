@@ -36,7 +36,6 @@ and distributed as a `.wcp` package. Obligations still apply to distribution.
 | Wine | LGPL-2.1-or-later | Distribute source or a written offer; keep modifications' source available. Our patches live in `patches/wine/` in this repo, which satisfies this if the repo is public. |
 | Proton | LGPL-2.1-or-later (Wine-derived) | As Wine. |
 | FEX-Emu | MIT | Preserve copyright and license text. |
-| Box64 | MIT | Preserve copyright and license text. |
 | Mesa / Turnip | MIT (plus other permissive licenses in-tree) | Preserve notices. |
 | DXVK | zlib | Preserve notices. |
 | vkd3d-proton | LGPL-2.1-or-later | As Wine. |

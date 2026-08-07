@@ -7,41 +7,42 @@ An Android phone has an ARM64 CPU. Windows software is mostly x86-64, some is
 different machinery for each, and the naive approach — one global "emulation
 mode" the user toggles — gets the tradeoff wrong for at least two of the three.
 
-## Three layers, not one switch
+## Two layers, and no switch at all
 
-### Layer 1 — Container architecture profile
+### Layer 1 — One kind of container
 
-Chosen when a container is created. It determines what Wine itself is compiled
-as, which is not something that can be changed afterward.
-
-**Universal (ARM64EC)** — the default.
-Wine's own DLLs are native ARM64/ARM64EC machine code. Only the application's
-own x86 code is translated, by FEX loaded as a PE module inside the process:
+There is no architecture profile to choose. Wine is built ARM64EC, so its own
+DLLs are native ARM64/ARM64EC machine code, and only the application's own x86
+code is translated — by FEX, loaded as a PE module inside the process:
 
 | App architecture | Path | Translation cost |
 |---|---|---|
 | ARM64 (native Windows-on-ARM) | Wine directly | none |
 | ARM64EC / ARM64X | Wine directly | none |
 | x86-64 | `libarm64ecfex.dll` (FEX) | app code only |
-| x86-32 | WoW64 + `libwow64fex.dll` (FEX), or WowBox64 | app code + WoW64 thunks |
+| x86-32 | WoW64 + `libwow64fex.dll` (FEX) | app code + WoW64 thunks |
 
-Because Wine, DXVK, and vkd3d are native in this profile, the graphics
-translation layer — usually the hottest code in a game — runs at full ARM64
-speed even when the game itself is x86.
+Because Wine, DXVK, and vkd3d are all native here, the graphics translation
+layer — usually the hottest code in a game — runs at full ARM64 speed even when
+the game itself is x86.
 
-**Compatibility (x86_64)** — the fallback.
-The classic Winlator arrangement: the entire Wine tree is x86-64 PE code, and
-Box64 emulates all of it, Wine and DXVK included. Slower in principle, but it
-is a different enough code path that it rescues applications which fail under
-ARM64EC — some installers, some DRM, some anti-cheat.
+### Why there is no Box64 fallback
 
-**This profile is 64-bit only.** Box64's Box32 mode, which would add 32-bit x86
-support, is written against glibc and does not compile against Android's bionic
-libc — verified, with the specific failures recorded in `build/box64.sh`.
-Closing that gap would need either a glibc-targeted Box64 or patches under
-`patches/box64/`. Until then, 32-bit x86 applications must run in a Universal
-container, where FEX's WoW64 path handles them. That is the recommended
-placement regardless, since it is also the faster one.
+Earlier designs kept a second "Compatibility" profile in which the entire Wine
+tree was x86-64 PE and Box64 emulated all of it, Wine and DXVK included, as a
+rescue path for applications that misbehave under ARM64EC.
+
+It was removed, because it could not work as designed: Wine here is built
+`--enable-archs=arm64ec,aarch64,i386`, so there is no x86-64 Wine for Box64 to
+run. The profile had nothing to execute. Two further facts made the decision
+easy — Box64's Box32 mode does not compile against bionic at all (it reaches
+for glibc internals, so that profile would have been 64-bit only anyway), and
+ARM64EC is proven in production on this exact device by Winlator-Ludashi.
+
+The gain is not just one fewer component. It removed a choice from container
+creation, six tuning parameters from the settings surface, and an engine
+selector from the UI. If ARM64EC ever proves insufficient, the build script is
+in git history.
 
 ### Layer 2 — Automatic per-application detection
 
@@ -53,31 +54,27 @@ Vessel reads the PE header:
   directory (`CHPEMetadataPointer`), so an ARM64X binary is not mistaken for
   pure ARM64
 
-The detected architecture is shown as a badge on the app tile and drives engine
-selection inside the container. If an executable cannot run in the container it
-was dropped into, Vessel says so and offers to place it in one that can, rather
-than failing with a Wine backtrace.
+The detected architecture is shown as a badge on the app tile and selects the
+translation path inside the container. Because there is only one kind of
+container, an executable can never be "in the wrong one" — the badge is
+information, not a warning.
 
 ### Layer 3 — Per-application override
 
-A profile attached to a single executable can force an engine, pin a component
-version, or change memory-ordering settings. This is where per-game tuning
-lives, and it is what the benchmark screen writes into when a configuration
-wins.
+A profile attached to a single executable can pin a component version or change
+memory-ordering settings, for the occasional title that needs it.
 
 ## Expected performance ordering
 
 Fastest to slowest, as a prior to be tested rather than a claim:
 
-1. Native ARM64 app, Universal container — no translation anywhere.
-2. x64 app, Universal container — app code translated; Wine/DXVK/vkd3d native.
-3. x86-32 app, Universal container — as above plus WoW64 thunking.
-4. Anything in a Compatibility container — Wine, DXVK and app all emulated.
+1. Native ARM64 app — no translation anywhere.
+2. x64 app — app code translated; Wine, DXVK and vkd3d all native.
+3. x86-32 app — as above, plus WoW64 thunking.
 
-Box64 beats FEX on particular titles, mostly because its default memory model
-is laxer than FEX's. There is no universal winner, which is why the benchmark
-harness (see the roadmap) exists: every engine claim in this project should be
-reproducible on the target device before it is believed.
+There is no fourth tier any more, because there is no second engine to be
+slower. What remains variable is FEX's own configuration, and memory ordering
+in particular — see below.
 
 ## Why memory ordering dominates on this chip
 
@@ -91,11 +88,9 @@ Consequences:
   stay on — turning it off breaks multithreaded applications — but
   `HalfBarrierTSOEnabled` (cheap form) is on and `VectorTSOEnabled` (very
   expensive, and games are vector-heavy) is off.
-- Box64 exposes `BOX64_DYNAREC_STRONGMEM` from 0 (fastest, default) to 4 (full
-  TSO mimicry). Start at 0 and raise only for titles showing threading glitches.
-
-These are the highest-leverage runtime dials on this device, which is why the
-container editor surfaces them properly instead of hiding them.
+These are the highest-leverage runtime dials on this device. They sit behind
+the editor's advanced disclosure rather than on its face: every default is
+already the correct one, and each is a trade a user would be making blind.
 
 ## Runtime defaults
 
@@ -105,29 +100,26 @@ Runtime defaults live in exactly one place — `app/src/main/assets/params-manif
 
 | Setting | Value | Reason |
 |---|---|---|
-| `TU_DEBUG` | `sysmem` | GMEM tiled rendering page-faults on gen8 Adreno; see the warning below |
+| `TU_DEBUG` | *(none forced)* | Neither rendering mode is forced — see below |
+| `TU_AUTOTUNE_ALGO` | `default` | `prefer_sysmem` available if a title corrupts |
 | FEX `TSOEnabled` | on | required for correctness |
 | FEX `HalfBarrierTSOEnabled` | on | cheap ordering, no `FEAT_TSO` on Oryon |
 | FEX `VectorTSOEnabled` | off | severe cost on vector-heavy workloads |
-| Box64 `STRONGMEM` | 0 | upstream default; contested — see below |
-| Box64 `WEAKBARRIER` | 1 | makes raising `STRONGMEM` affordable |
 | Wine sync | esync | kernel 6.12 GKI has no `/dev/ntsync` |
 
-Two of these deserve more than a table row, because the widely circulated
-advice is wrong:
+**On forcing a rendering mode — a correction.** An earlier version of this
+document stated that GMEM is broken on Adreno 829 and `TU_DEBUG=sysmem` is
+mandatory. That was wrong. Reading Turnip's source: the GMEM page-fault report
+is scoped to Adreno **830**, and Turnip does not set `disable_gmem` for a829 —
+so forcing sysmem gives up tiled rendering the hardware can actually do. The
+opposite advice, common in Chinese-language guides, is equally unfounded: it is
+Adreno 710/720 guidance.
 
-**`TU_DEBUG=sysmem` is not optional on this GPU.** Popular guides — most
-Chinese-language ones, and the K11MCH1 release notes they derive from — say to
-disable sysmem and select `gmem`. That guidance is scoped to Adreno 710/720.
-On A8xx the fork maintainer reports GMEM write page faults, and the picture
-corrupts. This is the single most likely piece of circulating advice to break
-a build on this device.
-
-**`STRONGMEM=0` is inherited, not chosen.** It is Box64's own default, and at
-0 x86 store ordering is simply not emulated — which is fine until a
-multithreaded title desyncs. The best-evidenced way to buy ordering back
-cheaply is pairing `STRONGMEM=1` with `WEAKBARRIER=1` or `2`. Measure it on
-the target rather than inheriting either value.
+Neither forcing is justified without measuring on this device, so the default
+forces nothing. Where a specific title does corrupt, `TU_AUTOTUNE_ALGO=prefer_sysmem`
+is the better control than `TU_DEBUG=sysmem` — Turnip's own documentation notes
+it still permits the fast path in high-confidence cases, making it a nudge
+rather than a veto.
 
 Full flag reference, with primary sources and what could not be verified, is
 in [TUNING.md](TUNING.md).
@@ -168,7 +160,7 @@ Two consequences worth stating plainly:
 | Phase | Deliverable | Status |
 |---|---|---|
 | 1 | Repo, pipeline, Docker toolchain | **Done** |
-| 2 | Custom Box64 (`SD8EG5`/`oryon-1`) | **Done** — runs on device, translates x86-64 |
+| 2 | ~~Custom Box64~~ | **Removed** — no x86-64 Wine for it to run; see above |
 | 3 | Custom FEX PE DLLs | **Done** — CHPE-verified ARM64EC |
 | 4 | Custom Turnip gen8 + matched DXVK/vkd3d | **Done** — a829 support confirmed in the binary |
 | 5 | Custom Wine ARM64EC | **Blocked** — see below |

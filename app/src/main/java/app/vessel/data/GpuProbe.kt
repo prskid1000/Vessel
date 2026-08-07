@@ -101,9 +101,6 @@ class GpuProbe @Inject constructor() {
      * is the honest answer; anything else would need root.
      */
     fun kgslNode(): DeviceNode = DeviceNode.of("/dev/kgsl-3d0")
-
-    /** `/dev/ntsync` — absent on this kernel, which is why Wine sync defaults to esync. */
-    fun ntsyncNode(): DeviceNode = DeviceNode.of("/dev/ntsync")
 }
 
 /** The system graphics driver's own strings, or the reason there are none. */

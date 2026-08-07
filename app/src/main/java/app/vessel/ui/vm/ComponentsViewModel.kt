@@ -89,7 +89,7 @@ internal fun sectionsOf(packages: List<ComponentPackage>): List<ComponentSection
     }
 
 private val SECTION_TYPES: List<Pair<String, Set<ComponentType>>> = listOf(
-    "Engines" to setOf(ComponentType.FEXCORE, ComponentType.BOX64, ComponentType.WOWBOX64),
+    "Engines" to setOf(ComponentType.FEXCORE),
     "Wine builds" to setOf(ComponentType.WINE, ComponentType.PROTON),
     "GPU drivers" to setOf(ComponentType.TURNIP),
     "D3D layers" to setOf(ComponentType.DXVK, ComponentType.VKD3D, ComponentType.D8VK),

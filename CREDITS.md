@@ -11,7 +11,6 @@ these components are moving weekly. This file exists so that is never unclear.
 | [Wine](https://www.winehq.org/) | Wine developers, Alexandre Julliard | Implements the Windows API. Everything else is in service of this. |
 | [Wine ARM64EC branch](https://github.com/bylaws/wine) | Billy Laws (bylaws) | The ARM64EC work that makes native-ARM64 Wine with translated x86 apps possible. |
 | [FEX-Emu](https://github.com/FEX-Emu/FEX) | FEX-Emu team | x86/x86-64 → ARM64 translation; our primary engine, loaded into Wine as PE DLLs. |
-| [Box64](https://github.com/ptitSeb/box64) | Sébastien Chevalier (ptitSeb) | x86-64 → ARM64 translation; our fallback engine. Ships the Oryon-tuned preset we use. |
 | [Mesa / Turnip](https://gitlab.freedesktop.org/mesa/mesa) | Mesa developers; freedreno by Rob Clark, Danylo Piliaiev, Connor Abbott | Open-source Vulkan driver for Adreno. |
 | [Turnip gen8 branch](https://github.com/whitebelyash/mesa-unified) | whitebelyash and contributors | Adreno 8xx support ahead of mainline — the only reason this works on an Adreno 829. |
 | [DXVK](https://github.com/doitsujin/dxvk) | Philip Rebohle and contributors | Direct3D 9/10/11 → Vulkan. |

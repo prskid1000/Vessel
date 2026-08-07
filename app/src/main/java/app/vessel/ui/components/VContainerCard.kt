@@ -14,11 +14,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import app.vessel.core.ArchProfile
 import app.vessel.core.ContainerProfile
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -52,20 +50,16 @@ fun VContainerCard(
             .padding(Vessel.metrics.s17),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                container.name,
-                style = Vessel.type.cardTitle,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            VTonalPill(container.archProfile.label, archProfileColor(container.archProfile))
-        }
+        // No architecture badge beside the name any more. It named the container's
+        // profile — Universal or Compatibility — and with Box64 gone there is one
+        // kind of container, so the pill was telling every card the same thing.
+        Text(
+            container.name,
+            style = Vessel.type.cardTitle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         // Wine, driver and D3D layer are what actually decides whether a given
         // program runs, so they sit on the tile rather than behind an edit.
@@ -100,13 +94,6 @@ fun VContainerCard(
     }
 }
 
-/** The profile colours by what Wine itself is: native ARM64EC, or x86 under Box64. */
-@Composable
-private fun archProfileColor(profile: ArchProfile): Color = when (profile) {
-    ArchProfile.UNIVERSAL -> Vessel.colors.archNative
-    ArchProfile.COMPATIBILITY -> Vessel.colors.archX64
-}
-
 @Composable
 private fun VContainerFact(key: String, value: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
@@ -138,7 +125,6 @@ private fun VContainerCardPreview() {
                 container = ContainerProfile(
                     id = "default",
                     name = "Default",
-                    archProfile = ArchProfile.UNIVERSAL,
                     wineBuild = "wine-11.0-arm64ec",
                     driver = "turnip-gen8-25.2.0",
                     d3dLayer = "dxvk-2.7.1",

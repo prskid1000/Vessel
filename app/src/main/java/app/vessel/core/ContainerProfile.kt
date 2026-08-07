@@ -4,25 +4,16 @@ import app.vessel.core.params.ParamValue
 import kotlinx.serialization.Serializable
 
 /**
- * What Wine itself is compiled as. Chosen when a container is created and not
- * changeable afterwards, which is why the picker explains rather than toggles.
- */
-@Serializable
-enum class ArchProfile(val label: String, val explanation: String) {
-    UNIVERSAL(
-        label = "Universal",
-        explanation = "Wine, DXVK and vkd3d are native ARM64EC. Only the application's own " +
-            "x86 code is translated, by FEX inside the process.",
-    ),
-    COMPATIBILITY(
-        label = "Compatibility",
-        explanation = "The whole Wine tree is x86-64 under Box64. Slower in principle, but a " +
-            "different enough code path to rescue installers and anti-cheat that ARM64EC refuses.",
-    ),
-}
-
-/**
  * One container, as the Containers screen shows it and as it is stored.
+ *
+ * There is one kind of container. Wine is built `arm64ec,aarch64,i386` and there
+ * is no x86-64 tree to run, so what a container *is* was never a choice the user
+ * could make: ARM64 programs run on Wine directly, x64 through
+ * `libarm64ecfex.dll` and 32-bit x86 through WoW64 and `libwow64fex.dll`. The
+ * architecture profile that used to sit at the top of the editor selected between
+ * that and a Box64 tree which does not exist, so the field and its picker are
+ * gone. Documents written before that carry an `archProfile` key; the reader is
+ * configured with `ignoreUnknownKeys`, so they still load.
  *
  * [wineBuild], [driver] and [d3dLayer] are the *resolved* component labels — what
  * this container will actually load, worked out against the installed set when
@@ -39,7 +30,6 @@ enum class ArchProfile(val label: String, val explanation: String) {
 data class ContainerProfile(
     val id: String,
     val name: String,
-    val archProfile: ArchProfile,
     val wineBuild: String,
     val driver: String,
     val d3dLayer: String,

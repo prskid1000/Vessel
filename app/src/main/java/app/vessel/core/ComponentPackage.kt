@@ -3,16 +3,19 @@ package app.vessel.core
 /**
  * The `type` field of a `.wcp` `profile.json`.
  *
- * The set is the Winlator-family one, mirrored from `KNOWN_TYPES` in
- * `build/package_wcp.py`; a package carrying anything outside it is refused
- * rather than installed. [wire] is the exact string in the manifest, which is
- * not always the Kotlin name.
+ * The set is the Winlator-family one; a package carrying anything outside it is
+ * refused rather than installed. [wire] is the exact string in the manifest,
+ * which is not always the Kotlin name.
+ *
+ * `Box64` and `WOWBox64` are deliberately not in the set. Vessel's Wine is built
+ * `arm64ec,aarch64,i386`, so FEX covers every case — x64 through
+ * `libarm64ecfex.dll` and 32-bit x86 through WoW64 — and a Box64 package would
+ * have nothing to translate for. A `.wcp` of either type is refused, which is
+ * the right answer rather than a silent install of dead weight.
  */
 enum class ComponentType(val wire: String, val label: String) {
     WINE("Wine", "Wine"),
     PROTON("Proton", "Proton"),
-    BOX64("Box64", "Box64"),
-    WOWBOX64("WOWBox64", "WOWBox64"),
     FEXCORE("FEXCore", "FEX"),
     DXVK("DXVK", "DXVK"),
     VKD3D("VKD3D", "vkd3d"),

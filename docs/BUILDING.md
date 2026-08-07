@@ -16,21 +16,20 @@ docker volume create vessel-work
 docker run --rm \
   -v "$PWD:/src" \
   -v vessel-work:/work \
-  vessel-build ./build/box64.sh
+  vessel-build ./build/fex.sh
 ```
 
 The result lands in `dist/`:
 
 ```
-dist/box64-0.4.4-canoe.wcp
-dist/box64-0.4.4-canoe.wcp.sha256
+dist/fex-2608-canoe.wcp
+dist/fex-2608-canoe.wcp.sha256
 ```
 
 One script per component, all with the same shape:
 
 | Script | Produces | Toolchain | Rough time |
 |---|---|---|---|
-| `build/box64.sh` | Box64 ELF | NDK | ~4 min (verified) |
 | `build/fex.sh` | `libarm64ecfex.dll`, `libwow64fex.dll` | llvm-mingw | ~15 min |
 | `build/turnip.sh` | `libvulkan_freedreno.so` | NDK | ~10 min |
 | `build/dxvk.sh` | DXVK PE DLLs | llvm-mingw | ~10 min |
@@ -44,7 +43,7 @@ Docker Desktop with the WSL2 backend, from PowerShell:
 ```powershell
 docker build -t vessel-build .
 docker volume create vessel-work
-docker run --rm -v "${PWD}:/src" -v vessel-work:/work vessel-build ./build/box64.sh
+docker run --rm -v "${PWD}:/src" -v vessel-work:/work vessel-build ./build/fex.sh
 ```
 
 ### Why the volume
@@ -129,7 +128,7 @@ android-36 and build-tools 36.
 
 ```bash
 adb install -r app/build/outputs/apk/sideload/debug/app-sideload-debug.apk
-adb push dist/box64-0.4.4-canoe.wcp /sdcard/Download/
+adb push dist/fex-2608-canoe.wcp /sdcard/Download/
 ```
 
 Then install the package from the Components screen (Settings ▸ Components). A
