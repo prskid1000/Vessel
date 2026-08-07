@@ -1,0 +1,87 @@
+ntdll: map PE images into anonymous memory on Android.
+
+Wine could load ntdll.so and answer `wine --version` inside the app sandbox,
+but building a prefix died with:
+
+    err:virtual:map_image_into_view failed to set 60000020 protection on
+    L"\\??\\C:\\windows\\system32\\ntdll.dll" section .text, noexec filesystem?
+    err:virtual:... section .hexpthk, noexec filesystem?
+    err:virtual:virtual_setup_exception stack overflow 416 bytes addr 0x6fffea6850
+
+The last line is the consequence, not a second bug: execution reached ntdll's
+.text, which had never been made executable, and faulted.
+
+Upstream's "noexec filesystem?" is a guess, and on Android it is the wrong one.
+Measured on the device (Motorola Signature, Android 16, SM8845), all three
+obvious explanations are false:
+
+  - SELinux logs `granted { execute }` on app_data_file for this process.
+  - /data/user/0 is mounted rw, not noexec.
+  - Page size is 4096, so PE sections are not sub-page.
+
+tools/probe/mapexec.c narrows it to one line. Against the very same ntdll.dll,
+in the app's own uid:
+
+    ok    mmap R  /  then mprotect RX
+    ok    mmap RX directly
+    ok    MAP_FIXED RX over a PROT_NONE reservation
+    ok    clean private page -> RX
+    FAIL  DIRTIED private page -> RX (execmod): Permission denied (errno 13)
+
+Writing one byte to a private file mapping is the whole difference. Making a
+*modified* file-backed mapping executable requires the SELinux execmod
+permission, which apps do not have; parts of the policy dontaudit it, which is
+why the denial never appears in logcat.
+
+Wine writes relocations into an image before protecting its sections, so any PE
+loaded away from its ImageBase dirties its own .text and can then never execute.
+That is exactly the observed split: wineboot.exe landed at its preferred base
+0x140000000, was never written to, and mapped `c-r-x` fine; ntdll.dll was
+relocated to 0x6fffe40000 and failed.
+
+Wine already has the code path needed -- when `removable` is set,
+map_file_into_view skips mmap and pread()s each section into the view's
+anonymous memory, where PROT_EXEC needs only execmem, which every JIT on the
+platform relies on. This forces that path for image mappings on Android.
+
+The cost is real: image pages become private copies instead of shared,
+demand-paged file pages, so each process pays full RSS for its DLLs and they are
+not shared between processes. There is no cheaper option -- any scheme that
+keeps the pages file-backed runs into execmod the moment a relocation is applied.
+
+Not suitable upstream as-is: a real fix would gate on a configure check for the
+platform's willingness to execute modified file mappings rather than on
+__ANDROID__, and would ideally narrow the fallback to images that actually get
+relocated.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index db820a89525..65cf19eedee 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3050,6 +3050,26 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+     SIZE_T align_mask = max( image_info->alignment - 1, page_mask );
+     INT_PTR delta;
+ 
++#ifdef __ANDROID__
++    /* Never execute from file-backed pages on Android.
++     *
++     * A PE loaded away from its ImageBase has relocations written into it
++     * before its sections are protected. Those writes dirty COW pages of the
++     * private file mapping, and making a *modified* file mapping executable is
++     * a distinct SELinux permission -- execmod -- which apps are not granted.
++     * The result is an mprotect that fails with EACCES, no audit line (parts
++     * of the policy dontaudit execmod), and a crash the moment anything calls
++     * into the section.
++     *
++     * Forcing the removable path makes map_file_into_view pread() each section
++     * into the view's anonymous memory instead, where PROT_EXEC needs only
++     * execmem -- which apps do have, because every JIT on the platform needs
++     * it. The cost is that image pages become private copies rather than
++     * shared, demand-paged file pages.
++     */
++    removable = TRUE;
++#endif
++
+     TRACE_(module)( "mapping PE file %s at %p-%p\n", debugstr_us(nt_name), ptr, ptr + total_size );
+ 
+     /* map the header */

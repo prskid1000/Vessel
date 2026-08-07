@@ -1,0 +1,63 @@
+server: allow the NLS directory to be set by environment.
+
+wineserver dies on Android with
+
+    wineserver: failed to load l_intl.nls
+
+while l_intl.nls is sitting in the package at share/wine/nls/. All four places
+it looks are unreachable here:
+
+  - get_nls_dir() derives the path from realpath("/proc/self/exe"). The app
+    cannot execve a file in its own data directory, so wineserver is started as
+    an argument to /system/bin/linker64 and /proc/self/exe is the linker -- the
+    search lands under /apex/com.android.runtime.
+  - The remaining three are absolute paths under /usr, on a read-only system
+    partition where nothing can be installed.
+
+It is a fatal_error, not a warning, so the case mapping table is simply absent.
+
+Adding WINENLSDIR ahead of the existing entries is the same shape as the
+WINEDLLPATH fallback that tools/wine/wine.c already has for the identical
+reason, and it changes nothing when the variable is unset.
+
+Note that ntdll needs no equivalent: it finds its own NLS data through dladdr()
+on ntdll.so, which stays correct under the linker. Only wineserver, a separate
+executable, asks the kernel who it is.
+
+Not suitable upstream as-is: upstream would want this driven by configure or by
+a general datadir override rather than a single-purpose variable.
+
+--- a/server/unicode.c
++++ b/server/unicode.c
+@@ -327,7 +327,7 @@
+ /* load the case mapping table */
+ struct fd *load_intl_file(void)
+ {
+-    static const char *nls_dirs[] = { NULL, DATADIR "/wine/nls", "/usr/local/share/wine/nls", "/usr/share/wine/nls" };
++    static const char *nls_dirs[] = { NULL, NULL, DATADIR "/wine/nls", "/usr/local/share/wine/nls", "/usr/share/wine/nls" };
+     static const WCHAR nt_pathW[] = {'C',':','\\','w','i','n','d','o','w','s','\\',
+         's','y','s','t','e','m','3','2','\\','l','_','i','n','t','l','.','n','l','s',0};
+     static const struct unicode_str nt_name = { nt_pathW, sizeof(nt_pathW) };
+@@ -338,7 +338,21 @@
+     int unix_fd;
+     mode_t mode = 0600;
+ 
+-    nls_dirs[0] = get_nls_dir();
++    /* WINENLSDIR is checked before everything else because on Android none of
++     * the other entries can work. get_nls_dir() derives its answer from
++     * realpath("/proc/self/exe"), and the sandbox cannot execve a file in its
++     * own data directory -- wineserver is started as an argument to
++     * /system/bin/linker64, so /proc/self/exe is the linker and the search
++     * lands in /apex/com.android.runtime. The three fallbacks are absolute
++     * paths under /usr, on a read-only system partition where nothing can be
++     * installed. The result is a hard fatal_error("failed to load
++     * l_intl.nls") with the file sitting in the package all along.
++     *
++     * ntdll does not need this: it locates its own NLS through dladdr() on
++     * ntdll.so, which stays correct under the linker. Only wineserver, which
++     * is a separate executable, asks the kernel who it is. */
++    nls_dirs[0] = getenv( "WINENLSDIR" );
++    nls_dirs[1] = get_nls_dir();
+     for (i = 0; i < ARRAY_SIZE( nls_dirs ); i++)
+     {
+         if (!nls_dirs[i]) continue;

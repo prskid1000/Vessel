@@ -74,7 +74,20 @@ tools_sfnt2fon_has_freetype() {
   ! grep -q 'needs to be built with FreeType support' <<< "$out"
 }
 
+# The tools tree is only reusable if it was built from *this* Wine. It lives in
+# the persistent /work volume, so without a stamp a changed pin silently keeps
+# the previous version's binaries — and they are used to generate the makefiles
+# for the new source. Moving 10.13 -> 11.14 failed exactly there, well past
+# configure and with nothing pointing at the cause:
+#
+#   Unknown option '-i./conf3bXwBS/makefile'
+#   config.status: error: could not create Makefile
+#
+# 11.14's configure passes makedep an option that 10.13's makedep never had.
+TOOLS_STAMP="$TOOLS/.vessel-source-sha"
+
 if [ -x "$TOOLS/tools/winebuild/winebuild" ] && [ -e "$TOOLS/nls/locale.nls" ] \
+   && [ "$(cat "$TOOLS_STAMP" 2>/dev/null)" = "$SOURCE_SHA" ] \
    && tools_sfnt2fon_has_freetype; then
   info "reusing native tools in $TOOLS"
 else
@@ -107,6 +120,8 @@ else
      that 'pkg-config --exists freetype2' succeeds, then rebuild the image with
      'docker build -t vessel-build .'. Look for 'checking for -lfreetype' in
      $TOOLS/config.log."
+  # Stamped last, so an interrupted build is not mistaken for a finished one.
+  printf '%s' "$SOURCE_SHA" > "$TOOLS_STAMP"
   ok "native tools ready"
 fi
 
@@ -160,12 +175,27 @@ export READELF="$NDK_BIN/llvm-readelf"
 # this branch with a modern clang. Side effect: with wineandroid, winemac and
 # winewayland all off, configure promotes "X development files not found" from a
 # notice to a hard error under --with-x, which is what we want.
+#
+# GRADLE is not honesty about having gradle; it is the only way to get past a
+# check that turning the driver off does not skip. Wine 11 added
+#
+#   AC_PATH_PROG([GRADLE], [gradle])
+#   test -n "$GRADLE" || AC_MSG_ERROR([gradle is required for the Android build])
+#
+# to configure.ac's linux-android* case, unconditionally — before and regardless
+# of enable_wineandroid_drv, so a build that never wants an APK still stops at
+#   checking for gradle... configure: error: gradle is required for the Android build
+# AC_PATH_PROG lets a preset value through untested ("Let the user override the
+# test with a path"), and the only rule that expands $(GRADLE) is the
+# wineandroid.drv APK target, which is disabled — so nothing ever runs it. Wine
+# 10.13 had no such check; this appeared with the 11.x pin.
 CONFIGURE_ARGS=(
   --prefix=/usr
   --exec-prefix=/usr
   --host="$HOST_TRIPLE"
   --with-wine-tools="$TOOLS"
   enable_wineandroid_drv=no
+  GRADLE=/bin/true
   PKG_CONFIG="$HOST_PKG_CONFIG"
   --enable-archs=arm64ec,aarch64,i386
   --with-mingw=clang
@@ -264,6 +294,61 @@ log "installing into staging prefix"
 make -C "$BUILD" install-lib DESTDIR="$STAGE" || die "make install-lib failed"
 
 [ -d "$PAYLOAD" ] || die "make install-lib produced nothing under $PAYLOAD"
+
+# --- Ship the X11/FreeType runtime ----------------------------------------------
+# `make install-lib` installs Wine and nothing else, so without this the package
+# holds a winex11.so whose NEEDED entries name libX11.so and libXext.so and a
+# device that has neither. Wine then has no way to open a window at all, and
+# win32u's dlopen of libfreetype.so fails too, which is the
+#
+#   Wine cannot find the FreeType font library.
+#
+# banner: compiled *with* FreeType, unable to load it, so no TrueType text
+# anywhere. Both were invisible until a prefix built on the phone, because
+# wineboot gets a long way without a display or a glyph.
+#
+# Everything is copied, not just the two NEEDED names: winex11 dlopens Xrender,
+# Xcursor, Xfixes, Xi, Xrandr, Xinerama, Xcomposite and Xxf86vm by soname at
+# runtime, and configure already decided they exist. The whole set is a few MB.
+# Sonames here are unversioned (libX11.so, not libX11.so.6), so a plain copy is
+# enough; the launcher puts <wine>/lib on LD_LIBRARY_PATH.
+log "adding the X11/FreeType runtime"
+shopt -s nullglob
+runtime_libs=("$SYSROOT/usr/lib"/*.so)
+shopt -u nullglob
+[ "${#runtime_libs[@]}" -gt 0 ] \
+  || die "no shared libraries in $SYSROOT/usr/lib — run ./build/x11-sysroot.sh first"
+install -d "$PAYLOAD/lib"
+for lib in "${runtime_libs[@]}"; do
+  install -m 0644 "$lib" "$PAYLOAD/lib/"
+  "$NDK_BIN/llvm-strip" --strip-unneeded "$PAYLOAD/lib/$(basename "$lib")" 2>/dev/null || true
+done
+ok "$(( ${#runtime_libs[@]} )) runtime libraries"
+
+# The check that would have caught the above. Every NEEDED entry of every ELF we
+# ship must resolve inside the package or be one Android already provides —
+# anything else is a library that exists only on the build machine.
+BIONIC_PROVIDED="libc.so libm.so libdl.so libz.so liblog.so libandroid.so
+libEGL.so libGLESv2.so libGLESv3.so libvulkan.so libnativewindow.so
+libsync.so libcamera2ndk.so ld-android.so"
+missing=""
+for elf in "$PAYLOAD"/bin/* "$PAYLOAD"/lib/*.so "$PAYLOAD"/lib/wine/aarch64-unix/*.so; do
+  [ -f "$elf" ] || continue
+  # llvm-readelf output is captured, never piped into grep: grep exits at its
+  # first match, readelf takes SIGPIPE, and pipefail turns that into a failure.
+  dyn="$("$NDK_BIN/llvm-readelf" -d "$elf" 2>/dev/null || true)"
+  for need in $(grep NEEDED <<<"$dyn" | sed 's/.*\[//;s/\]//'); do
+    case " $BIONIC_PROVIDED " in *" $need "*) continue ;; esac
+    [ -f "$PAYLOAD/lib/$need" ] && continue
+    [ -f "$PAYLOAD/lib/wine/aarch64-unix/$need" ] && continue
+    missing="$missing
+     $(basename "$elf") needs $need"
+  done
+done
+[ -z "$missing" ] || die "the package depends on libraries it does not ship:$missing
+     Add them to the X11 sysroot (build/x11-sysroot.sh) or to BIONIC_PROVIDED if
+     Android really does supply them."
+ok "every NEEDED entry resolves inside the package"
 
 # --- Verification --------------------------------------------------------------
 # Each check below has failed during bring-up, and each is otherwise invisible

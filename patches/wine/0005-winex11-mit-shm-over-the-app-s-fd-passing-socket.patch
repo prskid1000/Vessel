@@ -1,0 +1,240 @@
+winex11: MIT-SHM over the app's fd-passing socket.
+
+bionic exports shmget and friends, so this compiles and links, but Android
+refuses them at runtime -- the NDK's own sys/shm.h says "Not useful on Android
+because it's disallowed by SELinux". Wine therefore drops to XPutImage, which is
+correct but pushes every damaged region through the X socket as a copy.
+
+A SysV shmid could not be used here even if SELinux allowed it. It names a
+segment in the kernel IPC namespace, and the X server on the other end is a Java
+process inside the app that can only mmap a descriptor. Any MIT-SHM in an
+Android app has to be fd-passing.
+
+The app already runs the server half (com.winlator.sysvshm): a unix socket where
+SHMGET allocates ashmem and GET_FD returns the descriptor over SCM_RIGHTS, with
+the server keeping its own id table so the id in XShmAttach resolves. Three
+requests, native byte order, one connection per operation -- the server does not
+release anything when a client disconnects, so no connection has to be held
+open:
+
+    SHMGET  0  u32 size   -> i32 shmid
+    GET_FD  1  i32 shmid  -> u8 status, descriptor via SCM_RIGHTS
+    DELETE  2  i32 shmid  -> nothing
+
+Winlator solves the same problem by patching glibc to redirect shmget to this
+socket. On bionic there is no libc to patch, so the client half goes here.
+
+Two behavioural differences from the SysV path, both handled:
+
+  - A SysV segment is IPC_RMID'd right after attach so it dies with the last
+    detach. The socket server has no such rule, so DELETE is sent from
+    destroy_shm_image instead.
+  - The mapping length is recovered from the XImage at teardown rather than
+    stored, because x11drv_xshm_info_t is Xlib's XShmSegmentInfo and has nowhere
+    to keep it.
+
+Gated on WINE_SYSVSHM_SOCKET naming the socket. Unset, every path here is
+bypassed and the behaviour is exactly upstream's.
+
+NOT YET EXERCISED. The X server is in the app but not wired to a host, so this
+has been compiled and reasoned about, not run. It is off by default for that
+reason; setting the variable is the switch that turns it on.
+
+Not suitable upstream as-is: the protocol is specific to this app's helper.
+
+--- a/dlls/winex11.drv/bitblt.c
++++ b/dlls/winex11.drv/bitblt.c
+@@ -1602,6 +1602,131 @@
+     return 1;  /* FIXME: should check event contents */
+ }
+ 
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/mman.h>
++
++/* MIT-SHM without System V shared memory.
++ *
++ * bionic exports shmget and friends but Android refuses them -- the NDK header
++ * says as much ("Not useful on Android because it's disallowed by SELinux"),
++ * and they fail at runtime rather than at link time. Wine then quietly drops
++ * to XPutImage, which is correct but copies every damaged region through the
++ * socket.
++ *
++ * A SysV shmid could not be used here even if it were allowed: it names a
++ * segment in the kernel IPC namespace, and the X server on the other end is a
++ * Java process inside the app that can only mmap a descriptor. So the app runs
++ * a tiny fd-passing service (com.winlator.sysvshm) and hands out its own ids.
++ * Three requests, native byte order, one connection each -- the server keeps a
++ * process-wide table and does not free anything when a client disconnects:
++ *
++ *     SHMGET  0  u32 size   -> i32 shmid
++ *     GET_FD  1  i32 shmid  -> u8 status, descriptor via SCM_RIGHTS
++ *     DELETE  2  i32 shmid  -> nothing
++ *
++ * The id that comes back is what goes into XShmAttach, and the server matches
++ * it against that table. Winlator solves the same problem by patching glibc to
++ * redirect shmget; on bionic there is no libc to patch, so the client half
++ * lives here instead.
++ *
++ * Inert unless WINE_SYSVSHM_SOCKET names the socket, so a build that does not
++ * set it behaves exactly as upstream.
++ */
++static BOOL vessel_shm_enabled(void)
++{
++    static int enabled = -1;
++    const char *path;
++
++    if (enabled == -1)
++    {
++        path = getenv( "WINE_SYSVSHM_SOCKET" );
++        enabled = (path && path[0]);
++    }
++    return enabled;
++}
++
++static int vessel_shm_connect(void)
++{
++    const char *path = getenv( "WINE_SYSVSHM_SOCKET" );
++    struct sockaddr_un addr;
++    int fd;
++
++    if (!path || !path[0] || strlen( path ) >= sizeof(addr.sun_path)) return -1;
++    memset( &addr, 0, sizeof(addr) );
++    addr.sun_family = AF_UNIX;
++    strcpy( addr.sun_path, path );
++    if ((fd = socket( AF_UNIX, SOCK_STREAM, 0 )) == -1) return -1;
++    if (!connect( fd, (const struct sockaddr *)&addr, sizeof(addr) )) return fd;
++    close( fd );
++    return -1;
++}
++
++static void vessel_shm_delete( int shmid )
++{
++    unsigned char req[5] = { 2 };
++    int sock;
++
++    if ((sock = vessel_shm_connect()) == -1) return;
++    memcpy( req + 1, &shmid, sizeof(shmid) );
++    if (write( sock, req, sizeof(req) ) != sizeof(req))
++        WARN( "could not release shm segment %d\n", shmid );
++    close( sock );
++}
++
++/* Returns the server's shmid and maps it, or -1. */
++static int vessel_shm_alloc( size_t size, void **addr )
++{
++    char control[CMSG_SPACE(sizeof(int))];
++    struct msghdr msg;
++    struct cmsghdr *cmsg;
++    struct iovec iov;
++    unsigned char req[5], status;
++    unsigned int size32 = size;
++    int sock, shmid = -1, fd = -1;
++
++    *addr = NULL;
++    if (size != (size_t)size32) return -1;  /* the request field is 32-bit */
++    if ((sock = vessel_shm_connect()) == -1) return -1;
++
++    req[0] = 0;  /* SHMGET */
++    memcpy( req + 1, &size32, sizeof(size32) );
++    if (write( sock, req, sizeof(req) ) != sizeof(req)) goto done;
++    if (read( sock, &shmid, sizeof(shmid) ) != sizeof(shmid) || shmid <= 0)
++    {
++        shmid = -1;
++        goto done;
++    }
++
++    req[0] = 1;  /* GET_FD */
++    memcpy( req + 1, &shmid, sizeof(shmid) );
++    if (write( sock, req, sizeof(req) ) != sizeof(req)) goto fail;
++
++    memset( &msg, 0, sizeof(msg) );
++    iov.iov_base = &status;
++    iov.iov_len = sizeof(status);
++    msg.msg_iov = &iov;
++    msg.msg_iovlen = 1;
++    msg.msg_control = control;
++    msg.msg_controllen = sizeof(control);
++    if (recvmsg( sock, &msg, 0 ) != sizeof(status)) goto fail;
++    if (!(cmsg = CMSG_FIRSTHDR( &msg )) || cmsg->cmsg_level != SOL_SOCKET ||
++        cmsg->cmsg_type != SCM_RIGHTS || cmsg->cmsg_len != CMSG_LEN(sizeof(fd)))
++        goto fail;
++    memcpy( &fd, CMSG_DATA( cmsg ), sizeof(fd) );
++
++    *addr = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++    close( fd );
++    if (*addr != MAP_FAILED) goto done;
++    *addr = NULL;
++
++fail:
++    vessel_shm_delete( shmid );
++    shmid = -1;
++done:
++    close( sock );
++    return shmid;
++}
+ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height, x11drv_xshm_info_t *shminfo )
+ {
+     XImage *image;
+@@ -1611,10 +1736,21 @@
+     if (!image) return NULL;
+     if (image->bytes_per_line & 3) goto failed;  /* we need 32-bit alignment */
+ 
+-    shminfo->shmid = shmget( IPC_PRIVATE, image->bytes_per_line * height, IPC_CREAT | 0700 );
+-    if (shminfo->shmid == -1) goto failed;
++    if (vessel_shm_enabled())
++    {
++        void *addr;
++
++        shminfo->shmid = vessel_shm_alloc( (size_t)image->bytes_per_line * height, &addr );
++        if (shminfo->shmid == -1) goto failed;
++        shminfo->shmaddr = addr;
++    }
++    else
++    {
++        shminfo->shmid = shmget( IPC_PRIVATE, image->bytes_per_line * height, IPC_CREAT | 0700 );
++        if (shminfo->shmid == -1) goto failed;
+ 
+-    shminfo->shmaddr = shmat( shminfo->shmid, 0, 0 );
++        shminfo->shmaddr = shmat( shminfo->shmid, 0, 0 );
++    }
+     if (shminfo->shmaddr != (char *)-1)
+     {
+         BOOL ok;
+@@ -1626,12 +1762,17 @@
+         if (!X11DRV_check_error() && ok)
+         {
+             image->data = shminfo->shmaddr;
+-            shmctl( shminfo->shmid, IPC_RMID, 0 );
++            /* A SysV segment is removed immediately so it dies with the last
++             * detach. The socket server has no such rule -- it holds the
++             * segment until DELETE, which destroy_shm_image sends. */
++            if (!vessel_shm_enabled()) shmctl( shminfo->shmid, IPC_RMID, 0 );
+             return image;
+         }
+-        shmdt( shminfo->shmaddr );
++        if (vessel_shm_enabled()) munmap( shminfo->shmaddr, (size_t)image->bytes_per_line * height );
++        else shmdt( shminfo->shmaddr );
+     }
+-    shmctl( shminfo->shmid, IPC_RMID, 0 );
++    if (vessel_shm_enabled()) vessel_shm_delete( shminfo->shmid );
++    else shmctl( shminfo->shmid, IPC_RMID, 0 );
+     shminfo->shmid = -1;
+ 
+ failed:
+@@ -1644,7 +1785,14 @@
+     if (shminfo->shmid == -1) return FALSE;
+ 
+     XShmDetach( gdi_display, shminfo );
+-    shmdt( shminfo->shmaddr );
++    if (vessel_shm_enabled())
++    {
++        /* The size is recovered from the image rather than stored: shminfo is
++         * Xlib's XShmSegmentInfo and has nowhere to keep it. */
++        munmap( shminfo->shmaddr, (size_t)image->bytes_per_line * image->height );
++        vessel_shm_delete( shminfo->shmid );
++    }
++    else shmdt( shminfo->shmaddr );
+ 
+     return TRUE;
+ }

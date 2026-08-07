@@ -1,0 +1,83 @@
+ntdll: exec child loaders through the system linker on Android.
+
+Starting a session works: the app builds an argv of
+{ /system/bin/linker64, <wine>/bin/wine, ... } and execs that, because an app at
+targetSdk >= 29 may not execve a file in its own data directory but may exec the
+system linker and hand it the program.
+
+Every *child* Windows process skips that. Wine creates them by re-execing its
+own loader from preloader_exec(), which runs
+
+    execv( argv[0], argv );          /* <loader>-preloader */
+    execv( argv[1], argv + 1 );      /* the loader itself */
+
+Both binaries live in the app's data directory, so both are refused, and the
+symptom is lopsided in a way that hides the cause: the first process runs
+perfectly and anything that spawns a second one -- an installer, a launcher stub,
+most non-trivial applications -- dies with EACCES.
+
+The argv the caller builds is already the right shape. exec_wineloader()
+documents that "argv[0] and argv[1] must be reserved for the preloader and
+loader respectively", so writing the linker path into argv[0] yields exactly
+{ linker, loader, args... }. The linker consumes its own argv[0] before handing
+control over, so the loader still sees itself at argv[0] and Wine's argv[0]
+dispatch -- which is what makes one binary serve as wineboot, winecfg and the
+rest -- is unaffected.
+
+The preloader is skipped rather than redirected. It exists to reserve low
+address space before the dynamic linker claims it, so running it *under* the
+linker would defeat its purpose. Wine's own reserved-area fallback covered the
+64-bit case in every run observed so far (images were placed in a reserved area
+with no preloader in the process at all). The 32-bit/WoW64 path depends on that
+reservation more heavily and is the likeliest place for this shortcut to surface
+as an address-space failure; it has not been exercised yet.
+
+Not suitable upstream as-is: the linker path is hardcoded, and a real fix would
+come from configure or an environment variable rather than __ANDROID__.
+
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -437,6 +437,35 @@
+ 
+ static void preloader_exec( char **argv )
+ {
++#ifdef __ANDROID__
++    /* Exec the system linker, never the loader directly.
++     *
++     * An app at targetSdk >= 29 may not execve a file in its own data
++     * directory, and both binaries this function would otherwise run live
++     * there: the preloader at lib/wine/<arch>-unix/wine-preloader and the
++     * loader beside it. Android permits execing /system/bin/linker64 and
++     * passing the program as its first argument, which is how the session is
++     * started in the first place -- but every *child* Windows process comes
++     * through here instead, so without this an installer that spawns a second
++     * process fails with EACCES while the first one runs fine.
++     *
++     * argv is already shaped for this: the caller reserves argv[0] for the
++     * preloader and puts the loader in argv[1], so overwriting argv[0] with
++     * the linker path gives exactly { linker, loader, args... }. The linker
++     * consumes its own argv[0], so the loader still sees itself at argv[0]
++     * and Wine's argv[0] dispatch keeps working.
++     *
++     * The preloader is skipped, not redirected. Its job is to reserve low
++     * address space before the dynamic linker claims it, and it cannot run
++     * under the linker because the linker is what it exists to preempt.
++     * Wine's own reserved-area fallback covers the 64-bit case (observed
++     * placing images in a reserved area with no preloader present); the
++     * 32-bit/WoW64 case leans on it harder and is the more likely place for
++     * this to show up as an address-space failure.
++     */
++    argv[0] = (char *)"/system/bin/linker64";
++    execv( argv[0], argv );
++#else
+ #ifdef HAVE_WINE_PRELOADER
+     asprintf( &argv[0], "%s-preloader", argv[1] );
+ #ifdef __APPLE__
+@@ -452,6 +481,7 @@
+     free( argv[0] );
+ #endif
+     execv( argv[1], argv + 1 );
++#endif
+ }
+ 
+ /* exec the appropriate wine loader for the specified machine */
