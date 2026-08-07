@@ -1,0 +1,55 @@
+Vessel
+Copyright (C) 2026 Vessel contributors
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU Lesser General Public License as published by the Free
+Software Foundation; either version 2.1 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License along
+with this program; if not, write to the Free Software Foundation, Inc., 51
+Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+The full text of version 2.1 is in LICENSE-LGPL-2.1 beside this file.
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+
+Why this licence
+----------------
+
+It is not a preference; it is the only choice that fits what the app already
+contains. Vessel vendors the Winlator X server (LGPL-2.1) directly into the APK,
+so the app's own terms have to be LGPL-compatible.
+
+"or later" is the load-bearing part. libadrenotools is LGPL-3.0, and LGPL-2.1
+*only* cannot be combined with it; the "or any later version" clause is what
+permits that combination. Choosing bare LGPL-2.1 would quietly rule out a
+component this project expects to link.
+
+GPL-3.0 would also have been compatible and was rejected as stricter than the
+obligation requires: it would impose full copyleft on the whole application
+where the LGPL only asks that the LGPL parts stay free and relinkable.
+
+
+What this means in practice
+---------------------------
+
+The obligation created by section 6 is that a user must be able to relink the
+app against their own modified build of the LGPL parts. Two things satisfy it,
+and both are already true:
+
+  - The vendored source is in this public repository, unobfuscated and
+    buildable, with its upstream commit recorded.
+  - R8 does not rename or strip the com.winlator packages. Keep rules in
+    app/proguard-rules.pro enforce that. If minification ever starts touching
+    them, it is a licensing regression, not a build one.
+
+Third-party components are not covered by this file. Each keeps its own licence
+and its own copyright headers; see docs/LICENSING.md for the full picture,
+including the components shipped as separate .wcp packages rather than compiled
+into the app.

@@ -31,6 +31,17 @@ chain of work it builds on:
 | [libadrenotools](https://github.com/bylaws/libadrenotools) | Billy Laws (bylaws) | Loading custom GPU drivers on Android without root. |
 | [AdrenoToolsDrivers](https://github.com/K11MCH1/AdrenoToolsDrivers) | K11MCH1 | Packaged Turnip driver builds. |
 
+### Code shipped inside the app
+
+Vessel's display backend **is** Winlator's X server, vendored rather than
+reimplemented: the X11 server, the GL compositor, the socket connector and the
+`libwinlator` JNI, from
+[`brunodev85/winlator-app`](https://github.com/brunodev85/winlator-app) at
+commit `ca3d735`, under LGPL-2.1. It lives at
+`app/src/main/java/com/winlator/` with upstream's package names intact;
+`app/src/main/java/com/winlator/README.md` records what changed. This is the
+single largest piece of other people's work inside the APK.
+
 ## Prior art we learned from
 
 - [Hangover](https://github.com/AndreRH/hangover) — the original Wine + emulator-on-ARM combination.

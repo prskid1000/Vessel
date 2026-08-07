@@ -124,6 +124,14 @@ JAVA_HOME=/c/'Program Files'/Android/'Android Studio'/jbr ./gradlew :app:assembl
 create it (or open the project once in Android Studio). Requires platform
 android-36 and build-tools 36.
 
+The app also builds native code now — `libwinlator`, the JNI half of the
+vendored X server, from `app/src/main/cpp/`. That means the Gradle build needs
+the NDK pinned in `app/build.gradle.kts` (**27.0.12077973**) and CMake 3.22.1;
+Gradle downloads both if the SDK does not have them, which costs a few minutes
+once. Unlike the component scripts, this NDK is not the same knob as
+`TARGET_NDK_API` above — that one governs the `.wcp` payloads, this one only
+the ~2.9k lines of C inside the APK.
+
 ## Verifying on device
 
 ```bash

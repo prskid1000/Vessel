@@ -61,26 +61,34 @@ docker build -t vessel-build .
 
 ## Status
 
-**Every native component builds and produces a verified package. Nothing has
-been run together yet.**
+**Every native component builds and produces a verified package. On the device,
+Wine's loader starts inside the app's own sandbox; nothing has been run together
+yet.**
 
 | Component | Package | Verified |
 |---|---|---|
-| Wine 10.13 | `wine-10.13-canoe.wcp` | `wineserver`/`ntdll.so`/`winex11.so` are aarch64 Android ELF; `ntdll.dll` carries CHPE |
+| Wine 11.14 | `wine-11.14-canoe.wcp` | `wineserver`/`ntdll.so`/`winex11.so` are aarch64 Android ELF; `ntdll.dll` carries CHPE |
 | FEX 2608 | `fex-2608-canoe.wcp` | Both PE modules carry hybrid (CHPE) metadata — genuine ARM64EC |
 | Turnip | `turnip-…-canoe.wcp` | Binary carries an explicit `Adreno (TM) 829` entry |
 | DXVK 2.7.1 | `dxvk-2.7.1-canoe.wcp` | ARM64EC `system32/` + 32-bit `syswow64/` |
 | vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Same layout, D3D12 |
 | Zink (OpenGL) | `zink-…-canoe.wcp` | `IMAGE_FILE_MACHINE_ARM64EC` (0xA641) with CHPE; exports all five WGL entry points |
 
-The app builds, installs and runs: containers can be created, configured,
-persisted and deleted, and per-container session logging is implemented.
-**What is missing is the session launcher** — create the Wine prefix, install
-components, start the X server, set the environment from
-[docs/LOGGING.md](docs/LOGGING.md), launch an executable and drain its stderr
-into the log. Until it exists, Launch does nothing. The **X server also does not
-exist in our app yet**; that is Winlator-lineage code carrying the open question
-in [docs/LICENSING.md](docs/LICENSING.md).
+The app builds, installs and runs. Containers can be created, configured,
+persisted and deleted; per-container session logging works; the session launcher
+and an X server are both in the tree. **None of it has driven a Windows program
+yet** — the launcher's argv and environment come from reading Wine's source and
+from what has been run by hand on the device, not from a completed session, and
+the X server is not wired to a host.
+
+Three things are known to be missing rather than merely untested: the
+AHardwareBuffer present path that lets DXVK bypass X11, a `winex11.drv` patch so
+MIT-SHM uses the app's fd-passing shim instead of `shmget` (bionic exports it but
+SELinux refuses it, so Wine falls back to `XPutImage` and copies), and a licence
+for Vessel itself — LGPL-2.1 code is now in the APK, which makes
+[docs/LICENSING.md](docs/LICENSING.md) a blocking decision rather than an open
+question.
+
 Roadmap: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#roadmap).
 
 ## Known limitations

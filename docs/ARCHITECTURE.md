@@ -46,11 +46,58 @@ Expected ordering, as a prior to be tested rather than a claim: native ARM64
 
 ## Why memory ordering dominates on this chip
 
-x86 guarantees Total Store Order. ARM does not, so an emulator must either
-insert barriers or use a hardware TSO mode. Some ARM cores implement `FEAT_TSO`
-and can switch it on for free. **Oryon does not**, verified on-device — but it
-does report `lrcpc3`/`ilrcpc`, which is what FEX accelerates TSO off, and makes
-emulating it comparatively cheap.
+x86 guarantees Total Store Order. Arm does not, so an emulator must insert
+barriers. There is no hardware escape on this chip, and the reason is worth
+stating precisely because the folklore is wrong in three separate ways.
+
+**There is no `FEAT_TSO`.** Arm does not define a TSO feature at all. The
+implementations that exist are vendor-specific: Nvidia Denver/Carmel and Fujitsu
+A64FX are always-TSO, and Apple's is IMPDEF — `ACTLR_EL1[1]` toggles it,
+`AIDR_EL1[9]` advertises it. Nothing comparable is documented for Oryon.
+The widely-repeated claim that Oryon has "hardware accommodations for x86's
+memory store architecture" traces to a single unsourced sentence in one review
+that never says TSO, names no register, and cites no Qualcomm document.
+
+**The kernel interface does not exist either.** `PR_SET_MEM_MODEL`, which is how
+userspace would ask for such a mode, was rejected upstream in 2024 and is absent
+from mainline; it ships only in Asahi's tree. FEX carries hardcoded magic
+constants for it, which is the signature of an out-of-tree patch rather than an
+allocated prctl. `ACTLR_EL1` is EL1-only in any case, so an unrooted app could
+not reach it even if Qualcomm had one.
+
+Worth knowing: hardware TSO is not free even where it exists. Measured on an
+Apple M1 under Asahi, turning it on cost 19% reader-thread IPC and made real
+workloads 11–64% slower. It pays for emulated code and taxes everything else.
+
+What the chip *does* give us is `lrcpc`/`ilrcpc` (FEAT_LRCPC2) and `lrcpc3`, and
+only the first of those is currently worth anything — see below.
+
+**FEAT_LRCPC2 is doing real work, measured.** FEX emits `LDAPUR`/`STLUR` for x86
+loads and stores when the host reports it. Arm erratum 3877900 says those execute
+with full Load-Acquire ordering on some cores, which would make the "fast" path
+slower than a barrier; FEX disables it on eight Arm-designed cores for that
+reason, and the blocklist is gated on `Implementer_ARM`, so Qualcomm keeps it.
+Nobody had checked whether it should. `tools/tso/run.sh` checks:
+
+| | x86-64 (FEX) | ARM64 (control) |
+|---|---|---|
+| default | **289.3 ms** | 279.5 ms |
+| `FEX_HOSTFEATURES=disablelrcpc2` | **348.8 ms** | 279.3 ms |
+
+Turning it off costs 21%, and the native control moved 0.2 ms — so that is the
+ordering path and not thermals. Oryon does not have the erratum, FEX is right to
+leave it enabled, and Vessel should not touch it.
+
+The same numbers say something else worth keeping: on this memory-ordering-bound
+loop, translated x86-64 is within 4% of native ARM64. That is a workload chosen
+to isolate barriers rather than a general claim about emulation speed, but it is
+the shape the ARM64EC design was betting on.
+
+**FEAT_LRCPC3 buys nothing today.** The CPU reports it and FEX detects it
+(`Source/Common/HostFeatures.cpp:237`), but the field does not exist in the
+struct that reaches codegen — the emitter has no RCPC3 encodings at all, and
+`Addressing.cpp` says so outright. It would only matter for *vector* TSO, which
+Vessel ships off, so there is nothing to gain until that changes.
 
 These are the highest-leverage runtime dials on this device, and they sit behind
 the editor's advanced disclosure: every default is already the correct one, and
@@ -75,18 +122,28 @@ FEX configuration traps worth knowing before adding a knob:
 
 ## Runtime defaults
 
-Runtime defaults live in exactly one place — `app/src/main/assets/params-manifest.json`
-— so a fresh container is correct without the user knowing any of this.
-`build/targets/<target>.env` is build-time only. For `canoe`:
+Most of what used to be configurable is now fixed, because measurement kept
+producing the same answer: there is one correct value and no user could reach a
+better one by guessing. `build/targets/<target>.env` is build-time only. For
+`canoe`:
 
-| Setting | Value | Reason |
-|---|---|---|
-| `TU_DEBUG` | *(none forced)* | Neither rendering mode is forced — see below |
-| `TU_AUTOTUNE_ALGO` | `default` | `prefer_sysmem` available if a title corrupts |
-| FEX `TSOEnabled` | on | required for correctness; off breaks multithreaded apps |
-| FEX `HalfBarrierTSOEnabled` | on | cheap ordering, no `FEAT_TSO` on Oryon |
-| FEX `VectorTSOEnabled` | off | severe cost on vector-heavy workloads |
-| Wine sync | esync | fixed, not a setting — see README, Known limitations |
+| Setting | Value | Where it lives | Reason |
+|---|---|---|---|
+| `TU_DEBUG` | *(none forced)* | fixed | Neither rendering mode is forced — see below |
+| `TU_AUTOTUNE_ALGO` | `default` | fixed | `prefer_sysmem` available if a title corrupts |
+| `FEX_TSOENABLED` | `1` | fixed | Required for correctness; off breaks multithreaded programs quietly |
+| `FEX_HALFBARRIERTSOENABLED` | `1` | fixed | Measured 21% cheaper than the alternative on this core |
+| `FEX_VECTORTSOENABLED` | `0` | fixed | Severe cost, and FEAT_LRCPC3 that would make it cheap is unused by FEX |
+| Wine sync | esync | fixed | The only mode that works here — README, Known limitations |
+| Resolution | `1280x720` | **container** | The single biggest performance dial on this phone |
+| Frame rate limit | `60` | **container** | Thermal headroom over a long session |
+| Extra DLL overrides | *(empty)* | **container** | The one escape hatch for a single misbehaving program |
+
+Only the last three are in `app/src/main/assets/params-manifest.json` and only
+those three appear in the editor. The fixed ones are set in
+`SessionEnvironment.kt` beside `WINEESYNC` and are listed in
+`RESERVED_SESSION_ENV`, so a manifest entry cannot reintroduce them — which also
+means a container saved while they *were* switches cannot resurrect an old value.
 
 **Neither rendering mode is forced.** The widely repeated "GMEM is broken on
 Adreno 829, force `TU_DEBUG=sysmem`" is wrong: Turnip's GMEM page-fault report is
@@ -124,6 +181,53 @@ The linker lives in a system exec context, so policy permits it. This is how
 `ProcessBuilder` because it declares `targetSdkVersion 28`, below the threshold.
 Vessel targets 36. Read any Winlator technique that appears to execute
 downloaded binaries directly with its manifest in hand.
+
+Two consequences of the linker trick are easy to miss and both cost a day:
+
+- `/proc/self/exe` becomes the **linker**, not the binary. Wine's installed
+  loader (`tools/wine/wine.c`) derives its library directory from it, so it
+  hunts for `ntdll.so` under `/apex/com.android.runtime/lib/wine` and dies.
+  Setting **`WINEDLLPATH=<wine>/lib/wine`** — the loader's documented fallback —
+  fixes it. Anything else that self-locates will need the same treatment.
+- Exec is only permitted out of `app_data_file`. A binary sitting in
+  `/data/local/tmp` cannot be run by the app even when it is world-readable:
+  the linker reports `couldn't map "…" segment 3: Permission denied`.
+
+### Executable pages must be anonymous
+
+W^X on Android has a second edge that has nothing to do with `execve`, and it is
+the one that actually stopped Wine.
+
+Making a page executable takes SELinux `execute` on a clean file mapping, but
+**`execmod` on a *modified* one** — and apps are not granted `execmod`. Parts of
+the policy `dontaudit` it, so the denial never reaches logcat. Measured with
+`tools/probe/mapexec.c`, running as the app, against a real Wine PE:
+
+```
+ok    mmap R  /  then mprotect RX
+ok    MAP_FIXED RX over a PROT_NONE reservation
+ok    clean private page -> RX
+FAIL  DIRTIED private page -> RX (execmod): Permission denied (errno 13)
+```
+
+Writing one byte is the entire difference. Wine applies relocations to an image
+*before* protecting its sections, so any PE loaded away from its `ImageBase`
+dirties its own `.text` and can never execute it. That is exactly what happened:
+`wineboot.exe` landed at its preferred base `0x140000000` and mapped `c-r-x`
+fine, while `ntdll.dll` was relocated to `0x6fffe40000` and failed — leaving a
+646-byte stub prefix and a crash the moment anything called into it.
+
+`patches/wine/0002` forces Wine's existing `removable` path, which `pread()`s
+each section into anonymous memory, where `PROT_EXEC` needs only `execmem` —
+which apps do have, because every JIT on the platform needs it. The cost is
+that image pages are private copies rather than shared, demand-paged file pages,
+so a session's RSS is well above the on-disk size. There is no cheaper option:
+anything that keeps the pages file-backed meets `execmod` again the moment a
+relocation lands.
+
+Upstream Wine blames this on a "noexec filesystem?", which on Android is simply
+the wrong guess — `/data/user/0` is mounted `rw`, SELinux logs
+`granted { execute }`, and the page size is 4096.
 
 | Component | Kind | Delivery |
 |---|---|---|
@@ -199,18 +303,23 @@ changed — each workflow triggers on its own `pins.env` key and
 | 2 | ~~Custom Box64~~ | **Removed** — no x86-64 Wine for it to run |
 | 3 | Custom FEX PE DLLs | **Done** — CHPE-verified ARM64EC |
 | 4 | Custom Turnip gen8 + matched DXVK/vkd3d | **Done** — a829 support confirmed in the binary |
-| 5 | Custom Wine ARM64EC | **Done** — packaged and verified |
+| 5 | Custom Wine ARM64EC | **Done** — upstream 11.14, packaged and verified |
 | 6 | App shell: containers, components, diagnostics | **Done** for everything not needing a session |
-| 7 | Session launcher | Not started; the one blocker for running anything |
-| 8 | Benchmark harness | Not started; needs a running session to measure |
+| 7 | Session launcher | In progress |
+| 8 | Display backend (X server) | In progress |
+| 9 | Benchmark harness | Not started; needs a running session to measure |
+
+On the device itself, `tools/device-smoke.sh` has taken the stack as far as
+`wine --version` answering from inside the app's own uid and sandbox. Building a
+prefix needs the `execmod` fix above, which is why phase 5 was rebuilt.
 
 Phases 2–5 each produce an installable `.wcp` whose provenance records the
 source commit and the exact compiler flags used, so any claim this project makes
 about a component can be checked against the package rather than taken on trust.
 
-## Open issue: components are stored per container
+## Components are shared, not copied per container
 
-Measured 2026-08-07, after the first full set of packages existed:
+Measured 2026-08-07, once a full set of packages existed:
 
 | Component | Download | On disk |
 |---|---|---|
@@ -222,24 +331,135 @@ Measured 2026-08-07, after the first full set of packages existed:
 | FEX | 1.1 MB | 9 MB |
 | | **75 MB** | **~988 MB** |
 
-`ContainerLayout.components` resolves to `containers/<id>/components/`, so every
-container gets its own copy. Three containers on the same Wine build is three
-byte-identical 912 MB trees — about 3 GB to store one Wine.
+Components used to live at `containers/<id>/components/`, so three containers on
+one Wine build meant three byte-identical 912 MB trees. They now install once to
+`components/<type>/<versionCode>/` and containers reference them:
 
-That is not sustainable, and the fix is a **content-addressed shared store**:
-install a package once at `filesDir/components/<type>/<versionCode>/` and have
-containers reference it rather than own it. Reference counting decides when a
-version can be deleted; a container pinned to an older build keeps it alive.
+```
+filesDir/
+  components/<Type>/<versionCode>/     payload + profile.json, shared
+  components/<Type>/<versionCode>.json ComponentRecord (registry package id)
+  components/.staging/                 install staging, same filesystem
+  containers/<id>/                     prefix/ tmp/ provisioned.json
+```
 
-Two reasons it is worth doing before the launcher rather than after:
+A container's references are the `type -> versionCode` entries in its own
+`provisioned.json`. The count is taken from **disk**, over every directory under
+`containers/`, not from the container database — a container directory that
+outlives its document entry still has a prefix expecting those components.
+`prune()` deletes only versions nothing references, and nothing calls it
+automatically; deleting a container frees the reference but never the bytes.
 
-- The launcher builds the environment from component paths. Changing where
-  components live afterwards means changing the launcher, the provisioner, the
-  environment builder and their tests together.
-- Per-container copies make a component *update* cost a full reinstall per
-  container, which undermines the update-without-reinstall property the whole
-  `.wcp` design exists for.
+`ContainerPaths` remains the only place that knows this layout. Devices built
+before the change are migrated by **moving** the per-container copies into the
+store, keyed from `provisioned.json` first and the payload's own `profile.json`
+second. A directory that can be keyed by neither is left alone and reported, not
+deleted — up to 912 MB the user paid a download for is not something to discard
+because this code could not read it.
 
-The per-container layout was not wrong when written — components were assumed
-small. Wine at 912 MB is what changed the answer, and it was only visible once
-a real package existed to measure.
+The per-container layout was not wrong when written; components were assumed
+small. Wine at 912 MB changed the answer, and that was only visible once a real
+package existed to measure.
+
+## The display path: a vendored Java X server
+
+Wine needs an X server. There is no X server on Android, and Wine's own
+`wineandroid.drv` is switched off in `build/wine.sh` for reasons recorded there,
+so something has to answer on `/tmp/.X11-unix/X0` inside the container.
+
+That something is Winlator's X server, vendored wholesale into
+`app/src/main/java/com/winlator/` at commit `ca3d735`. It is LGPL-2.1;
+`app/src/main/java/com/winlator/README.md` records what was taken, what was
+left, and every local change. Writing one instead was never seriously on the
+table — this is ~10k lines of Java plus ~2.9k of JNI that already work against
+`winex11.drv` specifically, which is a much narrower and better-tested target
+than "the X protocol".
+
+### Why a Java X server is not the slow choice it sounds like
+
+The instinct is that a Java X server means CPU-copying every frame. It does
+not, because the frames do not go through the protocol at all:
+
+- A window's backing store is a `GPUImage`, which is an `AHardwareBuffer`
+  imported as an `EGLImageKHR` and bound with `glEGLImageTargetTexture2DOES`.
+- DRI3 `BufferFromPixmap` hands the guest that buffer's **dma-buf fd** over
+  SCM_RIGHTS. DXVK renders into it directly, on the GPU, in the guest process.
+- `GLRenderer` then composites the window textures into one `GLSurfaceView`
+  pass.
+
+So the X protocol carries geometry, input and damage; the pixels never cross it.
+The CPU path (`Drawable.drawImage`, the `PutImage` blitter in `drawable.c`) is
+the 2D fallback for GDI, not the game path.
+
+### What we did not need, and why
+
+**No Vortek.** Vortek exists because box64 runs a glibc x86-64 Wine, and glibc
+code cannot call bionic's Vulkan driver; Vortek marshals Vulkan over a socket to
+a native helper that can. Vessel's Wine is bionic-native ARM64EC, so it calls
+`libvulkan.so` directly. The problem Vortek solves does not occur here.
+
+**No GLX.** Upstream's `GLXExtension` is a dispatcher onto `libgladiorenderer`,
+a GL-over-a-socket translator that exists because Winlator's guest has no real
+`opengl32`. Vessel builds Mesa/Zink as an ARM64EC `opengl32.dll`, so the guest
+resolves GL in-process and never asks X for a GLX visual. The extension is
+simply absent from the advertised set, which winex11 handles — as it does for
+XFixes, XInput2, RandR, RENDER and SHAPE, all of which are also missing and all
+of which winex11 treats as optional.
+
+**No `android_sysvshm` glibc patch.** See below.
+
+### Shared memory on bionic: MIT-SHM stays on, and was never SysV
+
+The framing "bionic has no shmget, so MIT-SHM must be shimmed or disabled" turns
+out to be wrong in both halves, and the truth is more convenient.
+
+bionic *does* export `shmget`/`shmat`/`shmdt`/`shmctl` from API 26. The NDK's
+own `sys/shm.h` documents them as "Not useful on Android because it's disallowed
+by SELinux" — they link, and they fail at runtime with EACCES. So the failure is
+silent at build time, which is the part worth knowing.
+
+But even if SELinux allowed it, it would not help. A SysV `shmid` names a
+segment in the kernel's IPC namespace; a Java X server can only `mmap` a file
+descriptor. There is no way for it to attach to a segment another process
+created by key. **Any** MIT-SHM implementation living in an Android app has to
+be fd-passing, whatever the client believes it is doing.
+
+Which is exactly what the vendored `com.winlator.sysvshm` already is: a unix
+socket on `/tmp/.sysvshm/SM0` where SHMGET allocates an ashmem region
+(`ASharedMemory_create`, with a memfd fallback Vessel added) and GET_FD returns
+the descriptor as an SCM_RIGHTS ancillary message. Nothing in it calls
+`shmget`. Winlator needs a glibc patch for the *client* half — interposing the
+guest's `shmget` onto that socket — and that patch is glibc-specific, which is
+the only reason it appears on the "not vendored" list.
+
+So MIT-SHM is enabled, and the extension is complete on the server side.
+
+**What is missing is the client half.** Wine's `winex11.drv` calls `shmget`
+directly in `create_shm_image` (`dlls/winex11.drv/bitblt.c`), guarded by
+`HAVE_LIBXXSHM`, which our X11 sysroot satisfies. On bionic that call returns
+-1, Wine reads that as "XShm unavailable" and falls back to `XPutImage`. That is
+correct, and costs one copy per damaged region — a 2D/GDI cost, not a game one.
+Making it fast means teaching winex11 to talk to the sysvshm socket instead: a
+Wine patch under `patches/wine/`, not something the display backend can do from
+its side. Not written yet.
+
+### Still missing
+
+- **The AHardwareBuffer/DAC present layer for DXVK is out of scope here and not
+  done.** The X server side exists — DRI3 hands out the buffer fd and Present
+  routes the flip — but nothing yet drives a real swapchain from DXVK's
+  `VK_KHR_present_wait`/DAC path onto that buffer with correct fencing. Until
+  then, expect presentation to be composited rather than flipped.
+- **No guest-side helper.** `com.winlator.winhandler.WinHandler` is an interface
+  with a no-op implementation. Relative mouse mode and window activation from
+  the X side into Win32 are therefore inert. The integration point is
+  `XServer.setWinHandler()`.
+- **The host is not wired up.** This task vendored the backend only. The seam
+  exists on the session side — `app.vessel.core.SessionDisplayServer`, currently
+  bound to `SessionDisplayServer.Absent` — and closing it means one adapter that
+  creates the `XServer`, stands up `XConnectorEpoll` on the two sockets and hosts
+  `XServerView`. The call sequence is in
+  `app/src/main/java/com/winlator/README.md`.
+- **No XFixes.** winex11 uses it for cursor images and region ops when present;
+  without it the pointer is the server's own cursor. Fine for now, wrong for
+  applications that set custom cursors.
