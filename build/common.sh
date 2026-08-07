@@ -260,17 +260,43 @@ EOF
 # matters: an arm64ec target silently falling back to plain x64.
 #
 #   verify_pe_dll <path> <triple> [label]
+# Note on the shape of the code below: every check captures its command's output
+# into a variable and greps the variable, rather than piping producer into
+# `grep -q`. That is not a style preference, it is required by `set -o pipefail`
+# at the top of this file.
+#
+# `grep -q` exits the instant it matches. If the producer is still writing, it
+# takes SIGPIPE and exits 141, and pipefail then makes the whole pipeline
+# non-zero — so a SUCCESSFUL match reports failure. Whether that happens depends
+# on nothing more meaningful than output size: anything under the 64 KB pipe
+# buffer is written and the producer exits cleanly first. llvm-readobj
+# --coff-load-config on Wine's ntdll.dll emits 5080 lines with the CHPE match on
+# line 38, which is exactly the losing case, and it failed here as
+#     error: aarch64-windows/ntdll.dll (ARM64X) has no CHPE load-config
+# on a DLL that demonstrably has one. The same pipeline had always passed for
+# FEX's and DXVK's much smaller DLLs.
 verify_pe_dll() {
   local dll="$1" triple="$2" label="${3:-$(basename "$1")}"
+  local file_out loadcfg
 
   [ -f "$dll" ] || die "$label: no such file: $dll"
-  file "$dll" | grep -Eqi 'PE32\+ executable \(DLL\)' \
-    || die "$label is not a PE32+ DLL: $(file -b "$dll")"
+  file_out="$(file -b "$dll")"
+
+  # PE32 and PE32+ are both PE DLLs; the "+" only means a 64-bit optional header.
+  # A 32-bit x86 module is therefore PE32 and asserting PE32+ up here rejects a
+  # perfectly correct i386 build:
+  #     error: i386 ntdll.dll is not a PE32+ DLL:
+  #            PE32 executable (DLL) (console) Intel 80386, for MS Windows
+  # The 32-vs-64 question belongs to the per-triple checks below, which know
+  # which one they asked for. (This branch went unexercised for a long time
+  # because dxvk.sh and vkd3d.sh only route their 64-bit pass through here.)
+  grep -Eqi 'PE32\+? executable \(DLL\)' <<< "$file_out" \
+    || die "$label is not a PE DLL: $file_out"
 
   case "$triple" in
     arm64ec-*)
-      if "$MINGW_BIN/llvm-readobj" --coff-load-config "$dll" 2>/dev/null \
-           | grep -qE 'CHPEMetadata|HybridMetadataPointer'; then
+      loadcfg="$("$MINGW_BIN/llvm-readobj" --coff-load-config "$dll" 2>/dev/null || true)"
+      if grep -qE 'CHPEMetadata|HybridMetadataPointer' <<< "$loadcfg"; then
         info "$label carries hybrid (CHPE) metadata — genuine ARM64EC"
       else
         die "$label has no CHPE load-config, so it is not really ARM64EC.
@@ -278,11 +304,25 @@ verify_pe_dll() {
       fi
       ;;
     aarch64-*)
-      file "$dll" | grep -Eqi 'aarch64|arm64' \
-        || die "$label should be an ARM64 PE but is: $(file -b "$dll")"
+      grep -Eqi 'PE32\+ executable' <<< "$file_out" \
+        || die "$label should be a 64-bit PE but is: $file_out"
+      grep -Eqi 'aarch64|arm64' <<< "$file_out" \
+        || die "$label should be an ARM64 PE but is: $file_out"
       ;;
-    i686-*|x86_64-*)
-      : # 32/64-bit x86 PE; file's own machine type is already the truth
+    i686-*)
+      # No EC-style subtlety here: a 32-bit x86 module is PE32 + Intel 80386, and
+      # file's machine type is the truth. The failure worth catching is a 64-bit
+      # or ARM image installed under an i386 name.
+      grep -Eqi 'PE32 executable' <<< "$file_out" \
+        || die "$label should be a 32-bit PE but is: $file_out"
+      grep -Eqi '80386|intel' <<< "$file_out" \
+        || die "$label should be a 32-bit x86 PE but is: $file_out"
+      ;;
+    x86_64-*)
+      grep -Eqi 'PE32\+ executable' <<< "$file_out" \
+        || die "$label should be a 64-bit PE but is: $file_out"
+      grep -Eqi 'x86-64' <<< "$file_out" \
+        || die "$label should be an x86-64 PE but is: $file_out"
       ;;
     *)
       warn "$label: no architecture check defined for triple $triple"

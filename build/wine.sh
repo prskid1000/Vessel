@@ -118,11 +118,15 @@ done
 # depend on, and it also catches a tools tree left behind by an older revision of
 # this script that did pass --without-freetype.
 tools_sfnt2fon_has_freetype() {
-  local exe="$TOOLS/tools/sfnt2fon/sfnt2fon"
+  local exe="$TOOLS/tools/sfnt2fon/sfnt2fon" out
   [ -x "$exe" ] || return 1
   # No arguments: with FreeType it prints its usage, without it prints the stub
-  # message above. Either way it exits non-zero, so match on the text.
-  ! "$exe" 2>&1 | grep -q 'needs to be built with FreeType support'
+  # message above. Either way it exits non-zero, so match on the text and not on
+  # the status — and capture rather than pipe, because under `set -o pipefail`
+  # `! cmd | grep -q` reports the failing *producer*, not the match, and would
+  # answer "yes, it has FreeType" for precisely the tree that does not.
+  out="$("$exe" 2>&1 || true)"
+  ! grep -q 'needs to be built with FreeType support' <<< "$out"
 }
 
 if [ -x "$TOOLS/tools/winebuild/winebuild" ] && [ -e "$TOOLS/nls/locale.nls" ] \
@@ -258,6 +262,27 @@ CONFIGURE_ARGS=(
   --enable-archs=arm64ec,aarch64,i386
   --with-mingw=clang
   --disable-tests
+
+  # --enable-tools looks redundant next to --with-wine-tools and is not.
+  # configure.ac turns the tools off as a side effect of being handed a prebuilt
+  # tools tree:
+  #     elif test -d "$toolsdir/tools/winebuild"; then
+  #         enable_tools=${enable_tools:-no}
+  # and one of the things that switches off is tools/wine — which since Wine 10
+  # is the program that becomes bin/wine. It is not the same binary as
+  # loader/wine (that one installs to lib/wine/aarch64-unix/wine); it is the
+  # small front end that resolves libdir, dlopens ntdll.so and calls
+  # __wine_main. Without it the install still creates bin/notepad, bin/winecfg
+  # and the rest as symlinks to "wine", and every one of them dangles:
+  #     error: no wine loader at .../bin/wine
+  # Nothing in the container can start a process at that point.
+  #
+  # Turning the tools back on does NOT redirect code generation: makedep resolves
+  # winebuild/wrc/widl through toolsdir regardless, so those still run as x86-64
+  # host binaries. All this adds is a second, cross-compiled copy of tools/ for
+  # the device, of which install-lib ships exactly one file — tools/wine is the
+  # only tools subdirectory with an INSTALL_LIB.
+  --enable-tools
   # AC_PATH_XTRA does not consult pkg-config, so the sysroot has to be named
   # again here even though PKG_CONFIG_SYSROOT_DIR already points at it.
   --with-x
@@ -335,7 +360,13 @@ fi
 # found but rejected for some other reason — a missing extension header, say.
 # --with-x already turns a *missing* X11 into a configure error; this catches
 # the quieter case.
-if grep -E '^DISABLED_SUBDIRS' "$BUILD/Makefile" | grep -q 'dlls/winex11\.drv'; then
+#
+# Captured rather than piped into `grep -q` for the pipefail reason spelled out
+# above verify_pe_dll in common.sh: DISABLED_SUBDIRS is one very long line, so a
+# matching `grep -q` would SIGPIPE the producer and the check would never fire —
+# it would stay quiet on exactly the failure it exists to catch.
+DISABLED_LINE="$(grep -E '^DISABLED_SUBDIRS' "$BUILD/Makefile" || true)"
+if grep -q 'dlls/winex11\.drv' <<< "$DISABLED_LINE"; then
   die "configure disabled dlls/winex11.drv despite --with-x.
      Search $BUILD/config.log for 'checking for X' and for the X11 extension
      header checks that follow it."
@@ -363,8 +394,12 @@ make -C "$BUILD" install-lib DESTDIR="$STAGE" || die "make install-lib failed"
 # failure this rewrite exists to prevent, and `file` is the only cheap way to
 # tell the two apart — look for "interpreter /system/bin/linker64" on the
 # executables, which no glibc build can produce.
+# Note the unix driver is winex11.so, NOT winex11.drv.so. winex11.drv is the
+# PE module in lib/wine/aarch64-windows; its unix half is named by UNIXLIB in
+# dlls/winex11.drv/Makefile.in, which reads "winex11.so". Checking for the .drv.so
+# spelling passes over a genuinely missing driver every time.
 for elf in bin/wineserver bin/wine lib/wine/aarch64-unix/ntdll.so \
-           lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/winex11.drv.so; do
+           lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/winex11.so; do
   path="$PAYLOAD/$elf"
   [ -f "$path" ] || die "missing unix binary $elf (expected $path).
      Without winex11.drv.so in particular, Wine has no way to put a window on
