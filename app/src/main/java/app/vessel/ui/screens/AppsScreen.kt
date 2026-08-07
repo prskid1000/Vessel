@@ -40,7 +40,7 @@ fun AppsScreen(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
 @Composable
 private fun AppsPreview() {
     VesselTheme {

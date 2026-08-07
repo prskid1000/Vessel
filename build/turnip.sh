@@ -104,7 +104,7 @@ done
 #      the driver fails to open /dev/kgsl-3d0 on device, try 'kgsl,msm'.
 #   2. that the .so really lands at src/freedreno/vulkan/ in the build tree
 #      (checked below, so a move fails loudly rather than shipping nothing).
-log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $TARGET_API)"
+log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $NDK_API)"
 
 # Only the Vulkan driver is wanted: no GL, no EGL, no gallium, no window system
 # integration. android-stub replaces the platform libraries we cannot link
@@ -112,7 +112,7 @@ log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $TARGET_API)"
 meson setup "$BUILD" "$SRC" \
   --cross-file "$CROSS" \
   -Dplatforms=android \
-  -Dplatform-sdk-version="$TARGET_API" \
+  -Dplatform-sdk-version="$NDK_API" \
   -Dandroid-stub=true \
   -Dandroid-libbacktrace=disabled \
   -Degl=disabled \
@@ -157,7 +157,7 @@ cat > "$STAGE/meta.json" <<EOF
   "packageVersion": "$VERSION",
   "vendor": "Mesa",
   "driverVersion": "$MESA_VERSION",
-  "minApi": $TARGET_API,
+  "minApi": $NDK_API,
   "libraryName": "libvulkan_freedreno.so"
 }
 EOF

@@ -75,8 +75,8 @@ private fun ContainersContent(
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = Vessel.metrics.s24),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s12),
+                contentPadding = PaddingValues(bottom = Vessel.metrics.s22),
+                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
             ) {
                 items(state.rows, key = { it.profile.id }) { row ->
                     VContainerCard(
@@ -91,7 +91,7 @@ private fun ContainersContent(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
 @Composable
 private fun ContainersPreview() {
     VesselTheme {
@@ -106,7 +106,7 @@ private fun ContainersPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
 @Composable
 private fun ContainersEmptyPreview() {
     VesselTheme {

@@ -1,7 +1,6 @@
 package app.vessel.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,26 +38,34 @@ fun VArchBadge(
     VTonalPill(text = arch.label, tone = archColor(arch), modifier = modifier)
 }
 
-/** The badge shape shared by [VArchBadge] and the container profile tag. */
+/**
+ * The badge shape shared by [VArchBadge] and the container profile tag.
+ *
+ * Nocturne's `.tag` geometry — `radius-md * 0.75`, `3px 10px` — with a tinted
+ * ground rather than the `-800`/`-100` ramp pair of [VTag]. That is the one
+ * deliberate deviation in the whole system: the tag ramps are all violet, and a
+ * violet architecture badge would destroy the signal the colour is carrying.
+ * The ground is the tone at 18% and the label is the tone itself, so `x64` blue
+ * still reads as blue.
+ */
 @Composable
 fun VTonalPill(
     text: String,
     tone: Color,
     modifier: Modifier = Modifier,
 ) {
-    val shape = Vessel.metrics.shapePill
+    val shape = Vessel.metrics.shapeTag
     Text(
         text,
         style = Vessel.type.monoSmall,
         color = tone,
         modifier = modifier
-            .background(tone.copy(alpha = 0.14f), shape)
-            .border(Vessel.metrics.hairline, tone.copy(alpha = 0.35f), shape)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .background(tone.copy(alpha = 0.18f), shape)
+            .padding(horizontal = 10.dp, vertical = 3.dp),
     )
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F)
+@Preview(showBackground = true, backgroundColor = 0xFF161826)
 @Composable
 private fun VArchBadgePreview() {
     VesselTheme {

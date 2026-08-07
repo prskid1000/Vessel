@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,7 +38,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.vRuleAbove
 import app.vessel.ui.theme.vRuleBelow
@@ -83,8 +83,8 @@ fun VRootToolbar(
             .padding(
                 start = Vessel.metrics.screenGutter,
                 end = Vessel.metrics.screenGutter,
-                top = Vessel.metrics.s12,
-                bottom = Vessel.metrics.s12,
+                top = Vessel.metrics.s11,
+                bottom = Vessel.metrics.s11,
             ),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         verticalAlignment = Alignment.CenterVertically,
@@ -92,7 +92,7 @@ fun VRootToolbar(
         Column(Modifier.weight(1f)) {
             Text(title, style = Vessel.type.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle != null) {
-                Text(subtitle, style = Vessel.type.monoSmall, color = Vessel.colors.textTertiary)
+                Text(subtitle, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
             }
         }
         trailing?.invoke(this)
@@ -111,12 +111,12 @@ fun VPushToolbar(
     Row(
         modifier
             .fillMaxWidth()
-            .vRuleBelow(Vessel.colors.border)
+            .vRuleBelow(Vessel.colors.divider)
             .padding(
                 start = Vessel.metrics.s8,
                 end = Vessel.metrics.screenGutter,
-                top = Vessel.metrics.s12,
-                bottom = Vessel.metrics.s12,
+                top = Vessel.metrics.s11,
+                bottom = Vessel.metrics.s11,
             ),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         verticalAlignment = Alignment.CenterVertically,
@@ -128,7 +128,7 @@ fun VPushToolbar(
                 Text(
                     subtitle,
                     style = Vessel.type.monoSmall,
-                    color = Vessel.colors.textTertiary,
+                    color = Vessel.colors.textMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -160,21 +160,21 @@ fun VBottomNav(
             // Fill first, rule second: `drawBehind` paints before it delegates,
             // so a rule declared above the background is painted over by it.
             .background(Vessel.colors.bg)
-            .vRuleAbove(Vessel.colors.border)
+            .vRuleAbove(Vessel.colors.divider)
             .padding(
                 top = Vessel.metrics.s8,
-                bottom = Vessel.metrics.s12 +
+                bottom = Vessel.metrics.s11 +
                     WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
             ),
     ) {
         destinations.forEach { destination ->
             val selected = currentRoute == destination.route
-            val tint = if (selected) Vessel.colors.accent else Vessel.colors.textTertiary
+            val tint = if (selected) Vessel.colors.accent else Vessel.colors.textMuted
             Column(
                 Modifier
                     .weight(1f)
                     .clickable { onSelect(destination) }
-                    .padding(vertical = Vessel.metrics.s4),
+                    .padding(vertical = Vessel.metrics.s3),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
@@ -190,9 +190,16 @@ enum class VButtonStyle { Primary, Secondary, Ghost }
 /**
  * The one button.
  *
- * Not Material's, because rule 3 is flat and precise: a fill, one hairline, no
- * elevation and no shadow at any state. Pressed is a colour change and nothing
- * else.
+ * **Buttons in Nocturne are outlined, not filled.** A primary button is accent
+ * text with a 1 dp accent border on a transparent ground, tinting to 12% accent
+ * on hover and 22% on press. A solid accent slab is not a form this system has,
+ * and it used to be one here: the previous version filled Primary with the flat
+ * accent and set the label to `bg`, which read as a Material FAB dropped onto a
+ * Nocturne screen and made the Launch button the loudest thing in the product.
+ *
+ * `.btn-secondary` is the same geometry with a `divider` border and text
+ * colour; `.btn-ghost` drops the border entirely. Disabled is 45% opacity, not
+ * a different palette — Nocturne never recolours a disabled control.
  */
 @Composable
 fun VButton(
@@ -205,44 +212,55 @@ fun VButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val hovered by interaction.collectIsHoveredAsState()
     val shape = Vessel.metrics.shapeMd
+    val colors = Vessel.colors
 
+    // Transparent at rest, always. The tint is the only thing a state changes.
     val fill = when {
-        !enabled -> Vessel.colors.surfaceRaised
-        style == VButtonStyle.Primary && pressed -> Vessel.colors.accentPressed
-        style == VButtonStyle.Primary -> Vessel.colors.accent
-        style == VButtonStyle.Secondary -> Vessel.colors.surfaceRaised
+        !enabled -> Color.Transparent
+        style == VButtonStyle.Ghost && pressed -> colors.accentGhostPressed
+        style == VButtonStyle.Ghost && hovered -> colors.accentGhostHover
+        style == VButtonStyle.Primary && pressed -> colors.accentPressed
+        style == VButtonStyle.Primary && hovered -> colors.accentHover
+        style == VButtonStyle.Secondary && pressed -> colors.neutralPressed
+        style == VButtonStyle.Secondary && hovered -> colors.neutralHover
         else -> Color.Transparent
     }
-    val stroke = when {
-        style == VButtonStyle.Primary -> Color.Transparent
-        pressed -> Vessel.colors.borderStrong
-        else -> Vessel.colors.border
+    val stroke = when (style) {
+        VButtonStyle.Primary -> colors.accent
+        VButtonStyle.Secondary -> colors.divider
+        VButtonStyle.Ghost -> Color.Transparent
     }
-    val content = when {
-        !enabled -> Vessel.colors.textTertiary
-        style == VButtonStyle.Primary -> Vessel.colors.bg
-        style == VButtonStyle.Ghost -> Vessel.colors.textSecondary
-        else -> Vessel.colors.textPrimary
+    val content = when (style) {
+        VButtonStyle.Primary, VButtonStyle.Ghost -> colors.accent
+        VButtonStyle.Secondary -> colors.textPrimary
     }
+    val alpha = if (enabled) 1f else colors.disabledAlpha
 
     Row(
         modifier
             .defaultMinSize(minHeight = 40.dp)
             .background(fill, shape)
-            .border(Vessel.metrics.hairline, stroke, shape)
+            .border(Vessel.metrics.hairline, stroke.copy(alpha = stroke.alpha * alpha), shape)
             .clickable(
                 interactionSource = interaction,
                 indication = LocalIndication.current,
                 enabled = enabled,
                 onClick = onClick,
             )
-            .padding(horizontal = Vessel.metrics.s16, vertical = Vessel.metrics.s8),
+            .padding(
+                // `.btn` padding: `var(--space-2) calc(var(--space-3) * 1.2)`,
+                // and `.btn-ghost` pulls its inline padding back to `--space-1`.
+                horizontal = if (style == VButtonStyle.Ghost) Vessel.metrics.s8 else Vessel.metrics.s11,
+                vertical = Vessel.metrics.s6,
+            ),
         horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (icon != null) Icon(icon, null, Modifier.size(16.dp), tint = content)
-        Text(label, style = Vessel.type.label, color = content, maxLines = 1)
+        val tinted = content.copy(alpha = alpha)
+        if (icon != null) Icon(icon, null, Modifier.size(16.dp), tint = tinted)
+        Text(label, style = Vessel.type.control, color = tinted, maxLines = 1)
     }
 }
 
@@ -263,13 +281,19 @@ fun VIconButton(
     }
 }
 
-/** The mono rule that names a group on every screen. */
+/**
+ * The kicker that names a group on every screen.
+ *
+ * `h6` in Nocturne: 11 sp, `0.08em` tracking, uppercase. The uppercasing has to
+ * happen here because Compose has no `text-transform`, which is also why
+ * `Vessel.type.overline` carries the tracking but not the case.
+ */
 @Composable
 fun VSectionHeader(text: String, modifier: Modifier = Modifier) {
     Text(
         text.uppercase(),
-        style = Vessel.type.monoSmall.copy(letterSpacing = 0.1.em),
-        color = Vessel.colors.textTertiary,
-        modifier = modifier.padding(top = Vessel.metrics.s16, bottom = Vessel.metrics.s8),
+        style = Vessel.type.overline,
+        color = Vessel.colors.textMuted,
+        modifier = modifier.padding(top = Vessel.metrics.s17, bottom = Vessel.metrics.s8),
     )
 }

@@ -35,6 +35,14 @@ Box64 emulates all of it, Wine and DXVK included. Slower in principle, but it
 is a different enough code path that it rescues applications which fail under
 ARM64EC — some installers, some DRM, some anti-cheat.
 
+**This profile is 64-bit only.** Box64's Box32 mode, which would add 32-bit x86
+support, is written against glibc and does not compile against Android's bionic
+libc — verified, with the specific failures recorded in `build/box64.sh`.
+Closing that gap would need either a glibc-targeted Box64 or patches under
+`patches/box64/`. Until then, 32-bit x86 applications must run in a Universal
+container, where FEX's WoW64 path handles them. That is the recommended
+placement regardless, since it is also the faster one.
+
 ### Layer 2 — Automatic per-application detection
 
 The user should never have to know what architecture an `.exe` is. On launch,

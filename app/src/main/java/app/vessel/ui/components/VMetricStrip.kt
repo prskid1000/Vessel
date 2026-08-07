@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
@@ -42,14 +43,19 @@ fun VMetricStrip(
     Row(
         modifier
             .fillMaxWidth()
-            .vCard(shape = Vessel.metrics.shapeMd)
-            .padding(vertical = Vessel.metrics.s12),
+            // The one genuinely floating surface in the product: the strip sits
+            // over a running Windows desktop, so it takes `--shadow-md` — the
+            // lighter neutral-700 ring plus ambient darkness — rather than the
+            // flat hairline every in-page card gets. DESIGN.md's "ring only when
+            // raised" is about exactly this distinction.
+            .vCard(elevation = VElev.md)
+            .padding(vertical = Vessel.metrics.s11),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         metrics.forEach { metric ->
             Column(
-                Modifier.weight(1f).padding(horizontal = Vessel.metrics.s4),
+                Modifier.weight(1f).padding(horizontal = Vessel.metrics.s3),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
@@ -59,7 +65,7 @@ fun VMetricStrip(
                         Text(
                             metric.unit,
                             style = Vessel.type.monoSmall,
-                            color = Vessel.colors.textTertiary,
+                            color = Vessel.colors.textMuted,
                             modifier = Modifier.padding(start = 2.dp, bottom = 3.dp),
                         )
                     }
@@ -67,7 +73,7 @@ fun VMetricStrip(
                 Text(
                     metric.label.uppercase(),
                     style = Vessel.type.monoSmall,
-                    color = Vessel.colors.textTertiary,
+                    color = Vessel.colors.textMuted,
                 )
             }
         }
@@ -82,7 +88,7 @@ private fun toneColor(tone: VMetricTone): Color = when (tone) {
     VMetricTone.Danger -> Vessel.colors.danger
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
 @Composable
 private fun VMetricStripPreview() {
     VesselTheme {

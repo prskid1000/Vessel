@@ -74,14 +74,32 @@ setup_ndk() {
   NDK_BIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$host_tag/bin"
   [ -d "$NDK_BIN" ] || die "no toolchain at $NDK_BIN"
 
-  NDK_CC="$NDK_BIN/aarch64-linux-android${TARGET_API}-clang"
-  NDK_CXX="$NDK_BIN/aarch64-linux-android${TARGET_API}-clang++"
-  [ -x "$NDK_CC" ] || die "no compiler for API $TARGET_API at $NDK_CC"
+  # Compile against TARGET_NDK_API, not the device's API level — an NDK only
+  # ships wrappers and sysroots for the API levels it knows about, which lags
+  # the newest Android release.
+  local api="${TARGET_NDK_API:-$TARGET_API}"
+  NDK_CC="$NDK_BIN/aarch64-linux-android${api}-clang"
+  NDK_CXX="$NDK_BIN/aarch64-linux-android${api}-clang++"
+
+  if [ ! -x "$NDK_CC" ]; then
+    local available
+    available="$(ls "$NDK_BIN" 2>/dev/null \
+      | grep -E '^aarch64-linux-android[0-9]+-clang$' \
+      | sed -E 's/^aarch64-linux-android([0-9]+)-clang$/\1/' \
+      | sort -n | tr '\n' ' ')"
+    die "no compiler for API $api in this NDK.
+     Available API levels: ${available:-none found}
+     Set TARGET_NDK_API in build/targets/$TARGET_NAME.env to one of those, or
+     bump ANDROID_NDK_VERSION in native/pins.env to an NDK that has $api."
+  fi
+
+  NDK_API="$api"
+  export NDK_API
 
   require_clang_major "$NDK_CC" 19 \
     "-mtune=oryon-1 requires clang >= 19; NDK r26/r27 ship clang 18. Bump ANDROID_NDK_VERSION in native/pins.env to r28 or newer."
 
-  info "ndk: $(basename "$ANDROID_NDK")  clang $(clang_version "$NDK_CC")"
+  info "ndk: $(basename "$ANDROID_NDK")  clang $(clang_version "$NDK_CC")  api $NDK_API"
 }
 
 # llvm-mingw, for everything that is a Windows PE inside the container
@@ -220,7 +238,7 @@ write_provenance() {
   "sourceSha": "${SOURCE_SHA:-unknown}",
   "cpuFlags": "${VESSEL_CPU_FLAGS:-none}",
   "ndk": "${ANDROID_NDK_VERSION:-n/a}",
-  "apiLevel": "${TARGET_API:-n/a}",
+  "apiLevel": "${NDK_API:-${TARGET_NDK_API:-n/a}}",
   "builtBy": "vessel-build"
 }
 EOF

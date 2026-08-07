@@ -36,6 +36,15 @@ class ContainersViewModel @Inject constructor() : ViewModel() {
     val state: StateFlow<ContainersUiState> = _state.asStateFlow()
 }
 
+/**
+ * One container, and one is the point.
+ *
+ * There used to be a second row here — an "Installers" container on a legacy
+ * x86-64 Wine tree — and it was doing the exact thing DESIGN.md refuses. Legacy
+ * Wine is not part of this product: there is one Wine build, compiled for this
+ * device, and offering a second tree implies a catalogue the user then has to
+ * choose from. The Universal profile is the only example the home screen needs.
+ */
 internal val SampleContainerRows = listOf(
     ContainerRow(
         profile = ContainerProfile(
@@ -48,17 +57,5 @@ internal val SampleContainerRows = listOf(
             lastRun = null,
         ),
         lastRunLabel = "ran 12 minutes ago",
-    ),
-    ContainerRow(
-        profile = ContainerProfile(
-            id = "installers",
-            name = "Installers",
-            archProfile = ArchProfile.COMPATIBILITY,
-            wineBuild = "wine-9.22-x86_64",
-            driver = "turnip-gen8-25.2.0",
-            d3dLayer = "dxvk-2.4",
-            lastRun = null,
-        ),
-        lastRunLabel = "never run",
     ),
 )

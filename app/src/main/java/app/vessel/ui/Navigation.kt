@@ -55,18 +55,23 @@ object Routes {
 }
 
 /**
- * Four roots and no more.
+ * Three roots and no more.
  *
- * Everything else in the product — the editor, the session, benchmarks,
- * drivers, diagnostics, files — is pushed on top of one of these. A fifth tab
- * is the first sign that a screen has been added instead of designed.
+ * Everything else in the product — the editor, the session, components,
+ * benchmarks, drivers, diagnostics, files — is pushed on top of one of these. A
+ * fourth tab is the first sign that a screen has been added instead of designed.
+ *
+ * Components deliberately is not a root. Vessel ships one current build of each
+ * component, compiled for this device, so there is nothing to browse and no
+ * choice to make: the set is provisioned on first run and updated from a row in
+ * Settings. A store front would be UI for a decision the product does not ask
+ * the user to make.
  *
  * TODO: Material icons stand in for the bespoke set DESIGN.md implies.
  */
 val BottomDestinations = listOf(
     VNavDestination("Containers", Icons.Filled.Home, Routes.CONTAINERS),
     VNavDestination("Apps", Icons.AutoMirrored.Filled.List, Routes.APPS),
-    VNavDestination("Components", Icons.Filled.Build, Routes.COMPONENTS),
     VNavDestination("Settings", Icons.Filled.Settings, Routes.SETTINGS),
 )
 
@@ -99,19 +104,11 @@ fun VesselApp(
                 onOpenFiles = { navController.navigate(Routes.FILES) },
             )
         }
-        composable(Routes.COMPONENTS) {
-            ComponentsScreen(
-                currentRoute = currentRoute,
-                onNavigate = { navController.navigateToRoot(it) },
-                // TODO: hands off to the download service once it does anything.
-                onInstall = {},
-                onRefresh = {},
-            )
-        }
         composable(Routes.SETTINGS) {
             SettingsScreen(
                 currentRoute = currentRoute,
                 onNavigate = { navController.navigateToRoot(it) },
+                onOpenComponents = { navController.navigate(Routes.COMPONENTS) },
                 onOpenDrivers = { navController.navigate(Routes.DRIVERS) },
                 onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
                 onOpenBenchmark = { navController.navigate(Routes.BENCHMARK) },
@@ -119,6 +116,15 @@ fun VesselApp(
         }
 
         // — pushes —
+        composable(Routes.COMPONENTS) {
+            ComponentsScreen(
+                onBack = { navController.popBackStack() },
+                // TODO: hands off to the download service once it does anything.
+                onInstall = {},
+                onRefresh = {},
+            )
+        }
+
         composable(Routes.CONTAINER_EDITOR) { entry ->
             ContainerEditorScreen(
                 containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID) ?: NEW_CONTAINER,

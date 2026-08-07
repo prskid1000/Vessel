@@ -28,9 +28,8 @@ enum class ComponentType(val wire: String, val label: String) {
  * turn the `.wcp` `profile.json` keys. [installed] is the one field that is not
  * in the registry — it is this device's answer, not the registry's.
  *
- * TODO: the registry also carries `sha256`, `url` and the provenance triple
- *  (`target`, `sourceSha`, `cpuFlags`). They belong here once there is a
- *  downloader to verify against and a detail screen to show them on.
+ * TODO: the registry also carries `sha256` and `url`. They belong here once
+ *  there is a downloader to verify against.
  */
 data class ComponentPackage(
     val id: String,
@@ -40,4 +39,21 @@ data class ComponentPackage(
     val versionCode: Int,
     val sizeBytes: Long,
     val installed: Boolean,
+
+    /**
+     * The provenance triple, read from `vessel.provenance` in the `.wcp`
+     * `profile.json` and copied into the registry verbatim by
+     * `build/gen_registry.py`.
+     *
+     * These are on the row rather than behind a detail screen on purpose.
+     * Vessel's whole claim is "this was compiled for your device", and a claim
+     * that cannot be checked in the interface is just a marketing line: [target]
+     * names the device profile (`build/targets/<target>.env`), [sourceSha] the
+     * upstream commit it was built from, and [cpuFlags] the flags the compiler
+     * actually got — which is the one of the three most likely to be wrong,
+     * because `resolve_cpu_flags` falls back when a toolchain refuses `-mcpu`.
+     */
+    val target: String,
+    val sourceSha: String,
+    val cpuFlags: String,
 )

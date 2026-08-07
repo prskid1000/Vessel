@@ -13,7 +13,7 @@
 FROM ubuntu:24.04
 
 # Keep these in sync with native/pins.env.
-ARG ANDROID_NDK_VERSION=r28c
+ARG ANDROID_NDK_VERSION=r29
 ARG LLVM_MINGW_VERSION=20250910
 
 # llvm-mingw asset naming has varied between releases. It is a full URL ARG so
@@ -36,7 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Android NDK -------------------------------------------------------------
-# r28+ is required: -mtune=oryon-1 needs clang >= 19, and r26/r27 ship clang 18.
+# r29 is required. Android's clang 19 (r28c) is built from a pre-oryon LLVM
+# snapshot and rejects -mtune=oryon-1 despite the version number; r29's clang 21
+# accepts it. The check below tests the actual flag, not the version.
 RUN set -eux; \
     curl -fSL -o /tmp/ndk.zip \
       "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"; \
@@ -47,12 +49,23 @@ RUN set -eux; \
 ENV ANDROID_NDK_HOME=/opt/android-ndk
 ENV ANDROID_NDK_ROOT=/opt/android-ndk
 
-# Fail the image build rather than every component build if the NDK is too old.
+# Fail the image build, not every component build, if this NDK cannot target the
+# core we tune for.
+#
+# This tests the flag rather than the version on purpose: r28c advertises clang
+# 19.0.1 yet rejects -mtune=oryon-1, because Android builds clang from an LLVM
+# snapshot that predates the oryon-1 definition. A version comparison passes
+# there and then fails at compile time, which is the worst place to find out.
 RUN set -eux; \
-    cc=/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang; \
-    major="$("$cc" -dumpversion | cut -d. -f1)"; \
-    echo "NDK clang major: $major"; \
-    [ "$major" -ge 19 ] || { echo "ERROR: clang $major < 19; -mtune=oryon-1 unsupported"; exit 1; }
+    B=/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin; \
+    "$B/clang" --version | head -1; \
+    printf 'int main(void){return 0;}\n' > /tmp/probe.c; \
+    "$B/clang" --target=aarch64-linux-android35 -mtune=oryon-1 -c /tmp/probe.c -o /tmp/probe.o \
+      || { echo "ERROR: this NDK rejects -mtune=oryon-1, which Box64's SD8EG5 preset requires."; \
+           echo "Supported CPUs:"; "$B/clang" --target=aarch64-linux-android35 --print-supported-cpus 2>&1 | tail -20; \
+           exit 1; }; \
+    rm -f /tmp/probe.c /tmp/probe.o; \
+    echo "oryon-1 tuning supported"
 
 # --- llvm-mingw --------------------------------------------------------------
 # Provides aarch64-w64-mingw32 and, critically, arm64ec-w64-mingw32.

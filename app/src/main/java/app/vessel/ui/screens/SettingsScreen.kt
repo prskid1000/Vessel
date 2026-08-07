@@ -14,11 +14,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import app.vessel.BuildConfig
 import app.vessel.ui.BottomDestinations
 import app.vessel.ui.Routes
 import app.vessel.ui.components.VBottomNav
 import app.vessel.ui.components.VRootToolbar
+import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VScaffold
 import app.vessel.ui.components.VSectionHeader
 import app.vessel.ui.theme.Vessel
@@ -26,11 +26,25 @@ import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
 
 /**
- * Root 4 — registry, channel, storage, diagnostics, about.
+ * Root 4 — storage, theme, and the way into Diagnostics. Three things.
  *
- * TODO: every row here is a readout. Editing the registry URL, choosing an
- *  update channel and reporting real storage all need the stores that do not
- *  exist yet.
+ * Deliberately *not* here, and each was here once:
+ *
+ *  - **The registry URL.** Build plumbing. A user has no reason to change where
+ *    `contents.json` is fetched from and no way to evaluate a different value,
+ *    so the row was a readout dressed as a setting. If it ever needs to be
+ *    visible it belongs in Diagnostics, next to the other facts about how this
+ *    build was assembled.
+ *  - **The update channel.** Same argument, and worse: it read `BuildConfig`,
+ *    so it could not be changed at all. A control that cannot control anything
+ *    teaches the user that this whole screen is decorative.
+ *  - **About and credits.** Credits live in `CREDITS.md` in the repository,
+ *    which is where anyone who cares about them already is. A version string on
+ *    a settings screen exists for the person writing a bug report, and the
+ *    export bundle in Diagnostics already carries it.
+ *
+ * TODO: storage and theme are readouts. Both need stores that do not exist yet;
+ *  neither pretends to work.
  */
 @Composable
 fun SettingsScreen(
@@ -39,27 +53,29 @@ fun SettingsScreen(
     onOpenDrivers: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenBenchmark: () -> Unit,
+    onOpenComponents: () -> Unit,
 ) {
     VScaffold(
         toolbar = { VRootToolbar(title = "Settings") },
         bottomBar = { VBottomNav(BottomDestinations, currentRoute) { onNavigate(it.route) } },
     ) {
         Column(Modifier.verticalScroll(rememberScrollState())) {
-            VSectionHeader("Components")
-            SettingsRow("Registry", "registry/contents.json")
-            SettingsRow("Update channel", BuildConfig.UPDATE_CHANNEL.lowercase())
+            VSectionHeader("Storage")
+            SettingsRow("Location", "internal · Android/data/app.vessel")
+            SettingsRow("Containers", "1 container · 612 MiB")
+
+            // Freestanding rules between groups: they fade at both ends, which
+            // is the Nocturne signature a plain divider would lose.
+            // No Appearance section: the product is dark-only by design, so a
+            // theme row would be a control that offers no choice.
+
+            VRule()
 
             VSectionHeader("Device")
+            SettingsRow("Components", "6 builds installed · compiled for this device", onOpenComponents)
             SettingsRow("GPU drivers", "installed and per-container assignment", onOpenDrivers)
             SettingsRow("Benchmark", "measure a configuration instead of arguing about it", onOpenBenchmark)
             SettingsRow("Diagnostics", "logs, capability report, export bundle", onOpenDiagnostics)
-
-            VSectionHeader("About")
-            SettingsRow("Version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-            SettingsRow(
-                "Credits",
-                "Wine, Box64, FEX-Emu, Mesa/Turnip, DXVK, vkd3d-proton and the Winlator lineage",
-            )
         }
     }
 }
@@ -72,13 +88,13 @@ private fun SettingsRow(label: String, value: String, onClick: (() -> Unit)? = n
             .padding(bottom = Vessel.metrics.s8)
             .vCard()
             .let { if (onClick != null) it.clickable(onClick = onClick) else it }
-            .padding(Vessel.metrics.s12),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s12),
+            .padding(Vessel.metrics.s11),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(label, style = Vessel.type.body)
-            Text(value, style = Vessel.type.mono, color = Vessel.colors.textTertiary)
+            Text(value, style = Vessel.type.mono, color = Vessel.colors.textMuted)
         }
         if (onClick != null) {
             Text("→", style = Vessel.type.body, color = Vessel.colors.accent)
@@ -86,7 +102,7 @@ private fun SettingsRow(label: String, value: String, onClick: (() -> Unit)? = n
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
 @Composable
 private fun SettingsPreview() {
     VesselTheme {
@@ -96,6 +112,7 @@ private fun SettingsPreview() {
             onOpenDrivers = {},
             onOpenDiagnostics = {},
             onOpenBenchmark = {},
+            onOpenComponents = {},
         )
     }
 }

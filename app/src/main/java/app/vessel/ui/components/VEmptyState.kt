@@ -29,15 +29,15 @@ fun VEmptyState(
     onAction: (() -> Unit)? = null,
 ) {
     Column(
-        modifier.fillMaxSize().padding(Vessel.metrics.s32),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s16, Alignment.CenterVertically),
+        modifier.fillMaxSize().padding(Vessel.metrics.s22),
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s17, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(icon, null, Modifier.size(28.dp), tint = Vessel.colors.textTertiary)
+        Icon(icon, null, Modifier.size(28.dp), tint = Vessel.colors.textMuted)
         Text(
             message,
             style = Vessel.type.body,
-            color = Vessel.colors.textSecondary,
+            color = Vessel.colors.textLabel,
             textAlign = TextAlign.Center,
         )
         if (actionLabel != null && onAction != null) {
@@ -46,7 +46,7 @@ fun VEmptyState(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392, heightDp = 400)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 400)
 @Composable
 private fun VEmptyStatePreview() {
     VesselTheme {

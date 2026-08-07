@@ -43,8 +43,8 @@ fun VContainerCard(
             .fillMaxWidth()
             .vCard()
             .clickable(onClick = onOpen)
-            .padding(Vessel.metrics.s16),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s12),
+            .padding(Vessel.metrics.s17),
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
         Row(
             Modifier.fillMaxWidth(),
@@ -53,7 +53,7 @@ fun VContainerCard(
         ) {
             Text(
                 container.name,
-                style = Vessel.type.subtitle,
+                style = Vessel.type.cardTitle,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -77,9 +77,13 @@ fun VContainerCard(
             Text(
                 lastRunLabel,
                 style = Vessel.type.monoSmall,
-                color = Vessel.colors.textTertiary,
+                color = Vessel.colors.textMuted,
                 modifier = Modifier.weight(1f),
             )
+            // Outlined, like every primary action in the system. This used to be
+            // a solid accent slab and was the single loudest thing on the home
+            // screen — which is exactly backwards for a card whose job is to
+            // show machine facts.
             VButton(
                 label = "Launch",
                 onClick = onLaunch,
@@ -103,49 +107,38 @@ private fun VContainerFact(key: String, value: String) {
         Text(
             key,
             style = Vessel.type.monoSmall,
-            color = Vessel.colors.textTertiary,
+            color = Vessel.colors.textMuted,
             modifier = Modifier.width(48.dp),
         )
         Text(
             value,
             style = Vessel.type.mono,
-            color = Vessel.colors.textSecondary,
+            color = Vessel.colors.textLabel,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF0A0C0F, widthDp = 392)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
 @Composable
 private fun VContainerCardPreview() {
     VesselTheme {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // One container, because there is one build of everything for this
+        // device. A second card showing a legacy Wine tree would be advertising
+        // a catalogue this product deliberately does not have.
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
             VContainerCard(
                 container = ContainerProfile(
-                    id = "1",
+                    id = "default",
                     name = "Default",
                     archProfile = ArchProfile.UNIVERSAL,
                     wineBuild = "wine-11.0-arm64ec",
-                    driver = "turnip-gen8-25.2",
-                    d3dLayer = "dxvk-2.7",
+                    driver = "turnip-gen8-25.2.0",
+                    d3dLayer = "dxvk-2.7.1",
                     lastRun = null,
                 ),
-                lastRunLabel = "12 minutes ago",
-                onOpen = {},
-                onLaunch = {},
-            )
-            VContainerCard(
-                container = ContainerProfile(
-                    id = "2",
-                    name = "Installers",
-                    archProfile = ArchProfile.COMPATIBILITY,
-                    wineBuild = "wine-9.22-x86_64",
-                    driver = "turnip-gen8-25.2",
-                    d3dLayer = "dxvk-2.4",
-                    lastRun = null,
-                ),
-                lastRunLabel = "never run",
+                lastRunLabel = "ran 12 minutes ago",
                 onOpen = {},
                 onLaunch = {},
             )
