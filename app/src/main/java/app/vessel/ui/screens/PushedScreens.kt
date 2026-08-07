@@ -2,25 +2,30 @@ package app.vessel.ui.screens
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VPushToolbar
 import app.vessel.ui.components.VScaffold
+import app.vessel.ui.theme.VesselTheme
 
 /**
- * The six pushed destinations, as routes with a frame and nothing in them yet.
+ * The four destinations that are routed but not built.
  *
- * They exist so the navigation graph in `ui/Navigation.kt` is complete and
- * every root's affordances go somewhere, rather than being commented out until
- * the screen behind them is written. Each says what it will be; none pretends
- * to work.
+ * Each says, in the first clause, that it is not implemented — and then what it
+ * will do. That order matters. A screen that only describes its future reads as
+ * a screen that has failed to load its data, and a blank one reads as a crash;
+ * either way the person holding the phone spends time deciding whether the app
+ * is broken. Saying "not built yet" costs one clause and settles the question.
+ *
+ * These are the last four. The container editor, drivers and diagnostics used to
+ * be here too and are now real screens in their own files.
  */
 @Composable
-private fun PushedStub(
+private fun NotBuiltYet(
     title: String,
     subtitle: String?,
     icon: ImageVector,
@@ -35,88 +40,63 @@ private fun PushedStub(
 }
 
 @Composable
-fun ContainerEditorScreen(containerId: String, onBack: () -> Unit) {
-    PushedStub(
-        title = if (containerId == NEW_CONTAINER) "New container" else "Edit container",
-        subtitle = containerId,
-        icon = Icons.Filled.Settings,
-        message = "The architecture profile picker, Wine build, driver, D3D layer and the full " +
-            "parameter surface rendered from assets/params-manifest.json.",
-        onBack = onBack,
-    )
-}
-
-@Composable
 fun SessionScreen(containerId: String, onBack: () -> Unit) {
-    PushedStub(
+    NotBuiltYet(
         title = "Session",
         subtitle = containerId,
         icon = Icons.Filled.PlayArrow,
-        message = "The Vulkan surface for the running Windows desktop, with the edge-swipe " +
-            "overlay carrying the metric strip, profile switch, input mode and kill switch.",
+        message = "Not built yet. Launching a container will open the Vulkan surface for the " +
+            "running Windows desktop here, with an edge-swipe overlay carrying the metric " +
+            "strip, the performance profile switch, input mode and a kill switch. Nothing " +
+            "starts when you press Launch today.",
         onBack = onBack,
     )
 }
 
 @Composable
 fun AppProfileScreen(appId: String, onBack: () -> Unit) {
-    PushedStub(
+    NotBuiltYet(
         title = "App profile",
         subtitle = appId,
         icon = Icons.Filled.Settings,
-        message = "Per-executable overrides: engine, pinned component versions, memory ordering " +
-            "and launch arguments, plus how the architecture was detected.",
+        message = "Not built yet. This will hold per-executable overrides — engine, pinned " +
+            "component versions, memory ordering and launch arguments — along with the " +
+            "architecture read from the PE header and how it was determined.",
         onBack = onBack,
     )
 }
 
 @Composable
 fun BenchmarkScreen(onBack: () -> Unit) {
-    PushedStub(
+    NotBuiltYet(
         title = "Benchmark",
         subtitle = null,
         icon = Icons.Filled.PlayArrow,
-        message = "A standard workload against the current configuration, stored and comparable " +
-            "run to run. This is what turns an engine argument into a measurement.",
-        onBack = onBack,
-    )
-}
-
-@Composable
-fun DriversScreen(onBack: () -> Unit) {
-    PushedStub(
-        title = "Drivers",
-        subtitle = null,
-        icon = Icons.Filled.Build,
-        message = "Installed GPU drivers, what each reports at runtime, per-container " +
-            "assignment, and a warning when one does not claim support for this GPU.",
-        onBack = onBack,
-    )
-}
-
-@Composable
-fun DiagnosticsScreen(onBack: () -> Unit) {
-    PushedStub(
-        title = "Diagnostics",
-        subtitle = null,
-        icon = Icons.Filled.Info,
-        message = "Wine, FEX, Box64 and Turnip output in a log pane, the device capability " +
-            "report, and a one-tap export bundle for a bug report.",
+        message = "Not built yet. It will run a standard workload against the current " +
+            "container configuration, store the result, and compare runs side by side — " +
+            "which is what turns an engine argument into a measurement. It needs a session " +
+            "that can actually run something first.",
         onBack = onBack,
     )
 }
 
 @Composable
 fun FilesScreen(onBack: () -> Unit) {
-    PushedStub(
+    NotBuiltYet(
         title = "Files",
         subtitle = null,
         icon = Icons.Filled.Build,
-        message = "Browse container drives, import and export, and the folders shared with " +
-            "Android storage.",
+        message = "Not built yet. It will browse the drives inside a container, import and " +
+            "export files, and show the folders shared with Android storage. No container " +
+            "has a drive to browse until a Wine build is installed.",
         onBack = onBack,
     )
 }
 
-/** The id a container editor is given when there is no container yet. */
-const val NEW_CONTAINER = "new"
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Composable
+private fun NotBuiltYetPreview() {
+    VesselTheme {
+        BenchmarkScreen(onBack = {})
+    }
+}

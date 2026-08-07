@@ -85,6 +85,24 @@ RUN set -eux; \
     test -x /opt/llvm-mingw/bin/arm64ec-w64-mingw32-clang \
       || { echo "ERROR: llvm-mingw ${LLVM_MINGW_VERSION} has no arm64ec target"; exit 1; }
 
+# --- widl ----------------------------------------------------------------------
+# vkd3d-proton generates its COM headers from .idl at configure time and hard
+# requires widl, the Wine IDL compiler:
+#   meson.build:76: ERROR: Program 'widl-stable widl-mingw-tools-fallback' not found
+# On Debian/Ubuntu it comes from mingw-w64-tools, not from any wine package.
+#
+# Installed as its own late layer on purpose: adding it to the apt block at the
+# top would invalidate the NDK layer and re-download 700 MB.
+# Note the binary is prefixed — the package installs x86_64-w64-mingw32-widl
+# and i686-w64-mingw32-widl, never a plain `widl`. vkd3d's meson looks for
+# `widl`, then `widl-stable`, then `widl-mingw-tools-fallback`, and upstream
+# documents that last name as a cross-file hook; build/vkd3d.sh points it at the
+# binary below rather than relying on a symlink existing here.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      mingw-w64-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/bin/x86_64-w64-mingw32-widl
+
 # --- Meson ---------------------------------------------------------------------
 # Ubuntu 24.04 ships meson 1.3.2 and Mesa requires >= 1.4, so the apt version
 # cannot configure Turnip at all. pip's copy lands in /usr/local/bin and shadows

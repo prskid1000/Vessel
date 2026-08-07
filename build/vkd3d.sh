@@ -86,6 +86,22 @@ for PASS in 64 32; do
     done
   fi
 
+  # vkd3d-proton generates its COM headers from .idl at configure time and hard
+  # requires widl. There is never a plain `widl` here: mingw-w64-tools installs
+  # it prefixed, and llvm-mingw ships its own i686 copy. widl emits
+  # architecture-independent C headers, so any of them will do — including for
+  # the arm64ec pass, which has no widl of its own.
+  WIDL=""
+  for cand in /usr/bin/x86_64-w64-mingw32-widl \
+              /usr/bin/i686-w64-mingw32-widl \
+              "$MINGW_BIN/i686-w64-mingw32-widl" \
+              "$(command -v widl 2>/dev/null || true)"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then WIDL="$cand"; break; fi
+  done
+  [ -n "$WIDL" ] || die "no widl found. vkd3d-proton cannot configure without it.
+     Install mingw-w64-tools (provides x86_64-w64-mingw32-widl)."
+  info "widl: $WIDL"
+
   CROSS="$WORK_DIR/$COMPONENT-$TRIPLE.ini"
   cat > "$CROSS" <<EOF
 [binaries]
@@ -94,6 +110,7 @@ cpp = '$MINGW_BIN/$TRIPLE-clang++'
 ar = '$MINGW_BIN/llvm-ar'
 strip = '$MINGW_BIN/llvm-strip'
 windres = '$MINGW_BIN/$TRIPLE-windres'
+widl-mingw-tools-fallback = '$WIDL'
 
 [host_machine]
 system = 'windows'
@@ -123,7 +140,7 @@ EOF
     -Denable_tests=false
 
   log "building $COMPONENT ($TRIPLE)"
-  ninja -C "$BUILD" -j "$(nproc_safe)"
+  ninja -C "$BUILD" -j "$(build_jobs 1)"
   ninja -C "$BUILD" install
 
   # d3d12core.dll holds the implementation; d3d12.dll is the thin loader that
@@ -135,8 +152,9 @@ EOF
      If $VKD3D_REF renamed or merged the loader, update this check — do not
      drop it."
     if [ "$PASS" = 64 ]; then
-      file "$OUT" | grep -Eqi 'PE32\+.*(aarch64|arm64)' \
-        || die "$OUTDIR/$dll is not an ARM64 PE: $(file -b "$OUT")"
+      # See verify_pe_dll in common.sh: an ARM64EC DLL reports machine type
+      # AMD64, so checking for "aarch64" here would reject a good build.
+      verify_pe_dll "$OUT" "$TRIPLE" "$OUTDIR/$dll"
     else
       file "$OUT" | grep -Eqi 'PE32 .*(80386|intel)' \
         || die "$OUTDIR/$dll is not a 32-bit x86 PE: $(file -b "$OUT")"

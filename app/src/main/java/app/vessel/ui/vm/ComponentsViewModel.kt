@@ -2,16 +2,19 @@ package app.vessel.ui.vm
 
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import app.vessel.core.ComponentPackage
 import app.vessel.core.ComponentType
+import app.vessel.data.InstalledComponents
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * One section of the `.wcp` store.
+ * One section of the components screen.
  *
  * [warning] is how a broken matched set is reported: a Turnip build and the
  * DXVK validated against it are published together, and installing one without
@@ -27,169 +30,68 @@ data class ComponentSection(
 @Immutable
 data class ComponentsUiState(
     val sections: List<ComponentSection> = emptyList(),
+    /** False until the first read of the install directory has answered. */
+    val loaded: Boolean = false,
 )
 
+/**
+ * What is actually installed, and nothing else.
+ *
+ * This used to serve a fixed list of six packages. It read well and it was a
+ * lie: [InstalledComponents] scans the `profile.json` in every
+ * `files/components/<id>` directory, so on a device with nothing unpacked the
+ * driver manager correctly reported zero Turnip
+ * builds while this screen claimed six installed components — including the very
+ * Turnip the other screen said was missing. Two screens disagreeing about the
+ * same directory is worse than an empty screen, because it makes the honest one
+ * look broken.
+ *
+ * So there is one source now, and it is the disk. The fixed list survives only
+ * as `@Preview` data in `ComponentsScreen`, where nobody can mistake it for a
+ * fact about their phone.
+ *
+ * TODO: the *available* half — packages not yet downloaded — arrives with the
+ *  registry read and the downloader. Until then "installed" is the whole story
+ *  this class can honestly tell.
+ */
 @HiltViewModel
-class ComponentsViewModel @Inject constructor() : ViewModel() {
+class ComponentsViewModel @Inject constructor(
+    private val installed: InstalledComponents,
+) : ViewModel() {
 
-    // TODO: reads registry/contents.json over the network once the downloader
-    //  exists. Fixed data until then.
-    private val _state = MutableStateFlow(ComponentsUiState(sections = SampleComponentSections))
+    private val _state = MutableStateFlow(ComponentsUiState())
     val state: StateFlow<ComponentsUiState> = _state.asStateFlow()
+
+    init {
+        refresh()
+    }
+
+    /** Re-scan the install directory. Cheap: a handful of small files at most. */
+    fun refresh() {
+        viewModelScope.launch {
+            _state.value = ComponentsUiState(sections = sectionsOf(installed.refresh()), loaded = true)
+        }
+    }
 }
 
 /**
- * The one target this build was compiled for.
+ * The install set, grouped the way DESIGN.md names the groups.
  *
- * `build/targets/canoe.env` — Snapdragon SM8845 (Oryon) / Adreno 829. Every
- * package in the list below carries it, which is the point: a second value here
- * would mean the list had started listing things we did not build for this
- * phone.
+ * The grouping is over [ComponentType] rather than anything in the package, and
+ * an empty group is dropped rather than shown with a zero: a heading with nothing
+ * under it is a promise that something belongs there, which is the store-front
+ * shape this product is arguing against.
  */
-private const val TARGET = "canoe"
+internal fun sectionsOf(packages: List<ComponentPackage>): List<ComponentSection> =
+    SECTION_TYPES.mapNotNull { (title, types) ->
+        val items = packages.filter { it.type in types }
+        if (items.isEmpty()) null else ComponentSection(title, items)
+    }
 
-/**
- * `resolve_cpu_flags` in `build/common.sh` prefers `-mcpu=oryon-1` and records
- * whatever it actually settled on. Wine is the exception — one configure builds
- * three PE targets, so there is no single CPU flag to record for it.
- */
-private const val ORYON = "-mcpu=oryon-1"
-
-private fun sample(
-    id: String,
-    type: ComponentType,
-    name: String,
-    version: String,
-    versionCode: Int,
-    sizeBytes: Long,
-    installed: Boolean,
-    sourceSha: String,
-    cpuFlags: String = ORYON,
-) = ComponentPackage(
-    id = id,
-    type = type,
-    name = name,
-    versionName = version,
-    versionCode = versionCode,
-    sizeBytes = sizeBytes,
-    installed = installed,
-    target = TARGET,
-    sourceSha = sourceSha,
-    cpuFlags = cpuFlags,
-)
-
-/**
- * Six components: one current build of each thing this device needs, and
- * nothing else.
- *
- * This list is the deliberate difference from every other app in this space.
- * Those ship a catalogue — a dozen Wine versions, DXVK 1.x through 2.x, a Turnip
- * for every Adreno generation — and leave the user to guess which combination
- * works. Vessel has exactly one, compiled here, so there is nothing to guess
- * about.
- *
- * What was removed and why:
- *   - **A Turnip for an older Adreno generation.** A driver for a GPU this
- *     phone does not have. Listing it invites installing it, and a driver that
- *     does not claim support for the GPU is a black screen, not a fallback.
- *   - **The legacy x86-64 Wine tree.** Superseded by the ARM64EC build.
- *   - **Older DXVK and vkd3d-proton majors.** Older than the Turnip they would
- *     be paired with, so the pair was never validated together.
- *   - **WOWBox64 and D8VK.** Not built for this target.
- *
- * Older builds remain installable as a rollback path, but they live behind an
- * explicit "previous builds" disclosure, not here.
- *
- * There is no matched-set [ComponentSection.warning] on any section, and that is
- * a result rather than an omission: DXVK 2.7.1 and vkd3d-proton 3.0.1 were both
- * validated against the Turnip 25.2.0 build in the same list. A warning appears
- * the moment that stops being true.
- *
- * Ids are `.wcp` stems, which is what `build/gen_registry.py` uses as the id.
- */
-internal val SampleComponentSections = listOf(
-    ComponentSection(
-        title = "Engines",
-        items = listOf(
-            sample(
-                id = "box64-0.4.4-canoe",
-                type = ComponentType.BOX64,
-                name = "Box64",
-                version = "0.4.4",
-                versionCode = 4004,
-                sizeBytes = 9_300_000,
-                installed = true,
-                sourceSha = "8f2c1d4a9b03",
-            ),
-            sample(
-                id = "fexcore-2608-canoe",
-                type = ComponentType.FEXCORE,
-                name = "FEXCore",
-                version = "2608",
-                versionCode = 2608,
-                sizeBytes = 43_400_000,
-                installed = true,
-                sourceSha = "c17ae5039f6b",
-            ),
-        ),
-    ),
-    ComponentSection(
-        title = "Wine builds",
-        items = listOf(
-            sample(
-                id = "wine-11.0-arm64ec-canoe",
-                type = ComponentType.WINE,
-                name = "Wine ARM64EC",
-                version = "11.0",
-                versionCode = 110_000,
-                sizeBytes = 537_000_000,
-                installed = true,
-                sourceSha = "a4d90b7e2c58",
-                // build/wine.sh runs one configure for three PE targets, so
-                // there is no single -mcpu to record. Saying "none" is the
-                // honest answer; inventing one would be worse than blank.
-                cpuFlags = "none (multi-target PE build)",
-            ),
-        ),
-    ),
-    ComponentSection(
-        title = "GPU drivers",
-        items = listOf(
-            sample(
-                id = "turnip-25.2.0-gen8-canoe",
-                type = ComponentType.TURNIP,
-                name = "Turnip gen8",
-                version = "25.2.0",
-                versionCode = 250_200,
-                sizeBytes = 29_100_000,
-                installed = true,
-                sourceSha = "6b0f83ce1d47",
-            ),
-        ),
-    ),
-    ComponentSection(
-        title = "D3D layers",
-        items = listOf(
-            sample(
-                id = "dxvk-2.7.1-canoe",
-                type = ComponentType.DXVK,
-                name = "DXVK",
-                version = "2.7.1",
-                versionCode = 20_701,
-                sizeBytes = 14_900_000,
-                installed = true,
-                sourceSha = "d52814fb96a0",
-            ),
-            sample(
-                id = "vkd3d-proton-3.0.1-canoe",
-                type = ComponentType.VKD3D,
-                name = "vkd3d-proton",
-                version = "3.0.1",
-                versionCode = 30_001,
-                sizeBytes = 12_100_000,
-                installed = false,
-                sourceSha = "1e7fa2c40b93",
-            ),
-        ),
-    ),
+private val SECTION_TYPES: List<Pair<String, Set<ComponentType>>> = listOf(
+    "Engines" to setOf(ComponentType.FEXCORE, ComponentType.BOX64, ComponentType.WOWBOX64),
+    "Wine builds" to setOf(ComponentType.WINE, ComponentType.PROTON),
+    "GPU drivers" to setOf(ComponentType.TURNIP),
+    "D3D layers" to setOf(ComponentType.DXVK, ComponentType.VKD3D, ComponentType.D8VK),
+    "Tools" to setOf(ComponentType.TOOLS),
 )

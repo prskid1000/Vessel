@@ -47,6 +47,8 @@
       "id": "memory",
       "title": "Memory ordering",
       "help": "This phone's CPU does not have the hardware mode that makes x86 memory rules free, so these settings trade speed against the risk of glitches in multi-threaded programs. They matter more here than anywhere else.",
+      "advanced": true,
+      "_advancedNote": "Every default in this group is the safe one, and every change to any of them is a trade the user is asked to make blind — 'raise this if a program hangs at random' is a debugging instruction, not a setting. It stays in the product because a maintainer chasing a specific hang needs it, and it stays behind the disclosure because nobody else should meet it.",
       "params": [
         {
           "key": "fex.TSOEnabled",
@@ -178,27 +180,45 @@
           "key": "gpu.d3dLayer",
           "title": "Direct3D translation",
           "help": "Converts the game's Direct3D calls to Vulkan; must match your GPU driver.",
+          "_advancedNote": "'@latest' resolves to the one DXVK build published for this device, and the only other honest value is a pin to an older one for a rollback. There is no choice to offer a user here, and the row's own help sentence says the value must match the driver — a control whose correct setting is 'whatever the other control implies' is a readout.",
           "type": "component",
           "componentType": "DXVK",
-          "default": "@latest"
+          "default": "@latest",
+          "advanced": true
         },
         {
           "key": "turnip.TU_DEBUG",
           "title": "Driver mode",
-          "help": "Leave on system memory rendering — the tiled path corrupts the picture on this GPU generation.",
-          "_note": "Widely reposted Chinese guides say to uncheck sysmem and select gmem. That advice is scoped to Adreno 710/720 and is wrong here: the A8xx fork maintainer reports GMEM write page faults on this generation. This is the most likely piece of circulating advice to break the build.",
+          "help": "Leave on automatic unless a game shows corruption; forcing a mode is a troubleshooting step, not a speed-up.",
+          "_note": "CORRECTION (verified in Turnip source, 2026-08-07). An earlier version of this file said GMEM was broken on this GPU and sysmem was mandatory. That is wrong, and it was wrong in both directions. The GMEM page-fault report is scoped to Adreno *830*, not 829, and Turnip does not set disable_gmem for a829 — so forcing sysmem here would give up tiled rendering the hardware can actually do. The Chinese-guide advice to force gmem is equally unfounded: it is Adreno 710/720 guidance. Neither forcing is justified without measuring on this device. Prefer turnip.TU_AUTOTUNE_ALGO, which keeps both modes available and lets the driver choose.",
           "type": "multi",
-          "options": ["sysmem", "gmem", "nocb", "nolrz", "noubwc", "deck_emu"],
+          "options": ["sysmem", "gmem", "forcecb", "nolrz", "noubwc", "noconform", "deck_emu"],
           "optionLabels": {
-            "sysmem": "System memory rendering (required)",
-            "gmem": "Tiled rendering (breaks A829)",
-            "nocb": "Disable concurrent binning",
+            "sysmem": "Force direct rendering",
+            "gmem": "Force tiled rendering",
+            "forcecb": "Re-enable concurrent binning",
             "nolrz": "Disable low-resolution Z",
             "noubwc": "Disable bandwidth compression",
+            "noconform": "Relax conformance workarounds",
             "deck_emu": "Report as Steam Deck"
           },
-          "default": ["sysmem"],
+          "default": [],
           "env": "TU_DEBUG",
+          "advanced": true
+        },
+        {
+          "key": "turnip.TU_AUTOTUNE_ALGO",
+          "title": "Rendering mode preference",
+          "help": "Nudges the driver toward direct rendering, which fixes most corruption, while still letting it use the faster tiled path when it is confident.",
+          "_note": "Preferred over forcing TU_DEBUG=sysmem: Turnip's own docs note this still allows the other mode in high-confidence cases, so it is a nudge rather than a veto.",
+          "type": "enum",
+          "options": ["default", "prefer_sysmem"],
+          "optionLabels": {
+            "default": "Automatic",
+            "prefer_sysmem": "Prefer direct rendering"
+          },
+          "default": "default",
+          "env": "TU_AUTOTUNE_ALGO",
           "advanced": true
         },
         {
@@ -223,6 +243,8 @@
     {
       "id": "system",
       "title": "System",
+      "advanced": true,
+      "_advancedNote": "Both settings here have exactly one correct value on this device and the manifest already knows it: esync is the only Wine sync that works without /dev/ntsync, and this chip has no efficiency cluster for a core restriction to avoid. Neither changes anything a user would notice, which is the test for staying on the default screen.",
       "params": [
         {
           "key": "wine.sync",

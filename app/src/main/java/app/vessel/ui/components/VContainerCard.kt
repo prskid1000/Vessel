@@ -1,6 +1,7 @@
 package app.vessel.ui.components
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,6 +31,7 @@ import app.vessel.ui.theme.vCard
  * name is mono. [lastRunLabel] arrives already formatted — the card does no
  * clock arithmetic, which also makes it previewable and testable.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VContainerCard(
     container: ContainerProfile,
@@ -37,12 +39,16 @@ fun VContainerCard(
     onOpen: () -> Unit,
     onLaunch: () -> Unit,
     modifier: Modifier = Modifier,
+    onLongPress: (() -> Unit)? = null,
 ) {
     Column(
         modifier
             .fillMaxWidth()
             .vCard()
-            .clickable(onClick = onOpen)
+            // Long-press is the delete affordance. It is not the only one — the
+            // editor carries an explicit Delete — because a gesture nothing
+            // advertises cannot be the sole route to a destructive action.
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
             .padding(Vessel.metrics.s17),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {

@@ -41,26 +41,28 @@ import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
 import app.vessel.ui.theme.vRing
+import app.vessel.core.ComponentType
 import app.vessel.ui.vm.ComponentSection
 import app.vessel.ui.vm.ComponentsUiState
 import app.vessel.ui.vm.ComponentsViewModel
-import app.vessel.ui.vm.SampleComponentSections
 
 /**
- * Components, reached from Settings rather than the bottom bar.
+ * Components, reached from the overflow in the Containers toolbar rather than
+ * from the bottom bar.
  *
  * One current build per component, all compiled for this device, so this is a
- * status-and-update view rather than a store to shop in.
+ * status view rather than a store to shop in. Everything it lists was read off
+ * this phone's install directory — there is no seeded catalogue, which is why a
+ * fresh device shows an empty screen and says so.
  */
 @Composable
 fun ComponentsScreen(
     onBack: () -> Unit,
     onInstall: (ComponentPackage) -> Unit,
-    onRefresh: () -> Unit,
     viewModel: ComponentsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    ComponentsContent(state, onBack, onInstall, onRefresh)
+    ComponentsContent(state, onBack, onInstall, viewModel::refresh)
 }
 
 @Composable
@@ -76,20 +78,25 @@ private fun ComponentsContent(
         toolbar = {
             VPushToolbar(
                 title = "Components",
-                subtitle = "$installed installed",
+                subtitle = if (state.loaded) "$installed installed" else "reading",
                 onBack = onBack,
-                trailing = { VIconButton(Icons.Filled.Refresh, "Check for updates", onRefresh) },
+                trailing = { VIconButton(Icons.Filled.Refresh, "Re-scan", onRefresh) },
             )
         },
     ) {
         if (state.sections.isEmpty()) {
-            VEmptyState(
-                icon = Icons.Filled.Build,
-                message = "The component registry could not be read. Nothing is installed and " +
-                    "nothing can be, until it can.",
-                actionLabel = "Retry",
-                onAction = onRefresh,
-            )
+            // Only once the directory has been read. Saying "nothing installed"
+            // while the first scan is in flight would be a guess.
+            if (state.loaded) {
+                VEmptyState(
+                    icon = Icons.Filled.Build,
+                    message = "Nothing is installed yet. Components are the engine, Wine build, " +
+                        "GPU driver and D3D layers this app compiles for this device, and none " +
+                        "of them have been unpacked here.",
+                    actionLabel = "Re-scan",
+                    onAction = onRefresh,
+                )
+            }
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),
@@ -229,12 +236,33 @@ private fun MatchedSetWarning(text: String) {
 /** MiB, matching what `build/gen_registry.py` prints for the same number. */
 private fun mebibytes(bytes: Long): String = "${bytes / (1024 * 1024)} MiB"
 
+// — previews ---------------------------------------------------------------
+//
+// Everything below this line is fixed data, and it exists only so the layout can
+// be looked at without a device that has packages on it. It is deliberately not
+// visible to the view model: the screen itself reads
+// `files/components/*/profile.json` and shows exactly what is there, so a build
+// listed here and absent from the phone stays a drawing rather than a claim.
+
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
 @Composable
 private fun ComponentsPreview() {
     VesselTheme {
         ComponentsContent(
-            state = ComponentsUiState(SampleComponentSections),
+            state = ComponentsUiState(PreviewSections, loaded = true),
+            onBack = {},
+            onInstall = {},
+            onRefresh = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Composable
+private fun ComponentsEmptyPreview() {
+    VesselTheme {
+        ComponentsContent(
+            state = ComponentsUiState(loaded = true),
             onBack = {},
             onInstall = {},
             onRefresh = {},
@@ -247,10 +275,128 @@ private fun ComponentsPreview() {
 private fun ComponentSectionPreview() {
     VesselTheme {
         Column(Modifier.padding(16.dp)) {
-            val section: ComponentSection = SampleComponentSections.last()
+            val section: ComponentSection = PreviewSections.last()
             VSectionHeader(section.title)
             section.warning?.let { MatchedSetWarning(it) }
             section.items.forEach { ComponentRow(it, {}) }
         }
     }
 }
+
+/** `build/targets/canoe.env` — Snapdragon SM8845 (Oryon) / Adreno 829. */
+private const val PREVIEW_TARGET = "canoe"
+
+/** What `resolve_cpu_flags` in `build/common.sh` settles on for this target. */
+private const val PREVIEW_CPU_FLAGS = "-mcpu=oryon-1"
+
+private fun previewPackage(
+    id: String,
+    type: ComponentType,
+    name: String,
+    version: String,
+    versionCode: Int,
+    sizeBytes: Long,
+    sourceSha: String,
+    installed: Boolean = true,
+    cpuFlags: String = PREVIEW_CPU_FLAGS,
+) = ComponentPackage(
+    id = id,
+    type = type,
+    name = name,
+    versionName = version,
+    versionCode = versionCode,
+    sizeBytes = sizeBytes,
+    installed = installed,
+    target = PREVIEW_TARGET,
+    sourceSha = sourceSha,
+    cpuFlags = cpuFlags,
+)
+
+/**
+ * A fully provisioned device, drawn.
+ *
+ * One current build of each thing this phone needs and nothing else, which is
+ * the shape the real screen takes once the packages are on disk: no Turnip for
+ * an older Adreno, no legacy x86-64 Wine tree, no D3D majors older than the
+ * driver they would pair with.
+ */
+private val PreviewSections = listOf(
+    ComponentSection(
+        title = "Engines",
+        items = listOf(
+            previewPackage(
+                id = "fexcore-2608-canoe",
+                type = ComponentType.FEXCORE,
+                name = "FEXCore",
+                version = "2608",
+                versionCode = 2608,
+                sizeBytes = 43_400_000,
+                sourceSha = "c17ae5039f6b",
+            ),
+            previewPackage(
+                id = "box64-0.4.4-canoe",
+                type = ComponentType.BOX64,
+                name = "Box64",
+                version = "0.4.4",
+                versionCode = 4004,
+                sizeBytes = 9_300_000,
+                sourceSha = "8f2c1d4a9b03",
+            ),
+        ),
+    ),
+    ComponentSection(
+        title = "Wine builds",
+        items = listOf(
+            previewPackage(
+                id = "wine-11.0-arm64ec-canoe",
+                type = ComponentType.WINE,
+                name = "Wine ARM64EC",
+                version = "11.0",
+                versionCode = 110_000,
+                sizeBytes = 537_000_000,
+                sourceSha = "a4d90b7e2c58",
+                // build/wine.sh runs one configure for three PE targets, so
+                // there is no single -mcpu to record.
+                cpuFlags = "none (multi-target PE build)",
+            ),
+        ),
+    ),
+    ComponentSection(
+        title = "GPU drivers",
+        items = listOf(
+            previewPackage(
+                id = "turnip-25.2.0-gen8-canoe",
+                type = ComponentType.TURNIP,
+                name = "Turnip gen8",
+                version = "25.2.0",
+                versionCode = 250_200,
+                sizeBytes = 29_100_000,
+                sourceSha = "6b0f83ce1d47",
+            ),
+        ),
+    ),
+    ComponentSection(
+        title = "D3D layers",
+        items = listOf(
+            previewPackage(
+                id = "dxvk-2.7.1-canoe",
+                type = ComponentType.DXVK,
+                name = "DXVK",
+                version = "2.7.1",
+                versionCode = 20_701,
+                sizeBytes = 14_900_000,
+                sourceSha = "d52814fb96a0",
+            ),
+            previewPackage(
+                id = "vkd3d-proton-3.0.1-canoe",
+                type = ComponentType.VKD3D,
+                name = "vkd3d-proton",
+                version = "3.0.1",
+                versionCode = 30_001,
+                sizeBytes = 12_100_000,
+                sourceSha = "1e7fa2c40b93",
+                installed = false,
+            ),
+        ),
+    ),
+)

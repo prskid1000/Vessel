@@ -1,9 +1,13 @@
 package app.vessel.core
 
+import app.vessel.core.params.ParamValue
+import kotlinx.serialization.Serializable
+
 /**
  * What Wine itself is compiled as. Chosen when a container is created and not
  * changeable afterwards, which is why the picker explains rather than toggles.
  */
+@Serializable
 enum class ArchProfile(val label: String, val explanation: String) {
     UNIVERSAL(
         label = "Universal",
@@ -17,7 +21,21 @@ enum class ArchProfile(val label: String, val explanation: String) {
     ),
 }
 
-/** One container, as the Containers screen shows it. */
+/**
+ * One container, as the Containers screen shows it and as it is stored.
+ *
+ * [wineBuild], [driver] and [d3dLayer] are the *resolved* component labels — what
+ * this container will actually load, worked out against the installed set when
+ * it is saved. They are stored rather than derived at read time so the home
+ * screen can name what a container runs without the card knowing anything about
+ * the component store.
+ *
+ * [params] is the manifest surface: every key in `assets/params-manifest.json`
+ * that this container has a value for. It is a map rather than fields on purpose
+ * — adding a knob to the manifest must not need a field here, or the promise
+ * that the editor is data-driven stops being true one layer down.
+ */
+@Serializable
 data class ContainerProfile(
     val id: String,
     val name: String,
@@ -26,5 +44,6 @@ data class ContainerProfile(
     val driver: String,
     val d3dLayer: String,
     /** Epoch millis, or null when the container has never been launched. */
-    val lastRun: Long?,
+    val lastRun: Long? = null,
+    val params: Map<String, ParamValue> = emptyMap(),
 )

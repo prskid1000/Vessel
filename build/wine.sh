@@ -87,7 +87,7 @@ if [ -n "${WINE_HOST:-}" ]; then
   mkdir -p "$TOOLS"
   ( cd "$TOOLS" && "$SRC/configure" --enable-win64 --disable-tests --without-x --without-freetype )
   # __tooldeps__ builds only the code generators, not all of Wine.
-  make -C "$TOOLS" -j"$(nproc_safe)" __tooldeps__
+  make -C "$TOOLS" -j"$(build_jobs 1)" __tooldeps__
   [ -x "$TOOLS/tools/winebuild/winebuild" ] \
     || die "native tools build produced no winebuild (looked in $TOOLS/tools/winebuild)"
   CONFIGURE_ARGS+=( --host="$WINE_HOST" --with-wine-tools="$TOOLS" )
@@ -102,7 +102,7 @@ log "configuring $COMPONENT (arm64ec + aarch64 + i386)"
 ( cd "$BUILD" && "$SRC/configure" "${CONFIGURE_ARGS[@]}" )
 
 log "building $COMPONENT — expect an hour or more"
-make -C "$BUILD" -j"$(nproc_safe)"
+make -C "$BUILD" -j"$(build_jobs 1)"
 
 # install-lib is the runtime half: no headers, no import libraries, no man
 # pages. None of it is useful on the device and it is most of the size.

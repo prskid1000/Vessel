@@ -246,7 +246,79 @@ EOF
 
 # --- Misc --------------------------------------------------------------------
 
+# Verify a built Windows DLL is the architecture we asked for.
+#
+# This exists because the obvious check is wrong for ARM64EC. An ARM64EC image
+# reports machine type AMD64 — file(1) says "PE32+ executable (DLL) x86-64" and
+# that is CORRECT, because presenting an x64-compatible machine type is the
+# entire point of EC: x64 code has to be able to call into it. Grepping for
+# "aarch64" here rejects perfectly good EC builds, which it did for both FEX and
+# DXVK before this was centralised.
+#
+# So the real test for EC is the hybrid (CHPE) load-config directory, which only
+# an EC/ARM64X image carries. That also catches the failure that actually
+# matters: an arm64ec target silently falling back to plain x64.
+#
+#   verify_pe_dll <path> <triple> [label]
+verify_pe_dll() {
+  local dll="$1" triple="$2" label="${3:-$(basename "$1")}"
+
+  [ -f "$dll" ] || die "$label: no such file: $dll"
+  file "$dll" | grep -Eqi 'PE32\+ executable \(DLL\)' \
+    || die "$label is not a PE32+ DLL: $(file -b "$dll")"
+
+  case "$triple" in
+    arm64ec-*)
+      if "$MINGW_BIN/llvm-readobj" --coff-load-config "$dll" 2>/dev/null \
+           | grep -qE 'CHPEMetadata|HybridMetadataPointer'; then
+        info "$label carries hybrid (CHPE) metadata — genuine ARM64EC"
+      else
+        die "$label has no CHPE load-config, so it is not really ARM64EC.
+     A plain x64 DLL here means the arm64ec target silently fell back."
+      fi
+      ;;
+    aarch64-*)
+      file "$dll" | grep -Eqi 'aarch64|arm64' \
+        || die "$label should be an ARM64 PE but is: $(file -b "$dll")"
+      ;;
+    i686-*|x86_64-*)
+      : # 32/64-bit x86 PE; file's own machine type is already the truth
+      ;;
+    *)
+      warn "$label: no architecture check defined for triple $triple"
+      ;;
+  esac
+}
+
 nproc_safe() { nproc 2>/dev/null || echo 4; }
+
+# Parallelism capped by MEMORY, not just core count.
+#
+# C++ template-heavy builds (DXVK and vkd3d-proton especially) can hold well
+# over a gigabyte per compiler process. On a machine with many cores and a
+# modest Docker VM, `-j$(nproc)` does not merely swap — it got the Docker engine
+# itself OOM-killed mid-build, which surfaces as
+#   error waiting for container: unexpected EOF
+# and then a 500 from the daemon, with no compiler error to explain it.
+#
+# One job per GB of available memory, clamped to the core count, floor of 1.
+# Override with VESSEL_JOBS to force a value.
+build_jobs() {
+  local per_job_gb="${1:-1}"
+  if [ -n "${VESSEL_JOBS:-}" ]; then echo "$VESSEL_JOBS"; return; fi
+
+  local cores mem_kb mem_gb jobs
+  cores="$(nproc_safe)"
+  mem_kb="$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  mem_gb=$(( mem_kb / 1024 / 1024 ))
+
+  if [ "$mem_gb" -le 0 ]; then echo "$cores"; return; fi
+
+  jobs=$(( mem_gb / per_job_gb ))
+  [ "$jobs" -lt 1 ] && jobs=1
+  [ "$jobs" -gt "$cores" ] && jobs="$cores"
+  echo "$jobs"
+}
 
 # Every component script starts here.
 vessel_init() {

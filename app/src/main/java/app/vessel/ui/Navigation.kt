@@ -3,9 +3,7 @@ package app.vessel.ui
 import android.net.Uri
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -24,15 +22,13 @@ import app.vessel.ui.screens.ContainersScreen
 import app.vessel.ui.screens.DiagnosticsScreen
 import app.vessel.ui.screens.DriversScreen
 import app.vessel.ui.screens.FilesScreen
-import app.vessel.ui.screens.NEW_CONTAINER
 import app.vessel.ui.screens.SessionScreen
-import app.vessel.ui.screens.SettingsScreen
+import app.vessel.ui.vm.NEW_CONTAINER
 
 object Routes {
     const val CONTAINERS = "containers"
     const val APPS = "apps"
     const val COMPONENTS = "components"
-    const val SETTINGS = "settings"
 
     const val CONTAINER_EDITOR = "containerEditor/{containerId}"
     const val SESSION = "session/{containerId}"
@@ -55,24 +51,33 @@ object Routes {
 }
 
 /**
- * Three roots and no more.
+ * Two roots and no more.
  *
  * Everything else in the product — the editor, the session, components,
  * benchmarks, drivers, diagnostics, files — is pushed on top of one of these. A
- * fourth tab is the first sign that a screen has been added instead of designed.
+ * third tab is the first sign that a screen has been added instead of designed.
  *
- * Components deliberately is not a root. Vessel ships one current build of each
- * component, compiled for this device, so there is nothing to browse and no
- * choice to make: the set is provisioned on first run and updated from a row in
- * Settings. A store front would be UI for a decision the product does not ask
- * the user to make.
+ * The two that are here are the two things a user comes to this app to do: pick
+ * a container, or pick a program. Nothing else is a place you go on purpose.
+ *
+ * **Settings was a root and is now gone**, which is the clearest case of the
+ * rule. It held two readouts that could not be changed — storage location and a
+ * container count — and four links onward. Once the readouts were removed for
+ * being decoration, what was left was a menu with a tab of its own: a whole
+ * destination whose only content was the names of four other destinations. Those
+ * four now hang off the overflow in the Containers toolbar, which is where a
+ * maintainer looks for them and where a user never has to.
+ *
+ * Components deliberately is not a root either. Vessel ships one current build
+ * of each component, compiled for this device, so there is nothing to browse and
+ * no choice to make: the set is provisioned on first run. A store front would be
+ * UI for a decision the product does not ask the user to make.
  *
  * TODO: Material icons stand in for the bespoke set DESIGN.md implies.
  */
 val BottomDestinations = listOf(
     VNavDestination("Containers", Icons.Filled.Home, Routes.CONTAINERS),
     VNavDestination("Apps", Icons.AutoMirrored.Filled.List, Routes.APPS),
-    VNavDestination("Settings", Icons.Filled.Settings, Routes.SETTINGS),
 )
 
 @Composable
@@ -95,6 +100,10 @@ fun VesselApp(
                 onOpenContainer = { navController.navigate(Routes.containerEditor(it)) },
                 onCreateContainer = { navController.navigate(Routes.containerEditor()) },
                 onLaunch = { navController.navigate(Routes.session(it)) },
+                onOpenComponents = { navController.navigate(Routes.COMPONENTS) },
+                onOpenDrivers = { navController.navigate(Routes.DRIVERS) },
+                onOpenBenchmark = { navController.navigate(Routes.BENCHMARK) },
+                onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
             )
         }
         composable(Routes.APPS) {
@@ -104,16 +113,6 @@ fun VesselApp(
                 onOpenFiles = { navController.navigate(Routes.FILES) },
             )
         }
-        composable(Routes.SETTINGS) {
-            SettingsScreen(
-                currentRoute = currentRoute,
-                onNavigate = { navController.navigateToRoot(it) },
-                onOpenComponents = { navController.navigate(Routes.COMPONENTS) },
-                onOpenDrivers = { navController.navigate(Routes.DRIVERS) },
-                onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
-                onOpenBenchmark = { navController.navigate(Routes.BENCHMARK) },
-            )
-        }
 
         // — pushes —
         composable(Routes.COMPONENTS) {
@@ -121,15 +120,14 @@ fun VesselApp(
                 onBack = { navController.popBackStack() },
                 // TODO: hands off to the download service once it does anything.
                 onInstall = {},
-                onRefresh = {},
             )
         }
 
-        composable(Routes.CONTAINER_EDITOR) { entry ->
-            ContainerEditorScreen(
-                containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID) ?: NEW_CONTAINER,
-                onBack = { navController.popBackStack() },
-            )
+        // The editor takes no id argument: it reads `containerId` off the route
+        // through its SavedStateHandle, which is also how it survives the
+        // process being killed with the screen open.
+        composable(Routes.CONTAINER_EDITOR) {
+            ContainerEditorScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.SESSION) { entry ->
             SessionScreen(

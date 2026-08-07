@@ -104,7 +104,7 @@ EOF
     -Dstrip=true
 
   log "building $COMPONENT ($TRIPLE)"
-  ninja -C "$BUILD" -j "$(nproc_safe)"
+  ninja -C "$BUILD" -j "$(build_jobs 1)"
   ninja -C "$BUILD" install
 
   # d3d10core/d3d8 come and go between releases; these three are the ones no
@@ -113,8 +113,10 @@ EOF
     OUT="$STAGE/$OUTDIR/$dll"
     [ -f "$OUT" ] || die "build produced no $OUTDIR/$dll (looked in $STAGE/$OUTDIR)"
     if [ "$PASS" = 64 ]; then
-      file "$OUT" | grep -Eqi 'PE32\+.*(aarch64|arm64)' \
-        || die "$OUTDIR/$dll is not an ARM64 PE: $(file -b "$OUT")"
+      # Shared with fex.sh and vkd3d.sh — and it has to be shared, because the
+      # naive "is it aarch64" test rejects a correct ARM64EC DLL. See the
+      # verify_pe_dll comment in common.sh.
+      verify_pe_dll "$OUT" "$TRIPLE" "$OUTDIR/$dll"
     else
       file "$OUT" | grep -Eqi 'PE32 .*(80386|intel)' \
         || die "$OUTDIR/$dll is not a 32-bit x86 PE: $(file -b "$OUT")"

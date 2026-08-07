@@ -41,6 +41,17 @@ VERSION="$MESA_VERSION-${SOURCE_SHA:0:8}"
 
 resolve_cpu_flags "$NDK_CC"
 
+# tu_device.cc includes tu_version.h, which is NOT committed to this branch —
+# every community builder generates it before configuring. Our current pin
+# happens to build without it, so this only writes the file when it is missing:
+# if a future pin reintroduces the include, the build keeps working instead of
+# failing on a header nobody can find in the tree.
+TU_VERSION_H="$SRC/src/freedreno/vulkan/tu_version.h"
+if [ ! -f "$TU_VERSION_H" ] && grep -rq 'tu_version\.h' "$SRC/src/freedreno/vulkan/" 2>/dev/null; then
+  info "generating tu_version.h (not committed upstream)"
+  echo '#define TUGEN8_DRV_VERSION "vessel"' > "$TU_VERSION_H"
+fi
+
 # --- meson cross file --------------------------------------------------------
 # Meson has no NDK integration, so the toolchain is spelled out. Written into
 # WORK_DIR rather than the source tree so the checkout stays pristine.
@@ -122,6 +133,8 @@ meson setup "$BUILD" "$SRC" \
   -Dgallium-drivers= \
   -Dvulkan-drivers=freedreno \
   -Dfreedreno-kmds="$TARGET_KMD" \
+  -Dvulkan-beta=true \
+  -Dvideo-codecs= \
   -Dbuildtype=release \
   -Dstrip=true \
   -Dspirv-tools=disabled
@@ -141,7 +154,7 @@ meson setup "$BUILD" "$SRC" \
 # way; if a future build fails on a missing host-detected header, this is why.
 
 log "building $COMPONENT"
-ninja -C "$BUILD" -j "$(nproc_safe)"
+ninja -C "$BUILD" -j "$(build_jobs 1)"
 
 SO="$BUILD/src/freedreno/vulkan/libvulkan_freedreno.so"
 [ -f "$SO" ] || die "build produced no libvulkan_freedreno.so (expected $SO).

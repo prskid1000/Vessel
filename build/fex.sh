@@ -101,38 +101,15 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
     -DBUILD_FEX_LINUX_TESTS=False
 
   log "building $DLL_NAME"
-  cmake --build "$BUILD" -j "$(nproc_safe)"
+  cmake --build "$BUILD" -j "$(build_jobs 1)"
 
   DLL="$(find "$BUILD" -type f -name "$DLL_NAME" -print -quit)"
   [ -n "$DLL" ] || die "build produced no $DLL_NAME (searched $BUILD).
      If the link failed on jemalloc symbols, add -DENABLE_JEMALLOC=False."
 
-  # Verify the DLL, which is less obvious than it sounds.
-  #
-  # An ARM64EC image reports machine type AMD64, not ARM64 — file(1) says
-  # "PE32+ executable (DLL) x86-64" and that is CORRECT, not a broken build.
-  # That is the entire point of EC: the binary presents an x64-compatible
-  # machine type and ABI so x64 code can call into it, while the code inside is
-  # ARM64. Checking for "aarch64" here rejects a perfectly good EC build, which
-  # is exactly what it did the first time.
-  #
-  # So: assert it is a PE32+ DLL, then assert the real thing — the hybrid
-  # (CHPE) load-config directory, which only an EC/ARM64X image carries.
-  file "$DLL" | grep -Eqi 'PE32\+ executable \(DLL\)' \
-    || die "$DLL_NAME is not a PE32+ DLL: $(file -b "$DLL")"
-
-  if [ "$TRIPLE" = "arm64ec-w64-mingw32" ]; then
-    if "$MINGW_BIN/llvm-readobj" --coff-load-config "$DLL" 2>/dev/null \
-         | grep -qE 'CHPEMetadata|HybridMetadataPointer'; then
-      info "$DLL_NAME carries hybrid (CHPE) metadata — genuine ARM64EC"
-    else
-      die "$DLL_NAME has no CHPE load-config, so it is not really ARM64EC.
-     A plain x64 DLL here would mean the arm64ec target silently fell back."
-    fi
-  else
-    file "$DLL" | grep -Eqi 'aarch64|arm64' \
-      || die "$DLL_NAME should be an ARM64 PE but is: $(file -b "$DLL")"
-  fi
+  # Shared with dxvk.sh and vkd3d.sh. The naive "is it aarch64" test rejects a
+  # correct ARM64EC DLL — see the verify_pe_dll comment in common.sh.
+  verify_pe_dll "$DLL" "$TRIPLE" "$DLL_NAME"
 
   install -m 0644 "$DLL" "$STAGE/$DLL_NAME"
   ok "$DLL_NAME ($TRIPLE)"

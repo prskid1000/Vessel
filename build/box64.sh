@@ -90,7 +90,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
 #               signal delivery; revisit if crashes appear under load.
 
 log "building $COMPONENT"
-cmake --build "$BUILD" -j "$(nproc_safe)"
+cmake --build "$BUILD" -j "$(build_jobs 1)"
 
 BIN="$BUILD/box64"
 [ -f "$BIN" ] || die "build produced no box64 binary (looked in $BUILD)"
