@@ -69,6 +69,13 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
   # BUILD_TESTING is CMake's own CTest variable, NOT BUILD_TESTS — that is what
   # FEX gates on. With tests enabled, configure demands NASM to assemble the x86
   # test corpus and dies before compiling anything we want.
+  # ENABLE_LTO=False: LTO across the mingw link was judged unreliable and to cost
+  # more build time than it wins. That reasoning was recorded when the flag was
+  # first set and then lost in a refactor, which is why it is back here — but it
+  # is a judgement, not a measurement, and FEX's dispatcher is the hottest code
+  # in the project for any non-native program. docs/OPTIMIZATION.md carries it as
+  # an open candidate: benchmark before flipping, and if the ARM64EC link is what
+  # actually fails, record *that* instead of this.
   cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DMINGW_TRIPLE="$TRIPLE" \
