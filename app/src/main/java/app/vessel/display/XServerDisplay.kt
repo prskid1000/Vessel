@@ -418,7 +418,28 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         // them would republish the whole list on every drag of a guest window.
         xServer.windowManager.addOnWindowModificationListener(
             object : WindowManager.OnWindowModificationListener {
-                override fun onMapWindow(window: Window) = publishWindows()
+                override fun onMapWindow(window: Window) {
+                    // **Focus what just appeared, because nothing else will.**
+                    // `setFocus` was called from exactly one place — a taskbar
+                    // press — so a window that opened and was never tapped never
+                    // held the X input focus, and the server delivered every key
+                    // to the root instead of to it. That is the same defect from
+                    // two directions: typing did not reach the guest, and the
+                    // window the user was looking at was not the one listening.
+                    //
+                    // A real window only. Wine maps a dozen 1x1 message windows
+                    // per session and focusing one of those would take the
+                    // keyboard away from the program that has it.
+                    if (window.isRealWindow()) {
+                        runCatching {
+                            xServer.windowManager.setFocus(
+                                window,
+                                WindowManager.FocusRevertTo.PARENT,
+                            )
+                        }.onFailure { Log.w("VesselDisplay", "could not focus a new window", it) }
+                    }
+                    publishWindows()
+                }
                 override fun onUnmapWindow(window: Window) = publishWindows()
                 override fun onChangeWindowZOrder(window: Window) = publishWindows()
                 override fun onModifyWindowProperty(window: Window, property: Property) =

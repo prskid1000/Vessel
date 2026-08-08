@@ -335,7 +335,11 @@ fun SessionLauncher(
         ) {
             terminals.forEach { option ->
                 LauncherAction(
-                    icon = VIcons.Terminal,
+                    icon = when (option.profile) {
+                        TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
+                        TerminalProfile.POWERSHELL -> VIcons.Prompt
+                        TerminalProfile.BUSYBOX_SH -> VIcons.Code
+                    },
                     caption = option.profile.shortLabel,
                     description = option.unavailable ?: "Open ${option.profile.label}",
                     enabled = option.enabled,

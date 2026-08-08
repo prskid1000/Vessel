@@ -96,17 +96,20 @@ object VIcons {
     val FileCode: ImageVector by lazy { glyph("phosphor.fileCode", FILE_CODE) }
 
     /**
-     * A console window — the launcher's terminal profiles.
+     * `terminal-window` — Command Prompt, the one shell Wine always provides.
      *
-     * **Drawn here, not transcribed.** Every other constant in this file is the
-     * `d` attribute of a Phosphor SVG copied unaltered, and the licensing table
-     * says so; Phosphor's `terminal-window` was not to hand to copy, and path
-     * data written from memory and labelled Phosphor would make that table
-     * false. This one is ours — a frame, a prompt chevron and a cursor rule, on
-     * the same 256 grid and at the same 16-unit weight so it sits with them.
-     * Replace it with the real transcription whenever the asset is available.
+     * A framed console, against [Prompt]'s bare one. The three shells in the
+     * launcher share a family on purpose — they are three of the same kind of
+     * thing — and are told apart by whether the mark has a window around it, by
+     * where its chevron sits, and by the three-character caption beneath.
      */
-    val Terminal: ImageVector by lazy { glyph("vessel.terminal", TERMINAL_WINDOW) }
+    val Terminal: ImageVector by lazy { glyph("phosphor.terminalWindow", TERMINAL_WINDOW) }
+
+    /** `terminal` — a bare `>_` prompt. PowerShell in the launcher. */
+    val Prompt: ImageVector by lazy { glyph("phosphor.terminal", TERMINAL) }
+
+    /** `code` — `</>`. The POSIX shell, which is the one people write in. */
+    val Code: ImageVector by lazy { glyph("phosphor.code", CODE) }
 
     /** `list-bullets` — the session log, and its history. */
     val List: ImageVector by lazy { glyph("phosphor.list", LIST_BULLETS) }
@@ -210,24 +213,20 @@ private const val UPLOAD_SIMPLE =
         "7.66,120,51.31V144a8,8,0,0,0,16,0V51.31l26.34,26.35a8,8,0,0,0,11.32-11.32l-40-40a8,8,0,0,0-11" +
         ".32,0l-40,40A8,8,0,0,0,93.66,77.66Z"
 
-/**
- * Ours, not Phosphor's — see [VIcons.Terminal]. Frame, chevron, cursor rule.
- *
- * Straight lines only. The first attempt used rounded corners the way Phosphor's
- * own paths do, and rendered as a solid block: the frame's inner subpath stopped
- * cutting its hole, and the chevron and rule vanished inside the fill. Arcs are
- * not worth debugging in a glyph this small, and square corners are what the
- * rest of this product's chrome uses anyway.
- *
- * The hole works by winding. The outer rectangle runs clockwise — right, down,
- * left, up — and the inner one runs counter-clockwise, which is what makes the
- * non-zero fill rule subtract it. Reversing either one fills the frame in.
- */
 private const val TERMINAL_WINDOW =
-    "M24,48H232V208H24Z" +
-        "M216,192H40V64H216Z" +
-        "M72,100L84,88L124,128L84,168L72,156L100,128Z" +
-        "M136,156H184V172H136Z"
+    "M128,128a8,8,0,0,1-3,6.25l-40,32a8,8,0,1,1-10-12.5L107.19,128,75,102.25a8,8,0,1,1,10-12.5l40,32A" +
+        "8,8,0,0,1,128,128Zm48,24H136a8,8,0,0,0,0,16h40a8,8,0,0,0,0-16Zm56-96V200a16,16,0,0,1-16,16H" +
+        "40a16,16,0,0,1-16-16V56A16,16,0,0,1,40,40H216A16,16,0,0,1,232,56ZM216,200V56H40V200H216Z"
+
+private const val TERMINAL =
+    "M117.31,134l-72,64a8,8,0,1,1-10.63-12L100,128,34.69,70A8,8,0,1,1,45.32,58l72,64a8,8,0,0,1,0,12ZM" +
+        "216,184H120a8,8,0,0,0,0,16h96a8,8,0,0,0,0-16Z"
+
+private const val CODE =
+    "M69.12,94.15,28.5,128l40.62,33.85a8,8,0,1,1-10.24,12.29l-48-40a8,8,0,0,1,0-12.29l48-40a8,8,0,0,1" +
+        ",10.24,12.3Zm176,27.7-48-40a8,8,0,1,0-10.24,12.3L227.5,128l-40.62,33.85a8,8,0,1,0,10.24,12." +
+        "29l48-40a8,8,0,0,0,0-12.29ZM162.73,32.48a8,8,0,0,0-10.25,4.79l-64,176a8,8,0,0,0,4.79,10.26A" +
+        "8.14,8.14,0,0,0,96,224a8,8,0,0,0,7.52-5.27l64-176A8,8,0,0,0,162.73,32.48Z"
 
 private const val FOLDER =
     "M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0," +
