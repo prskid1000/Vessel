@@ -265,13 +265,35 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         val root = manager.rootWindow
         val focused = manager.focusedWindow?.id
         val list = root.children.mapNotNull { window ->
-            if (!window.attributes.isMapped) return@mapNotNull null
-            if (window.width <= MIN_WINDOW_EDGE || window.height <= MIN_WINDOW_EDGE) {
-                return@mapNotNull null
-            }
+            if (!window.isRealWindow()) return@mapNotNull null
             if (window.isVirtualDesktop(root)) return@mapNotNull null
             TopLevelWindow(window.id, window.taskbarTitle(), focused = window.id == focused)
-        }
+        } + root.children
+            // **And the windows inside the desktop, which is where they move to
+            // the moment the prefix has a virtual desktop configured.**
+            //
+            // The two shapes are both real and the taskbar has to handle both. A
+            // process that starts rootless puts its window beside the desktop,
+            // under the root — that is what the tree dump caught, and it is what
+            // the list above reads. Once `PrefixRegistry.virtualDesktop` is
+            // seeded, the same window is created *inside* the desktop instead,
+            // and reading only the root's children would find nothing but the
+            // desktop itself, which is skipped. Adding the caption also took the
+            // taskbar away, and one without the other is no good.
+            //
+            // One level, not a walk. A window inside the desktop is a top-level
+            // window; anything below *it* is Wine's own client area.
+            .filter { it.isVirtualDesktop(root) }
+            .flatMap { desktop ->
+                desktop.children.mapNotNull { window ->
+                    if (!window.isRealWindow()) return@mapNotNull null
+                    TopLevelWindow(
+                        window.id,
+                        window.taskbarTitle(),
+                        focused = window.id == focused,
+                    )
+                }
+            }
         listener(list)
         if (Log.isLoggable(TREE_TAG, Log.DEBUG)) {
             // The tree, whenever it changes, at a tag nothing enables by
@@ -300,10 +322,21 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     }
 
     /**
+     * Mapped, and bigger than Wine's message-only plumbing.
+     *
+     * Wine litters both the root and the desktop with 1×1 windows it uses to
+     * receive messages — a dozen in one session. None is a window in any sense a
+     * user would recognise, and none is ever mapped for long.
+     */
+    private fun Window.isRealWindow(): Boolean =
+        attributes.isMapped && width > MIN_WINDOW_EDGE && height > MIN_WINDOW_EDGE
+
+    /**
      * The `explorer /desktop=` window: the one that covers the whole screen.
      *
-     * It is a sibling of the guest's windows rather than their parent, so size
-     * is what tells it apart. That is safe here for a reason worth stating: this
+     * Their sibling before the prefix is configured for one and their parent
+     * after, so size rather than position is what tells it apart. That is safe
+     * here for a reason worth stating: this
      * product always runs under a virtual desktop, and a guest window can only
      * ever be as large as the desktop it is inside — never larger, and if it
      * were exactly as large it would be indistinguishable, which is a maximised
