@@ -6,15 +6,20 @@ import androidx.lifecycle.viewModelScope
 import app.vessel.core.ContainerProfile
 import app.vessel.core.PeArchitecture
 import app.vessel.core.params.ParamValue
+import app.vessel.data.ContainerPaths
 import app.vessel.data.ContainerRepository
 import app.vessel.ui.shell.AppRegistry
+import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.AppShortcut
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -33,10 +38,12 @@ data class HomeContainer(
     /**
      * Whether this container has a `drive_c` to browse.
      *
-     * False until the first launch, because the prefix is created by `wineboot`
-     * and not by saving the settings. A folder button that opens an empty
-     * directory reads as a broken feature rather than an empty one, so the card
-     * does not draw one.
+     * **Read off the filesystem, not inferred from `lastRun`.** The prefix is
+     * created by `wineboot` rather than by saving the settings, so a container
+     * that has never run usually has no drive — but "usually" is the wrong word
+     * for a folder button: a launch that failed after `wineboot` leaves a real
+     * drive behind a null `lastRun`, and a container whose directory was cleared
+     * out from under the app has the opposite. The directory is the fact.
      */
     val hasPrefix: Boolean,
 )
@@ -75,6 +82,7 @@ data class HomeUiState(
 class HomeViewModel @Inject constructor(
     private val containers: ContainerRepository,
     private val registry: AppRegistry,
+    private val paths: ContainerPaths,
 ) : ViewModel() {
 
     val state: StateFlow<HomeUiState> =
@@ -85,12 +93,19 @@ class HomeViewModel @Inject constructor(
                         profile = profile,
                         meta = metaLine(profile),
                         shortcuts = shortcuts.filter { it.containerId == profile.id },
-                        hasPrefix = profile.lastRun != null,
+                        hasPrefix = File(
+                            paths.of(profile.id).prefix,
+                            GuestPath.DRIVE_C,
+                        ).isDirectory,
                     )
                 },
                 loaded = true,
             )
-        }.stateIn(
+        }
+            // The `isDirectory` stat per container is small but it is still disk,
+            // and this flow re-emits on every registry write.
+            .flowOn(Dispatchers.IO)
+            .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(SUBSCRIPTION_GRACE_MS),
             initialValue = HomeUiState(),

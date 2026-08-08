@@ -17,6 +17,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import app.vessel.core.DisplayGeometry
@@ -127,6 +128,11 @@ fun VesselApp(
     // somebody opened the Session screen.
     val session: SessionViewModel = hiltViewModel()
     val state by session.state.collectAsStateWithLifecycle()
+
+    // One owner for the whole app's orientation, driven by the route. See
+    // `LockOrientation` — the per-destination form races on the way out.
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    LockOrientation(orientationFor(backStackEntry?.destination?.route))
 
     // The panel's own size, which is what `display.resolution: native` means.
     // `maximumWindowMetrics` rather than `Resources.displayMetrics`: the latter

@@ -1,12 +1,6 @@
 package app.vessel.ui.shell
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import java.util.UUID
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Every program the user has added, across every container.
@@ -48,57 +42,4 @@ interface AppRegistry {
 
     /** Forget every shortcut belonging to a container that has been deleted. */
     suspend fun removeAllIn(containerId: String)
-}
-
-/**
- * The stand-in, until `data/` owns this.
- *
- * **It does not survive the process.** That is a scaffold, not a design: the
- * shape of the contract above is what this pass had to get right, and a UI that
- * writes its own file into `filesDir` would be a second, competing owner of the
- * app's storage layout the day the real one lands. The cost is that a shortcut
- * added now is gone after a cold start, which is stated in
- * `out/ui-needs-from-core.md` and in the release notes for this pass rather than
- * hidden behind a plausible-looking list.
- *
- * A concrete `@Singleton` with an `@Inject` constructor rather than an
- * `@Binds` module, because the Hilt modules live in `di/`, which this pass does
- * not own. Call sites depend on [AppRegistry] through this type; swapping the
- * implementation is a one-line module in `di/`.
- */
-@Singleton
-class InMemoryAppRegistry @Inject constructor() : AppRegistry {
-
-    private val state = MutableStateFlow<List<AppShortcut>>(emptyList())
-    override val shortcuts: Flow<List<AppShortcut>> = state.asStateFlow()
-
-    override suspend fun add(shortcut: AppShortcut): AppShortcut {
-        val assigned = shortcut.copy(id = shortcut.id.ifBlank { UUID.randomUUID().toString() })
-        state.update { current ->
-            val existing = current.indexOfFirst {
-                it.containerId == assigned.containerId &&
-                    it.executable.equals(assigned.executable, ignoreCase = true)
-            }
-            if (existing >= 0) {
-                current.toMutableList().apply { this[existing] = assigned.copy(id = current[existing].id) }
-            } else {
-                current + assigned
-            }
-        }
-        return assigned
-    }
-
-    override suspend fun update(shortcut: AppShortcut) {
-        state.update { current ->
-            current.map { if (it.id == shortcut.id) shortcut else it }
-        }
-    }
-
-    override suspend fun remove(id: String) {
-        state.update { current -> current.filterNot { it.id == id } }
-    }
-
-    override suspend fun removeAllIn(containerId: String) {
-        state.update { current -> current.filterNot { it.containerId == containerId } }
-    }
 }

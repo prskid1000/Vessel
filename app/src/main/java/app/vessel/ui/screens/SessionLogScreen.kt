@@ -2,7 +2,10 @@ package app.vessel.ui.screens
 
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -148,6 +151,14 @@ private fun SessionLogContent(
 ) {
     val listState = rememberLazyListState()
 
+    // **One horizontal scroll shared by every row, so the gutter stays a column.**
+    // The viewer is portrait — 422 dp — and a Wine line is routinely 200
+    // characters. Wrapping breaks `err:module:import_dll Library d3dx9_43.dll not
+    // found` across three lines mid-token, which is unreadable and unsearchable
+    // by eye; panning keeps each line a line. A shared state rather than one per
+    // row is what keeps the source gutter aligned while you pan.
+    val pan = rememberScrollState()
+
     // Follow-tail, and the one rule that makes it bearable: the moment the user
     // scrolls up, following stops. Scrolling back to the bottom turns it on
     // again, which is the same contract every terminal has.
@@ -223,7 +234,7 @@ private fun SessionLogContent(
                 bottom = Vessel.metrics.s22,
             ),
         ) {
-            items(state.entries, key = { it.index }) { entry -> LogRow(entry) }
+            items(state.entries, key = { it.index }) { entry -> LogRow(entry, pan) }
             if (state.truncated) {
                 item(key = "truncated") {
                     Text(
@@ -248,12 +259,13 @@ private fun SessionLogContent(
  * ordering already says.
  */
 @Composable
-private fun LogRow(entry: LogEntry) {
+private fun LogRow(entry: LogEntry, pan: ScrollState) {
     Row(
-        // A hairline of vertical padding, and it is not decoration: `monoSmall`
-        // wraps a long Wine line to two or three, and without a gap between rows
-        // a wrapped line and the next line are indistinguishable.
-        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s3),
+        // A hairline of vertical padding, and it is not decoration: without a gap
+        // between rows two adjacent lines are indistinguishable.
+        Modifier
+            .horizontalScroll(pan)
+            .padding(vertical = Vessel.metrics.s3),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
     ) {
         Text(
@@ -262,10 +274,16 @@ private fun LogRow(entry: LogEntry) {
             color = Vessel.colors.neutral700,
             modifier = Modifier.width(Vessel.metrics.logGutterWidth),
         )
-        // Wraps rather than clips. A truncated `err:module:import_dll` is a line
-        // that has kept the part everybody already knows and dropped the name of
-        // the DLL that is missing.
-        Text(entry.text, style = Vessel.type.monoSmall, color = levelColor(entry.level))
+        // One line, panned to. Neither wrapped nor truncated: a truncated
+        // `err:module:import_dll` has kept the part everybody already knows and
+        // dropped the name of the DLL that is missing.
+        Text(
+            entry.text,
+            style = Vessel.type.monoSmall,
+            color = levelColor(entry.level),
+            maxLines = 1,
+            softWrap = false,
+        )
     }
 }
 

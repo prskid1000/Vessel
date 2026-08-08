@@ -1,6 +1,5 @@
-package app.vessel.ui.shell
+package app.vessel.core
 
-import app.vessel.core.PeArchitecture
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -14,42 +13,42 @@ import java.io.File
  * this runs over every file in a directory listing, and a Wine prefix is full of
  * things that are not PEs.
  */
-class PeMachineTest {
+class PeReaderTest {
 
     @get:Rule
     val temp = TemporaryFolder()
 
     @Test
     fun `each machine word maps to its architecture`() {
-        assertEquals(PeArchitecture.ARM64, PeMachine.fromMachine(0xAA64))
-        assertEquals(PeArchitecture.X64, PeMachine.fromMachine(0x8664))
-        assertEquals(PeArchitecture.X86, PeMachine.fromMachine(0x014C))
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.fromMachine(0x0001))
+        assertEquals(PeArchitecture.ARM64, PeReader.fromMachine(0xAA64))
+        assertEquals(PeArchitecture.X64, PeReader.fromMachine(0x8664))
+        assertEquals(PeArchitecture.X86, PeReader.fromMachine(0x014C))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.fromMachine(0x0001))
     }
 
     @Test
     fun `a well-formed PE is read from disk`() {
-        assertEquals(PeArchitecture.X64, PeMachine.of(pe(0x8664)))
+        assertEquals(PeArchitecture.X64, PeReader.architectureOf(pe(0x8664)))
     }
 
     @Test
     fun `a file with no MZ is unknown`() {
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.of(text("hello, world")))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.architectureOf(text("hello, world")))
     }
 
     @Test
     fun `a truncated file is unknown rather than an exception`() {
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.of(text("MZ")))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.architectureOf(text("MZ")))
     }
 
     @Test
     fun `a missing file is unknown`() {
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.of(File(temp.root, "absent.exe")))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.architectureOf(File(temp.root, "absent.exe")))
     }
 
     @Test
     fun `a directory is unknown`() {
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.of(temp.newFolder("folder")))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.architectureOf(temp.newFolder("folder")))
     }
 
     @Test
@@ -64,7 +63,7 @@ class PeMachineTest {
         bytes[0x3E] = 0xFF.toByte()
         bytes[0x3F] = 0x7F
         bomb.writeBytes(bytes)
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.of(bomb))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.architectureOf(bomb))
     }
 
     @Test
@@ -76,7 +75,7 @@ class PeMachineTest {
         bytes[0x3C] = 0x40
         // No "PE\0\0" at 0x40 — a genuine DOS-only executable.
         stub.writeBytes(bytes)
-        assertEquals(PeArchitecture.UNKNOWN, PeMachine.of(stub))
+        assertEquals(PeArchitecture.UNKNOWN, PeReader.architectureOf(stub))
     }
 
     private fun pe(machine: Int): File = temp.newFile("app.exe").apply {

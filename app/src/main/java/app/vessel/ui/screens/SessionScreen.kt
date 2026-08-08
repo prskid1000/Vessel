@@ -49,7 +49,6 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionDiagnosis
-import app.vessel.core.formatElapsed
 import app.vessel.data.ProvisionStatus
 import app.vessel.data.ProvisionStep
 import app.vessel.data.SessionMetricsState
@@ -553,7 +552,6 @@ fun SessionDesktop(
             TaskbarTransition(visible = taskbarOpen) {
                 SessionTaskbar(
                     windows = windows,
-                    status = statusLine(state),
                     paused = state.paused,
                     unavailableReason = shellUnavailableReason,
                     launcherOpen = launcherOpen,
@@ -581,14 +579,6 @@ fun SessionDesktop(
             onDismiss = { confirmingStop = false },
         )
     }
-}
-
-/** `Display proof · t+4:08`. The taskbar's right-hand readout. */
-private fun statusLine(state: SessionState): String {
-    val name = state.containerName.ifBlank { "Session" }
-    val started = state.startedAt ?: return name
-    val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(0)
-    return "$name \u00b7 t+${formatElapsed(elapsed)}"
 }
 
 /** Four seconds is long enough to aim at a button and short enough not to be in the way. */

@@ -98,16 +98,19 @@ private fun ContainerSheetContent(
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
 
-    VSheet(onDismiss = onDismiss) {
-        VSheetHeader(
-            title = if (state.creating) "New container" else state.name.ifBlank { "Container" },
-            trailing = {
-                if (state.error == null && !state.loading) {
-                    VButton("Save", onSave, style = VButtonStyle.Primary)
-                }
-            },
-        )
-
+    VSheet(
+        onDismiss = onDismiss,
+        header = {
+            VSheetHeader(
+                title = if (state.creating) "New container" else state.name.ifBlank { "Container" },
+                trailing = {
+                    if (state.error == null && !state.loading) {
+                        VButton("Save", onSave, style = VButtonStyle.Primary)
+                    }
+                },
+            )
+        },
+    ) {
         when {
             state.error != null -> Text(
                 state.error,
@@ -181,9 +184,34 @@ private fun ContainerSheetContent(
 @Composable
 private fun ParamGroup(group: EditorGroup, onParam: (String, ParamValue) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-        group.params.forEach { ParamControl(it, onParam) }
+        // Two selects to a row where the manifest declares two in a row, and one
+        // per row otherwise. A *shape* rule rather than a key rule: it is about
+        // the control being a short closed choice, and it keeps the boundary
+        // intact — Resolution and Frame rate pair up because they are adjacent
+        // enums, not because anything here knows their names. Anything with a
+        // help sentence long enough to matter still gets the full width, because
+        // the sentence is under the field and two of them side by side is four
+        // lines of prose in two columns.
+        var index = 0
+        while (index < group.params.size) {
+            val here = group.params[index]
+            val next = group.params.getOrNull(index + 1)
+            if (here.pairs() && next != null && next.pairs()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
+                    Column(Modifier.weight(1f)) { ParamControl(here, onParam) }
+                    Column(Modifier.weight(1f)) { ParamControl(next, onParam) }
+                }
+                index += 2
+            } else {
+                ParamControl(here, onParam)
+                index += 1
+            }
+        }
     }
 }
+
+/** A short closed choice, which is what can sit in half a sheet's width. */
+private fun EditorParam.pairs(): Boolean = resolved.spec.type == ParamType.ENUM
 
 /**
  * One composable per param *type*, and that is the entire dispatch.

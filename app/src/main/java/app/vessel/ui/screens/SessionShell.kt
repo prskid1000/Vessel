@@ -83,7 +83,6 @@ import app.vessel.ui.theme.vRuleAbove
 @Composable
 fun SessionTaskbar(
     windows: List<GuestWindow>,
-    status: String,
     paused: Boolean,
     unavailableReason: String?,
     onStart: () -> Unit,
@@ -151,14 +150,6 @@ fun SessionTaskbar(
                 }
             }
         }
-
-        Text(
-            status,
-            style = Vessel.type.monoSmall,
-            color = Vessel.colors.textMuted,
-            maxLines = 1,
-            softWrap = false,
-        )
 
         // Repeated from the rail on purpose: the taskbar is the surface that is
         // already open when a session needs ending.
@@ -393,7 +384,6 @@ private fun SessionTaskbarPreview() {
                 GuestWindow(1, "Notepad++", focused = true),
                 GuestWindow(2, "Stalker"),
             ),
-            status = "Display proof \u00b7 t+4:08 \u00b7 62%",
             paused = false,
             unavailableReason = null,
             onStart = {},

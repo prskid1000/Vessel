@@ -1,6 +1,7 @@
 package app.vessel.ui.shell
 
 import app.vessel.core.PeArchitecture
+import app.vessel.core.PeReader
 import java.io.File
 
 /**
@@ -68,7 +69,7 @@ sealed interface Launchable {
  */
 fun launchabilityOf(file: File): Launchable = when (file.extension.lowercase()) {
     EXE -> {
-        val arch = PeMachine.of(file)
+        val arch = PeReader.architectureOf(file)
         if (arch == PeArchitecture.UNKNOWN) {
             Launchable.Refused(
                 "This file ends in .exe but has no PE header, so it is not a Windows program. " +

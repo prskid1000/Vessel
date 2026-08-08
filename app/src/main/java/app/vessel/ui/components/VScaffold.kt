@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -82,7 +83,16 @@ fun VScaffold(
     ) {
         toolbar?.invoke()
         Column(
-            Modifier.weight(1f).vContentColumn().padding(contentPadding),
+            Modifier
+                .weight(1f)
+                .vContentColumn()
+                // A screen with no bottom bar owns its own bottom inset. Without
+                // this the last row of a full list — a log line, a file — is drawn
+                // under the gesture pill, which is legible but reads as content
+                // running off the end of the screen. A bar applies the inset
+                // itself, so adding it here too would double it.
+                .then(if (bottomBar == null) Modifier.navigationBarsPadding() else Modifier)
+                .padding(contentPadding),
             content = content,
         )
         bottomBar?.invoke()
