@@ -230,6 +230,14 @@ data class VMetricStat(val label: String, val value: String)
  * many digits a milliwatt deserves and this does not. When [unavailable] is set
  * the card says why instead of drawing an empty box, which is the rule the whole
  * feature exists to serve: never a fabricated or a zero reading.
+ *
+ * **There is no caption slot, deliberately.** This card had a `note` for a line
+ * of explanation under the numbers, and the Metrics tab put one under nearly
+ * every card until the whole tab read as prose with graphs in it. A card is its
+ * title, its number, its shape and its statistics; anything that has to be said
+ * about scope goes in the title, where it is read. Taking the parameter away
+ * rather than leaving it unused is the point — a caption cannot drift back in
+ * one card at a time.
  */
 // FlowRow is still experimental at this Compose BOM. It is used for two rows
 // that genuinely wrap — eight core legends and a stats row — and the fallback
@@ -243,7 +251,6 @@ fun VMetricGraphCard(
     modifier: Modifier = Modifier,
     unit: String? = null,
     stats: List<VMetricStat> = emptyList(),
-    note: String? = null,
     unavailable: String? = null,
 ) {
     Column(
@@ -292,10 +299,6 @@ fun VMetricGraphCard(
         }
 
         if (stats.isNotEmpty()) VMetricStatRow(stats)
-
-        if (note != null) {
-            Text(note, style = Vessel.type.monoSmall, color = Vessel.colors.neutral600)
-        }
     }
 }
 
@@ -493,7 +496,7 @@ private fun VMetricGraphCardPreview() {
             verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         ) {
             VMetricGraphCard(
-                title = "cpu · session",
+                title = "cpu",
                 value = "62",
                 unit = "%",
                 stats = listOf(
@@ -502,7 +505,6 @@ private fun VMetricGraphCardPreview() {
                     VMetricStat("min", "12%"),
                     VMetricStat("samples", "16"),
                 ),
-                note = "session process tree, not the device",
                 series = listOf(
                     VMetricSeries("cpu", SampleCpu, ceiling = 100),
                     VMetricSeries(

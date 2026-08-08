@@ -236,7 +236,9 @@ private fun SessionLogContent(
             // No footnote under the last row when the cap is hit. This screen is a
             // log viewer and every sentence added to it is a sentence between the
             // user and the lines they came for; the cap and Share both work
-            // without one, and `state.truncated` still drives the toolbar.
+            // without one. `state.truncated` is still read — it is what stops
+            // the pager asking for a page that will never come — it just has
+            // nothing to say on screen.
             items(state.entries, key = { it.index }) { entry -> LogRow(entry, pan) }
         }
     }

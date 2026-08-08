@@ -29,7 +29,6 @@ import app.vessel.ui.components.VMetricSeries
 import app.vessel.ui.components.VMetricSpark
 import app.vessel.ui.components.VMetricStat
 import app.vessel.ui.components.VMetricTone
-import app.vessel.ui.components.VSectionHeader
 import app.vessel.ui.components.VSeriesForm
 import app.vessel.ui.components.VSeriesTone
 import app.vessel.ui.theme.Vessel
@@ -163,6 +162,22 @@ fun SessionMetricsRail(
  *
  * Every card carries its own statistics. A shape says a run ramped; only the
  * numbers say what it ramped to, and the peak is what gets quoted.
+ *
+ * **A card, its numbers, and nothing else.** There were captions under most of
+ * these — which process tree the CPU figure covers, that the GPU one is
+ * device-wide, where the battery current is read from — and section headers
+ * above them, and a list of every source at the bottom. All of it is gone. It
+ * was a page of prose wrapped around seven graphs, and the person who opens this
+ * tab is looking at the graphs. Where a scope genuinely has to be said, it is
+ * said in the title.
+ *
+ * **A source that cannot be read is left off, not drawn empty.** There were four
+ * cards here whose whole content was a sentence explaining why they had no
+ * content — device-total CPU, GPU clock, RAM clock, per-rail power, none of
+ * which this device or this sandbox exposes. Four permanent apologies is not a
+ * panel. The probe reason still reaches [VMetricGraphCard.unavailable] for a
+ * card that *usually* works and did not this run, which is the case worth
+ * reporting.
  */
 @Composable
 fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifier) {
@@ -195,83 +210,29 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             color = if (state.replayed) Vessel.colors.textMuted else Vessel.colors.accent,
         )
 
-        VSectionHeader("Processor")
-
         VMetricGraphCard(
-            // "session" is not decoration. `/proc/stat` is denied to apps on this
-            // platform, so this is the CPU of Vessel's own process tree — which
-            // under an emulated desktop is everything the container is doing, and
-            // is still not the same number as the device's total load. The GPU
-            // figure below *is* device-wide, and two adjacent percentages with
-            // different scopes is exactly how someone misreads a panel.
-            title = "cpu · session process tree",
+            title = "cpu",
             value = sample.cpuPercent?.toString(),
             unit = "%",
             stats = history.stats { it.cpuPercent }.percentStats(),
-            note = "Vessel's own processes, including wineserver and every Windows " +
-                "process. Not the device.",
             series = listOfNotNull(
                 history.seriesOrNull(100, VSeriesTone.Primary, VSeriesForm.Area, "cpu") { it.cpuPercent },
             ),
             unavailable = state.unavailable("cpu"),
         )
 
-        // A card that only ever says why it is empty. It is here because "where
-        // is total CPU" is the first question this panel invites, and an absent
-        // card answers it with silence.
-        state.unavailable("cpu total")?.let {
-            VMetricGraphCard(
-                title = "cpu · device total",
-                value = null,
-                series = emptyList(),
-                unavailable = it,
-            )
-        }
-
         CoreClockCard(state)
 
         VMetricGraphCard(
-            title = "clock · mean of online cores",
-            value = sample.clockMhz?.let(::formatMegahertz),
-            stats = history.stats { it.clockMhz }.stats(::formatMegahertz),
-            note = state.clockCeilingMhz?.let { "part maximum ${formatMegahertz(it)}" },
-            series = listOfNotNull(
-                state.clockCeilingMhz?.let { ceiling ->
-                    history.seriesOrNull(ceiling, VSeriesTone.Primary, VSeriesForm.Line, "mean") {
-                        it.clockMhz
-                    }
-                },
-                state.clockCeilingMhz?.let { ceiling ->
-                    history.seriesOrNull(ceiling, VSeriesTone.Neutral, VSeriesForm.Dashed, "fastest core") {
-                        it.clockPeakMhz
-                    }
-                },
-            ),
-            unavailable = state.unavailable("clock"),
-        )
-
-        VSectionHeader("Graphics")
-
-        VMetricGraphCard(
-            // "device" because KGSL counts every client of the GPU, this app
-            // included but not only — the compositor drawing our own UI is in it.
-            // This is the total GPU figure; the CPU one above is not a total.
-            title = "gpu · device total",
+            title = "gpu",
             value = sample.gpuPercent?.toString(),
             unit = "%",
             stats = history.stats { it.gpuPercent }.percentStats(),
-            note = "every client of the GPU, not only this session",
             series = listOfNotNull(
                 history.seriesOrNull(100, VSeriesTone.Secondary, VSeriesForm.Area, "gpu") { it.gpuPercent },
             ),
             unavailable = state.unavailable("gpu"),
         )
-
-        state.unavailable("gpu clock")?.let {
-            VMetricGraphCard("gpu clock", null, emptyList(), unavailable = it)
-        }
-
-        VSectionHeader("Memory")
 
         VMetricGraphCard(
             title = "memory",
@@ -289,7 +250,6 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
                     }
                 }
             },
-            note = sample.ramTotalMb?.let { "scaled against ${formatMegabytes(it)} of device RAM" },
             series = listOfNotNull(
                 // Scaled against device RAM, not against its own range: the
                 // question anyone brings to this graph is whether the container
@@ -308,22 +268,13 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             unavailable = state.unavailable("ram"),
         )
 
-        state.unavailable("ram clock")?.let {
-            VMetricGraphCard("ram clock", null, emptyList(), unavailable = it)
-        }
-
-        VSectionHeader("Thermal")
-
         TemperatureCard(state)
-
-        VSectionHeader("Power")
 
         val powerCeiling = history.peak { magnitude(it.powerMilliwatts) }
         VMetricGraphCard(
             title = if ((sample.powerMilliwatts ?: 0) < 0) "power · charging" else "power · total draw",
             value = sample.powerMilliwatts?.let(::formatWatts),
             stats = history.stats { magnitude(it.powerMilliwatts) }.stats(::formatWatts),
-            note = "battery current × voltage — the whole phone, not this session",
             series = listOfNotNull(
                 powerCeiling?.takeIf { it > 0 }?.let { ceiling ->
                     history.seriesOrNull(ceiling, VSeriesTone.Neutral, VSeriesForm.Area, "draw") {
@@ -334,13 +285,7 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             unavailable = state.unavailable("power"),
         )
 
-        state.unavailable("cpu/gpu power")?.let {
-            VMetricGraphCard("power · cpu and gpu rails", null, emptyList(), unavailable = it)
-        }
-
         BatteryCard(state)
-
-        SourceList(state)
     }
 }
 
@@ -394,14 +339,6 @@ private fun CoreClockCard(state: SessionMetricsState) {
                 latest.getOrNull(core)?.let(::formatMegahertz) ?: PARKED,
             )
         },
-        note = "each core against its own rated maximum, so the two clusters compare. " +
-            ceilings.withIndex()
-                .filter { it.value != null }
-                .groupBy { it.value }
-                .entries
-                .joinToString("; ") { (ceiling, cores) ->
-                    "cpu${cores.first().index}–${cores.last().index} ${formatMegahertz(ceiling!!)}"
-                },
         series = series,
         unavailable = state.unavailable("clock") ?: if (series.isEmpty()) NO_CORE_CLOCKS else null,
     )
@@ -428,7 +365,6 @@ private fun TemperatureCard(state: SessionMetricsState) {
                 VMetricStat("gpu peak", "${formatDeciCelsius(it)}°")
             },
         ),
-        note = "hottest zone of each kind, matched by the zone's own type string",
         series = listOfNotNull(
             history.seriesOrNull(TEMP_CEILING_DECI_C, VSeriesTone.Primary, VSeriesForm.Line, "cpu") {
                 it.cpuTempDeciC
@@ -461,7 +397,6 @@ private fun BatteryCard(state: SessionMetricsState) {
             // Signed: a run that charged the phone did not cost 4% of battery.
             levelStats?.let { VMetricStat("used", "${-it.delta}%") },
         ),
-        note = "level from the battery broadcast; current from the health HAL",
         series = listOfNotNull(
             history.seriesOrNull(100, VSeriesTone.Primary, VSeriesForm.Line, "level") {
                 it.batteryPercent
@@ -469,27 +404,6 @@ private fun BatteryCard(state: SessionMetricsState) {
         ),
         unavailable = state.unavailable("battery"),
     )
-}
-
-/** Every source, said out loud, so a gap in a graph is never a mystery. */
-@Composable
-private fun SourceList(state: SessionMetricsState) {
-    if (state.sources.isEmpty()) return
-    Column(Modifier.padding(top = Vessel.metrics.s11)) {
-        VSectionHeader("Sources")
-        state.sources.forEach { source ->
-            Text(
-                if (source.available) {
-                    "${source.label}  ${source.origin}"
-                } else {
-                    "${source.label}  unavailable — ${source.reason}"
-                },
-                style = Vessel.type.monoSmall,
-                color = if (source.available) Vessel.colors.textMuted else Vessel.colors.neutral600,
-                modifier = Modifier.padding(bottom = Vessel.metrics.s3),
-            )
-        }
-    }
 }
 
 // — mapping helpers ---------------------------------------------------------
