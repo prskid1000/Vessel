@@ -45,6 +45,16 @@ enum class TerminalProfile(
 
     /** Said when the profile is offered but the shell is not installed. */
     val missingReason: String,
+
+    /**
+     * Whether this needs `wineconsole` in front of it.
+     *
+     * True for a shell, which has no window of its own and needs a console
+     * drawn around it. False for a program that is already a Windows
+     * application — `regedit` and `explorer` both open their own window, and
+     * putting a console in front of one would give it a second, empty one.
+     */
+    val viaConsole: Boolean = true,
 ) {
     COMMAND_PROMPT(
         label = "Command Prompt",
@@ -89,6 +99,39 @@ enum class TerminalProfile(
         installedAt = """C:\Program Files\Vessel Tools\busybox.exe""",
         missingReason = "The Unix tools are not installed.",
     ),
+
+    /**
+     * Wine's own registry editor, interactively this time.
+     *
+     * Vessel already runs it non-interactively on every launch to apply
+     * `prefix-seed.reg`, so it is present in every prefix by definition. Having
+     * it on the menu is the difference between a container whose settings are
+     * whatever Vessel decided and one the user can actually inspect and change.
+     */
+    REGEDIT(
+        label = "Registry Editor",
+        program = "regedit.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Wine's file manager, beside Vessel's own C: browser rather than instead
+     * of it.
+     *
+     * The two answer different questions. Vessel's browser is for getting a
+     * file *in* and finding something to launch; this one is a Windows
+     * application that guest programs' Open dialogs look like, and it can do
+     * what a Windows file manager does inside the prefix.
+     */
+    WINE_EXPLORER(
+        label = "File Explorer",
+        program = "explorer.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
     ;
 
     /** Whether this shell is one Wine provides rather than one somebody installed. */
@@ -105,6 +148,8 @@ enum class TerminalProfile(
             COMMAND_PROMPT -> "cmd"
             POWERSHELL -> "pwsh"
             BUSYBOX_SH -> "sh"
+            REGEDIT -> "reg"
+            WINE_EXPLORER -> "files"
         }
 }
 

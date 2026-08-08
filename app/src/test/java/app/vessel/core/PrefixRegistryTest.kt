@@ -155,11 +155,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(11, PrefixRegistry.SEED_VERSION)
+        assertEquals(13, PrefixRegistry.SEED_VERSION)
         // The two being equal is a coincidence — a version bump does not have to
         // add a key — but while it holds it is a cheap way to catch a key added
         // without the bump that makes existing containers pick it up.
-        assertEquals(12, PrefixRegistry.seed.size)
+        assertEquals(13, PrefixRegistry.seed.size)
     }
 
     @Test
@@ -201,11 +201,11 @@ class PrefixRegistryTest {
         // stay in proportion. See the note on CaptionWidth.
         assertEquals("-480", values["CaptionWidth"])
         assertEquals("-360", values["ScrollWidth"])
-        assertEquals("-60", values["BorderWidth"])
-        assertEquals("-60", values["PaddedBorderWidth"])
+        assertEquals("-120", values["BorderWidth"])
+        assertEquals("0", values["PaddedBorderWidth"])
         assertTrue(
-            "every metric is a negative integer",
-            PrefixRegistry.windowMetrics.values.all { it.data.toInt() < 0 },
+            "every metric is zero or a negative integer",
+            PrefixRegistry.windowMetrics.values.all { it.data.toInt() <= 0 },
         )
     }
 

@@ -81,6 +81,10 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 13 moved the whole sizing border into BorderWidth, PaddedBorderWidth
+     * being sized but seemingly not painted;
+     * 12 set the console's own palette, which is where the white rim around a
+     * console came from — conhost ignores the system colours entirely;
      * 11 narrowed the caption buttons and darkened the 3D highlight, both of
      * which only became visible once seed 8 enlarged the frame;
      * 9 added [toolsPath], which is what puts the Unix tools on `PATH` in every
@@ -88,7 +92,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 11
+    const val SEED_VERSION: Int = 13
 
     /**
      * A value written into the hive that names the seed version that wrote it.
@@ -428,6 +432,37 @@ object PrefixRegistry {
     )
 
     /**
+     * The console's own colours, which are not the system's.
+     *
+     * **Every one of Windows' 31 system colours is already dark and the console
+     * still came up with a white rim.** That is because `conhost` does not use
+     * them: a console window paints from `HKCU\Console`'s own 16-entry palette
+     * and a `ScreenColors` byte picking a foreground and background out of it.
+     * The default background is entry 0 and the default *border* fill is the
+     * light grey at entry 7, which is the white edge around the black text area.
+     *
+     * `ScreenColors` is `0xF0 >> 4` style: the high nibble is the background
+     * index and the low nibble the foreground. `0x07` — grey on black — is the
+     * default and is what shipped. `0x08` here is entry 8 as the background,
+     * which the table below sets to Nocturne's window ground, with entry 7 as
+     * the text.
+     *
+     * Only the two entries this needs are overridden. The other fourteen are
+     * ANSI colours that programs ask for by name and a shell that prints red
+     * should get red, not a palette somebody redecorated.
+     */
+    val consoleColours: RegistryKey = RegistryKey(
+        path = """HKEY_CURRENT_USER\Console""",
+        values = listOf(
+            RegistryValue.dword("ScreenColors", 0x87),
+            RegistryValue.dword("PopupColors", 0x87),
+            // Entry 8 is the ground; entry 7 is the text on it.
+            RegistryValue.dword("ColorTable08", bgr(GuestPalette.BG)),
+            RegistryValue.dword("ColorTable07", bgr(GuestPalette.TEXT)),
+        ),
+    )
+
+    /**
      * The Unix tools on `PATH`, for every program in the container.
      *
      * **This is what makes one shell's tools available in all of them.** The
@@ -526,10 +561,22 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
+        consoleColours,
         seedStamp,
     ) + virtualDesktop
 
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))
+
+    /**
+     * `0x00BBGGRR`, which is what a console colour table entry is.
+     *
+     * Not the `r g b` string [rgbTriplet] writes — that form is `Control Panel
+     * \Colors`' alone. A console entry is a `REG_DWORD` with the channels in
+     * the opposite order to the one everybody expects, and getting it backwards
+     * gives a plausible wrong colour rather than an error.
+     */
+    private fun bgr(argb: Int): Int =
+        ((argb and 0xFF) shl 16) or (argb and 0xFF00) or ((argb shr 16) and 0xFF)
 
     /**
      * A non-client metric, in the twips [windowMetrics] explains.
@@ -547,8 +594,18 @@ object PrefixRegistry {
     private const val CAPTION_PX = 40
     private const val SMALL_CAPTION_PX = 32
     private const val SCROLLBAR_PX = 24
-    private const val BORDER_PX = 4
-    private const val PADDED_BORDER_PX = 4
+    /**
+     * The whole grab region in one value, with nothing in the padded half.
+     *
+     * `PaddedBorderWidth` is a Windows concept Wine reads when it *sizes* a
+     * frame and does not appear to paint: with 4+4 the window came up with a
+     * 4 px unpainted band around its client area showing white, which survived
+     * every system colour being set dark, `ThemeActive=0`, and the console's own
+     * palette. Putting the full 8 px in `BorderWidth` keeps the region the same
+     * size and hands all of it to the code that actually fills it.
+     */
+    private const val BORDER_PX = 8
+    private const val PADDED_BORDER_PX = 0
 
     /**
      * Where the container's Unix tools live.

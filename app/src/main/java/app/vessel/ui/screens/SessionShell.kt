@@ -346,8 +346,10 @@ fun SessionLauncher(
         // than the programs did, and two of the three spent their line
         // apologising for not being installed. These are four verbs; they belong
         // side by side, the way the taskbar's own actions are.
+        // Scrolls, because six actions do not fit a phone's width and a row that
+        // silently drops the last two is worse than one that can be pushed.
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -357,6 +359,8 @@ fun SessionLauncher(
                         TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
                         TerminalProfile.POWERSHELL -> VIcons.Prompt
                         TerminalProfile.BUSYBOX_SH -> VIcons.Code
+                        TerminalProfile.REGEDIT -> VIcons.List
+                        TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
                     },
                     caption = option.profile.shortLabel,
                     description = option.unavailable ?: "Open ${option.profile.label}",
