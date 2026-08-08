@@ -93,14 +93,41 @@ different product.
 
 ## 4. Real, not blocking
 
-- [ ] **`ComponentDownloadService` has no downloader.** It is a manifest
-  placeholder for the `dataSync` foreground type. The `play` flavour therefore
-  has no way to obtain components at all.
-- [ ] **`ComponentPackage` carries no `sha256` or `url`.** Nothing verifies a
-  package's integrity; the registry already publishes both.
-- [ ] **No fonts bundled.** `DESIGN.md` promises Inter and JetBrains Mono as
-  variable fonts; `res/font` is empty, so the type scale is honest and the
-  letterforms are system defaults — "mono" does not read as monospaced.
+- [~] **`ComponentDownloadService` has no downloader.** It now has one, and it
+  has never run on the device. `ComponentDownloader` fetches with resume
+  (`Range`, and a restart when the server ignores it), verifies the registry's
+  digest over the completed file, deletes the part-file on a mismatch so a retry
+  cannot rebuild the same wrong bytes, reports progress, and returns a sentence
+  for every failure. The service runs it as one queue behind a `dataSync`
+  foreground notification with a Cancel action, then hands the archive to
+  `ComponentStore.install`, which stages and swaps — so a killed process cannot
+  leave a half-installed component the store reports as present. `play` refuses
+  out loud, naming Play policy, because `CAN_INSTALL_COMPONENTS` is false there.
+  *Evidence so far:* 11 tests against a real socket in the test source set
+  (`ComponentDownloaderTest`) covering resume, an ignored `Range`, a digest
+  mismatch, a 404, an unreachable host, an already-downloaded archive, and a
+  path-traversing package id. *Not yet done:* nothing is wired to a screen (see
+  `out/needs-from-install-agent.md`), and **nothing publishes `contents.json`**
+  — see §6.
+- [x] **`ComponentPackage` carries no `sha256` or `url`.** Both are on it now,
+  nullable and defaulted so the store path is unchanged, with `isDownloadable`
+  as the single predicate over the pair. `core/ComponentRegistry` parses
+  `contents.json` and *refuses* an entry with no digest, a malformed digest, an
+  unknown type or a non-`https` URL, returning the reason rather than dropping
+  it. `core/Sha256` is the one definition of what "the same digest" means.
+  *Evidence:* `ComponentRegistryTest` parses the repository's own
+  `registry/contents.json` and asserts every entry in it is downloadable, so a
+  `gen_registry.py` that stopped writing the field would fail here.
+- [~] **No fonts bundled.** `res/font` now holds Inter 4.001 and JetBrains Mono
+  2.304 as variable fonts, both OFL-1.1, both recorded in `docs/LICENSING.md`
+  with their digests, and both verified from their own `name` and `fvar` tables
+  by `LicensingTest` — including PANOSE `bProportion == 9` on the mono, which is
+  the font's own claim to be monospaced. They are in the APK
+  (`unzip -l` on `app-sideload-debug.apk`).
+  *Not done:* `VesselTheme.kt` does not reference them yet, so nothing has
+  changed on screen. That file is in the UI tree; the ask, including the
+  variable-font trap that makes weight 500 silently render at 400, is item 2 of
+  `out/needs-from-install-agent.md`.
 - [ ] **No program icons.** Tiles show a letter in a ringed square, which is an
   honest placeholder. Real icons need the PE resource directory and
   `RT_GROUP_ICON` unpacked.
@@ -139,13 +166,54 @@ Still open:
 
 The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
 
-- [ ] **`docs/LICENSING.md` blockers.** Its own opening says they must be
-  resolved first — chiefly that the vendored `com.winlator` LGPL-2.1 packages
-  stay replaceable, which is the section 6 obligation.
-- [ ] **Line-ending corruption in `native/wine`.** Binary `.bmp` files show as
-  modified; a checkout is not clean.
+- [~] **`docs/LICENSING.md` blockers.** Eight of ten closed; that document now
+  ends in a table with the status and the evidence for each. What was found and
+  fixed: `LICENSE` still repeated the retracted "libadrenotools is LGPL-3.0"
+  claim; the APK contained no copy of the LGPL at all, which section 6 requires
+  independently of everything else; and the vendored tree's list of local
+  modifications was missing `cpp/winlator/CMakeLists.txt`. The vendored tree was
+  diffed against upstream file by file — 13 modified, 143 byte-identical, 0
+  without an upstream counterpart, every difference marked — by
+  `build/verify_vendored.py`, which is now in the repository so the claim stays
+  checkable. `LicensingTest` asserts the offline half of all of it.
+  *Two remain, and neither blocks making the repository public:*
+  - [ ] **Prominent notice, in the interface, that the app contains LGPL code.**
+    Section 6's first sentence. The licence text ships in the APK now, but
+    nothing shows it, and a file in a zip is not notice. This one **blocks
+    distributing the APK**, and it needs a screen — item 1 of
+    `out/needs-from-install-agent.md`.
+  - [ ] **A source offer on the component release page.** Each `.wcp` embeds its
+    upstream `sourceRef`/`sourceSha`, but the GitHub release the packages are
+    published from says nothing about where their source is. One line per
+    component on that release closes it.
+- [x] **Line-ending corruption in `native/wine`.** It was not line endings. All
+  53 modified files were `100755 -> 100644` with an empty diff: the clone had
+  `core.filemode=true` from being made through a bind mount, and
+  Git-for-Windows reports 0644 for everything on NTFS. The `.bmp` fixtures are
+  simply among the files Wine marks executable, which is why it looked like
+  binary corruption. `core.autocrlf=true` was a second, separate defect that had
+  not bitten yet — `git diff` warned that LF would become CRLF for 37 more
+  files, `configure` and `tools/make_makefiles` among them, on the next touch.
+  Fixed in `harden_checkout()` in `build/common.sh`, which owns every upstream
+  checkout; `assert_pristine()` now refuses to apply patches to a dirty tree.
+  *Evidence:* `native/wine` went from 53 dirty entries to 0 with `git diff
+  --stat` empty and no CRLF warnings, and all five patches then applied leaving
+  exactly the five files they touch. dxvk (2), fex (24), vkd3d (4) and mesa
+  (149) were in the same state and are now 0.
+- [ ] **Nothing publishes `registry/contents.json`.** Found while building the
+  downloader. `.github/workflows/_component.yml` uploads `dist/*.wcp` and their
+  `.sha256` sidecars to the rolling `components` release and never runs
+  `build/gen_registry.py`, so there is no index anywhere and the app's catalogue
+  fetch is a 404 by construction. `ComponentCatalog` says so in those words
+  rather than showing an empty list, which is the honest interim state, but the
+  download path cannot be exercised end to end until a build publishes one.
+  *Done when:* a `components` release carries a `contents.json` that
+  `ComponentRegistryTest`'s parser accepts with nothing refused.
 - [ ] **Decide what happens to `Redesigning interfaces/`.** Untracked today:
-  commit it as the design source, or ignore it.
+  commit it as the design source, or ignore it. Checked for licensing on
+  2026-08-08 and it is clean — the Nocturne design system from the sibling
+  project, reference screenshots, and a generated `support.js` from the author's
+  own tooling. Nothing third-party, so this is a taste decision and not a gate.
 - [ ] **A README that is true.** Whatever the state is on the day, said plainly.
 
 ---
