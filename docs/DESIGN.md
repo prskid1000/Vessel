@@ -9,11 +9,19 @@ software: dense, precise, calm, and confident. Not gamer chrome, not a toy.
 
 **The interface is designed from scratch.** Vessel reuses proven *engine* code
 from the Winlator lineage — container setup, the X server, driver loading — but
-no screen here is a restyled Winlator screen. Concretely: two bottom-nav
-destinations and no more; the common path (open the app, launch a program) is
-two taps from cold start; every advanced knob is explained in one plain sentence
-next to itself; and defaults are correct for this device, so a new container
-needs zero configuration.
+no screen here is a restyled Winlator screen. Concretely: **one root and no
+bottom navigation**; the common path (open the app, launch a program) is two taps
+from cold start; every advanced knob is explained in one plain sentence next to
+itself; and defaults are correct for this device, so a new container needs zero
+configuration.
+
+**Home does everything.** A program is listed inside the container that owns it,
+so there is no Apps destination — the same `.exe` in two containers is two
+different things, with two different drivers and two different registries, and
+the only list worth having is the one that says so. Short things are bottom
+sheets over home; only the file browser and the log viewer are pushes. The bottom
+edge is left clear on every screen, because over a running session that edge is
+the taskbar's reveal gesture.
 
 Four rules everything follows:
 
@@ -133,6 +141,21 @@ lines does not read as a shortened number, it reads as `57`.
 - Cards: `surface` ground, `md` radius, ring only when raised
 - Motion: 150 ms standard easing; 250 ms for sheets; no springs
 
+**Every dp, sp and colour in the product is a token.** `ui/theme/VesselTheme.kt`
+is the only file in `ui/` allowed to write a `dp` or an `sp` literal or a
+`Color(0x…)`, and that rule is enforceable by grep — which is the point of it.
+A layout that needs a value the tokens do not carry adds a token with a sentence
+saying what it is for; it does not write the number where it is used. `VMetrics`
+therefore holds ceilings and component geometry (`railWidth`, `sheetHandleWidth`,
+`proseMaxWidth`, `checklistMaxHeight`, `logGutterWidth`, …) alongside the spacing
+scale, because a magic number in a screen file is a magic number whatever it
+measures.
+
+Two tokens exist only so the rule stays honest: `none` (zero, so "this edge has
+no padding" is not a bare `0.dp`) and `hairGap` (2 dp, the one gap below the
+scale, for the inside of a graph where 3 dp reads as a step rather than as
+attachment).
+
 ### Landscape, and the one rule that handles it
 
 This phone is 421 dp across in portrait and **927 dp in landscape**. Every layout
@@ -162,52 +185,102 @@ solid.
 
 | Component | Purpose |
 |---|---|
-| `VScaffold` | Root/push toolbars, bottom nav, sheet host |
+| `VScaffold` | Root/push toolbars and a bottom action bar |
+| `VSheet` | The bottom sheet: scrim, drag handle, three dismiss gestures |
+| `VSheetHeader` / `VSheetRow` / `VLabeledField` | A sheet's title row, its routes, its fields |
 | `VArchBadge` | Mono pill: `ARM64` / `x64` / `x86`, architecture palette |
-| `VEngineChip` | `FEX 2608` — mono; the build actually loaded |
-| `VContainerCard` | Container tile: name, last run, launch — two lines, not a slab |
-| `VAppTile` | Windows app: icon, name, arch badge, container |
+| `VContainerCard` | A container and the four columns of programs inside it |
+| `VAppTile` / `VAppGrid` | A program: letter, name, arch badge — home and the launcher |
 | `VParamRow` | One setting from the manifest: label, description, control |
-| `VMetricStrip` | The wide readout: a row of live values on a raised card |
-| `VMetricGrid` | The narrow readout: the same values in fixed columns, for the rail |
-| `VMetricSpark` | One quantity, one ceiling: name, reading and a 20 dp sparkline — the rail |
-| `VSparkline` | Compact frametime history |
-| `VProgressCard` | Download/build/install progress with speed and ETA |
+| `VMetricGraphCard` | One quantity with its ceiling, legend and statistics — the Metrics tab |
+| `VMetricSpark` | The same quantity as a 22 dp sparkline — the rail |
 | `VEmptyState` | Icon, one sentence, one action |
-| `VConfirmSheet` | Destructive confirmation |
+| `VConfirmSheet` | Destructive confirmation — a centred panel, not a sheet |
+| `VOutcomeDialog` | What happened, in plain words, over the evidence |
+| `VIcons` | Phosphor, as vector paths |
+
+Gone with the redesign: `VBottomNav` (there is one root), `VEngineChip` (one
+build of each component, so there is nothing to chip), `VMetricStrip` and
+`VMetricGrid` (the rail draws sparklines and there is no fps overlay),
+`VOverflowMenu` (nothing is behind an overflow any more).
+
+### Icons
+
+**Phosphor, regular weight, transcribed as path data into `VIcons.kt`.** Phosphor
+ships no Compose artifact, and `material-icons-extended` is several thousand
+glyphs and about a megabyte of dex for the two dozen used here. Each constant in
+that file is the `d` attribute of the matching `assets/regular/<name>.svg` in
+`@phosphor-icons/core`, unaltered and verified against the package.
+
+The one trap: **Phosphor draws on a 256-unit grid and Material on 24.** An
+`ImageVector` built at `viewportWidth = 24f` scales every glyph to a tenth of its
+box and renders as a speck in the corner of a button — a failure that looks like
+a missing icon rather than a wrong number.
 
 ## Screens
 
 Single activity, `NavHost`, string routes in `ui/Navigation.kt`.
 
-**Two bottom-nav roots.** Everything else is pushed, and the technical screens
-are reached from an overflow menu on Containers rather than the bar.
+**One root. Three other destinations, and one of those is the desktop.**
+Everything short is a bottom sheet over home rather than a route.
 
-### Roots
+| Route | What it is |
+|---|---|
+| `home` | containers, and the programs inside them |
+| `files/{containerId}?pick=` | the container's `C:` — a push, because you navigate into it |
+| `logs/{containerId}` · `logs/{containerId}/{startedAt}` | a container's runs, and one run |
+| `session` | the running desktop, full-bleed |
 
-**1. Containers** — the home screen. `VContainerCard` list showing Wine build,
-GPU driver, D3D layer and last run, with a prominent launch affordance.
+### The root
 
-**2. Apps** — every Windows application detected across all containers, icons
-extracted from the PE resources, a `VArchBadge` on each tile, filter by
-architecture, long-press to pin to the Android home screen.
+**Home** — a `VContainerCard` per container: its name, one mono line of *ran 12
+minutes ago · 1280×720 · 60 fps*, a folder button, a play button, and a
+four-column grid of the programs added to it. Tapping the name opens the
+container's settings sheet; tapping a tile launches it; long-pressing one opens
+its profile sheet.
 
-### Pushed
+**Apps is not a screen, and that is the navigation decision of this redesign.**
+It was a flat grid of every executable across every container whose first job was
+to tell you which container each belonged to. A program is meaningless without its
+prefix, so the list that says so is the only list worth having — and it is these
+four columns, drawn once and reused by the launcher over a running session.
 
-**Container editor** — create/edit. The default view is short by design: name,
-engine, GPU driver, resolution, frame-rate limit; everything else sits behind a
-single "Show advanced" disclosure. The whole surface is rendered by `VParamRow`
-from `assets/params-manifest.json`, so adding a knob is a data change and never
-a UI one.
+### Sheets, over home
 
-`VParamRow`'s right-hand value column exists so the whole configuration can be
-read down one edge without touching a control — and it prints **only what the
-control cannot show itself**. An enum's own field already carries its label, so
-printing it again gave every dropdown on the screen `Resolution  1280 x 720
-(720p)` with `1280 x 720 (720p)` in the box directly beneath it. What is left is
-an integer (whose control is a slider with no number on it) and a component
-(whose field shows the resolved build while the column shows the selector that
-resolved it).
+Three, and each is a handful of fields *about the thing the user just tapped*.
+Pushing a screen for any of them threw away the context that made them make
+sense; a sheet keeps it visible behind. All three dismiss three ways — swipe
+down, tap the scrim, press back.
+
+**Container sheet** — new and edit are the same sheet, because two forms for one
+object is how a setting ends up changeable in one and not the other. Name, then
+everything the manifest declares, then Delete and Session logs. The manifest
+currently declares exactly four controls — resolution, frame rate, the file
+manager toggle and the DLL overrides — which is the whole of the sheet and the
+whole of what a container has to be told. **There is no "Show advanced".** If the
+manifest ever grows past what a sheet can hold, the answer is to cut knobs, not
+to add a disclosure.
+
+Everything below the name is still rendered by `VParamRow` from
+`assets/params-manifest.json`, so adding a knob is a data change and never a UI
+one. There is one `when` in that file and it is over `ParamType`; no manifest key
+appears anywhere in it.
+
+**App sheet** — a program's profile, and the form that adds one. Three fields and
+one read-only fact: the executable, its launch arguments, its working directory,
+and the architecture *read from the PE header together with how it was
+determined* — because `unread` is a different claim from `x86` and only the
+sentence separates them. Everything else about how a program runs belongs to its
+container. Adding is the same sheet with empty values and one field, because the
+name and the architecture are read from the file: nothing here is typed twice.
+
+Editing commits on the way out. The profile has Launch and Remove and no Save,
+because it has no draft — adding does have an explicit Add, because until it is
+pressed there is nothing to edit.
+
+**Delete confirmation** is a *centred panel*, not a second sheet: two stacked
+sheets have no visible order, and a destructive confirmation is the one place the
+buttons stay words.
 
 ### Session, in detail
 
@@ -314,7 +387,7 @@ choice and the wrong one: this screen is usually landscape, where vertical space
 is scarce and horizontal space is not. It sits on a translucent `surface`, the
 sole place the design permits translucency.
 
-**The rail hugs, and it is one card.** 178 dp wide, sized by its content, and
+**The rail hugs, and it is one card.** 212 dp wide, sized by its content, and
 centred against the screen's vertical middle.
 
 - *Nothing is `fillMaxHeight`.* A rail pinned to the full height with its content
@@ -332,19 +405,26 @@ centred against the screen's vertical middle.
 One card holds all of it. Nesting a readout card inside the rail card draws a
 ringed box inside a ringed box, 8 dp apart, over a running desktop.
 
-**Close and Pause are at the top right, and they are the only bare glyphs.**
-Session-lifetime controls belong in the header where a window's controls always
-are, not at the bottom of a list of unrelated toggles. Stop keeps `danger` and
-keeps its confirmation.
+**Pause and Stop are at the foot, as two equal squares, and they are the only
+bare glyphs.** They were briefly at the top right, where a window's controls live
+on a desktop — but this rail is a column read top to bottom, not a window, and
+putting the destructive action first meant the first thing under the reader's
+thumb was the one that closes everything. A triangle and a cross are the two
+marks in this product that carry themselves; Stop keeps `danger` and keeps its
+confirmation.
 
-**Everything else is a labelled row, not a glyph.** The rail used to be a 2×2
+**Everything else is captioned, not a bare glyph.** The rail used to be a 2×2
 grid of unlabelled squares — pointer mode, keyboard, files, log — and the honest
-summary of that design is that its author had to be asked what the icons were.
-A 24 dp glyph can carry a *known* action (a play triangle, a back arrow); it
-cannot introduce one. Four ambiguous glyphs stacked in a grid also hide their
-own state: the pointer toggle's icon is the mode it will switch *to*, which is
-unreadable without the word beside it. So each is an icon plus its name on one
-36 dp row, and the pointer row's label is the mode it will switch to.
+summary of that design is that its author had to be asked what the icons were. A
+glyph can carry a *known* action; it cannot introduce one. The four tools are now
+one equal-spaced row with a word under each, which costs eleven dp against four
+full-width rows. The pointer tool's caption is the mode it will switch *to*,
+matching its glyph — an icon alone on a two-state control is a coin toss, and
+losing that bet mid-game means the cursor stops behaving.
+
+**The rail's Files opens Vessel's own `C:` browser, not `winefile`.** Wine's file
+manager runs inside the guest, so it cannot reach Android storage at all; the
+browser reads `drive_c` directly and gets import and export for free.
 
 **Four graphs, one per quantity — CPU, GPU, mean clock, memory.** They were one
 shared graph, which cannot be right: a percentage, a percentage, a clock in MHz
@@ -398,22 +478,84 @@ otherwise leaves the screen with the session still running — it does not stop 
 container, and it is not forwarded as `Esc`, because a gesture that cannot be
 escaped from is how the first build trapped the user on a running desktop.
 
-**App profile** — per-executable overrides: component pins, memory ordering,
-launch arguments. Shows the detected architecture and how it was determined.
+## The shell — taskbar and launcher
 
-**Components** — one current build of each component, with provenance from the
-`.wcp` (source commit and the compiler flags actually used) on each row. That
-provenance is the point: "compiled for your device" is the product's central
-claim, and a claim you cannot check is just an assertion. Every other app in
-this space ships a catalogue and leaves the user to guess; here there is one
-build per component, so this is a status view rather than a store — hence the
-overflow rather than the nav bar.
+The product's missing centre: without it Vessel can run a Windows *desktop* but
+there is no way to pick and run a Windows *program*.
 
-**Driver manager** — installed GPU drivers, what each reports at runtime,
-per-container assignment, and a warning when a driver does not claim support for
-this GPU.
+**It is drawn in Compose over the GL surface, not inside Wine.** Launching a
+program into a running desktop is already proven from the Android side; theme,
+fonts and 44 dp touch targets come free; and a Win32 shell would mean
+owner-drawing a whole UI toolkit to avoid using the one already here.
 
-**File manager** — browse container drives, import/export, shared folders.
+Two constraints, both found on the device, and both shape the design:
+
+- **An Android overlay always covers a fullscreen Windows application.** There is
+  no z-order in which a Compose layer sits under the guest's output. So the
+  taskbar auto-hides after four seconds and is revealed by an edge gesture,
+  exactly as the rail is. Two edges, two gestures, and they must not collide: the
+  rail comes in from the **left** through a full-height 20 dp target with a 4 dp
+  accent mark, the taskbar comes up from the **bottom** and takes the gesture
+  bar's own width as its handle.
+- **Tray icons cannot work.** Receiving one needs a helper process inside the
+  guest, which this project deliberately does not ship. A program that minimises
+  to tray vanishes from the taskbar rather than docking in it, and **the bar says
+  so in words** where a user would go looking for the icon — an empty corner
+  would read as a bug in the bar.
+
+**The taskbar shows what is running; the launcher shows what could run.** Those
+are two different lists and conflating them is the mistake the layout exists to
+avoid. The taskbar carries a start button, the guest's open windows, the
+session's elapsed time, and Pause and Stop repeated from the rail — because the
+taskbar is the surface that is already open when a session needs ending.
+
+**The launcher is the home screen's tile grid, scoped to the running container.**
+One concept drawn once, at the same 44 dp. It anchors above the start button
+rather than filling the screen, because launching a second program is not a
+reason to hide the first. A search field filters it, and *Browse C:* is the
+escape hatch for an executable with no shortcut yet.
+
+## The file browser
+
+**A container's `C:` drive, read straight off Android with Wine stopped.** A Wine
+prefix is an ordinary directory tree, so listing it is `File.listFiles()`. That is
+the whole argument for browsing it here rather than starting `winefile` in the
+guest: it works before the container has ever launched, it works while a session
+is running, and it gets import and export to Android storage for free — which a
+file manager running *inside* the guest cannot do at all, because from in there
+is no Android to copy to.
+
+Directories first, then files, each case-blind alphabetical. An executable's mark
+is a ringed glyph in its architecture's own colour, because in a folder of
+downloads the fact anybody is looking for is which of these runs natively. Back
+goes up one folder while the path has depth and leaves the screen at the drive
+root, so Back and the toolbar arrow never disagree.
+
+**What the shell will start, and what it refuses.** Decided before anything runs,
+from the extension and — for a PE — the header:
+
+| Extension | Verdict |
+|---|---|
+| `.exe` | runs. ARM64 native, x86-64 via `libarm64ecfex.dll`, x86-32 via WoW64 |
+| `.bat` `.cmd` | runs — `cmd.exe /c` |
+| `.msi` | runs — `msiexec.exe /i` |
+| `.lnk` | runs — Wine resolves it |
+| `.vbs` `.js` | runs, with a caveat: Wine's Windows Script Host is real but partial |
+| `.ps1` | **refused.** Wine's `powershell.exe` is a stub that cannot run a script |
+| a `.exe` with no PE header | **refused.** A partly-downloaded file looks exactly like this |
+| Linux ELF, `.sh` | never offered. Android is bionic, and FEX ships as Wine's DLLs rather than as `FEXLoader` |
+
+The two refusals are the "honest refusal over silent failure" rule doing its job:
+a `.ps1` shortcut would *appear* to launch and then do nothing, which is the
+failure mode this product treats as worse than an error. The reason is shown at
+the point the user tries, beside the button that would have run it.
+
+**Components and Driver manager are gone as screens.** This build compiles in one
+version of each component and one driver, so both could only recite what was
+already decided at build time. Provenance is still the point — "compiled for your
+device" is a claim you should be able to check — and it belongs in the session
+log's header, where it is printed on every run, rather than on a screen nobody
+opens.
 
 ### Removed, and why
 
@@ -426,6 +568,35 @@ this GPU.
   to being arguments — and both are recoverable from git history.
 - **The architecture-profile picker.** Removed with Box64; there is one kind of
   container now. See [ARCHITECTURE.md](ARCHITECTURE.md).
+- **The Apps root, and the bottom navigation with it.** A flat grid of every
+  executable across every container had to name the container on every tile,
+  which is the shape of a list that should have been nested. With Apps gone there
+  was one destination left, and a bar with one destination on it advertises that
+  the app has somewhere else to be when it does not.
+- **The container editor and the app profile as pushed screens.** Both were a
+  handful of fields about the thing the user had just tapped, and both are sheets
+  now. See *Sheets, over home*.
+- **`VMetricStrip`, the optional fps overlay.** Specified, never built, and the
+  rail's sparklines cover the same ground with a history behind them. The
+  component went with it rather than sitting unused.
+
+### Not built, and named rather than faked
+
+Two things in this design are drawn and cannot yet work, because both need
+something in `data/` that does not exist. Both say so at the point of use rather
+than failing quietly, and both are specified in `out/ui-needs-from-core.md`.
+
+- **App shortcuts do not survive a cold start.** The registry the UI is written
+  against is real (`ui/shell/AppRegistry`); the implementation behind it is
+  in-memory.
+- **Tapping a program refuses, out loud.** `SessionRuntime.start` takes a
+  container and nothing else, so there is no way to ask a prefix to run a named
+  executable. The alternative — starting the container's plain desktop instead
+  and saying nothing — is a launcher that appears to work: you tap Notepad++, a
+  Windows desktop appears, and Notepad++ is not on it.
+- **The taskbar cannot list the guest's windows.** The X server does not publish
+  them yet, so the bar says which piece is missing instead of showing an empty
+  strip that reads as a bug.
 
 ## Reused patterns from the On-Device AI app
 
