@@ -13,7 +13,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -338,20 +341,22 @@ fun SessionLauncher(
  */
 @Composable
 fun BoxScope.TaskbarHandle(onReveal: () -> Unit) {
+    // **Beside Android's gesture pill, not above it.** The mark used to sit
+    // centred and one inset higher, which put two horizontal bars on the same
+    // edge, stacked, a few pixels apart — the second one reading as a glitch in
+    // the first. Sharing the navigation bar's band and taking the left of it
+    // makes them one row of two marks: the system's in the middle where it
+    // always is, ours at the edge it belongs to.
+    //
+    // The band's own height, so "same level" is measured rather than nudged. A
+    // device with no gesture inset reports zero, and the touch box would vanish
+    // with it, so it never shrinks below the target size.
+    val band = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     Box(
         Modifier
-            .align(Alignment.BottomCenter)
+            .align(Alignment.BottomStart)
             .fillMaxWidth()
-            // **The inset goes on the touch box, not on the mark inside it.**
-            // It used to sit on the mark, which asked a 4 dp bar to also reserve
-            // the navigation bar's height inside a 20 dp parent. The child wanted
-            // more room than the parent had, so it was pushed past the bottom of
-            // its own box and clipped away entirely — which is why this edge had
-            // no handle at all while the rail's left edge had a plainly visible
-            // one. The bar was never missing from the code; it was laid out
-            // off-screen.
-            .navigationBarsPadding()
-            .height(Vessel.metrics.railHandleTouch)
+            .height(maxOf(band, Vessel.metrics.railHandleTouch))
             .pointerInput(Unit) {
                 detectVerticalDragGestures { _, delta -> if (delta < 0f) onReveal() }
             }
@@ -361,17 +366,17 @@ fun BoxScope.TaskbarHandle(onReveal: () -> Unit) {
                 onClickLabel = "Show the taskbar",
                 onClick = onReveal,
             ),
-        contentAlignment = Alignment.BottomCenter,
+        // Centred in the band, which is where the system centres its own pill,
+        // so the two line up without either knowing about the other.
+        contentAlignment = Alignment.CenterStart,
     ) {
         Box(
             Modifier
+                .padding(start = Vessel.metrics.screenGutter)
                 // Square, like the rail's handle, and deliberately not a pill.
-                // Android draws its own gesture pill on this edge, centred, at
-                // very nearly this width — a rounded bar here is read as the
-                // system's and not as ours. Same colour, same thickness, same
-                // proportion of its edge as the left handle; the corners are the
-                // one thing that has to differ, because the system took that
-                // shape first.
+                // Android draws its own gesture pill on this edge at very nearly
+                // this width — a rounded bar beside it reads as a second system
+                // control rather than as ours.
                 .width(Vessel.metrics.edgeHandleLength)
                 .height(Vessel.metrics.railHandle)
                 .background(Vessel.colors.edgeHandle),

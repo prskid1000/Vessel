@@ -81,6 +81,33 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         xServer.pointer.addOnPointerMotionListener(this);
     }
 
+    /**
+     * VESSEL: which EGL context the GL names in this process belong to.
+     *
+     * Upstream never needs this. Winlator's X server owns a whole Activity for
+     * the whole session, so its context is created once and destroyed once.
+     * Vessel's is one screen among several: navigating away destroys the
+     * SurfaceView and the context with it, and coming back builds a new one —
+     * while every Java object that cached a GL name lives straight through.
+     *
+     * Three of them do, and the effect compounds. {@link Texture} keeps a
+     * texture id, {@link com.winlator.renderer.material.ShaderMaterial} keeps a
+     * linked program id, and {@link VertexAttribute} keeps a buffer id; all
+     * three test their id against zero to decide whether they still have to
+     * create it, and a stale id is not zero. The program is the one that turns
+     * the screen black on its own — `glUseProgram` on a name from a dead context
+     * fails, and after that nothing is drawn at all, textures or no textures.
+     *
+     * Deleting the stale names is not the alternative. A fresh context issues
+     * names from 1 again, so a delete would very likely destroy whatever now
+     * owns that number. Each holder compares generations and recreates.
+     */
+    public static int contextGeneration() {
+        return contextGeneration;
+    }
+
+    private static volatile int contextGeneration = 0;
+
     @Override
     public void onSurfaceCreated(GL10 gl, EGLConfig config) {
         // VESSEL: upstream calls GPUHelper.setGlobalEGLContext() here, which
@@ -89,10 +116,10 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         //
         // VESSEL: this fires again every time the SurfaceView is recreated —
         // leaving the desktop and coming back does it — and the context that
-        // comes back is a new one with none of the old texture objects in it.
-        // Telling Texture so is what makes each window re-upload itself on the
-        // next frame instead of binding a dead id and sampling black.
-        Texture.onContextCreated();
+        // comes back is a new one, holding none of the objects the old one did.
+        // Everything that cached a GL name is now holding a number that means
+        // nothing here. See contextGeneration().
+        contextGeneration++;
         GLES20.glFrontFace(GLES20.GL_CCW);
         GLES20.glDisable(GLES20.GL_CULL_FACE);
 

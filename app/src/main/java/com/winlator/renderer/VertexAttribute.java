@@ -13,6 +13,17 @@ public class VertexAttribute {
     private final byte itemSize;
     private boolean needsUpdate = true;
 
+    /**
+     * VESSEL: the EGL context {@link #bufferId} and {@link #location} came from.
+     *
+     * The third cache of a GL name that outlives its context — see
+     * {@link GLRenderer#contextGeneration()}. The attribute location is here too
+     * and not only the buffer: it is resolved against a program id, and the
+     * program is recompiled when the context changes, so a location cached
+     * against the old one points into nothing.
+     */
+    private int generation = -1;
+
     public VertexAttribute(String name, int itemSize) {
         this.name = name;
         this.itemSize = (byte)itemSize;
@@ -28,6 +39,17 @@ public class VertexAttribute {
     }
 
     public void update() {
+        // VESSEL: a new context means the buffer object is gone and the data has
+        // to be uploaded again, even though nothing about the data changed.
+        // Without this the early return below skips the upload and the draw
+        // sources its vertices from a buffer name that is not a buffer.
+        int current = GLRenderer.contextGeneration();
+        if (generation != current) {
+            bufferId = 0;
+            location = -1;
+            needsUpdate = true;
+            generation = current;
+        }
         if (!needsUpdate || buffer == null) return;
         if (bufferId == 0) {
             int[] bufferIds = new int[1];
@@ -60,8 +82,11 @@ public class VertexAttribute {
         clear();
 
         if (bufferId > 0) {
-            int[] bufferIds = new int[]{bufferId};
-            GLES20.glDeleteBuffers(bufferIds.length, bufferIds, 0);
+            // VESSEL: only delete a name this context issued. See update().
+            if (generation == GLRenderer.contextGeneration()) {
+                int[] bufferIds = new int[]{bufferId};
+                GLES20.glDeleteBuffers(bufferIds.length, bufferIds, 0);
+            }
             bufferId = 0;
         }
     }

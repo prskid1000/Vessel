@@ -57,8 +57,8 @@ reproduce.
 `brunodev85/winlator-app` at the pinned commit and diffs it file by file against
 this tree; `LicensingTest` then asserts, offline, that the set of files carrying
 a `// VESSEL:` marker is exactly the set named in the table. Run on 2026-08-08
-the diff was **14 modified, 142 byte-identical, 0 files without an upstream
-counterpart**, and all 14 were marked. The 142 includes
+the diff was **16 modified, 140 byte-identical, 0 files without an upstream
+counterpart**, and all 16 were marked. The 140 includes
 `app/src/main/res/drawable-nodpi/cursor.png`, which lives outside both trees and
 is byte-identical to upstream's `res/drawable-hdpi/cursor.png`.
 
@@ -107,19 +107,28 @@ The modifications, in the order they were made:
    compiler this pure-C sub-project has no source for; and `gpu_helper.c` and
    `wine_registry_editor.c` dropped from the source list, matching *What was
    deliberately not taken* above.
-13. **`Texture` and `GLRenderer.onSurfaceCreated`** — a static context
-   generation counter, stamped onto each texture when its id is generated and
-   checked by `isAllocated()` and `destroy()`, plus the `Texture.onContextCreated()`
-   call that bumps it. Upstream never loses its EGL context: Winlator's X server
-   owns a whole Activity for the whole session. Vessel's is one screen among
-   several, so leaving the desktop and coming back destroys the `SurfaceView`
-   and every texture object in the context — while the `Texture` objects
-   survive, still holding non-zero ids. `isAllocated()` said yes, no upload was
-   done, and the renderer bound names that no longer referred to anything: the
-   desktop came back black and stayed black, because an idle desktop never
-   repaints itself. Deleting the stale ids was not an option either — a fresh
-   context issues names from 1 again, so `destroy()` would very likely delete
-   whatever now owns the number. Both call sites test the generation instead.
+13. **`GLRenderer.contextGeneration()`, and the three caches that consult it** —
+   `Texture`, `ShaderMaterial` and `VertexAttribute`. Upstream never loses its
+   EGL context: Winlator's X server owns a whole Activity for the whole session.
+   Vessel's is one screen among several, so leaving the desktop and coming back
+   destroys the `SurfaceView` and every GL object in the context — while the
+   Java objects holding their names live straight through. All three test their
+   id against zero to decide whether they still have to create it, and a stale
+   id is not zero. `Texture` bound dead texture names; `ShaderMaterial`'s
+   `use()` called `glUseProgram` on a dead program, which is the one that blanks
+   the screen by itself because after it fails nothing is drawn at all;
+   `VertexAttribute` sourced vertices from a dead buffer and cached an attribute
+   location against a program that had been recompiled. The counter is on
+   `GLRenderer` because `onSurfaceCreated` is the callback that knows the
+   context is new. Deleting the stale names was not an option — a fresh context
+   issues them from 1 again, so a delete would very likely destroy whatever now
+   owns that number — so each holder abandons its id and recreates. Uniform and
+   attribute locations carry the generation too, since they belong to a linked
+   program rather than to the context.
+
+   *Fixing only `Texture` left the desktop exactly as black as before.* That is
+   worth recording: the texture is the visible symptom and the program is the
+   cause, and the first fix was verified on the device as not working.
 
 ### Every file that differs from upstream
 
@@ -138,6 +147,8 @@ fails the build.
 | `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
 | `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13 |
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |

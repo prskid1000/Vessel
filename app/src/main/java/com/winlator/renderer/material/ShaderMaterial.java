@@ -3,13 +3,31 @@ package com.winlator.renderer.material;
 import android.graphics.Color;
 import android.opengl.GLES20;
 
+import com.winlator.renderer.GLRenderer;
+
 public abstract class ShaderMaterial {
     private static final float INV_255 = 1.0f / 255.0f;
     public int programId;
 
+    /**
+     * VESSEL: the EGL context {@link #programId} was linked in.
+     *
+     * This is the one that turns the whole screen black by itself. `use()` tests
+     * `programId == 0` to decide whether it still has to compile, and after the
+     * SurfaceView is destroyed and rebuilt the id is not zero — it is a name
+     * from a context that no longer exists. `glUseProgram` on it fails, and with
+     * no program bound nothing is drawn at all. Fixing the textures alone left
+     * the desktop exactly as black as before, because the draw never got as far
+     * as sampling one.
+     */
+    private int generation = -1;
+
     public static class Uniform {
         public final String name;
         public int location = -1;
+
+        /** VESSEL: the generation {@link #location} was resolved against. */
+        public int generation = -1;
 
         public Uniform(String name) {
             this.name = name;
@@ -63,19 +81,36 @@ public abstract class ShaderMaterial {
     }
 
     public void use() {
-        if (programId == 0) programId = compileShaders(getVertexShader(), getFragmentShader());
+        // VESSEL: recompile when the context changed under us, not only when
+        // there has never been a program. The old id is abandoned rather than
+        // deleted — glDeleteProgram with a name from a dead context would very
+        // likely delete whatever now owns that number in the live one.
+        int current = GLRenderer.contextGeneration();
+        if (programId == 0 || generation != current) {
+            programId = compileShaders(getVertexShader(), getFragmentShader());
+            generation = current;
+        }
         GLES20.glUseProgram(programId);
     }
 
     private int getUniformLocation(Uniform uniform) {
-        if (uniform.location != -1) return uniform.location;
+        // VESSEL: a uniform location belongs to a linked program, so a
+        // recompiled program invalidates every one of them. Without the
+        // generation test the cached locations would be looked up once against
+        // the first program and used forever against the second, which silently
+        // sends every uniform to the wrong place.
+        if (uniform.location != -1 && uniform.generation == generation) return uniform.location;
         int location = programId != 0 ? GLES20.glGetUniformLocation(programId, uniform.name) : -1;
         uniform.location = location;
+        uniform.generation = generation;
         return location;
     }
 
     public void destroy() {
-        GLES20.glDeleteProgram(programId);
+        // VESSEL: same rule as use() — only delete a name this context issued.
+        if (programId != 0 && generation == GLRenderer.contextGeneration()) {
+            GLES20.glDeleteProgram(programId);
+        }
         programId = 0;
     }
 
