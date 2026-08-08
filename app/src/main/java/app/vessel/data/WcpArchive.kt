@@ -3,7 +3,6 @@ package app.vessel.data
 import org.tukaani.xz.XZInputStream
 import java.io.EOFException
 import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -69,9 +68,11 @@ internal object WcpArchive {
     private const val USTAR_OFFSET = 257
     private const val HEADER_SIZE = 512
 
-    fun detect(file: File): WcpCompression =
+    fun detect(file: File): WcpCompression = detect(FileWcpSource(file))
+
+    fun detect(source: WcpSource): WcpCompression =
         runCatching {
-            FileInputStream(file).use { stream ->
+            source.open().use { stream ->
                 val head = ByteArray(HEADER_SIZE)
                 val read = stream.readFullyUpTo(head)
                 detect(head, read)
@@ -103,8 +104,21 @@ internal object WcpArchive {
      * names the codec. The `else` branch is the belt-and-braces case and closes
      * the file rather than leaking the descriptor.
      */
-    fun open(file: File, compression: WcpCompression): InputStream {
-        val raw = FileInputStream(file).buffered()
+    fun open(file: File, compression: WcpCompression): InputStream =
+        open(FileWcpSource(file), compression)
+
+    /**
+     * @param onRawRead called with the running total of *compressed* bytes pulled
+     *   from the source. The one exact measure of how far through an archive an
+     *   install is — see [CountingInputStream]. Null costs nothing.
+     */
+    fun open(
+        source: WcpSource,
+        compression: WcpCompression,
+        onRawRead: ((Long) -> Unit)? = null,
+    ): InputStream {
+        val counted = source.open().let { if (onRawRead == null) it else CountingInputStream(it, onRawRead) }
+        val raw = counted.buffered()
         return try {
             when (compression) {
                 WcpCompression.NONE -> raw

@@ -139,6 +139,33 @@ sealed interface WcpInstallResult {
 private fun megabytes(bytes: Long): String = "${bytes / (1024 * 1024)} MB"
 
 /**
+ * How far through one package's extraction the installer is.
+ *
+ * **The fraction is over the compressed bytes, and that is the only honest one
+ * available.** `profile.json` lists the payload's file names and not their
+ * sizes, so the unpacked total is unknown until the archive has been read to the
+ * end — a bar over "files done" would be a bar whose denominator is a guess, and
+ * one over unpacked bytes would need a denominator that does not exist. The
+ * compressed length is exact and known before anything starts.
+ *
+ * [unpackedBytes] and [files] are reported anyway, because they are what a
+ * person watching wants to see: "412 MB unpacked" is the sentence that says the
+ * phone is doing something, and the bar is the one that says how much is left.
+ */
+data class WcpProgress(
+    val name: String,
+    val compressedRead: Long,
+    /** The archive's own length, or a negative number when the source cannot say. */
+    val compressedTotal: Long,
+    val unpackedBytes: Long,
+    val files: Int,
+) {
+    /** 0f..1f, or null when [compressedTotal] is unknown and a bar would be a lie. */
+    val fraction: Float?
+        get() = if (compressedTotal <= 0) null else (compressedRead.toFloat() / compressedTotal).coerceIn(0f, 1f)
+}
+
+/**
  * How much room is left where a component is being unpacked.
  *
  * An interface only so a test can say "400 MB". There is no way to make a real
@@ -195,8 +222,23 @@ class WcpInstaller @Inject constructor(
         expectedSha256: String? = null,
         /** The registry's id for this build. Recorded beside the payload. */
         packageId: String? = null,
+    ): WcpInstallResult = install(FileWcpSource(archive), into, expectedSha256, packageId)
+
+    suspend fun install(
+        source: WcpSource,
+        into: ComponentStoreLayout,
+        expectedSha256: String? = null,
+        packageId: String? = null,
+        /**
+         * Called as the archive is consumed, on the calling coroutine's IO thread.
+         *
+         * Throttled by [PROGRESS_INTERVAL_BYTES] rather than per entry: the Wine
+         * package holds around four thousand files and a callback per file is a
+         * state update per file, which is a recomposition per file.
+         */
+        onProgress: ((WcpProgress) -> Unit)? = null,
     ): WcpInstallResult = withContext(Dispatchers.IO) {
-        installBlocking(archive, into, expectedSha256, packageId)
+        installBlocking(source, into, expectedSha256, packageId, onProgress)
     }
 
     /** The whole of [install], synchronously. Separated so tests need no dispatcher. */
@@ -205,23 +247,34 @@ class WcpInstaller @Inject constructor(
         into: ComponentStoreLayout,
         expectedSha256: String? = null,
         packageId: String? = null,
-    ): WcpInstallResult {
-        if (!archive.isFile) return WcpInstallResult.NotFound(archive)
+    ): WcpInstallResult =
+        if (!archive.isFile) {
+            WcpInstallResult.NotFound(archive)
+        } else {
+            installBlocking(FileWcpSource(archive), into, expectedSha256, packageId, null)
+        }
 
-        val compression = WcpArchive.detect(archive)
+    internal fun installBlocking(
+        source: WcpSource,
+        into: ComponentStoreLayout,
+        expectedSha256: String?,
+        packageId: String?,
+        onProgress: ((WcpProgress) -> Unit)?,
+    ): WcpInstallResult {
+        val compression = WcpArchive.detect(source)
         if (!compression.decodable) {
             return WcpInstallResult.UnsupportedCompression(compression)
         }
 
-        val expected = (expectedSha256 ?: readSidecar(archive))?.lowercase()
+        val expected = (expectedSha256 ?: source.publishedSha256())?.lowercase()
         if (expected != null) {
-            val actual = sha256(archive)
+            val actual = sha256(source)
             if (!actual.equals(expected, ignoreCase = true)) {
                 return WcpInstallResult.ChecksumMismatch(expected, actual)
             }
         }
 
-        val profileBytes = runCatching { readProfileBytes(archive, compression) }
+        val profileBytes = runCatching { readProfileBytes(source, compression) }
             .getOrElse { return WcpInstallResult.Malformed(it.message ?: "unreadable archive") }
             ?: return WcpInstallResult.Malformed("no $WCP_PROFILE at the root of the archive")
 
@@ -254,14 +307,16 @@ class WcpInstaller @Inject constructor(
             return WcpInstallResult.Malformed("could not create ${into.root}")
         }
 
-        estimateSpace(archive, into.root)?.let { return it }
+        estimateSpace(source, into.root)?.let { return it }
 
         val staging = File(into.staging, "install-${type.wire}-${System.nanoTime()}")
         try {
             if (!staging.mkdirs()) {
                 return WcpInstallResult.Malformed("could not create staging directory")
             }
-            val extracted = when (val outcome = extract(archive, compression, staging)) {
+            val extracted = when (
+                val outcome = extract(source, compression, staging, onProgress)
+            ) {
                 is ExtractOutcome.Refused -> return outcome.failure
                 is ExtractOutcome.Ok -> outcome.fileCount
             }
@@ -300,8 +355,12 @@ class WcpInstaller @Inject constructor(
      * watches the real figure as it goes, because an estimate that is too low is
      * exactly the case this is here to make legible.
      */
-    private fun estimateSpace(archive: File, root: File): WcpInstallResult.InsufficientSpace? {
-        val required = archive.length() * EXPANSION_ESTIMATE + HEADROOM_BYTES
+    private fun estimateSpace(source: WcpSource, root: File): WcpInstallResult.InsufficientSpace? {
+        // A source that cannot state its own size is not guessed at: extraction's
+        // own running check is the one that cannot be fooled, and inventing a
+        // figure here would produce a refusal message with a made-up number in it.
+        if (source.sizeBytes <= 0) return null
+        val required = source.sizeBytes * EXPANSION_ESTIMATE + HEADROOM_BYTES
         val free = space.usableBytes(root)
         return if (free < required) {
             WcpInstallResult.InsufficientSpace(requiredBytes = required, freeBytes = free)
@@ -332,16 +391,40 @@ class WcpInstaller @Inject constructor(
      * it.
      */
     private fun extract(
-        archive: File,
+        source: WcpSource,
         compression: WcpCompression,
         destination: File,
+        onProgress: ((WcpProgress) -> Unit)?,
     ): ExtractOutcome {
         var files = 0
         var written = 0L
         var checkedAt = 0L
         val links = mutableListOf<PendingLink>()
 
-        TarReader(WcpArchive.open(archive, compression)).use { tar ->
+        // The compressed position, updated by the counting stream underneath the
+        // decompressor. `total` is the archive's own length, so the ratio is exact
+        // rather than an estimate of an unpacked size nobody knows yet.
+        var compressedRead = 0L
+        var reportedAt = 0L
+        fun report(force: Boolean) {
+            if (onProgress == null) return
+            if (!force && compressedRead - reportedAt < PROGRESS_INTERVAL_BYTES) return
+            reportedAt = compressedRead
+            onProgress(
+                WcpProgress(
+                    name = source.name,
+                    compressedRead = compressedRead,
+                    compressedTotal = source.sizeBytes,
+                    unpackedBytes = written,
+                    files = files,
+                ),
+            )
+        }
+
+        val counter: ((Long) -> Unit)? =
+            if (onProgress == null) null else { at -> compressedRead = at }
+
+        TarReader(WcpArchive.open(source, compression, counter)).use { tar ->
             while (true) {
                 val entry = tar.next() ?: break
                 when (entry.kind) {
@@ -386,6 +469,7 @@ class WcpInstaller @Inject constructor(
                         if (entry.mode and OWNER_EXECUTE != 0) target.setExecutable(true, true)
                         files++
                         written += entry.size
+                        report(force = false)
                         if (written - checkedAt >= SPACE_CHECK_INTERVAL) {
                             checkedAt = written
                             val free = space.usableBytes(destination)
@@ -412,6 +496,7 @@ class WcpInstaller @Inject constructor(
             }
             files++
         }
+        report(force = true)
         return ExtractOutcome.Ok(files)
     }
 
@@ -541,14 +626,37 @@ class WcpInstaller @Inject constructor(
     }
 
     /**
+     * A package's `profile.json`, read without unpacking it.
+     *
+     * The catalogue of bundled packages needs the type and `versionCode` of each
+     * one before it can say whether the store already has it, and that is the only
+     * place those two live. Reading the archive's first entry is cheap — the
+     * packager writes `profile.json` first, so the xz stream is decoded for about
+     * a kilobyte and closed.
+     *
+     * Null for anything that is not a readable `.wcp`, with no distinction between
+     * the reasons: the caller's next move is the same either way, and the real
+     * message comes from [install], which fails with the specific failure.
+     */
+    suspend fun profileOf(source: WcpSource): WcpProfile? = withContext(Dispatchers.IO) {
+        val compression = WcpArchive.detect(source)
+        if (!compression.decodable) return@withContext null
+        val bytes = runCatching { readProfileBytes(source, compression) }.getOrNull()
+            ?: return@withContext null
+        runCatching {
+            json.decodeFromString(WcpProfile.serializer(), bytes.toString(Charsets.UTF_8))
+        }.getOrNull()
+    }
+
+    /**
      * `profile.json`, without extracting anything.
      *
      * `build/package_wcp.py` writes it as the archive's first entry, so this
      * almost always stops after one member. It scans the whole archive rather
      * than requiring that, because the format is shared with other producers.
      */
-    private fun readProfileBytes(archive: File, compression: WcpCompression): ByteArray? {
-        TarReader(WcpArchive.open(archive, compression)).use { tar ->
+    private fun readProfileBytes(source: WcpSource, compression: WcpCompression): ByteArray? {
+        TarReader(WcpArchive.open(source, compression)).use { tar ->
             while (true) {
                 val entry = tar.next() ?: return null
                 if (entry.kind == TarEntryKind.FILE && entry.name == WCP_PROFILE) {
@@ -576,22 +684,15 @@ class WcpInstaller @Inject constructor(
         directory.walkTopDown().count { it.isFile }
 
     /**
-     * The digest published beside the package.
-     *
-     * `build/package_wcp.py` writes `<hex>  <filename>\n`, the `sha256sum`
-     * format, so the first whitespace-delimited token is the digest.
+     * The digest published beside the package. See [FileWcpSource.publishedSha256].
      */
-    internal fun readSidecar(archive: File): String? {
-        val sidecar = File(archive.parentFile, archive.name + SIDECAR_SUFFIX)
-        if (!sidecar.isFile) return null
-        return runCatching {
-            sidecar.readText().trim().substringBefore(' ').trim()
-        }.getOrNull()?.takeIf { it.length == SHA256_HEX_LENGTH }
-    }
+    internal fun readSidecar(archive: File): String? = FileWcpSource(archive).publishedSha256()
 
-    internal fun sha256(file: File): String {
+    internal fun sha256(file: File): String = sha256(FileWcpSource(file))
+
+    internal fun sha256(source: WcpSource): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        FileInputStream(file).use { stream ->
+        source.open().use { stream ->
             val buffer = ByteArray(1024 * 1024)
             while (true) {
                 val read = stream.read(buffer)
@@ -614,8 +715,6 @@ class WcpInstaller @Inject constructor(
     }
 
     private companion object {
-        const val SIDECAR_SUFFIX = ".sha256"
-        const val SHA256_HEX_LENGTH = 64
         const val OWNER_EXECUTE = 0b001_000_000
         const val TRAVERSAL = "the path escapes the component directory"
         const val LINK_TRAVERSAL =
@@ -629,5 +728,14 @@ class WcpInstaller @Inject constructor(
 
         /** How much is written between two `usableSpace` calls during extraction. */
         const val SPACE_CHECK_INTERVAL = 64L * 1024 * 1024
+
+        /**
+         * How much of the archive is consumed between two progress callbacks.
+         *
+         * 1 MiB of *compressed* input, which for the Wine package is around 90
+         * updates over 88 MB — a bar that moves visibly and a recomposition rate
+         * a phone does not notice. Per entry would be four thousand.
+         */
+        const val PROGRESS_INTERVAL_BYTES = 1L * 1024 * 1024
     }
 }

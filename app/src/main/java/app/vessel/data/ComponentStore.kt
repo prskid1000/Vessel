@@ -102,9 +102,27 @@ class ComponentStore @Inject constructor(
         archive: File,
         packageId: String? = null,
         expectedSha256: String? = null,
+    ): WcpInstallResult = install(FileWcpSource(archive), packageId, expectedSha256)
+
+    /**
+     * The same install from any [WcpSource] — a downloaded file, or a package
+     * bundled in the APK.
+     *
+     * One entry point on purpose. The store's layout is keyed by type and
+     * `versionCode`, and a container's `provisioned.json` references those keys, so
+     * an install that produced a different layout would leave every existing
+     * container unable to resolve its own components. Both sources therefore go
+     * through the same [WcpInstaller] and land in the same place; where the bytes
+     * came from is not something the store, or anything downstream of it, can tell.
+     */
+    suspend fun install(
+        source: WcpSource,
+        packageId: String? = null,
+        expectedSha256: String? = null,
+        onProgress: ((WcpProgress) -> Unit)? = null,
     ): WcpInstallResult {
         migrate()
-        return installer.install(archive, layout, expectedSha256, packageId)
+        return installer.install(source, layout, expectedSha256, packageId, onProgress)
     }
 
     /** Every version of every type in the store, read from disk. */

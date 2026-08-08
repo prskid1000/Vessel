@@ -1,0 +1,253 @@
+package app.vessel.data
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/** Where first-run component installation has got to. */
+enum class SetupPhase {
+    /** Nothing has been asked of it yet. */
+    IDLE,
+
+    /**
+     * Reading the bundle's manifests, before it is known whether there is work.
+     *
+     * Its own phase and not folded into [INSTALLING], because it is the phase in
+     * which the answer is *usually* "nothing to do" — every launch after the
+     * first — and drawing a setup dialog during it would put a dialog on screen
+     * for a fifth of a second on every cold start.
+     */
+    SCANNING,
+
+    INSTALLING,
+
+    /** Everything the APK carries is in the shared store. */
+    READY,
+
+    /** Finished, with at least one package that did not install. */
+    INCOMPLETE,
+}
+
+/**
+ * The whole of first-run setup, as one object the UI draws.
+ *
+ * The rows are [ProvisionStep]s — the same type the launch checklist uses,
+ * deliberately. This is the same kind of report about a different kind of work,
+ * and two step models would mean two checklist components a week later.
+ */
+data class SetupState(
+    val phase: SetupPhase = SetupPhase.IDLE,
+    val steps: List<ProvisionStep> = emptyList(),
+    /** Compressed bytes of the packages finished in this run. */
+    val completedBytes: Long = 0,
+    /** Compressed bytes consumed of the package being installed right now. */
+    val currentBytes: Long = 0,
+    /** Compressed bytes of everything this run set out to install. */
+    val totalBytes: Long = 0,
+) {
+    /** Whether work is in flight. [SetupPhase.SCANNING] counts; nothing draws it. */
+    val active: Boolean
+        get() = phase == SetupPhase.SCANNING || phase == SetupPhase.INSTALLING
+
+    /** Whether a report is worth showing: real work, or a failure to explain. */
+    val worthShowing: Boolean
+        get() = phase == SetupPhase.INSTALLING || phase == SetupPhase.INCOMPLETE
+
+    /**
+     * 0f..1f over the *compressed* bytes of the whole run.
+     *
+     * Weighted by package size rather than by package count, which is the
+     * difference between a bar that crawls for four minutes and jumps five times
+     * at the end and one that moves at a steady rate: Wine is 88% of the bundle's
+     * bytes and one sixth of its rows.
+     */
+    val fraction: Float
+        get() = if (totalBytes <= 0) {
+            0f
+        } else {
+            ((completedBytes + currentBytes).toFloat() / totalBytes).coerceIn(0f, 1f)
+        }
+
+    val failures: List<ProvisionStep>
+        get() = steps.filter { it.status == ProvisionStatus.FAILED }
+}
+
+/**
+ * Unpacks the components bundled in the APK, once, without being asked.
+ *
+ * **There is no button and no prompt.** The requirement is that installing the
+ * APK and opening the app is the whole of setup, so this runs from
+ * [app.vessel.MainActivity] on first composition and the UI over it is a
+ * progress report rather than a gate. Everything it needs is already inside the
+ * package; there is nothing a user could usefully decide.
+ *
+ * ## Idempotent, resumable, and not repeated
+ *
+ * Three properties, and each is load-bearing:
+ *
+ *  - **Idempotent.** [WcpInstaller] skips a version already in the store, so a
+ *    second pass over the same bundle extracts nothing and reports six skips.
+ *  - **Resumable per package.** The installer extracts into
+ *    `components/.staging/` and renames into place only once an archive has been
+ *    read to its end, so a process killed mid-Wine leaves no half-tree that the
+ *    store would then count as installed — it leaves nothing, and the next launch
+ *    redoes that one package and none of the others.
+ *  - **Not repeated.** The check is "is this version in the store", read off the
+ *    filesystem, never a preference flag. A flag and a filesystem can disagree,
+ *    and the way they disagree is a user who cleared storage and now has an app
+ *    that thinks it is set up.
+ *
+ * ## Why not a foreground service
+ *
+ * A `dataSync` service would keep the unpack alive through the app being swiped
+ * away, and `ComponentDownloadService` is already declared for the download path.
+ * It is not used here because the honest cost of not having it is small: the work
+ * resumes per package on the next launch, and the case it would protect — a user
+ * who opens a freshly installed app and immediately swipes it away — costs them
+ * one package's progress. A service that promised more would also have to own
+ * cancellation, notification actions and a second progress channel, none of which
+ * this feature has a use for.
+ *
+ * ## A failure is not a dead end
+ *
+ * A package that will not install does not stop the ones after it. Running out of
+ * space part-way through is the realistic failure, and a user who ends up with
+ * four of six components should see the four, be told which two are missing and
+ * why, and still reach the container list. [SetupPhase.INCOMPLETE] is that state,
+ * and it is a state the app opens in rather than one it stops at.
+ */
+@Singleton
+class ComponentSetup @Inject constructor(
+    private val bundled: BundledComponents,
+    private val store: ComponentStore,
+) {
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    private val _state = MutableStateFlow(SetupState())
+    val state: StateFlow<SetupState> = _state.asStateFlow()
+
+    /** Serialises the pass against itself; [started] is only read under it. */
+    private val gate = Mutex()
+    private var started = false
+
+    /**
+     * Run the pass, at most once per process.
+     *
+     * Called from the Activity, which is recreated on every rotation and on every
+     * return from the session — so "at most once" is the whole contract. A second
+     * call while the first is still running does nothing; a call after it has
+     * finished does nothing either, including after [SetupPhase.INCOMPLETE],
+     * because retrying a package that just ran out of space inside the same
+     * process would only produce the same message again.
+     */
+    fun start() {
+        scope.launch {
+            gate.withLock {
+                if (started) return@withLock
+                started = true
+                install()
+            }
+        }
+    }
+
+    private suspend fun install() {
+        _state.value = SetupState(phase = SetupPhase.SCANNING)
+
+        val catalogue = bundled.catalogue()
+        val pending = catalogue.filterNot { bundled.isInstalled(it) }
+        if (pending.isEmpty()) {
+            // Includes the `play` flavour, which bundles nothing at all, and every
+            // launch after the first. Neither draws anything.
+            _state.value = SetupState(phase = SetupPhase.READY)
+            return
+        }
+
+        val total = pending.sumOf { it.source.sizeBytes.coerceAtLeast(0) }
+        _state.value = SetupState(
+            phase = SetupPhase.INSTALLING,
+            steps = pending.map { ProvisionStep(it.packageId, "Install ${it.label}") },
+            totalBytes = total,
+        )
+
+        var completed = 0L
+        for (item in pending) {
+            mark(item.packageId, ProvisionStatus.RUNNING, "unpacking…")
+            var unpacked = 0L
+            val result = store.install(
+                source = item.source,
+                packageId = item.packageId,
+            ) { progress ->
+                unpacked = progress.unpackedBytes
+                _state.update {
+                    it.copy(
+                        currentBytes = progress.compressedRead,
+                        steps = it.steps.map { step ->
+                            if (step.id == item.packageId) step.copy(detail = progress.describe()) else step
+                        },
+                    )
+                }
+            }
+
+            completed += item.source.sizeBytes.coerceAtLeast(0)
+            _state.update { it.copy(completedBytes = completed, currentBytes = 0) }
+
+            when (result) {
+                // **Not `result.summary`.** That sentence is written for the
+                // download path and ends "checksum not verified (no sidecar)"
+                // whenever no digest was published — which for a bundled package
+                // is a deliberate non-event (see [AssetWcpSource]) and reads on
+                // screen as six warnings about something being wrong. What a
+                // person watching an unpack wants is how much came out of it.
+                is WcpInstallResult.Installed -> mark(
+                    item.packageId,
+                    ProvisionStatus.DONE,
+                    if (result.reused) {
+                        "already in the shared store · ${result.fileCount} files"
+                    } else {
+                        "${result.fileCount} files · ${unpacked / (1024 * 1024)} MB"
+                    },
+                )
+
+                is WcpInstallResult.Failure ->
+                    mark(item.packageId, ProvisionStatus.FAILED, result.summary)
+            }
+        }
+
+        _state.update {
+            it.copy(
+                phase = if (it.failures.isEmpty()) SetupPhase.READY else SetupPhase.INCOMPLETE,
+                currentBytes = 0,
+            )
+        }
+    }
+
+    private fun mark(id: String, status: ProvisionStatus, detail: String?) {
+        _state.update { state ->
+            state.copy(
+                steps = state.steps.map {
+                    if (it.id == id) it.copy(status = status, detail = detail) else it
+                },
+            )
+        }
+    }
+}
+
+/**
+ * What a row says while it is unpacking.
+ *
+ * Unpacked megabytes and a file count rather than a percentage, because the bar
+ * beside it already carries the percentage and this is the line that says the
+ * phone is actually doing something. Both numbers are counted, not estimated.
+ */
+private fun WcpProgress.describe(): String =
+    "${unpackedBytes / (1024 * 1024)} MB unpacked · $files files"
