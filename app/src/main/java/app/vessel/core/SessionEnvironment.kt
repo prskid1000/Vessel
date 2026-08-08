@@ -105,6 +105,16 @@ val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     "FEX_VECTORTSOENABLED",
 )
 
+/**
+ * Whether the session asks win32u to load Turnip.
+ *
+ * False until `patches/wine/0006` opens the adrenotools handle outside the
+ * loader lock — see the note at the call site for the measurement. A constant
+ * rather than a container setting on purpose: this is a defect with a known
+ * fix, not a choice anyone should be offered.
+ */
+const val TURNIP_ENABLED: Boolean = false
+
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
 
@@ -343,7 +353,29 @@ fun sessionEnvironment(
 
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
 
-    if (turnip != null) {
+    // **Turnip is held off until patches/wine/0006 stops deadlocking.**
+    //
+    // Setting these three variables is what makes win32u call
+    // `adrenotools_open_libvulkan`, and that call happens inside
+    // `vulkan_init_once`, which runs during `winex11.drv`'s process_attach —
+    // i.e. inside a `dlopen`, with Android's linker lock already held.
+    // libadrenotools' whole mechanism is linker-namespace surgery ending in
+    // `android_dlopen_ext`, which wants that same lock. `explorer.exe` hangs
+    // with exactly one thread in `futex_wait_queue` and the desktop never
+    // paints; its last log line is always the winediag success line, because
+    // the driver does load and then nothing returns.
+    //
+    // Measured both ways on the device, same build, same container:
+    //   with these set   surface #000000, explorer wedged, one thread
+    //   without them     surface #161826, the seeded desktop, drawn
+    //
+    // So this is not "Turnip does not work" — it loads, and §2 of
+    // docs/OPTIMIZATION.md has the driverID to prove it. It is a load-order
+    // bug in our own patch: the adrenotools handle has to be opened somewhere
+    // that is not under the loader lock. Until it is, a drawing desktop on the
+    // stock driver beats a hung one on Mesa.
+    @Suppress("KotlinConstantConditions")
+    if (turnip != null && TURNIP_ENABLED) {
         // libadrenotools concatenates path and name, so without the trailing
         // separator it looks for `…/componentslibvulkan….so`.
         environment["ADRENOTOOLS_DRIVER_PATH"] = turnip.driverDir.absolutePath + File.separator

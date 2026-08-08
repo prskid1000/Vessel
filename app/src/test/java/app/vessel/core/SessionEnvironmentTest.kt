@@ -215,18 +215,22 @@ class SessionEnvironmentTest {
     }
 
     @Test
-    fun `an installed Turnip sets all three, with a trailing separator on the paths`() {
+    fun `the adrenotools variables are withheld while TURNIP_ENABLED is false`() {
+        // Not "Turnip is broken" — it loads, and the driverID proves it. Setting
+        // these three is what makes win32u open the adrenotools handle from
+        // inside winex11.drv's process_attach, under Android's loader lock, and
+        // explorer.exe then hangs with one thread in futex_wait_queue and never
+        // paints. Measured both ways on the device: #000000 with them, the
+        // seeded #161826 without. See the note at the call site.
+        //
+        // This test inverts the moment patches/wine/0006 is fixed, which is the
+        // point of writing it as an assertion rather than deleting the old one.
+        assertFalse("flip this test when the patch is fixed", TURNIP_ENABLED)
+
         val environment = env(driver = turnip)
-        assertEquals(
-            File("/data/user/0/app.vessel/files/components/Turnip/260300").absolutePath +
-                File.separator,
-            environment["ADRENOTOOLS_DRIVER_PATH"],
-        )
-        assertEquals(
-            turnip.hooksDir.absolutePath + File.separator,
-            environment["ADRENOTOOLS_HOOKS_PATH"],
-        )
-        assertEquals("libvulkan_freedreno.so", environment["ADRENOTOOLS_DRIVER_NAME"])
+        assertNull(environment["ADRENOTOOLS_DRIVER_PATH"])
+        assertNull(environment["ADRENOTOOLS_HOOKS_PATH"])
+        assertNull(environment["ADRENOTOOLS_DRIVER_NAME"])
     }
 
     // — the fixed variables ---------------------------------------------------
@@ -480,9 +484,6 @@ class SessionEnvironmentTest {
                 "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
                 "VKD3D_SHADER_CACHE_PATH" to File(caches, "vkd3d").absolutePath,
                 "TU_DEBUG" to "startup",
-                "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
-                "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
-                "ADRENOTOOLS_DRIVER_NAME" to "libvulkan_freedreno.so",
                 "FEX_SILENTLOG" to "0",
                 "FEX_OUTPUTLOG" to "stderr",
                 "FEX_TSOENABLED" to "1",
