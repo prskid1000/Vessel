@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -392,8 +393,16 @@ fun SessionDesktop(
                 ) {
                     Box(
                         Modifier
+                            // The same mark as the taskbar's, turned on its side:
+                            // 4 dp thick and 108 dp long on both edges. It used to
+                            // be a quarter of the screen's height, which on a 2780
+                            // px phone is a 232 dp stripe down the side of a running
+                            // desktop — far more of a mark than an edge hint needs,
+                            // and nothing like the bar on the bottom edge it is
+                            // supposed to rhyme with. The touch target is unchanged
+                            // and still full height; only the drawn bar shrank.
                             .width(Vessel.metrics.railHandle)
-                            .fillMaxHeight(Vessel.metrics.railHandleFraction)
+                            .height(Vessel.metrics.edgeHandleLength)
                             .background(Vessel.colors.edgeHandle),
                     )
                 }

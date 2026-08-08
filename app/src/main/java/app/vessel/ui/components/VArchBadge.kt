@@ -34,7 +34,24 @@ fun VArchBadge(
     arch: PeArchitecture,
     modifier: Modifier = Modifier,
 ) {
-    VTonalPill(text = arch.label, tone = archColor(arch), modifier = modifier)
+    VArchBadge(arch = arch, label = arch.label, modifier = modifier)
+}
+
+/**
+ * The same pill with the word chosen by the caller.
+ *
+ * For a program with no PE header, where the honest architecture is `UNKNOWN`
+ * but the useful word is the interpreter — `cmd`, `msiexec`, `wscript`. The
+ * colour still comes from [arch], so those keep `UNKNOWN`'s neutral grey rather
+ * than borrowing a green that would claim they run natively.
+ */
+@Composable
+fun VArchBadge(
+    arch: PeArchitecture,
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    VTonalPill(text = label, tone = archColor(arch), modifier = modifier)
 }
 
 /**

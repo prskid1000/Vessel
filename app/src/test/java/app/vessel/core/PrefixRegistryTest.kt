@@ -155,8 +155,38 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(7, PrefixRegistry.SEED_VERSION)
-        assertEquals(7, PrefixRegistry.seed.size)
+        assertEquals(8, PrefixRegistry.SEED_VERSION)
+        // The two being equal is a coincidence — a version bump does not have to
+        // add a key — but while it holds it is a cheap way to catch a key added
+        // without the bump that makes existing containers pick it up.
+        assertEquals(8, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `window metrics are negative twips, which is the only form Wine reads`() {
+        // A positive number in these values is a point size, not a length, so
+        // getting the sign wrong does not fail — it silently asks for a caption
+        // forty points tall. Fifteen twips to the pixel at 96 dpi.
+        val values = PrefixRegistry.windowMetrics.values.associate { it.name to it.data }
+        assertEquals("-600", values["CaptionHeight"])
+        assertEquals("-360", values["ScrollWidth"])
+        assertEquals("-60", values["BorderWidth"])
+        assertEquals("-60", values["PaddedBorderWidth"])
+        assertTrue(
+            "every metric is a negative integer",
+            PrefixRegistry.windowMetrics.values.all { it.data.toInt() < 0 },
+        )
+    }
+
+    @Test
+    fun `the sizing border is wide enough to hit with a finger`() {
+        // Windows' default is 1 px of border and 0 of padding. The pair is what
+        // Wine adds up into the resize region, and a 1 px region is the reason
+        // the windows in a virtual desktop cannot be resized by touch at all.
+        val values = PrefixRegistry.windowMetrics.values.associate { it.name to it.data }
+        val border = -values.getValue("BorderWidth").toInt() / 15
+        val padded = -values.getValue("PaddedBorderWidth").toInt() / 15
+        assertTrue("grab region is at least 8 px", border + padded >= 8)
     }
 
     @Test

@@ -74,7 +74,7 @@ fun VAppTile(
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
-        VArchBadge(shortcut.arch)
+        VArchBadge(shortcut.arch, shortcut.badge)
     }
 }
 

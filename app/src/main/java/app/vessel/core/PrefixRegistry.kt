@@ -78,9 +78,11 @@ object PrefixRegistry {
      * what makes an already-provisioned container stop pointing at a bitmap that
      * no longer gets written; 7 removed the `winefile.exe` AppDefaults key along
      * with the file manager itself — Vessel's own C: browser replaced it, so
-     * nothing puts a second Wine program on the desktop any more.
+     * nothing puts a second Wine program on the desktop any more; 8 added
+     * [windowMetrics], so an existing container's windows get captions, borders
+     * and scrollbars a finger can hit rather than Windows' mouse-sized ones.
      */
-    const val SEED_VERSION: Int = 7
+    const val SEED_VERSION: Int = 8
 
     /** The mode the DLL override values carry. See [D3D_DLL_OVERRIDES]. */
     const val DLL_OVERRIDE_MODE: String = "native,builtin"
@@ -280,6 +282,66 @@ object PrefixRegistry {
     )
 
     /**
+     * Title bars, borders and scrollbars sized for a finger.
+     *
+     * **This is the half of "windows you can actually use" that colour cannot
+     * do.** Wine's virtual desktop already gives every top-level window a
+     * caption, a sizing border and a full non-client frame — that part is not
+     * missing and never was. What is missing is that they are sized for a mouse:
+     * Windows' defaults are a 22 px caption, a **1 px** sizing border and a 17 px
+     * scrollbar, and a 1 px grab region on a phone is a border nobody can hit.
+     * Two pointer modes make it worse, not better: trackpad mode can land on one
+     * pixel, direct-touch mode cannot come close.
+     *
+     * Everything here is in **twips at 96 dpi, negative, fifteen per pixel** —
+     * `-15 * pixels` — which is the form `SPI_GETNONCLIENTMETRICS` reads back and
+     * the only one `sysparams.c` parses. A positive number is a *point* size and
+     * means something else entirely.
+     *
+     * The sizes, and why each is what it is:
+     *
+     * - **Caption 40 px.** Twice Windows' 22, and the number that has to carry
+     *   both a drag handle and three buttons. Bigger reads as a phone app's
+     *   toolbar rather than a window; on a 720 px-tall guest desktop, 40 px is
+     *   5.5% of the height per window and three stacked windows still leave room
+     *   to work.
+     * - **Border 4 px plus padded border 4 px = an 8 px grab region.** The pair
+     *   is how Windows separates the drawn frame from the invisible margin
+     *   around it, and Wine adds them the same way; widening the padded half is
+     *   what buys a resize target without drawing a thick frame.
+     * - **Scrollbars 24 px**, from 17. A scrollbar is the one control a program
+     *   gives you no alternative to, and the thumb has to be draggable.
+     * - **Small caption and menu 32 px.** Tool windows and menu bars, one step
+     *   down: they are chrome you aim at rather than drag.
+     *
+     * **Not scaled through DPI, deliberately.** Raising `LogPixels` would size
+     * all of this in one number and scale fonts with it, which sounds better
+     * until the desktop is 1280×720 and every logical pixel costs 1.5 real ones:
+     * the guest loses a third of its working area to get a bigger title bar. The
+     * metrics are set directly so the trade is only paid where it buys something
+     * to touch.
+     *
+     * Fonts are left alone here for the same reason and one more: `CaptionFont`
+     * and its four siblings are `LOGFONTW` structs written as binary, not
+     * strings, and this seed writes `.reg` text.
+     */
+    val windowMetrics: RegistryKey = RegistryKey(
+        path = """HKEY_CURRENT_USER\Control Panel\Desktop\WindowMetrics""",
+        values = listOf(
+            twips("CaptionHeight", CAPTION_PX),
+            twips("CaptionWidth", CAPTION_PX),
+            twips("SmCaptionHeight", SMALL_CAPTION_PX),
+            twips("SmCaptionWidth", SMALL_CAPTION_PX),
+            twips("MenuHeight", SMALL_CAPTION_PX),
+            twips("MenuWidth", SMALL_CAPTION_PX),
+            twips("BorderWidth", BORDER_PX),
+            twips("PaddedBorderWidth", PADDED_BORDER_PX),
+            twips("ScrollHeight", SCROLLBAR_PX),
+            twips("ScrollWidth", SCROLLBAR_PX),
+        ),
+    )
+
+    /**
      * Tell dark-aware Windows programs that this is a dark system.
      *
      * `ShouldAppsUseDarkMode` and `ShouldSystemUseDarkMode`
@@ -341,11 +403,31 @@ object PrefixRegistry {
         arm64ecEmulator,
         x86Emulator,
         desktopTheme,
+        windowMetrics,
         visualStyles,
         windowsDarkMode,
     )
 
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))
+
+    /**
+     * A non-client metric, in the twips [windowMetrics] explains.
+     *
+     * Negative because that is what marks the number as a length rather than a
+     * point size, and `TWIPS_PER_PIXEL` rather than a literal 15 so the two
+     * facts — the unit, and that it assumes 96 dpi — stay written down together.
+     */
+    private fun twips(name: String, pixels: Int) =
+        RegistryValue(name, "${-pixels * TWIPS_PER_PIXEL}")
+
+    /** Twips per pixel at 96 dpi: 1440 twips to the inch over 96 pixels. */
+    private const val TWIPS_PER_PIXEL = 15
+
+    private const val CAPTION_PX = 40
+    private const val SMALL_CAPTION_PX = 32
+    private const val SCROLLBAR_PX = 24
+    private const val BORDER_PX = 4
+    private const val PADDED_BORDER_PX = 4
 
     private const val COLORS_KEY = """HKEY_CURRENT_USER\Control Panel\Colors"""
 

@@ -46,4 +46,24 @@ data class AppShortcut(
      * say "these are *these* apps".
      */
     val initial: String get() = name.trim().firstOrNull()?.uppercase() ?: "?"
+
+    /**
+     * The word in the tile's pill: an architecture, or what interprets this.
+     *
+     * A `.bat`, a `.msi` and a `.vbs` all wore `unknown` here, which was
+     * *truthful* — [PeReader] found no machine field because there is no PE
+     * header to hold one — and was still the wrong thing to say. Three tiles
+     * sitting in a row all badged `unknown` read as three files Vessel had
+     * failed to understand, when in fact it knew exactly what each one was and
+     * exactly what would run it.
+     *
+     * `unknown` survives for the case it was written for: a file whose extension
+     * says nothing and whose header said nothing either.
+     */
+    val badge: String
+        get() = if (arch != PeArchitecture.UNKNOWN) {
+            arch.label
+        } else {
+            interpreterFor(executable) ?: PeArchitecture.UNKNOWN.label
+        }
 }

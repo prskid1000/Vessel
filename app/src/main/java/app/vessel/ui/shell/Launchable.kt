@@ -98,6 +98,35 @@ fun launchabilityOf(file: File): Launchable = when (file.extension.lowercase()) 
     else -> Launchable.NotAProgram
 }
 
+/**
+ * The one word for *what interprets this*, or null for a file that is its own
+ * program.
+ *
+ * The badge on a tile normally names an architecture, read out of the PE header.
+ * A batch file, an installer and a script have no PE header and no machine
+ * field, so [PeReader] correctly answers `UNKNOWN` — and `unknown` is then the
+ * wrong word to print. Nothing is unknown about a `.bat`: it is a batch file and
+ * `cmd.exe` runs it. This is what the tile shows instead.
+ *
+ * Derived from the path rather than stored on the shortcut, and that is the
+ * whole reason it is cheap: an architecture has to be persisted because reading
+ * it means opening the file, whereas the extension is already in the path the
+ * shortcut carries. Nothing to migrate, and nothing that can go stale against
+ * the file it names.
+ *
+ * The words are the executable's stem rather than [Launchable.Runs.via]'s prose
+ * — `cmd`, not `cmd.exe /c` — because this goes in a pill beside a tile and the
+ * switches are not what is being said.
+ */
+fun interpreterFor(path: String): String? =
+    when (path.substringAfterLast('.', "").lowercase()) {
+        BAT, CMD -> "cmd"
+        MSI -> "msiexec"
+        VBS, JS -> "wscript"
+        LNK -> "shortcut"
+        else -> null
+    }
+
 /** The one-line answer to "how does this run on an ARM phone". */
 private fun translationFor(arch: PeArchitecture): String = when (arch) {
     PeArchitecture.ARM64, PeArchitecture.ARM64EC -> "natively, without translation"

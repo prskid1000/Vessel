@@ -476,9 +476,6 @@ data class VMetrics(
      */
     val sheetMaxHeightFraction: Float get() = 0.92f
 
-    /** How much of the screen's height the closed rail's handle mark covers. */
-    val railHandleFraction: Float get() = 0.25f
-
     val shapeSm: Shape = RoundedCornerShape(radiusSm)
     val shapeMd: Shape = RoundedCornerShape(radiusMd)
     val shapeLg: Shape = RoundedCornerShape(radiusLg)
