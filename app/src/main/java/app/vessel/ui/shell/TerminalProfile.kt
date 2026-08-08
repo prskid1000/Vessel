@@ -22,9 +22,16 @@ package app.vessel.ui.shell
  * difference. Both binaries are in the Wine tree this project builds.
  *
  * So a "profile" here is what Windows Terminal's profiles are: a name and the
- * shell to start. The list is fixed rather than user-editable, because the three
- * entries are the three shells the platform can offer and a fourth would need a
- * component that does not exist.
+ * program to start. The list is fixed rather than user-editable.
+ *
+ * **PowerShell and a POSIX shell were here and are gone.** Both were drawn
+ * disabled, truthfully saying they were not installed, and both stayed that way
+ * because neither component was ever built — a button that has only ever
+ * refused is a feature the launcher is advertising and the product does not
+ * have. They come back when there is something behind them: BusyBox-w32 builds
+ * from source and belongs in the APK, PowerShell 7 cannot be built from source
+ * and belongs behind the component downloader. Until then the honest list is
+ * the programs Wine itself provides.
  */
 enum class TerminalProfile(
     /** What the launcher calls it. */
@@ -61,43 +68,6 @@ enum class TerminalProfile(
         program = "cmd.exe",
         installedAt = null,
         missingReason = "",
-    ),
-
-    POWERSHELL(
-        label = "PowerShell",
-        program = """C:\Program Files\PowerShell\7\pwsh.exe""",
-        installedAt = """C:\Program Files\PowerShell\7\pwsh.exe""",
-        // Names *which* PowerShell in four words, because it matters: Wine ships
-        // a `powershell.exe` that is a stub and cannot run a script, which is
-        // why `.ps1` is refused in Launchable. The one that would work is
-        // Microsoft's 7, a self-contained .NET application and a separate
-        // install. The full explanation belongs in that file, not on this row.
-        missingReason = "PowerShell 7 is not installed.",
-    ),
-
-    /**
-     * A POSIX shell, and deliberately **not** Git Bash.
-     *
-     * Git for Windows' `bash.exe` is an MSYS2 program, and the MSYS2 runtime
-     * emulates `fork()` on top of Win32 in a way that is notoriously fragile
-     * under Wine — job control and process groups are exactly the parts that
-     * break, and they are exactly what a shell is. Its ARM64 build is also new
-     * and partial, so in practice it would be the x86-64 one through FEX: slow
-     * and unreliable at the same time.
-     *
-     * BusyBox-w32 is a native Win32 PE with no emulation layer under it. One
-     * binary carries `sh` plus about 150 applets — `ls`, `grep`, `sed`, `awk`,
-     * `find`, `tar`, `xargs` — which is the *toolchain* people actually mean
-     * when they say they want Git Bash, without the runtime that cannot survive
-     * the trip. It is what [app.vessel.core.PrefixRegistry.toolsPath] puts on the
-     * container's `PATH`, so those tools are in Command Prompt and PowerShell
-     * too rather than only in this profile.
-     */
-    BUSYBOX_SH(
-        label = "Shell",
-        program = """C:\Program Files\Vessel Tools\busybox.exe""",
-        installedAt = """C:\Program Files\Vessel Tools\busybox.exe""",
-        missingReason = "The Unix tools are not installed.",
     ),
 
     /**
@@ -146,8 +116,6 @@ enum class TerminalProfile(
     val shortLabel: String
         get() = when (this) {
             COMMAND_PROMPT -> "cmd"
-            POWERSHELL -> "pwsh"
-            BUSYBOX_SH -> "sh"
             REGEDIT -> "reg"
             WINE_EXPLORER -> "files"
         }

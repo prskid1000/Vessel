@@ -81,6 +81,8 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 15 took `Vessel Tools` back off `PATH`, no component ever having put
+     * anything there — a toolchain a user installs brings its own entry;
      * 14 declared the drive types, without which Wine may guess a mapped drive
      * is removable and a shell view then treats it as absent;
      * 13 moved the whole sizing border into BorderWidth, PaddedBorderWidth
@@ -94,7 +96,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 14
+    const val SEED_VERSION: Int = 15
 
     /**
      * A value written into the hive that names the seed version that wrote it.
@@ -495,34 +497,25 @@ object PrefixRegistry {
     )
 
     /**
-     * The Unix tools on `PATH`, for every program in the container.
+     * The machine `PATH`, written whole.
      *
-     * **This is what makes one shell's tools available in all of them.** The
-     * thing people mean by "give me Git Bash" is almost never `bash` itself —
-     * it is `ls`, `grep`, `sed`, `awk`, `find`, `tar`, `curl`. Putting the
-     * directory that holds them on the machine `PATH` means they work from
-     * Command Prompt, from PowerShell, from a program that shells out, and from
-     * the BusyBox shell, rather than only inside one profile that happens to
-     * prepend it. That is strictly more useful than a per-profile environment
-     * and it is one registry value instead of a launch-time variable per shell.
+     * Wine seeds exactly the three entries below and nothing has ever wanted a
+     * fourth. `C:\Program Files\Vessel Tools` was here for a bundled BusyBox
+     * that was never built, so the value named a directory that has never
+     * existed — harmless, and a promise the build did not keep. A toolchain a
+     * user installs brings its own entry; this seed has no business claiming
+     * one in advance.
      *
-     * The value replaces rather than appends, because there is nothing to append
-     * to yet: Wine seeds exactly the three entries below and this is the first
-     * thing that has ever wanted a fourth. Written whole so the result does not
-     * depend on what a previous seed left behind.
-     *
-     * `REG_EXPAND_SZ` would be the Windows-correct type for a `PATH` — it is how
-     * a real system stores `%SystemRoot%` in it — and this is deliberately plain
-     * [RegistryKind.SZ] instead, because nothing here needs expanding and
-     * `RegistryValue` renders one type of string. The literal `C:\windows` paths
-     * are the same ones `wine.inf` writes.
+     * Kept as a key rather than deleted so an existing prefix is *corrected*.
+     * Removing it would leave the old value, tools directory and all, in every
+     * hive that already has one.
      */
     val toolsPath: RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment""",
         values = listOf(
             RegistryValue(
                 "PATH",
-                """C:\windows\system32;C:\windows;C:\windows\system32\wbem;$TOOLS_DIR""",
+                """C:\windows\system32;C:\windows;C:\windows\system32\wbem""",
             ),
         ),
     )

@@ -245,7 +245,7 @@ private fun TaskbarWindow(window: GuestWindow, onClick: () -> Unit) {
 private fun windowGlyph(program: String): ImageVector? = when (program) {
     "conhost.exe", "cmd.exe" -> VIcons.Terminal
     "pwsh.exe", "powershell.exe" -> VIcons.Prompt
-    "wscript.exe", "cscript.exe", "busybox.exe" -> VIcons.Code
+    "wscript.exe", "cscript.exe" -> VIcons.Code
     "explorer.exe" -> VIcons.Folder
     else -> null
 }
@@ -357,8 +357,6 @@ fun SessionLauncher(
                 LauncherAction(
                     icon = when (option.profile) {
                         TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
-                        TerminalProfile.POWERSHELL -> VIcons.Prompt
-                        TerminalProfile.BUSYBOX_SH -> VIcons.Code
                         TerminalProfile.REGEDIT -> VIcons.List
                         TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
                     },
@@ -368,13 +366,13 @@ fun SessionLauncher(
                     onClick = { onTerminal(option.profile) },
                 )
             }
-            LauncherAction(
-                icon = VIcons.Folder,
-                caption = "C:",
-                description = "Browse this container's C: drive",
-                enabled = true,
-                onClick = onBrowse,
-            )
+            // **Vessel's own C: browser is not here, and that is deliberate.**
+            // Wine's File Explorer above it already lists the container's
+            // drives, and two file managers side by side in one menu is two
+            // answers to one question. Ours is still reachable from the
+            // container's card on the home screen, which is where getting a
+            // file *in* belongs — it is the only one of the two that can import
+            // from Android storage or add a program as a shortcut.
         }
     }
 }

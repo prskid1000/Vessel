@@ -155,7 +155,7 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(14, PrefixRegistry.SEED_VERSION)
+        assertEquals(15, PrefixRegistry.SEED_VERSION)
         // The two being equal is a coincidence — a version bump does not have to
         // add a key — but while it holds it is a cheap way to catch a key added
         // without the bump that makes existing containers pick it up.
@@ -181,13 +181,15 @@ class PrefixRegistryTest {
     }
 
     @Test
-    fun `the tools directory is on PATH without losing the Windows entries`() {
-        // Written whole rather than appended, so a program that needs
-        // system32 on PATH must still find it here.
+    fun `PATH is the Windows entries and nothing this project invented`() {
+        // `C:\Program Files\Vessel Tools` was on here for a component that was
+        // never built, so the value named a directory that has never existed.
+        // A toolchain a user installs brings its own PATH entry; this seed has
+        // no business claiming one in advance.
         val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data
-        assertTrue("system32 survives", path.contains("""C:\windows\system32"""))
-        assertTrue("wbem survives", path.contains("""C:\windows\system32\wbem"""))
-        assertTrue("the tools directory is on it", path.endsWith(PrefixRegistry.TOOLS_DIR))
+        assertTrue("system32 is on it", path.contains("""C:\windows\system32"""))
+        assertTrue("wbem is on it", path.contains("""C:\windows\system32\wbem"""))
+        assertTrue("nothing of ours is", !path.contains("Vessel"))
     }
 
     @Test
