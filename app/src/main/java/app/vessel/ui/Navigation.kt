@@ -34,7 +34,9 @@ import app.vessel.ui.screens.SessionLaunchDialog
 import app.vessel.ui.screens.SessionLogScreen
 import app.vessel.ui.screens.SessionLogsScreen
 import app.vessel.ui.screens.SessionOutcomeDialog
+import app.vessel.ui.screens.SetupDialog
 import app.vessel.ui.vm.SessionViewModel
+import app.vessel.ui.vm.SetupViewModel
 
 /**
  * Three destinations, and one of them is the desktop.
@@ -152,6 +154,15 @@ fun VesselApp(
         if (!openSession.isNullOrBlank()) session.launch(openSession, native)
     }
 
+    // First-run setup starts itself. There is no button and no prompt: everything
+    // it installs is already inside the APK, so there is nothing for the user to
+    // decide and nothing to fetch. It is started here rather than from
+    // `VesselApplication` so that it begins with the first frame the user sees,
+    // which is also the frame its progress dialog can appear over.
+    val setup: SetupViewModel = hiltViewModel()
+    val setupState by setup.state.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { setup.start() }
+
     NavHost(
         navController = navController,
         startDestination = Routes.HOME,
@@ -247,6 +258,16 @@ fun VesselApp(
     }
 
     SessionHost(state, session, navController, native)
+
+    // Over the container list, and over everything else too — this is the only
+    // dialog in the product that can be up before the user has done anything.
+    // Saveable, so a rotation does not put a report back that was put down; keyed
+    // on nothing, because setup happens once per install and there is no second
+    // run to reset it for.
+    var showSetup by rememberSaveable { mutableStateOf(true) }
+    if (showSetup && setupState.worthShowing) {
+        SetupDialog(setupState) { showSetup = false }
+    }
 }
 
 /**

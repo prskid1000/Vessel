@@ -27,9 +27,7 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,8 +42,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionDiagnosis
@@ -58,20 +54,20 @@ import app.vessel.input.PointerMode
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VConfirmSheet
+import app.vessel.ui.components.VDialogCard
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VOutcomeDialog
 import app.vessel.ui.components.VOutcomeTone
 import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VSectionHeader
+import app.vessel.ui.components.VStepRow
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestWindow
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
-import app.vessel.ui.theme.vElevation
-import app.vessel.ui.theme.vRing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 
@@ -117,7 +113,7 @@ fun SessionLaunchDialog(
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    SessionDialogCard(onDismiss = onDismiss) {
+    VDialogCard(onDismiss = onDismiss) {
         Text(
             state.containerName.ifBlank { "Session" },
             style = Vessel.type.subtitle,
@@ -132,46 +128,6 @@ fun SessionLaunchDialog(
         ) {
             VButton("Cancel", onCancel, style = VButtonStyle.Danger)
             VButton("Hide", onDismiss, style = VButtonStyle.Secondary)
-        }
-    }
-}
-
-/**
- * The dialog shell [VOutcomeDialog] draws, for a body that is not strings.
- *
- * Not a call to that composable, and not a slot added to it: its `evidence` is a
- * `List<String>` on purpose — it is the raw material a bug report quotes — and
- * widening it to a composable slot would let any caller put a scrolling layout
- * inside a dialog meant to hold three lines of mono. The checklist is rows with
- * live status glyphs, so it needs the shell and not the component.
- */
-@Composable
-private fun SessionDialogCard(
-    onDismiss: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        // The platform's 280 dp card is narrower than this product's gutter and
-        // wraps a two-line message to four.
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Box(
-            Modifier
-                .padding(horizontal = Vessel.metrics.screenGutter)
-                .widthIn(max = Vessel.metrics.dialogMaxWidth),
-        ) {
-            val shape = Vessel.metrics.shapeLg
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .vElevation(VElev.lg, shape)
-                    .background(Vessel.colors.surface, shape)
-                    .vRing(VElev.lg.ring, shape)
-                    .padding(Vessel.metrics.s17),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
-                content = content,
-            )
         }
     }
 }
@@ -198,7 +154,7 @@ private fun ColumnScope.ProvisionChecklist(state: SessionState) {
         // record of what happened, and calling it "Preparing" under a failure
         // dialog reads as though it were still going.
         VSectionHeader(if (state.finished) "Progress" else "Preparing")
-        state.steps.forEach { ChecklistRow(it) }
+        state.steps.forEach { VStepRow(it) }
     }
 
     // **Outside the scroll, and that is the fix.** These two lived inside it, so
@@ -227,79 +183,6 @@ private fun ColumnScope.ProvisionChecklist(state: SessionState) {
             color = Vessel.colors.textLabel,
             modifier = Modifier.fillMaxWidth(),
         )
-    }
-}
-
-@Composable
-private fun ChecklistRow(step: ProvisionStep) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s3),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-    ) {
-        StepGlyph(step.status)
-        Column(Modifier.weight(1f)) {
-            Text(
-                step.label,
-                style = Vessel.type.body,
-                color = if (step.status == ProvisionStatus.PENDING) {
-                    Vessel.colors.textMuted
-                } else {
-                    Vessel.colors.textPrimary
-                },
-            )
-            step.detail?.let {
-                Text(
-                    it,
-                    style = Vessel.type.monoSmall,
-                    color = if (step.status == ProvisionStatus.FAILED) {
-                        Vessel.colors.danger
-                    } else {
-                        Vessel.colors.textMuted
-                    },
-                )
-            }
-        }
-    }
-}
-
-/**
- * The status cell: one square whatever the state, so the labels beside it stay on
- * one left edge instead of stepping in and out as rows complete.
- */
-@Composable
-private fun StepGlyph(status: ProvisionStatus) {
-    val size = Vessel.metrics.iconStatus
-    Box(
-        Modifier.padding(top = Vessel.metrics.s3).size(size),
-        contentAlignment = Alignment.Center,
-    ) {
-        when (status) {
-            ProvisionStatus.DONE ->
-                Icon(VIcons.Check, null, Modifier.size(size), tint = Vessel.colors.ok)
-
-            ProvisionStatus.SKIPPED ->
-                Icon(VIcons.Check, null, Modifier.size(size), tint = Vessel.colors.textMuted)
-
-            ProvisionStatus.FAILED ->
-                Icon(VIcons.X, null, Modifier.size(size), tint = Vessel.colors.danger)
-
-            // Running is a filled accent dot and pending an empty ring — the same
-            // shape at two weights, which reads as progress down the column
-            // without a second animation competing with the log line below it.
-            ProvisionStatus.RUNNING ->
-                Box(
-                    Modifier
-                        .size(Vessel.metrics.dot)
-                        .background(Vessel.colors.accent, CircleShape),
-                )
-
-            ProvisionStatus.PENDING ->
-                Box(
-                    Modifier
-                        .size(Vessel.metrics.dot)
-                        .vRing(Vessel.colors.divider, CircleShape),
-                )
-        }
     }
 }
 
@@ -870,11 +753,24 @@ private fun SessionSurface(state: SessionState, surface: View?) {
 // nothing installed shows the failure rather than a plausible-looking run.
 
 private val PreviewSteps = listOf(
+    ProvisionStep("layout", "Create container", ProvisionStatus.SKIPPED, "Already created"),
     ProvisionStep(
         "session:components",
         "Resolve components",
         ProvisionStatus.DONE,
-        "Wine/1114 · DXVK/271",
+        "Wine/1114 · DXVK/20701",
+    ),
+    ProvisionStep(
+        "registry",
+        "Write registry seed",
+        ProvisionStatus.DONE,
+        "7 keys written to prefix-seed.reg",
+    ),
+    ProvisionStep(
+        "boot",
+        "Initialise Wine prefix",
+        ProvisionStatus.RUNNING,
+        "wineboot --update, pass 2 of 2",
     ),
     ProvisionStep(
         "session:fex",
@@ -882,20 +778,7 @@ private val PreviewSteps = listOf(
         ProvisionStatus.DONE,
         "libarm64ecfex.dll — 2 file(s) copied into the prefix",
     ),
-    ProvisionStep(
-        "session:d3d",
-        "Install D3D layers",
-        ProvisionStatus.DONE,
-        "DXVK, vkd3d — 18 file(s) copied into the prefix",
-    ),
-    ProvisionStep("layout", "Create prefix", ProvisionStatus.SKIPPED, "Already created"),
-    ProvisionStep(
-        "registry",
-        "First-run registry",
-        ProvisionStatus.DONE,
-        "4 keys written to prefix-seed.reg",
-    ),
-    ProvisionStep("boot", "Initialise Wine prefix", ProvisionStatus.RUNNING),
+    ProvisionStep("session:d3d", "Install D3D layers", ProvisionStatus.PENDING),
 )
 
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 620)

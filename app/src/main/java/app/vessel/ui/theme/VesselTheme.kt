@@ -296,6 +296,15 @@ data class VMetrics(
     val dot: Dp = 8.dp,
 
     /**
+     * The height of a determinate progress bar.
+     *
+     * A hairline would disappear against a `divider` track and Material's 4 dp is
+     * the one number in that system that already agrees with this one. It is a
+     * readout, not a control, so it does not take [controlHeight].
+     */
+    val progressTrack: Dp = 4.dp,
+
+    /**
      * A program tile's icon square, and the launcher's.
      *
      * The same number as [touchTarget], and not a coincidence: the tile *is* the
