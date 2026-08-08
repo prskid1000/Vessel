@@ -128,9 +128,22 @@ different product.
   changed on screen. That file is in the UI tree; the ask, including the
   variable-font trap that makes weight 500 silently render at 400, is item 2 of
   `out/needs-from-install-agent.md`.
-- [ ] **No program icons.** Tiles show a letter in a ringed square, which is an
-  honest placeholder. Real icons need the PE resource directory and
-  `RT_GROUP_ICON` unpacked.
+- [~] **No program icons.** The reader exists; nothing draws with it yet.
+  `core/PeIconReader` walks the optional header's data directory to the resource
+  table, maps the RVA through the section table, descends the type/id/language
+  tree to the lowest-numbered `RT_GROUP_ICON`, chooses an entry, and decodes the
+  `RT_ICON` DIB to straight ARGB — 32, 24, 8, 4 and 1 bit, bottom-up rows, the
+  doubled `biHeight`, the 1-bit AND mask, and the fallback Windows uses when a
+  32-bit icon's alpha channel is entirely zero, which real executables contain
+  and which renders the icon invisible if taken at face value. A 256×256 PNG
+  entry is handed on rather than decoded. Every failure is null, so the lettered
+  placeholder stays the fallback.
+  *Evidence:* 20 tests in `PeIconReaderTest`, against PE images assembled byte by
+  byte from the specification in the test source set rather than from this
+  reader's own output.
+  *Not done:* `VAppTile` still draws the letter. Item 4 of
+  `out/needs-from-install-agent.md` has the two-line call site and the caching
+  note.
 - [ ] **RpcSs.** `StartServiceW` fails inside the app and succeeds under
   `run-as`. Diagnosed to `dlls/combase/rpc.c:229`; unexplained.
 - [ ] **Move the `drive_c` reader out of `ui/vm`.** `FilesViewModel` reads the

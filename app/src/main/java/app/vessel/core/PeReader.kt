@@ -31,6 +31,12 @@ import java.io.RandomAccessFile
  * than a swallowed error: a file that is not a PE, a truncated download and a
  * file the app cannot open are all "we could not tell", which is what the
  * unread badge in the design says.
+ *
+ * The other question asked of a `.exe` — what it *looks* like — is
+ * [PeIconReader], which is a much longer walk through the same headers. The two
+ * are separate on purpose: this one runs over every file in a directory listing
+ * and must stay four reads, while extracting an icon is several kilobytes of
+ * resource tree and only worth doing for a file that is going to be drawn.
  */
 object PeReader {
 
@@ -79,9 +85,8 @@ object PeReader {
     /**
      * The machine word, as an architecture.
      *
-     * Exposed so a caller that already has the bytes — a future PE resource
-     * reader, say — does not open the file twice, and so this is unit-testable
-     * without a fixture on disk.
+     * Exposed so a caller that already has the bytes does not open the file
+     * twice, and so this is unit-testable without a fixture on disk.
      */
     fun fromMachine(machine: Int): PeArchitecture = when (machine) {
         PeArchitecture.ARM64.machine -> PeArchitecture.ARM64
