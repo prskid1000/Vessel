@@ -1,6 +1,8 @@
 package app.vessel.data
 
 import android.content.Context
+import android.net.Uri
+import android.provider.DocumentsContract
 import android.os.Environment
 import android.util.Log
 import app.vessel.core.DriveMap
@@ -91,6 +93,37 @@ class AndroidDrives @Inject constructor(
             .sortedBy { it.name.lowercase() }
     }
 
+    /**
+     * The folder a picked tree URI names, or null when it has no path.
+     *
+     * **A `content://` tree is not a path and cannot be symlinked — but its
+     * document id is one.** `getTreeDocumentId` gives `primary:Games`, whose
+     * left half names a storage volume and whose right half is the path inside
+     * it. That is enough to rebuild the real directory, and with
+     * `MANAGE_EXTERNAL_STORAGE` this build may then read it. An earlier note in
+     * `docs/DRIVE-MAPPING.md` said SAF could not work here; that was true of the
+     * tree itself and too absolute about the id.
+     *
+     * Null for a volume this cannot resolve — a network provider or a cloud
+     * document has no path at all, and inventing one would produce a drive that
+     * silently lists nothing.
+     */
+    fun folderFor(tree: Uri): File? {
+        val id = runCatching { DocumentsContract.getTreeDocumentId(tree) }.getOrNull() ?: return null
+        val volume = id.substringBefore(':')
+        val relative = id.substringAfter(':', "")
+        val root = when {
+            volume.equals(PRIMARY_VOLUME, ignoreCase = true) ->
+                Environment.getExternalStorageDirectory()
+            // A removable card or a USB drive: /storage/<uuid>, which is where
+            // Android mounts them and what the volume half of the id names.
+            volume.isNotEmpty() -> File(EXTERNAL_MOUNTS, volume)
+            else -> null
+        } ?: return null
+        val folder = if (relative.isEmpty()) root else File(root, relative)
+        return folder.takeIf { it.isDirectory }
+    }
+
     /** Remove a mapping. Never touches what it pointed at — see [DriveMap.unmap]. */
     fun unmap(prefix: File, letter: Char): Boolean = DriveMap.unmap(prefix, letter)
 
@@ -99,5 +132,11 @@ class AndroidDrives @Inject constructor(
 
         /** What a second drive is called on every Windows machine anyone has used. */
         const val SHARED_STORAGE_DRIVE = 'd'
+
+        /** The volume half of a tree document id for built-in storage. */
+        const val PRIMARY_VOLUME = "primary"
+
+        /** Where Android mounts a card or a USB drive, by volume uuid. */
+        const val EXTERNAL_MOUNTS = "/storage"
     }
 }

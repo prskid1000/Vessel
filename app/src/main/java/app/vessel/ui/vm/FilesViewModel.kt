@@ -177,12 +177,41 @@ class FilesViewModel @Inject constructor(
      * the mapping.
      */
     private fun refreshDrives() {
-        val list = drives.drives(prefix)
+        // **A drive this app cannot list is not offered as a tab.** `Z:` is the
+        // Unix root, which SELinux denies to `untrusted_app`, so its tab could
+        // only ever open onto a refusal — and a destination that always refuses
+        // is one the user has to learn to avoid. It stays in the prefix, because
+        // Wine creates it and reaches absolute Unix paths through it; it simply
+        // is not somewhere to send anybody.
+        //
+        // The rule generalises past `Z:`, which is why it is a readability test
+        // rather than a special case: a card that has been unmounted and a
+        // mapped folder that has been deleted both disappear from the row for
+        // the same reason and without further code.
+        val list = drives.drives(prefix).filter { drive ->
+            File(File(prefix, DriveMap.DOSDEVICES), "${drive.letter}:").list() != null
+        }
         _state.update { it.copy(drives = list, canMapDrives = drives.canMap) }
     }
 
-    /** The folders the map sheet offers. Read on open, not held. */
-    fun mappableFolders(): List<File> = drives.mappableFolders()
+    /**
+     * Map the folder behind a picked tree URI.
+     *
+     * The picker hands back a `content://` tree; [AndroidDrives.folderFor] turns
+     * its document id into the real directory, which is the thing a drive can
+     * point at. A tree with no path — a cloud provider — is refused in words
+     * rather than mapped to a drive that would list nothing.
+     */
+    fun mapPickedFolder(tree: Uri) {
+        val folder = drives.folderFor(tree)
+        if (folder == null) {
+            _state.update {
+                it.copy(error = "That location is not a folder on this device, so it cannot be a drive.")
+            }
+            return
+        }
+        mapFolder(folder)
+    }
 
     /** Show [letter], from its own root. Silent for a drive that is not mapped. */
     fun openDrive(letter: Char) {
@@ -270,7 +299,26 @@ class FilesViewModel @Inject constructor(
             )
         }
 
-        val children = directory.listFiles().orEmpty()
+        // **Null is not an empty array, and collapsing them was a lie.** `Z:` is
+        // the Unix root, which an Android app is not allowed to list — SELinux
+        // denies readdir on `/` to `untrusted_app`. `listFiles()` returns null,
+        // `.orEmpty()` turned that into no entries, and the browser said "This
+        // folder is empty" about a filesystem with everything in it. A thing
+        // that cannot be done says so and names why; that is the rule.
+        val children = directory.listFiles()
+        if (children == null) {
+            return Listing(
+                // The target, not the link. Every drive is reached through
+                // `dosdevices/<letter>:`, so `directory.path` is always that
+                // symlink — naming it tells the user about Vessel's plumbing
+                // when what they need to know is which folder was refused.
+                error = "Android does not allow this app to list " +
+                    runCatching { directory.canonicalPath }.getOrDefault(directory.path) +
+                    ". Wine creates this drive; the phone's own storage is on D:.",
+                storage = storageLine(),
+            )
+        }
+
         // Directories first, then files, each alphabetically and case-blind. A
         // Wine prefix mixes the two heavily and an undirected listing is unusable.
         val sorted = children.sortedWith(

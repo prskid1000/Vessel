@@ -37,11 +37,8 @@ import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VIconButton
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import app.vessel.ui.components.VSheet
-import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VPushToolbar
 import app.vessel.ui.components.VScaffold
@@ -81,7 +78,14 @@ fun FilesScreen(
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    var mapping by remember { mutableStateOf(false) }
+    // **Android's own folder picker, not a list of ours.** A tree URI is not a
+    // path, but its document id is — `primary:Games` rebuilds to a real
+    // directory — so the picker can be used for what it is good at, which is
+    // letting the user go anywhere rather than choosing from a top level we
+    // decided on.
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { tree -> if (tree != null) viewModel.mapPickedFolder(tree) }
 
     val importer = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -106,7 +110,7 @@ fun FilesScreen(
         onOpen = viewModel::open,
         onCrumb = viewModel::goTo,
         onDrive = viewModel::openDrive,
-        onAddDrive = { mapping = true },
+        onAddDrive = { folderPicker.launch(null) },
         onImport = { importer.launch(IMPORT_MIME) },
         onExport = { selected?.let { exporter.launch(it.name) } },
         onAddAsApp = {
@@ -116,42 +120,6 @@ fun FilesScreen(
         onDismissNotice = viewModel::dismissNotice,
     )
 
-    // **A sheet, not a screen.** Mapping a folder is one choice from a short
-    // list and the browser behind it is the context for that choice — pushing a
-    // destination would hide the drive tabs the new one is about to join.
-    if (mapping) {
-        val folders = remember { viewModel.mappableFolders() }
-        VSheet(
-            onDismiss = { mapping = false },
-            header = {
-                Text(
-                    "Map a folder as a drive",
-                    style = Vessel.type.subtitle,
-                    color = Vessel.colors.textPrimary,
-                )
-            },
-        ) {
-            if (folders.isEmpty()) {
-                Text(
-                    "No folders to map.",
-                    style = Vessel.type.bodySmall,
-                    color = Vessel.colors.textMuted,
-                )
-            } else {
-                folders.forEach { folder ->
-                    VSheetRow(
-                        icon = VIcons.Folder,
-                        title = folder.name,
-                        help = null,
-                        onClick = {
-                            mapping = false
-                            viewModel.mapFolder(folder)
-                        },
-                    )
-                }
-            }
-        }
-    }
 }
 
 private const val EXPORT_MIME = "application/octet-stream"
