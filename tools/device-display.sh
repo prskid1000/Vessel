@@ -113,7 +113,12 @@ if [ "$KEEP" -eq 0 ]; then
         || die "could not decompress $name.wcp"
     fi
 
-    read -r type code < <(python - "$tarball" <<'PY'
+    # `tr -d '\r'` is not cosmetic. On Windows, python's print() writes CRLF, so
+    # `read` leaves the CR on `$code` — and every path built from it then names a
+    # directory called `1114<CR>`. `adb shell` appends CRLF of its own, so
+    # in_app()'s own `tr` strips the CR back off on the way out and every later
+    # check reports a plain "no such file". Three hours, once.
+    read -r type code < <(python - "$tarball" <<'PY' | tr -d '\r'
 import json, sys, tarfile
 with tarfile.open(sys.argv[1]) as t:
     for member in ("profile.json", "./profile.json"):
@@ -127,6 +132,10 @@ with tarfile.open(sys.argv[1]) as t:
 print(profile["type"], profile["versionCode"])
 PY
     ) || die "could not read profile.json out of $name.wcp"
+
+    case "$type$code" in
+      *[!A-Za-z0-9]*) die "profile.json gave type='$type' code='$code', which is not a path" ;;
+    esac
 
     adb push "$STAGE_MOUNT/$name.tar" /data/local/tmp/component.tar >/dev/null
     in_app "rm -rf files/components/$type/$code && mkdir -p files/components/$type/$code && \
@@ -144,7 +153,10 @@ WINE_DIR="$(in_app "ls -d files/components/Wine/* 2>/dev/null | head -1")"
 # constant in winex11.so, so grep answers it without running anything. Checked
 # before the run rather than after, so "no MIT-SHM" is never mistaken for a
 # failure of the socket when it is really a stale package.
-if in_app "grep -c WINE_SYSVSHM_SOCKET $WINE_DIR/lib/wine/aarch64-unix/winex11.so 2>/dev/null" \
+# `-a` is required: winex11.so is an ELF, and grep without it prints "Binary file
+# matches" on a hit and nothing at all on some toybox builds — either way the
+# count this is testing never appears, and the answer is always "no patch".
+if in_app "grep -ac WINE_SYSVSHM_SOCKET $WINE_DIR/lib/wine/aarch64-unix/winex11.so 2>/dev/null" \
    | grep -qv '^0$'; then
   MITSHM_EXPECTED=1
   ok "winex11.so carries patch 0005"

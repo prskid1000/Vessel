@@ -2,7 +2,10 @@ package app.vessel.data
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -66,26 +69,61 @@ class WineProcessRunner @Inject constructor() {
     }
 
     /**
-     * Read [process]'s output until it closes, handing each line to [onLine].
+     * Read [process]'s output until the process exits, handing each line to [onLine].
      *
-     * Returns when the pipe reaches EOF, which is when the process has exited or
-     * been destroyed. There is no way to interrupt a blocking `readLine`, so
-     * cancellation works by the caller destroying the process: that closes the
-     * pipe, this returns, and the `ensureActive` below turns it into the
-     * `CancellationException` the caller is waiting for.
+     * **Until the process exits — not until the pipe reaches EOF.** Those are the
+     * same thing for an ordinary child and are emphatically not the same thing
+     * here. `ProcessBuilder` gives the child one pipe for its merged output, and
+     * every Wine process it goes on to spawn — `services.exe`, `rpcss.exe`,
+     * `wineserver` and each Windows program — inherits that descriptor. So when
+     * the desktop process dies the write end is still open in half a dozen
+     * survivors and `readLine` blocks forever on a pipe that will never close.
+     *
+     * That single fact caused both of the session bugs that mattered:
+     *
+     *  - a guest that had died left the session stuck in `RUNNING`, because the
+     *    `waitFor` that reports the exit code sits after this call; and
+     *  - **Stop did nothing at all.** `SessionRuntime.stop` cancels the session
+     *    job and joins it while holding the lifecycle lock, but a blocking
+     *    `readLine` cannot be interrupted by cancellation, so the job never
+     *    completed, the join never returned, and the lock was held for the rest
+     *    of the process's life. Nothing could start or stop afterwards.
+     *
+     * The fix is a watchdog that closes the read end once the process is gone,
+     * which is the one thing that *does* unblock a thread parked in `read(2)`.
+     * It also runs on cancellation, so destroying the process is no longer the
+     * caller's only way out — though it remains the polite one.
      */
     suspend fun drain(process: Process, onLine: (String) -> Unit) {
         withContext(Dispatchers.IO) {
+            val stream = process.inputStream
+            val closer = launch {
+                try {
+                    // Interruptible, so cancelling this coroutine does not leave
+                    // a thread parked in waitFor until the process happens to end.
+                    runInterruptible { process.waitFor() }
+                    // Descendants may still be mid-write; their last lines are
+                    // usually the interesting ones. Bounded, because the whole
+                    // point is that this pipe has no natural end.
+                    delay(FLUSH_GRACE_MS)
+                } finally {
+                    // Non-suspending, so it still runs when this coroutine is
+                    // cancelled — which is what makes cancellation work.
+                    runCatching { stream.close() }
+                }
+            }
             try {
-                process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                stream.bufferedReader(Charsets.UTF_8).use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
                         onLine(line)
                     }
                 }
             } catch (_: IOException) {
-                // The pipe went away underneath us, which is what destroying the
-                // process looks like from here. Not worth a line in the log.
+                // The pipe went away underneath us — either the process ended and
+                // the watchdog closed it, or it was destroyed. Both are ordinary.
+            } finally {
+                closer.cancel()
             }
         }
         coroutineContext.ensureActive()
@@ -103,5 +141,17 @@ class WineProcessRunner @Inject constructor() {
             process.destroyForcibly()
             throw cancellation
         }
+    }
+
+    private companion object {
+        /**
+         * How long to keep reading after the process itself has gone.
+         *
+         * Long enough for a dying Wine process's last few lines — which is where
+         * the reason it died usually is — and short enough that Stop still feels
+         * immediate. It is a grace period rather than a wait for EOF because
+         * there is no EOF to wait for; see [drain].
+         */
+        const val FLUSH_GRACE_MS = 250L
     }
 }
