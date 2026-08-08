@@ -282,7 +282,7 @@ class FilesViewModel @Inject constructor(
                     id = "",
                     containerId = containerId,
                     executable = row.guestPath,
-                    name = row.name.substringBeforeLast('.'),
+                    name = shortcutName(row.name),
                     arch = verdict.arch ?: PeArchitecture.UNKNOWN,
                 ),
             )
@@ -352,3 +352,26 @@ class FilesViewModel @Inject constructor(
 
 private fun gigabytes(bytes: Long): String =
     String.format(Locale.ROOT, "%.1f GB", bytes / 1_000_000_000.0)
+
+/**
+ * What a program is called on a tile.
+ *
+ * The extension comes off a `.exe` because "Notepad++.exe" is nobody's idea of
+ * a program's name, and stays on everything else because it is the only thing
+ * telling two of them apart. Measured on the device: a `.bat`, a `.msi` and a
+ * `.vbs` sitting beside each other in Downloads produced three tiles all
+ * reading `vessel-hello`, with no way to tell which was which and no duplicate
+ * anywhere in `shortcuts.json` — three distinct `executable` paths, one label.
+ *
+ * `.exe` alone rather than a list, because `.exe` is the only extension here
+ * that carries no information: everything else in [launchabilityOf] is a
+ * *different kind of thing* — a batch file, an installer, a script — and the
+ * suffix is what says so, since the architecture badge cannot (a `.bat` has no
+ * PE header and is honestly `UNKNOWN`).
+ */
+internal fun shortcutName(fileName: String): String =
+    if (fileName.substringAfterLast('.', "").equals("exe", ignoreCase = true)) {
+        fileName.substringBeforeLast('.')
+    } else {
+        fileName
+    }

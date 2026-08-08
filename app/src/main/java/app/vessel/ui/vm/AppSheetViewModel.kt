@@ -181,7 +181,10 @@ class AppSheetViewModel @Inject constructor(
             _state.update {
                 it.copy(
                     executable = guestPath,
-                    name = it.name.ifBlank { file.nameWithoutExtension },
+                    // Same rule as the browser's Add as app — see `shortcutName`.
+                    // Two places derive a default name and they have to agree, or
+                    // the same file added two ways gets two labels.
+                    name = it.name.ifBlank { shortcutName(file.name) },
                     arch = arch,
                     alreadyAdded = if (duplicate) {
                         "${file.name} is already on ${it.containerName}'s home row."

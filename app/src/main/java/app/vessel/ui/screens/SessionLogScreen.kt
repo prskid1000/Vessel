@@ -203,8 +203,7 @@ private fun SessionLogContent(
         if (state.missing) {
             VEmptyState(
                 icon = VIcons.Info,
-                message = "This session's log is no longer on the device. Ten are kept per " +
-                    "container, and the oldest is removed when an eleventh starts.",
+                message = "This log is no longer on the device.",
             )
             return@VScaffold
         }
@@ -221,7 +220,7 @@ private fun SessionLogContent(
         if (state.entries.isEmpty()) {
             VEmptyState(
                 icon = VIcons.Info,
-                message = "This session produced no output at all.",
+                message = "No output.",
             )
             return@VScaffold
         }
@@ -234,17 +233,11 @@ private fun SessionLogContent(
                 bottom = Vessel.metrics.s22,
             ),
         ) {
+            // No footnote under the last row when the cap is hit. This screen is a
+            // log viewer and every sentence added to it is a sentence between the
+            // user and the lines they came for; the cap and Share both work
+            // without one, and `state.truncated` still drives the toolbar.
             items(state.entries, key = { it.index }) { entry -> LogRow(entry, pan) }
-            if (state.truncated) {
-                item(key = "truncated") {
-                    Text(
-                        "This is as far as the viewer reads. Share exports the whole log.",
-                        style = Vessel.type.bodySmall,
-                        color = Vessel.colors.warn,
-                        modifier = Modifier.padding(vertical = Vessel.metrics.s11),
-                    )
-                }
-            }
         }
     }
 }
