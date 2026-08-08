@@ -69,18 +69,46 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
   # BUILD_TESTING is CMake's own CTest variable, NOT BUILD_TESTS — that is what
   # FEX gates on. With tests enabled, configure demands NASM to assemble the x86
   # test corpus and dies before compiling anything we want.
-  # ENABLE_LTO=False: LTO across the mingw link was judged unreliable and to cost
-  # more build time than it wins. That reasoning was recorded when the flag was
-  # first set and then lost in a refactor, which is why it is back here — but it
-  # is a judgement, not a measurement, and FEX's dispatcher is the hottest code
-  # in the project for any non-native program. docs/OPTIMIZATION.md carries it as
-  # an open candidate: benchmark before flipping, and if the ARM64EC link is what
-  # actually fails, record *that* instead of this.
+  # LTO off, and now for a reason that can be reproduced rather than a
+  # judgement. The original comment said only that LTO "is unreliable across the
+  # mingw link"; tried on 2026-08-08, it fails outright, and it fails in a
+  # specific and informative way:
+  #
+  #   ld.lld: error: undefined symbol: std::__1::mutex::lock() (EC symbol)
+  #   ld.lld: error: undefined symbol: std::__1::__shared_mutex_base::lock()
+  #     (EC symbol)
+  #   ...and ~40 more, every one of them tagged (EC symbol)
+  #
+  # Only the ARM64EC target. Every missing symbol comes from libc++, and ARM64EC
+  # reaches those through hybrid mapping — each one needs its mangled EC
+  # counterpart to survive to the link. LTO merges the libc++ archive members
+  # before the linker gets to apply that mapping, so the EC names are gone by
+  # the time anything looks for them. That is a toolchain limitation in
+  # llvm-mingw's ARM64EC support, not something to work around here.
+  #
+  # It stays a switch so the question is one command after a toolchain bump:
+  #
+  #   VESSEL_FEX_LTO=1 ./build/fex.sh
+  #   ./tools/device-bench.sh --only cpu --baseline out/bench/before.txt
+  #
+  # If a future llvm-mingw links it, benchmark before keeping it: FEX's
+  # dispatcher is the hottest code in the project for any non-native program, so
+  # the upside is real, but 2.28x on x86-32 integer is the number to beat and it
+  # should be beaten visibly.
+  # `if`, not `[ … ] && …`: under `set -e` a failing test as a bare statement
+  # takes the whole build down, so the off-by-default path would abort here.
+  if [ "${VESSEL_FEX_LTO:-0}" = 1 ]; then
+    FEX_LTO=True
+    info "ENABLE_LTO=True (VESSEL_FEX_LTO=1)"
+  else
+    FEX_LTO=False
+  fi
+
   cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DMINGW_TRIPLE="$TRIPLE" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DENABLE_LTO=False \
+    -DENABLE_LTO="$FEX_LTO" \
     -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
     -DBUILD_TESTING=False \
     -DBUILD_FEX_LINUX_TESTS=False
@@ -106,8 +134,10 @@ done
 
 # Record what was actually applied — no CPU tuning. Claiming -mcpu=oryon-1 here
 # because the probe accepted it would put a flag in the UI that never reached a
-# compiler.
-VESSEL_CPU_FLAGS="none (JIT detects host CPU at runtime)"
+# compiler. LTO rides along for the same reason: two packages that differ only
+# in a link-time flag are otherwise indistinguishable after the fact, and this
+# is the one flag anyone is likely to be A/B testing.
+VESSEL_CPU_FLAGS="none (JIT detects host CPU at runtime), LTO=$FEX_LTO"
 write_provenance "$STAGE/provenance.json" "$COMPONENT" "$VERSION"
 
 log "packaging"

@@ -107,21 +107,32 @@ carries Mesa's refusal.
   target is unusual enough that "it linked" is worth confirming separately from
   "it is faster".
 
-### Candidate B — LTO for FEX
+### Candidate B — LTO for FEX — **tried, does not link**
 
-`build/fex.sh` sets `-DENABLE_LTO=False`. The reason was recorded when the flag
-was first set — *"LTO across the mingw link is unreliable and costs more build
-time than it wins"* — and then lost in the refactor at `6d4a821`, leaving a bare
-flag. The comment is now restored.
+`build/fex.sh` sets `-DENABLE_LTO=False`. The original reason — *"LTO across the
+mingw link is unreliable and costs more build time than it wins"* — was recorded
+when the flag was set and lost in the refactor at `6d4a821`. It was a judgement,
+so it was tested.
 
-It is still a judgement rather than a measurement, and FEX's dispatcher and JIT
-emitter are the hottest code in the project for any non-native program.
+It fails, and the failure is specific:
 
-- **Cost:** build time. Possibly link trouble under llvm-mingw for ARM64EC,
-  which is likely what "unreliable" meant.
-- **Expected:** the largest single build-flag win available, if it links.
-- **Status:** not applied. If the ARM64EC link is what actually fails, record
-  *that* — a reproducible link error is a better comment than a judgement.
+```
+ld.lld: error: undefined symbol: std::__1::mutex::lock() (EC symbol)
+ld.lld: error: undefined symbol: std::__1::__shared_mutex_base::lock() (EC symbol)
+…and roughly forty more, every one tagged (EC symbol)
+```
+
+**Only the ARM64EC target.** Every missing symbol is from libc++, and ARM64EC
+reaches those through hybrid mapping — each needs its mangled EC counterpart to
+survive to the link. LTO merges the libc++ archive members before the linker
+applies that mapping, so the EC names are gone by the time anything looks for
+them. That is a limitation in llvm-mingw's ARM64EC support, not something to
+work around in this repo.
+
+- **Status:** closed. Kept as a switch (`VESSEL_FEX_LTO=1 ./build/fex.sh`) so a
+  toolchain bump can be re-tested in one command. If a future llvm-mingw links
+  it, benchmark before keeping it — **2.28× on x86-32 integer is the number to
+  beat**, and it should be beaten visibly.
 
 ### Candidate C — `-mcpu=oryon-1` for Wine's unix side
 
