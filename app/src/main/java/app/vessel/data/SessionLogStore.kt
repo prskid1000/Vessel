@@ -2,7 +2,6 @@ package app.vessel.data
 
 import android.content.Context
 import app.vessel.core.LogEntry
-import app.vessel.core.LogFilter
 import app.vessel.core.decodeLogLine
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -105,6 +104,7 @@ class SessionLogStore @Inject constructor(
     fun isOpen(containerId: String, startedAt: Long): Boolean =
         writers.containsKey(key(containerId, startedAt))
 
+
     // — listing ---------------------------------------------------------------
 
     /** Every session for a container, newest first, re-read on every change. */
@@ -161,16 +161,14 @@ class SessionLogStore @Inject constructor(
      * One page of a session, resuming from [cursor].
      *
      * Bounded twice: by [maxLines] returned and by [MAX_SCAN_LINES] examined.
-     * The second bound stops a filtered read of an error-free log scanning a
-     * hundred thousand lines in one call — it returns an empty page that is not
-     * at the end, and the caller asks again.
+     * Both bounds are what keeps one call's worth of work predictable on a log
+     * that is tens of megabytes and still being written to.
      */
     suspend fun read(
         containerId: String,
         startedAt: Long,
         cursor: LogCursor,
         maxLines: Int,
-        filter: LogFilter,
     ): LogChunk = withContext(Dispatchers.IO) {
         val directory = directoryFor(containerId)
         val segments = segmentsOf(directory, startedAt)
@@ -197,9 +195,8 @@ class SessionLogStore @Inject constructor(
                         // terminated by exactly one '\n' in UTF-8.
                         offset += raw.toByteArray(Charsets.UTF_8).size + 1L
                         scanned++
-                        val entry = decodeLogLine(raw, index)
+                        entries += decodeLogLine(raw, index)
                         index++
-                        if (filter.accepts(entry.level)) entries += entry
                     }
                 }
             }.onFailure {
@@ -227,7 +224,6 @@ class SessionLogStore @Inject constructor(
     suspend fun textFor(
         containerId: String,
         startedAt: Long,
-        filter: LogFilter,
         maxChars: Int = CLIPBOARD_LIMIT_CHARS,
     ): String = withContext(Dispatchers.IO) {
         val builder = StringBuilder()
@@ -237,9 +233,7 @@ class SessionLogStore @Inject constructor(
                 truncated = true
                 return@forEachEntry false
             }
-            if (filter.accepts(entry.level)) {
-                builder.append(render(entry)).append('\n')
-            }
+            builder.append(render(entry)).append('\n')
             true
         }
         if (truncated) {

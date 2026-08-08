@@ -169,15 +169,3 @@ class SessionLogCodecTest {
         assertEquals("… logging rate-limited, 8412 lines dropped …", rateLimitedLogMarker(8_412))
     }
 }
-
-class LogFilterTest {
-
-    @Test
-    fun `problems keeps errors and warnings only`() {
-        assertTrue(LogFilter.PROBLEMS.accepts(LogLevel.ERROR))
-        assertTrue(LogFilter.PROBLEMS.accepts(LogLevel.WARN))
-        assertTrue(!LogFilter.PROBLEMS.accepts(LogLevel.INFO))
-        assertTrue(!LogFilter.PROBLEMS.accepts(LogLevel.TRACE))
-        LogLevel.entries.forEach { assertTrue(LogFilter.ALL.accepts(it)) }
-    }
-}

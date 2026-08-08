@@ -25,8 +25,18 @@ import java.io.FileOutputStream
 internal const val LOG_SUFFIX = ".log"
 internal const val META_SUFFIX = ".meta.json"
 
+/**
+ * The telemetry sidecar, written by [SessionTraceStore] rather than by the log
+ * writer. Named here anyway, because [sessionFiles] is what deletes a session
+ * and a trace left behind by a pruned log is a file nothing will ever remove.
+ */
+internal const val TRACE_SUFFIX = ".trace.jsonl"
+
 internal fun logFile(directory: File, startedAt: Long) =
     File(directory, "$startedAt$LOG_SUFFIX")
+
+internal fun traceFile(directory: File, startedAt: Long) =
+    File(directory, "$startedAt$TRACE_SUFFIX")
 
 internal fun tailFile(directory: File, startedAt: Long, index: Int) =
     File(directory, "$startedAt$LOG_SUFFIX.t$index")
@@ -108,4 +118,5 @@ internal fun sessionFiles(directory: File, startedAt: Long): List<File> = listOf
     tailFile(directory, startedAt, 0),
     tailFile(directory, startedAt, 1),
     metaFile(directory, startedAt),
+    traceFile(directory, startedAt),
 )

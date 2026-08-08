@@ -55,22 +55,6 @@ data class LogEntry(
     val text: String,
 )
 
-/**
- * The viewer's severity filter — a *view* over lines already captured, never a
- * capture setting. Choosing what to record asks the user to predict, before the
- * crash, which layer will turn out to be at fault.
- */
-enum class LogFilter {
-    ALL,
-    PROBLEMS,
-    ;
-
-    fun accepts(level: LogLevel): Boolean = when (this) {
-        ALL -> true
-        PROBLEMS -> level == LogLevel.ERROR || level == LogLevel.WARN
-    }
-}
-
 /** What [parseSessionLogLine] recovered from one line of raw output. */
 data class ParsedLogLine(
     val source: LogSource,

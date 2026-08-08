@@ -5,16 +5,21 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.vessel.core.LogEntry
-import app.vessel.core.LogFilter
+import app.vessel.core.MetricHistory
 import app.vessel.data.LogCursor
 import app.vessel.data.SessionExit
 import app.vessel.data.SessionLogStore
+import app.vessel.data.SessionMetricsRecorder
+import app.vessel.data.SessionMetricsState
+import app.vessel.data.SessionTraceStore
 import app.vessel.ui.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -23,10 +28,13 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
+/** Which half of the screen is on show. */
+enum class SessionLogTab { LOG, METRICS }
+
 @Immutable
 data class SessionLogUiState(
     val loading: Boolean = true,
-    val filter: LogFilter = LogFilter.ALL,
+    val tab: SessionLogTab = SessionLogTab.LOG,
     val entries: List<LogEntry> = emptyList(),
     /** True while the session is still being written to; drives follow-tail. */
     val live: Boolean = false,
@@ -50,15 +58,18 @@ data class SessionLogUiState(
  * alternative, re-reading from the top on every change, is the thing that makes
  * log viewers stutter.
  *
- * The severity filter is applied at read time rather than over the loaded list.
- * Filtering afterwards would mean a session with three errors in a hundred
- * thousand lines showing three rows and never asking for more, because the list
- * that drives paging would never grow.
+ * **Every line, always.** There used to be a two-way severity filter here, and
+ * it was removed rather than improved: it made the reader choose between "all"
+ * and "errors and warnings" before knowing which layer had failed, which is
+ * exactly the prediction a log exists so nobody has to make. A missing `fixme`
+ * two hundred lines above the crash is the one that explains it.
  */
 @HiltViewModel
 class SessionLogViewModel @Inject constructor(
     savedState: SavedStateHandle,
     private val logs: SessionLogStore,
+    private val traces: SessionTraceStore,
+    recorder: SessionMetricsRecorder,
 ) : ViewModel() {
 
     private val containerId: String = savedState.get<String>(Routes.ARG_CONTAINER_ID).orEmpty()
@@ -68,8 +79,77 @@ class SessionLogViewModel @Inject constructor(
     private val _state = MutableStateFlow(SessionLogUiState())
     val state: StateFlow<SessionLogUiState> = _state.asStateFlow()
 
+    /**
+     * This session's metrics: the live window if it is running, its stored trace
+     * if it is not.
+     *
+     * `watched()` rather than the plain state, because collecting it is what
+     * tells the recorder a graph is on screen and moves it up to 1 Hz. The screen
+     * only collects while the Metrics tab is selected, so a reader sitting on the
+     * Log tab of a running session costs nothing.
+     *
+     * The `isLiveFor` check is the whole reason this is not just the recorder's
+     * flow. There is one recorder and one window, and a session log opened from
+     * the history while a *different* container is running would otherwise draw
+     * that container's graph under this one's timestamp.
+     *
+     * Falling back to the trace is what makes this screen useful at all today:
+     * every session on this device currently dies within half a minute at the
+     * graphics bug, so without a replay the tab would only ever say "not
+     * running".
+     */
+    val metrics: Flow<SessionMetricsState?> = recorder.watched().map { live ->
+        if (live.isLiveFor(containerId, startedAt)) {
+            wasLive = true
+            live
+        } else {
+            replay()
+        }
+    }
+
+    /**
+     * The stored trace, read once and kept.
+     *
+     * Cached because the recorder's state changes once a second and re-reading a
+     * finished run's file on each of those would be the most expensive thing this
+     * screen does. Invalidated when a session we were watching live stops, so the
+     * replay picks up the samples taken after the last frame we drew.
+     */
+    private suspend fun replay(): SessionMetricsState? = replaying.withLock {
+        if (wasLive) {
+            wasLive = false
+            replayed = null
+            replayLoaded = false
+        }
+        if (!replayLoaded) {
+            replayLoaded = true
+            replayed = traces.read(containerId, startedAt)
+                ?.takeIf { !it.isEmpty }
+                ?.let { trace ->
+                    SessionMetricsState(
+                        containerId = containerId,
+                        startedAt = startedAt,
+                        running = false,
+                        replayed = true,
+                        history = MetricHistory.of(trace.samples),
+                        sources = trace.header.sources,
+                        coreCeilingsMhz = trace.header.coreCeilingsMhz,
+                    )
+                }
+        }
+        replayed
+    }
+
     /** One reader at a time: a scroll and a tail update must not interleave. */
     private val reading = Mutex()
+
+    /** Guards the replay cache, which several emissions a second race for. */
+    private val replaying = Mutex()
+    private var replayed: SessionMetricsState? = null
+    private var replayLoaded = false
+
+    /** Set while this session is the live one, so its end can invalidate the cache. */
+    private var wasLive = false
 
     /** Set while a scroll-driven page is in flight, so scrolling cannot pile them up. */
     private val pulling = AtomicBoolean(false)
@@ -119,40 +199,31 @@ class SessionLogViewModel @Inject constructor(
         }
     }
 
-    fun setFilter(filter: LogFilter) {
-        if (filter == _state.value.filter) return
-        viewModelScope.launch {
-            reading.withLock {
-                cursor = LogCursor()
-                loaded = mutableListOf()
-                _state.update {
-                    it.copy(
-                        filter = filter,
-                        entries = emptyList(),
-                        atEnd = false,
-                        truncated = false,
-                        loading = true,
-                    )
-                }
-            }
-            pull()
-        }
+    /**
+     * Switch tabs.
+     *
+     * A plain state change and nothing else: the log keeps whatever it has
+     * loaded, so coming back from Metrics does not re-read the file from the top
+     * or lose the reader's scroll position.
+     */
+    fun setTab(tab: SessionLogTab) {
+        if (tab == _state.value.tab) return
+        _state.update { it.copy(tab = tab) }
     }
 
     /** The text a Copy All puts on the clipboard, bounded by the store. */
-    suspend fun clipboardText(): String =
-        logs.textFor(containerId, startedAt, _state.value.filter)
+    suspend fun clipboardText(): String = logs.textFor(containerId, startedAt)
 
-    /** The whole log written out for the share sheet, filter ignored. */
+    /** The whole log written out for the share sheet. */
     suspend fun exportFile(): File? = logs.export(containerId, startedAt)
 
     /**
      * Pull pages until something arrives, the file ends, or the view is full.
      *
-     * The loop is what makes the severity filter work: a page can legitimately
-     * come back empty because it scanned twenty thousand `trace` lines and none
-     * of them were problems, and stopping there would leave a screen that says
-     * nothing and never asks again.
+     * Still a loop with no filter to justify it, because the store bounds a read
+     * by lines *examined* as well as lines returned: a page can come back short
+     * without being at the end, and stopping on the first one would leave the
+     * screen short of a screenful and never ask again.
      */
     private suspend fun pull() {
         reading.withLock {
@@ -168,7 +239,6 @@ class SessionLogViewModel @Inject constructor(
                     startedAt = startedAt,
                     cursor = cursor,
                     maxLines = PAGE_LINES,
-                    filter = _state.value.filter,
                 )
                 cursor = chunk.cursor
                 if (chunk.entries.isNotEmpty()) {
@@ -207,7 +277,7 @@ class SessionLogViewModel @Inject constructor(
          */
         const val MAX_VIEW_LINES = 50_000
 
-        /** Bounds the work of one `pull` when a filter is rejecting everything. */
+        /** Bounds the work of one `pull` when pages keep coming back short. */
         const val MAX_ROUNDS = 8
     }
 }
