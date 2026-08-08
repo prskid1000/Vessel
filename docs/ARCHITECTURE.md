@@ -333,8 +333,8 @@ Android so the cross pass has something correct to link against.
 
 Each native component is built independently and published as a **`.wcp`**
 package — a compressed tar carrying a `profile.json` manifest — which the app
-downloads and installs at runtime. This is the format the Winlator ecosystem
-already uses, so our packages stay compatible with other apps and vice versa.
+installs at runtime. This is the format the Winlator ecosystem already uses, so
+our packages stay compatible with other apps and vice versa.
 
 ```
 native/pins.env  ──►  build/fetch.sh  ──►  patches/<c>/*.patch
@@ -355,6 +355,92 @@ native/pins.env  ──►  build/fetch.sh  ──►  patches/<c>/*.patch
 Updating a component does not require a new APK, and CI only rebuilds what
 changed — each workflow triggers on its own `pins.env` key and
 `patches/<component>/` path.
+
+### Two sources, one installer
+
+A package can reach the store two ways, and the store cannot tell which:
+
+| Flavour | Where the `.wcp` comes from | Size |
+|---|---|---|
+| `sideload` | **inside the APK**, `assets/components/` | 133 MB installed APK |
+| `play` | downloaded | 32 MB |
+
+The `sideload` APK carries the whole set, so installing it is the whole of
+setup: no side-loading a package by hand, no `tools/device-*.sh`, and no network
+on first run. `app/build.gradle.kts` names the six builds it ships — a bill of
+materials rather than a `dist/*.wcp` wildcard, because `dist/` accumulates
+superseded packages and shipping `wine-10.13` beside `wine-11.14` would cost 66
+MB of APK and 900 MB of unpacking for a Wine nothing adopts. They are stored
+uncompressed (`androidResources.noCompress`), because a `.wcp` is already xz and
+because an inflated asset cannot be read through `openFd`.
+
+`play` ships none, and that is expressed as an absent asset directory rather
+than as a flag: `BundledComponents` finds nothing there, the setup dialog never
+appears, and the download path is the only source. Both paths go through the
+same `WcpInstaller` into the same `components/<Type>/<versionCode>/`, which is
+what makes a container's references resolve whichever way its components
+arrived.
+
+Unpacking is automatic, once, on first open — see `ComponentSetup`. It is
+resumable per package because the installer stages and renames, and it decides
+what to do by asking the filesystem whether a version is in the store, never by
+reading a flag that a cleared app-storage would leave lying.
+
+## Bootstrapping a prefix, in the one order that works
+
+`SessionRuntime` owns this and nothing else may. The order is not arbitrary and
+each step is here because doing it anywhere else broke something measurable:
+
+```
+wineserver -f -p                 ours, because Wine may not exec its own
+wineboot --init                  creates system32 and the hives
+  ↳ believe the hive, not the exit code — a first boot exits 53 by design
+FEX -> system32                  after the boot, before the key that names it
+regedit prefix-seed.reg
+  ↳ flush, then grep system.reg for both emulator DLLs, or fail loudly
+rm .update-timestamp; wineboot --update   ×2, and both are needed
+DXVK / vkd3d / Zink -> prefix    after the last wine.inf pass
+```
+
+**`wineserver -w` cannot be used to flush the registry here, and this is the bug
+that cost the most.** It reads like "wait for the registry to reach disk" and it
+means "wait for every other `wineserver` to exit" — `wait_for_lock()` in
+`server/request.c` takes an `F_SETLKW` on the master socket lock. This app
+starts its own server `-f -p`, and `-p` is *persistent*: no idle timeout, so it
+never exits and the wait never returns. Provisioning wedged in PREPARING with
+`registrySeedVersion` already recorded, `regedit` never ran at all, and the
+symptom surfaced minutes later as `xtajit.dll not found` — a Wine-looking error
+with no Wine bug behind it. The reference scripts under `tools/` use
+`wineserver -w` perfectly happily because they never start a persistent server:
+`wineboot` auto-starts a transient one that exits three seconds after it goes
+idle.
+
+So the hive is flushed by ending the server and starting another;
+`flush_registry()` runs on the way out. Measured on the device: `grep
+libarm64ecfex system.reg` finds nothing while the server is up and finds it
+immediately after `wineserver -k`.
+
+**Two `wineboot --update` passes, each preceded by deleting
+`.update-timestamp`.** `wineboot` compares that stamp against `wine.inf` and
+skips its entire run when they match, which right after `--init` they do. One
+forced pass measurably leaves `syswow64` empty and a second fills it with 885
+entries; what the first establishes that the second needs is not understood, and
+the honest response is to run both and say so. Without them there is no 32-bit
+world: `syswow64` holds nothing, and every i386 program dies with `could not
+load kernel32.dll`.
+
+**The graphics layers go in last.** `tools/device-graphics.sh` warns that
+`wine.inf` would otherwise put its builtins back over the top. That half is not
+what happens — `create_dest_file` (`dlls/setupapi/fakedll.c`) refuses to
+overwrite anything that is not one of Wine's own placeholders, verified on the
+device where a 4 087 808-byte DXVK `d3d11.dll` survived a pass that created
+`syswow64/kernel32.dll` beside it. The half that *is* real is simpler:
+`syswow64` does not exist until the 32-bit pass has made it, so the 32-bit
+payload was being written into a directory Wine had not created yet.
+
+Every one of these steps has a timeout. The failure this whole section exists to
+end was a step that hung rather than one that errored, and a step that hangs is
+a step that has failed slowly.
 
 ## Roadmap
 

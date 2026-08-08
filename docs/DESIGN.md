@@ -323,6 +323,42 @@ pressed there is nothing to edit.
 sheets have no visible order, and a destructive confirmation is the one place the
 buttons stay words.
 
+### First run, over home
+
+**A dialog, and it is a report rather than a gate.** The `sideload` APK carries
+the component packages inside it, so installing the app is the whole of setup:
+there is nothing to choose, nothing to download, and no button. What there is, is
+about a minute of unpacking roughly a gigabyte, and a container list that sat
+there silently for a minute would look broken.
+
+So it is the launch checklist's shape, applied to a different kind of work — one
+row per component, a status glyph each, and the detail line saying what came out
+of it. `VDialogCard`, `VStepRow` and `VStepGlyph` are shared with
+`SessionLaunchDialog` outright; two copies of a checklist is how the second one
+ends up with a different tick.
+
+Three decisions worth stating:
+
+- **The bar is over compressed bytes, and says so in the line under it.** Wine is
+  88% of the bundle's bytes and one sixth of its rows, so a bar over rows would
+  sit at 17% for most of the wait and then finish in ten seconds. The unpacked
+  total is not knowable in advance — `profile.json` lists file *names* — so a bar
+  over unpacked bytes would need a denominator that does not exist.
+- **The only control is Hide**, which is the same word and the same meaning it
+  has on the launch checklist: it puts the report down, and the work carries on.
+  There is no Cancel, because cancelling would leave the app unable to do the one
+  thing it is for.
+- **A failure is not a dead end.** Running out of space part-way is the realistic
+  one, so a package that will not install does not stop the ones after it: the
+  dialog turns into *Setup did not finish*, names each missing component with the
+  installer's own sentence, adds the one sentence that says what would fix it, and
+  the button becomes Continue. Four of six components installed is four the user
+  can see, not a screen they cannot get past.
+
+It never appears twice. The check is "is this version in the shared store", read
+off the filesystem — never a preference flag, which is a thing that can disagree
+with a device whose storage was cleared.
+
 ### Session, in detail
 
 Five states, not one. Most designs for this only draw the happy one, and then
