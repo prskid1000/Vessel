@@ -90,13 +90,6 @@
             "120": "120 fps",
             "165": "165 fps  (panel maximum)"
           }
-        },
-        {
-          "key": "display.fileManager",
-          "title": "Open a file manager",
-          "help": "Starts Wine's file manager on the desktop, so there is something to browse and launch from.",
-          "type": "bool",
-          "default": true
         }
       ]
     },

@@ -299,15 +299,6 @@ object DisplayParams {
     const val RESOLUTION: String = "display.resolution"
     const val FPS_LIMIT: String = "display.fpsLimit"
 
-    /**
-     * Whether [WINE_FILE_MANAGER] starts with the desktop.
-     *
-     * A setting rather than unconditional because the desktop is also what a
-     * fullscreen game runs on, and a file manager under it is a window the game
-     * has to be told about. The rail button ignores it: pressing a button is a
-     * request, not a preference.
-     */
-    const val FILE_MANAGER: String = "display.fileManager"
 }
 
 /**
@@ -328,36 +319,6 @@ const val WINE_BOOT: String = "wineboot"
 
 /** `regedit`, likewise a symlink. */
 const val WINE_REGEDIT: String = "regedit"
-
-/**
- * Wine's own file manager, and the only thing on the desktop by default.
- *
- * `explorer /desktop=` draws a background and nothing else — no icons, no
- * taskbar, no Start menu, because Wine's explorer is not a shell. A session that
- * starts nothing into it is a coloured rectangle with no way to reach a program.
- *
- * The `.exe` is part of the name on purpose. It is what `wine` is handed, which
- * makes it what lands in `ImagePathName`, which is the key
- * [PrefixRegistry.fileManagerDesktop] is filed under — `get_default_desktop`
- * matches on the image's base name, so `wine winefile` and
- * `wine winefile.exe` are not interchangeable there.
- */
-const val WINE_FILE_MANAGER: String = "winefile.exe"
-
-/**
- * The directory the file manager opens on: the container's own Windows drive.
- *
- * Passed explicitly, and it has to be. `show_frame` (`programs/winefile/`) falls
- * back to `GetCurrentDirectoryW` when it gets no argument, and the session's
- * working directory is `files/containers/<id>/` — a Unix path, which Wine maps
- * onto `Z:`. So the default view is the *Android* filesystem seen through the
- * root drive, which is a real place and entirely the wrong one: the container's
- * programs, its `system32`, and everything a user installs are on `C:`.
- *
- * `_wsplitpath` gets no filename component out of a bare drive root, so winefile
- * treats it as a directory to open rather than a file to select.
- */
-const val WINE_FILE_MANAGER_ROOT: String = """C:\"""
 
 /**
  * The desktop process: `wine explorer /desktop=vessel,1280x720 [program]`.
@@ -383,17 +344,28 @@ fun WineTree.desktopArgv(
     hasBinary = hasBinary,
 )
 
-/** [WINE_FILE_MANAGER] and the directory it opens on, as explorer's trailing command line. */
-val FILE_MANAGER_COMMAND: List<String> = listOf(WINE_FILE_MANAGER, WINE_FILE_MANAGER_ROOT)
-
 /**
- * `wine winefile.exe`, for relaunching it into a desktop that already exists.
+ * `wine <program> [arguments]`, for a program the *user* chose.
  *
- * Routed through the loader rather than through `bin/winefile`, which is there
- * and would work: the symlink form leaves `ImagePathName` derived from the
- * symlink rather than from the resolved builtin, and the AppDefaults lookup that
- * puts this window on the `vessel` desktop keys on that name. Naming the program
- * explicitly is one argument and removes the question.
+ * Everything the
+ * launcher can start goes through here, including the ones that are not run
+ * directly: a `.bat` arrives as `cmd.exe` with `/c <file>`, an `.msi` as
+ * `msiexec.exe` with `/i <file>`. Deciding which is not this function's job —
+ * `ui/shell/Launchable.kt` already does it and has the tests — so what arrives
+ * here is always an executable plus its arguments.
+ *
+ * `hasBinary = false` for the same reason as the file manager: routing through
+ * `bin/<name>` would leave `ImagePathName` derived from the symlink rather than
+ * from the resolved image, and the AppDefaults lookup that puts a window on the
+ * `vessel` desktop keys on that name. A program named explicitly has no such
+ * question.
+ *
+ * Arguments are passed as separate argv entries and never joined into a string.
+ * A guest path routinely contains spaces — `C:\Program Files\…` is the common
+ * case, not the exotic one — and building one command line here would mean
+ * inventing a quoting convention that Wine's own parser then has to agree with.
  */
-fun WineTree.fileManagerArgv(): List<String> =
-    toolArgv(name = WINE_FILE_MANAGER, arguments = listOf(WINE_FILE_MANAGER_ROOT), hasBinary = false)
+fun WineTree.programArgv(
+    program: String,
+    arguments: List<String> = emptyList(),
+): List<String> = toolArgv(name = program, arguments = arguments, hasBinary = false)

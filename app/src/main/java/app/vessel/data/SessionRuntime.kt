@@ -5,7 +5,6 @@ import android.os.PowerManager
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
 import app.vessel.core.DEFAULT_DISPLAY
-import app.vessel.core.FILE_MANAGER_COMMAND
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayParams
@@ -20,13 +19,12 @@ import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
 import app.vessel.core.TurnipDriver
 import app.vessel.core.WINE_BOOT
-import app.vessel.core.WINE_FILE_MANAGER
 import app.vessel.core.WINE_REGEDIT
 import app.vessel.core.WINE_UNIX_ARCH
 import app.vessel.core.WineTree
 import app.vessel.core.desktopArgv
 import app.vessel.core.diagnoseSessionLine
-import app.vessel.core.fileManagerArgv
+import app.vessel.core.programArgv
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamValue
 import app.vessel.core.parseFpsLimit
@@ -130,20 +128,17 @@ data class SessionState(
 }
 
 /**
- * What [SessionRuntime.launchFileManager] did.
+ * What [SessionRuntime.launchProgram] did.
  *
- * A result rather than a `Boolean` because the two ways it can decline are
- * different things to say: one is "you already have one open" and the other names
- * a package that cannot provide it. DESIGN.md's rule about a control that
- * controls nothing applies to a button that silently does nothing too.
+ * No `AlreadyRunning` case. A second copy of a program the user asked for twice
+ * is their business, and refusing it would be this layer having an opinion it
+ * has no basis for.
  */
-sealed interface FileManagerLaunch {
-    data object Started : FileManagerLaunch
+sealed interface ProgramLaunch {
+    data object Started : ProgramLaunch
 
-    /** One this class started is still alive. Nothing was launched. */
-    data object AlreadyRunning : FileManagerLaunch
-
-    data class Unavailable(val reason: String) : FileManagerLaunch
+    /** Nothing was started, and this is the sentence to show. */
+    data class Unavailable(val reason: String) : ProgramLaunch
 }
 
 /**
@@ -224,7 +219,15 @@ class SessionRuntime @Inject constructor(
      * destroys leaves a zombie and a drain coroutine reading a pipe that will
      * never close. Guarded by [lifecycle] on every path that touches it.
      */
-    private val fileManagers = mutableListOf<Process>()
+    /**
+     * Programs the launcher started into a running session.
+     *
+     * Held only so the dead ones can be reaped and so teardown knows they
+     * existed. Killing them individually is not this list's job — every Windows
+     * process in the prefix is a child of `wineserver`, not of us, and
+     * `wineserver -k` is what ends them. See the teardown note.
+     */
+    private val launched = mutableListOf<Process>()
 
     /**
      * Whether the user asked for this.
@@ -351,30 +354,63 @@ class SessionRuntime @Inject constructor(
     }
 
     /**
-     * Open Wine's file manager on the running desktop. The rail's button.
+     * Start one more program inside the session that is already running.
      *
-     * Independent of `display.fileManager`, which only decides what the desktop
-     * starts with: a button press is a request and overrides a preference.
+     * The generalisation of [launchFileManager], which was this with `winefile`
+     * hard-coded. It is what makes the launcher a launcher: `start` takes a
+     * container and nothing else, so before this there was no way to ask a live
+     * prefix to run anything.
      *
-     * **This process is not the session.** It is started, drained into the same
-     * log, and destroyed at teardown, but nothing waits on it and its exit code is
-     * never read — the session still ends when and only when the desktop process
-     * exits. A failure to start is reported to the caller and does not touch
-     * [SessionState].
+     * **Deciding *what* to run is not done here.** `ui/shell/Launchable.kt`
+     * already maps a file to the program that opens it — a `.bat` to `cmd.exe
+     * /c`, an `.msi` to `msiexec.exe /i`, a `.ps1` to a refusal — and has the
+     * tests. What arrives here is an executable and its arguments.
+     *
+     * @param workingDirectory the Unix directory to start in, which is how the
+     *   guest's working directory is set: Wine maps the process's cwd onto a
+     *   Windows path, so a directory under `drive_c` becomes the matching `C:`
+     *   path with no extra argument and no quoting. Null means the container
+     *   root, which Wine maps to `Z:` — correct only when the caller genuinely
+     *   has no preference.
      */
-    suspend fun launchFileManager(): FileManagerLaunch = lifecycle.withLock {
+    suspend fun launchProgram(
+        program: String,
+        arguments: List<String> = emptyList(),
+        workingDirectory: File? = null,
+    ): ProgramLaunch = lifecycle.withLock {
         val current = plan
         if (current == null || _state.value.phase != SessionPhase.RUNNING) {
-            return@withLock FileManagerLaunch.Unavailable("there is no running desktop to open it on")
-        }
-        fileManagers.removeAll { !it.isAlive }
-        if (fileManagers.isNotEmpty()) return@withLock FileManagerLaunch.AlreadyRunning
-        if (!current.tree.hasProgram(WINE_FILE_MANAGER)) {
-            return@withLock FileManagerLaunch.Unavailable(
-                "this Wine package has no $WINE_FILE_MANAGER in lib/wine/${current.tree.peLib.name}",
+            return@withLock ProgramLaunch.Unavailable(
+                "there is no running desktop to start it on",
             )
         }
-        startFileManager(current)
+        // Reaped rather than tracked forever: a session left open all afternoon
+        // would otherwise hold a Process object for every program ever started.
+        launched.removeAll { !it.isAlive }
+
+        val spec = ProcessSpec(
+            argv = current.tree.programArgv(program, arguments),
+            environment = current.environment,
+            workingDirectory = workingDirectory?.takeIf { it.isDirectory } ?: current.layout.base,
+        )
+        current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${'$'}{spec.commandLine}")
+
+        val process = runner.start(spec).getOrElse {
+            val reason = it.message ?: it.javaClass.simpleName
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "${'$'}program could not start: ${'$'}reason",
+            )
+            return@withLock ProgramLaunch.Unavailable(reason)
+        }
+        launched += process
+        // Its output belongs in the session log like everything else: a program
+        // that starts and immediately dies is diagnosed from the lines it wrote,
+        // and dropping them would make the launcher the one place in this app
+        // where a failure is silent.
+        scope.launch { runner.drain(process) { line -> record(current.log, line) } }
+        ProgramLaunch.Started
     }
 
     // — the session -----------------------------------------------------------
@@ -418,7 +454,7 @@ class SessionRuntime @Inject constructor(
 
         try {
             prepare(containerId, profile, manifest, log) ?: return
-            runDesktop(log, geometry, fpsLimit, flag(profile, manifest, DisplayParams.FILE_MANAGER))
+            runDesktop(log, geometry, fpsLimit)
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
             // every step of it suspends, so it needs a context that is not
@@ -553,7 +589,6 @@ class SessionRuntime @Inject constructor(
         log: SessionLog,
         geometry: DisplayGeometry,
         fpsLimit: Int?,
-        fileManager: Boolean,
     ) {
         val current = plan ?: return
         _state.update { it.copy(phase = SessionPhase.STARTING) }
@@ -594,29 +629,18 @@ class SessionRuntime @Inject constructor(
         }
 
         // What the display server answered with becomes part of the plan, not just
-        // of this one command: `launchFileManager` starts a guest process later and
-        // it needs the same DISPLAY and the same shared-memory socket.
+        // of this one command: `launchProgram` starts a guest process later and it
+        // needs the same DISPLAY and the same shared-memory socket.
         val running = current.copy(environment = current.environment + displayEnvironment)
         plan = running
 
-        // Started by explorer rather than beside it. `explorer /desktop=` gives a
-        // bare background — no icons, no taskbar — so without something on it a
-        // new session is an empty rectangle with no way to reach a program.
-        val program = when {
-            !fileManager -> emptyList()
-            running.tree.hasProgram(WINE_FILE_MANAGER) -> FILE_MANAGER_COMMAND
-            else -> {
-                log.line(
-                    LogSource.VESSEL,
-                    LogLevel.WARN,
-                    "this Wine package has no $WINE_FILE_MANAGER; the desktop will be empty",
-                )
-                emptyList()
-            }
-        }
-
+        // `explorer /desktop=` and nothing on it. The desktop is deliberately a
+        // bare background: Vessel's own taskbar and launcher are drawn on the
+        // Android side, over this surface, so starting a Windows program here to
+        // give the user somewhere to click would put a second, worse shell
+        // underneath the real one.
         val spec = ProcessSpec(
-            argv = running.tree.desktopArgv(geometry, program),
+            argv = running.tree.desktopArgv(geometry, emptyList()),
             environment = running.environment,
             workingDirectory = running.layout.base,
         )
@@ -725,31 +749,10 @@ class SessionRuntime @Inject constructor(
      * Nothing joins this: the drain runs on [scope], which outlives the session
      * job, so a file manager the user leaves open cannot hold up a Stop and its
      * exit cannot be mistaken for the desktop's. It reaches the `vessel` desktop
-     * through [PrefixRegistry.fileManagerDesktop] rather than through a second
+     * through the prefix registry rather than through a second
      * `explorer /desktop=`, which would put a full-size second desktop window over
      * everything already on screen.
      */
-    private fun startFileManager(current: LaunchPlan): FileManagerLaunch {
-        val spec = ProcessSpec(
-            argv = current.tree.fileManagerArgv(),
-            environment = current.environment,
-            workingDirectory = current.layout.base,
-        )
-        current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
-        val process = runner.start(spec).getOrElse {
-            val reason = it.message ?: it.javaClass.simpleName
-            current.log.line(
-                LogSource.VESSEL,
-                LogLevel.WARN,
-                "$WINE_FILE_MANAGER could not start: $reason",
-            )
-            return FileManagerLaunch.Unavailable(reason)
-        }
-        fileManagers += process
-        scope.launch { runner.drain(process) { line -> record(current.log, line) } }
-        return FileManagerLaunch.Started
-    }
-
     // — teardown ---------------------------------------------------------------
 
     /**
@@ -779,7 +782,7 @@ class SessionRuntime @Inject constructor(
         // Ahead of `wineserver -k` for the same reason as the desktop: these are
         // our own children as well as the server's, so closing their pipes first
         // lets the drain coroutines finish instead of blocking on a read.
-        fileManagers.forEach { it.takeIf(Process::isAlive)?.destroy() }
+        launched.forEach { it.takeIf(Process::isAlive)?.destroy() }
 
         if (current != null && wineserver != null) {
             val spec = ProcessSpec(
@@ -798,10 +801,10 @@ class SessionRuntime @Inject constructor(
         }
 
         desktop?.destroyForcibly()
-        fileManagers.forEach { it.destroyForcibly() }
+        launched.forEach { it.destroyForcibly() }
         wineserver?.destroyForcibly()
         desktop = null
-        fileManagers.clear()
+        launched.clear()
         wineserver = null
         plan = null
 

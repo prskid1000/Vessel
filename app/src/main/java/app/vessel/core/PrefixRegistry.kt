@@ -71,14 +71,16 @@ object PrefixRegistry {
      * re-applied. [app.vessel.data.ContainerProvisioner] stores it, so a seed
      * change re-runs the registry step and nothing else.
      *
-     * 2 added a wallpaper key and [fileManagerDesktop]; 3 added [desktopTheme];
+     * 2 added a wallpaper key and a file-manager desktop key; 3 added [desktopTheme];
      * 4 added [visualStyles] and [windowsDarkMode]; 5 moved [visualStyles] off
      * `Software\Wine\Themes`, which uxtheme never reads; 6 removed the wallpaper
      * key and folded the desktop's `Background` into [desktopTheme], which is
      * what makes an already-provisioned container stop pointing at a bitmap that
-     * no longer gets written.
+     * no longer gets written; 7 removed the `winefile.exe` AppDefaults key along
+     * with the file manager itself — Vessel's own C: browser replaced it, so
+     * nothing puts a second Wine program on the desktop any more.
      */
-    const val SEED_VERSION: Int = 6
+    const val SEED_VERSION: Int = 7
 
     /** The mode the DLL override values carry. See [D3D_DLL_OVERRIDES]. */
     const val DLL_OVERRIDE_MODE: String = "native,builtin"
@@ -161,28 +163,7 @@ object PrefixRegistry {
         values = listOf(RegistryValue(RegistryValue.DEFAULT, "libwow64fex.dll")),
     )
 
-    /**
-     * Put the file manager on the session's virtual desktop, not on a second one.
-     *
-     * `explorer /desktop=vessel,WxH winefile.exe` gets the *first* one right for
-     * free — the child inherits the desktop from the thread that spawned it. A
-     * relaunch from the rail is a fresh top-level process with no Wine parent, and
-     * `winstation_init` (`dlls/win32u/winstation.c`) resolves its desktop from
-     * `HKCU\Software\Wine\AppDefaults\<exe>\Explorer` → `Desktop` before falling
-     * back to `Default`. Without this value the relaunched winefile opens on the
-     * Default desktop, which spawns a second `explorer` and leaves two desktops
-     * on one X screen.
-     *
-     * Scoped to `winefile.exe` rather than set at `HKCU\Software\Wine\Explorer`,
-     * which is the other place that function looks: the unscoped key would also
-     * catch `wineboot` and `regedit` during provisioning, when there is no
-     * `vessel` desktop yet and no `DISPLAY` to make one on.
-     */
-    val fileManagerDesktop: RegistryKey = RegistryKey(
-        path = """HKEY_CURRENT_USER\Software\Wine\AppDefaults\$WINE_FILE_MANAGER\Explorer""",
-        values = listOf(RegistryValue("Desktop", WINE_DESKTOP)),
-    )
-
+    
     /**
      * The guest's chrome in Nocturne, so a Windows window reads as part of
      * Vessel rather than as stock grey Wine.
@@ -325,7 +306,6 @@ object PrefixRegistry {
         dllOverrides,
         arm64ecEmulator,
         x86Emulator,
-        fileManagerDesktop,
         desktopTheme,
         visualStyles,
         windowsDarkMode,

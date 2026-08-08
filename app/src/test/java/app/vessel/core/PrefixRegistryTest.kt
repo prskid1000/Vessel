@@ -105,9 +105,6 @@ class PrefixRegistryTest {
             "",
             """[HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\x86]""",
             """@="libwow64fex.dll"""",
-            "",
-            """[HKEY_CURRENT_USER\Software\Wine\AppDefaults\winefile.exe\Explorer]""",
-            """"Desktop"="vessel"""",
         ).joinToString("\r\n", postfix = "\r\n")
 
         // The theme block is asserted by name and value below rather than being
@@ -158,13 +155,13 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(6, PrefixRegistry.SEED_VERSION)
-        assertEquals(8, PrefixRegistry.seed.size)
+        assertEquals(7, PrefixRegistry.SEED_VERSION)
+        assertEquals(7, PrefixRegistry.seed.size)
     }
 
     @Test
     fun `visual styles are switched off, or the colour theme does nothing`() {
-        // Measured on device: with Aero active, winefile's unthemed panes came up
+        // Measured on device: with Aero active, unthemed Win32 panes came up
         // Nocturne dark and its themed status bar came up #F5F5F5. A themed
         // control draws from the .msstyles package, never from Control Panel\Colors.
         assertEquals(
@@ -299,27 +296,6 @@ class PrefixRegistryTest {
         assertTrue(!PrefixRegistry.render().lowercase().contains("wallpaper"))
     }
 
-    @Test
-    fun `the file manager is filed under its own AppDefaults key, not the global one`() {
-        // HKCU\Software\Wine\Explorer\Desktop would also work and would also catch
-        // wineboot and regedit during provisioning, when there is no vessel
-        // desktop and no DISPLAY to make one on.
-        assertEquals(
-            """HKEY_CURRENT_USER\Software\Wine\AppDefaults\winefile.exe\Explorer""",
-            PrefixRegistry.fileManagerDesktop.path,
-        )
-        assertEquals(
-            listOf(RegistryValue("Desktop", WINE_DESKTOP)),
-            PrefixRegistry.fileManagerDesktop.values,
-        )
-    }
 
-    @Test
-    fun `the AppDefaults key names the same executable the launcher runs`() {
-        // get_default_desktop matches on the base name of ImagePathName. A key
-        // filed under `winefile` while the launcher runs `winefile.exe` is a key
-        // nothing ever reads, and the only symptom is a second desktop appearing.
-        assertTrue(PrefixRegistry.fileManagerDesktop.path.contains("""\$WINE_FILE_MANAGER\"""))
-    }
 
 }

@@ -21,6 +21,7 @@ import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayRequest
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDisplayServer
+import app.vessel.core.TopLevelWindow
 import app.vessel.core.displayNumber
 import app.vessel.core.xSocketName
 import app.vessel.input.GamepadControl
@@ -45,8 +46,11 @@ import com.winlator.widget.XServerView
 import com.winlator.xconnector.UnixSocketConfig
 import com.winlator.xconnector.XConnectorEpoll
 import com.winlator.xserver.Pointer
+import com.winlator.xserver.Property
 import com.winlator.xserver.SHMSegmentManager
 import com.winlator.xserver.ScreenInfo
+import com.winlator.xserver.Window
+import com.winlator.xserver.WindowManager
 import com.winlator.xserver.XClientConnectionHandler
 import com.winlator.xserver.XClientRequestHandler
 import com.winlator.xserver.XServer
@@ -108,6 +112,9 @@ class XServerDisplay @Inject constructor(
     private val _pointerMode = MutableStateFlow(PointerMode.TRACKPAD)
     override val pointerMode: StateFlow<PointerMode> = _pointerMode.asStateFlow()
 
+    private val _windows = MutableStateFlow<List<TopLevelWindow>>(emptyList())
+    override val windows: StateFlow<List<TopLevelWindow>> = _windows.asStateFlow()
+
     /** Serialises start against stop, so a fast Retry cannot bind X0 twice. */
     private val lifecycle = Mutex()
 
@@ -125,6 +132,21 @@ class XServerDisplay @Inject constructor(
         view.post { view.pointerMode = mode }
     }
 
+    /**
+     * Raise a window and focus it.
+     *
+     * Both halves are needed and they are different operations: raising changes
+     * the Z order so the user can see it, focusing decides where the keyboard
+     * goes. A taskbar press that did only the first would put the window in
+     * front of a program that still has the keys.
+     *
+     * Silent for an unknown id — a press that races the program's own exit is an
+     * ordinary thing to happen, not an error to report.
+     */
+    override fun focusWindow(id: Int) {
+        session?.focusWindow(id)
+    }
+
     override fun showKeyboard() {
         val view = session?.view ?: return
         view.post { view.showSoftKeyboard() }
@@ -136,6 +158,11 @@ class XServerDisplay @Inject constructor(
             try {
                 val started = DisplaySession(context, request)
                 session = started
+                // The server publishes its window list into this flow. Wired
+                // after construction rather than passed in, so DisplaySession
+                // stays a thing that owns sockets and a view and knows nothing
+                // about what the taskbar wants.
+                started.onWindowsChanged = { list -> _windows.value = list }
                 _surface.value = started.view
                 DisplayOutcome.Started(started.environment)
             } catch (t: Throwable) {
@@ -156,6 +183,9 @@ class XServerDisplay @Inject constructor(
     /** Main thread, lock held. */
     private fun teardown() {
         _surface.value = null
+        // Cleared here and not on session end: a taskbar still showing the
+        // windows of a session that has stopped is worse than an empty one.
+        _windows.value = emptyList()
         session?.let { runCatching { it.stop() }.onFailure { e -> Log.w(TAG, "teardown", e) } }
         session = null
     }
@@ -182,6 +212,67 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     val view: SessionSurfaceView
     val environment: Map<String, String>
 
+    /** Set by the adapter once construction has succeeded. */
+    var onWindowsChanged: ((List<TopLevelWindow>) -> Unit)? = null
+
+    /**
+     * Publish the current top-level window list.
+     *
+     * Called from the X server's own threads, which is why the whole thing is
+     * rebuilt and handed over as an immutable list rather than mutated in place:
+     * the collector is a Compose recomposition on the main thread, and a list
+     * being appended to underneath it is a crash waiting for the right timing.
+     *
+     * "Top level" means a direct child of the root window. Wine's X11 driver
+     * gives every Windows top-level window exactly one of these; the children
+     * below them are its own decorations and client areas, and a taskbar showing
+     * those would list four entries for one Notepad.
+     *
+     * Windows with no `WM_NAME` yet are dropped rather than listed blank. A
+     * program sets its title a moment after mapping, and a nameless button that
+     * turns into "Notepad" a frame later reads as a glitch.
+     */
+    private fun publishWindows() {
+        val listener = onWindowsChanged ?: return
+        val manager = xServer.windowManager
+        val focused = manager.focusedWindow?.id
+        val list = manager.rootWindow.children
+            .filter { it.attributes.isMapped }
+            .mapNotNull { window ->
+                val title = window.name.orEmpty().trim()
+                if (title.isEmpty()) {
+                    null
+                } else {
+                    TopLevelWindow(window.id, title, focused = window.id == focused)
+                }
+            }
+        listener(list)
+    }
+
+    /**
+     * Raise then focus. See the note on the adapter's `focusWindow`.
+     *
+     * Built from primitives the vendored server already exposes —
+     * `moveChildAbove`, `triggerOnChangeWindowZOrder`, `setFocus` — rather than
+     * by adding a method to `com.winlator`. Every line not added there is a line
+     * that does not have to be re-applied when the vendored tree is updated.
+     *
+     * `moveChildAbove(window, null)` is a raise to the top: the sibling argument
+     * is what it goes above, and null means "above all of them". The trigger
+     * afterwards is not optional — Z order is what the compositor draws from, and
+     * without it the window is logically in front and visually still behind.
+     */
+    fun focusWindow(id: Int) {
+        val manager = xServer.windowManager
+        val window = manager.getWindow(id) ?: return
+        runCatching {
+            window.parent?.moveChildAbove(window, null)
+            manager.triggerOnChangeWindowZOrder(window)
+            manager.setFocus(window, WindowManager.FocusRevertTo.PARENT)
+        }.onFailure { Log.w("VesselDisplay", "could not focus window ${'$'}id", it) }
+        publishWindows()
+    }
+
     init {
         xServer.setDebugSink { line -> Log.d("VesselDisplay", line) }
         // MIT-SHM is advertised unconditionally by XServer.setupExtensions, and
@@ -198,6 +289,22 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         val surface = SessionSurfaceView(context, xServer, request.fpsLimit)
         view = surface
         xServer.setRenderer(surface.renderer)
+
+        // The taskbar's source of truth. Four of the seven callbacks matter:
+        // map and unmap are a window appearing and going away, a property change
+        // is usually the title arriving a moment after the map, and a Z-order
+        // change is what moves the focus highlight. The other three are geometry
+        // and attribute churn that no taskbar entry reflects, and subscribing to
+        // them would republish the whole list on every drag of a guest window.
+        xServer.windowManager.addOnWindowModificationListener(
+            object : WindowManager.OnWindowModificationListener {
+                override fun onMapWindow(window: Window) = publishWindows()
+                override fun onUnmapWindow(window: Window) = publishWindows()
+                override fun onChangeWindowZOrder(window: Window) = publishWindows()
+                override fun onModifyWindowProperty(window: Window, property: Property) =
+                    publishWindows()
+            },
+        )
 
         try {
             xConnector = XConnectorEpoll(

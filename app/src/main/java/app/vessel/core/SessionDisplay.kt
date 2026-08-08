@@ -32,6 +32,21 @@ data class DisplayRequest(
     val socketRoot: File,
 )
 
+/**
+ * One mapped top-level window inside the guest.
+ *
+ * [id] is the X window id, which is what [SessionDisplayServer.focusWindow]
+ * takes back. [title] is `WM_NAME` — what the program's own title bar says, and
+ * therefore the only string a user will recognise. A window that has not set one
+ * yet reports an empty title rather than a placeholder; naming it "Untitled"
+ * here would be this layer inventing a fact about the guest.
+ */
+data class TopLevelWindow(
+    val id: Int,
+    val title: String,
+    val focused: Boolean,
+)
+
 /** How [SessionDisplayServer.start] went. Modelled on `BootstrapOutcome`. */
 sealed interface DisplayOutcome {
     /**
@@ -96,6 +111,35 @@ interface SessionDisplayServer {
     fun setPointerMode(mode: PointerMode)
 
     /**
+     * Top-level guest windows, for the taskbar. Empty when nothing is running.
+     *
+     * On this seam and not somewhere in `data/` because the X server is the only
+     * thing that knows. It already tracks every window's `WM_NAME` and fires on
+     * map, unmap and property change, so this is a translation of something
+     * present rather than new bookkeeping — and a flow rather than a poll for the
+     * same reason: a taskbar refreshed on a timer lags the thing it describes.
+     *
+     * [TopLevelWindow] deliberately carries no `com.winlator` type. Everything
+     * vendored stays on the far side of this interface, which is what lets the
+     * taskbar be an ordinary Compose list.
+     *
+     * **A window here is one the guest mapped, and nothing else.** A program that
+     * minimises to a tray icon leaves this list rather than docking somewhere:
+     * receiving a tray icon needs a helper process inside the guest and this
+     * project ships none. The taskbar says so in words; it must not quietly show
+     * a stale entry to paper over it.
+     */
+    val windows: StateFlow<List<TopLevelWindow>>
+
+    /**
+     * Raise a window and give it the input focus.
+     *
+     * A no-op for an id the server does not have. A taskbar button pressed while
+     * the program is closing is an ordinary race, not an error worth surfacing.
+     */
+    fun focusWindow(id: Int)
+
+    /**
      * Raise the IME over the guest's output.
      *
      * There is no hardware keyboard on a phone, and a Windows desktop with no
@@ -123,6 +167,13 @@ interface SessionDisplayServer {
             MutableStateFlow(PointerMode.TRACKPAD).asStateFlow()
 
         override fun setPointerMode(mode: PointerMode) = Unit
+
+        // Headless: there are no windows, and saying so with an empty list is the
+        // honest answer rather than a missing capability the taskbar has to guess at.
+        override val windows: StateFlow<List<TopLevelWindow>> =
+            MutableStateFlow(emptyList<TopLevelWindow>()).asStateFlow()
+
+        override fun focusWindow(id: Int) = Unit
 
         override fun showKeyboard() = Unit
 
