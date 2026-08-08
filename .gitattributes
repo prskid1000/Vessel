@@ -16,6 +16,11 @@ gradlew   text eol=lf
 *.bat     text eol=crlf
 *.cmd     text eol=crlf
 
+# Binary, stated rather than guessed. `text=auto` above sniffs the first 8 KB
+# for a NUL byte, which is a heuristic and not a guarantee — a file that happens
+# to open with printable bytes gets eol conversion applied to its middle. Every
+# extension this repository actually stores in binary form is listed, so nothing
+# depends on the sniff.
 *.jar     binary
 *.png     binary
 *.jpg     binary
@@ -23,3 +28,16 @@ gradlew   text eol=lf
 *.wcp     binary
 *.so      binary
 *.dll     binary
+*.bmp     binary
+*.ico     binary
+*.ttf     binary
+*.otf     binary
+*.woff    binary
+*.woff2   binary
+
+# This file cannot reach native/. `native/*/` is gitignored and each upstream
+# tree is its own repository, so those checkouts inherit the *host's* git config
+# — which on the Windows workstation is `core.autocrlf=true`, and which produced
+# 53 permanently-modified files in native/wine, `.bmp` fixtures included. The fix
+# for those trees lives in `harden_checkout()` in build/common.sh, because that
+# is the only code that owns them. Adding entries here would do nothing.

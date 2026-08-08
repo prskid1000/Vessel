@@ -189,6 +189,102 @@ resolve_cpu_flags() {
 
 # --- Source management -------------------------------------------------------
 
+# Make one upstream checkout independent of whoever's git config it lands in.
+#
+# This exists because of a bug that cost real time. `native/*` is gitignored, so
+# each upstream tree is its own repository and Vessel's `.gitattributes` says
+# nothing about it — it inherits the *host's* global git config instead. On the
+# Windows workstation this project is developed on that config is
+# `core.autocrlf=true`, and the result was a Wine checkout that could never be
+# clean:
+#
+#   $ git -C native/wine status --short
+#    M configure
+#    M dlls/iyuv_32/tests/i420frame.bmp
+#    M dlls/mf/tests/nv12frame-crop.bmp
+#    ... 41 files, none of which anyone had edited
+#
+# Two separate defects were tangled together there, and it is worth naming both
+# because only one of them is the one everybody guesses:
+#
+#  - **Mode, not content.** All 41 were `100755 -> 100644` with an empty diff.
+#    Wine marks a handful of data files executable (the `.bmp` fixtures among
+#    them, which is why the symptom looked like binary corruption), the clone was
+#    made through a bind mount where git probed `chmod` as working and therefore
+#    set `core.filemode=true`, and Git-for-Windows reading the same NTFS tree
+#    reports every file as 0644. So git compares a mode it cannot observe.
+#    `core.filemode=false` is the fix and it costs nothing: checkout still
+#    applies the index's mode when it writes a file, so `configure` is still
+#    executable inside the container. Only the read-back is disabled.
+#
+#  - **Content, waiting to happen.** `git diff` also printed *"LF will be
+#    replaced by CRLF the next time Git touches it"* for 37 more files. Nothing
+#    had been mangled yet, but the next checkout or `git apply` would have, and a
+#    CRLF'd `configure` or `tools/make_makefiles` fails inside the Linux
+#    container with an error that names none of this.
+#
+# The cost of leaving it was not cosmetic. `apply_patches` below is a hard gate
+# on `git apply --check`, and a dirty tree has already made that gate report the
+# wrong thing once. A build harness whose first act is to lie about whether the
+# source is pristine has given up the property it exists to provide.
+#
+# Config *and* attributes, deliberately: `core.autocrlf` can be overridden per
+# invocation (`git -c`, `GIT_CONFIG_*`), and `.git/info/attributes` cannot be.
+# `* -text` is the strongest available statement of "never rewrite a byte of
+# this tree", which is exactly right for a tree we neither author nor commit to.
+harden_checkout() {
+  local dir="$1" name="$2"
+
+  # Only the first pass has anything to do; written as a guard because the
+  # renormalize below is expensive on a tree Wine's size.
+  local before
+  before="$(git -C "$dir" config --local --get core.autocrlf || true)"
+
+  git -C "$dir" config core.autocrlf false
+  git -C "$dir" config core.eol lf
+  git -C "$dir" config core.filemode false
+
+  mkdir -p "$dir/.git/info"
+  printf '%s\n' \
+    '# Written by build/common.sh: harden_checkout(). Do not edit by hand.' \
+    '# Vessel never commits to this tree, so no byte of it should ever be' \
+    '# rewritten by an eol filter — see the comment on harden_checkout.' \
+    '* -text' \
+    > "$dir/.git/info/attributes"
+
+  # Config alone does not undo a checkout that was already converted: git trusts
+  # its stat cache and will not rewrite a file whose size and mtime are
+  # unchanged. Emptying the index forces every path to be written again. This is
+  # the recipe gitattributes(5) gives for renormalizing, and it runs at most once
+  # per tree — on the pass that finds the config wrong.
+  if [ "$before" != "false" ]; then
+    info "$name: normalising the checkout (was core.autocrlf='${before:-inherited}')"
+    git -C "$dir" rm --cached -r -q . >/dev/null 2>&1 || true
+    git -C "$dir" reset --hard --quiet HEAD
+  fi
+}
+
+# Fail loudly if an upstream tree is not pristine before patches go on.
+#
+# `checkout --force` above should guarantee this. The check is here because when
+# it does *not* hold the consequence is a patch gate testing the wrong tree, and
+# the whole reason `apply_patches` is a hard error is that a half-patched build
+# is not reproducible. Submodules are excluded: they are updated on the next
+# line and their own dirtiness is not this tree's.
+assert_pristine() {
+  local dir="$1" name="$2"
+  local dirty
+  dirty="$(git -C "$dir" status --porcelain --untracked-files=no --ignore-submodules=all)"
+  [ -z "$dirty" ] || die "$name: the checkout is not clean after 'checkout --force':
+
+$dirty
+
+     Nothing should modify native/$name — it is fetched, patched and built, and
+     Vessel's edits live in patches/$name/. If these are mode-only changes, the
+     harden_checkout() config did not take; if they are content, something wrote
+     into the tree."
+}
+
 # Clone (or update) a component to its pinned ref and apply our patches.
 # Idempotent: safe to re-run, always ends at exactly the pinned ref.
 # fetch_source <name> <repo> <ref> [exact_sha]
@@ -203,11 +299,17 @@ fetch_source() {
 
   if [ ! -d "$dir/.git" ]; then
     log "cloning $name from $repo"
-    git clone --recurse-submodules "$repo" "$dir"
+    # The two -c flags apply to the clone's own checkout, which happens before
+    # there is a repository to configure. harden_checkout() then makes them
+    # permanent; see its comment for why both halves are needed.
+    git -c core.autocrlf=false -c core.eol=lf \
+      clone --recurse-submodules "$repo" "$dir"
   else
     info "fetching $name"
     git -C "$dir" fetch --all --tags --prune
   fi
+
+  harden_checkout "$dir" "$name"
 
   log "checking out $name @ $ref"
   git -C "$dir" checkout --force "$ref"
@@ -224,6 +326,8 @@ fetch_source() {
     log "pinning $name to $exact"
     git -C "$dir" checkout --force --detach "$exact"
   fi
+
+  assert_pristine "$dir" "$name"
 
   git -C "$dir" submodule update --init --recursive
 
