@@ -176,6 +176,18 @@ private fun SessionContent(
 ) {
     var confirmingStop by remember { mutableStateOf(false) }
 
+    // A finished session has to be dismissed on the way out, and the system back
+    // gesture is a way out that nothing was intercepting.
+    //
+    // The toolbar's arrow and the outcome dialog's buttons both called
+    // `onDismiss`, which clears the runtime; a swipe popped the back stack
+    // straight past them and left the runtime holding an EXITED or FAILED
+    // session. `launchIfIdle` then returns early — it refuses whenever the phase
+    // is not IDLE — so the *next* container opened showed the *previous* run's
+    // outcome dialog immediately, before anything had launched. That is the bug
+    // that reads as "pressing back opens a dialogue".
+    BackHandler(enabled = state.finished) { onDismiss() }
+
     if (state.phase == SessionPhase.RUNNING) {
         RunningSurface(
             state = state,
@@ -435,11 +447,16 @@ private fun RunningSurface(
 ) {
     var railOpen by remember { mutableStateOf(false) }
 
-    // Back does not leave a running session. DESIGN.md forwards it to the guest
-    // as `Esc`, which needs a display server to send it to; until there is one,
-    // opening the rail — where Stop is — is the behaviour that does not silently
-    // discard the gesture.
-    BackHandler(enabled = true) { railOpen = true }
+    // Back closes the rail if it is open, and otherwise leaves the screen — the
+    // session keeps running, because the foreground service owns it and not this
+    // composable.
+    //
+    // It used to *open* the rail unconditionally, from a time when the rail had
+    // no other way in. That made Back a trap: every press reopened the rail and
+    // nothing could ever leave a running session. The rail has a full-height
+    // edge handle now, so the gesture is free to mean what it means everywhere
+    // else. Stopping the container is still only ever the Stop button.
+    BackHandler(enabled = railOpen) { railOpen = false }
 
     Box(Modifier.fillMaxSize().background(Vessel.colors.bg)) {
         SessionSurface(state, surface)
