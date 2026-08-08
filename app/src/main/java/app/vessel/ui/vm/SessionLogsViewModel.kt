@@ -130,11 +130,17 @@ internal fun durationLabel(startedAt: Long, endedAt: Long?): String {
     }
 }
 
-/** Decimal units, because a log's size is read as a magnitude and never as a block count. */
+/**
+ * Decimal units, because a size is read as a magnitude and never as a block count.
+ *
+ * Shared with the file browser, which is why it goes as far as gigabytes: a log
+ * never gets there, and a Wine prefix does.
+ */
 internal fun sizeLabel(bytes: Long): String = when {
     bytes < 1_000 -> "$bytes B"
     bytes < 1_000_000 -> "${bytes / 1_000} KB"
-    else -> String.format(Locale.ROOT, "%.1f MB", bytes / 1_000_000.0)
+    bytes < 1_000_000_000 -> String.format(Locale.ROOT, "%.1f MB", bytes / 1_000_000.0)
+    else -> String.format(Locale.ROOT, "%.1f GB", bytes / 1_000_000_000.0)
 }
 
 private fun plural(n: Long) = if (n == 1L) "" else "s"
