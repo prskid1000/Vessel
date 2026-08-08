@@ -232,32 +232,86 @@ the wrong guess — `/data/user/0` is mounted `rw`, SELinux logs
 | Component | Kind | Delivery |
 |---|---|---|
 | Wine unix side (`wineserver`, `bin/wine`, `*-unix/*.so`) | host bionic ELF | `.wcp`, started via the system linker |
-| Turnip (`libvulkan_freedreno.so`) | host bionic ELF | `.wcp`, `dlopen`ed from `filesDir` |
+| Turnip (`libvulkan_freedreno.so` + `libc++_shared.so`) | Android Vulkan HAL, bionic ELF | `.wcp`; loaded by the platform Vulkan loader, which libadrenotools redirects at `filesDir` |
+| libadrenotools + its hook objects | host bionic ELF | **inside the APK** — its hooks must sit in `nativeLibraryDir` and nowhere else works |
 | FEX DLLs, DXVK, vkd3d, Wine's PE DLLs | Windows PE | `.wcp`; Android's loader never sees them — Wine opens them as data |
 
-### Turnip does need adrenotools — measured
+### Turnip needs adrenotools — measured, then fixed
 
-This section used to say "spike this before adopting adrenotools", on the
+This section once said "spike this before adopting adrenotools", on the
 reasoning that Mesa's Turnip talks to `/dev/kgsl` directly and has no vendor-blob
-dependency, so a plain `dlopen` might do. The spike is done and the answer is no.
+dependency, so a plain `dlopen` might do. The answer is no, and the reason is
+that Turnip is not an ICD at all.
 
-`libvulkan_freedreno.so` exports exactly one symbol, `HMI`. Nothing can load it
-but Android's own Vulkan loader, and the loader will only load a driver from a
-path it trusts — which is what libadrenotools' `android_dlopen_ext` hook exists
-to arrange. Without that hook the driver is inert, and nothing says so.
-
-Confirmed on the device by asking Vulkan what answered:
+`libvulkan_freedreno.so` exports exactly one symbol, `HMI` — the Android Vulkan
+HAL module. Nothing can load it but Android's own Vulkan loader, and that loader
+resolves its driver from `/vendor/lib64/hw/vulkan.*.so` through
+`android_dlopen_ext` in a namespace an application cannot reach. So the driver
+was inert, and nothing said so:
 
 ```
-driver_id=8  driver="Qualcomm Technologies Inc. Adreno Vulkan Driver"
-name="Adreno (TM) 829"  api=1.4.295  vendor=0x5143
+driver_id=8   driver="Qualcomm Technologies Inc. Adreno Vulkan Driver"
+device="Adreno (TM) 829"   api=1.4.295   vendor=0x5143
 ```
 
-That is the stock Qualcomm blob, not our build. The APK ships no adrenotools
-hook libraries, so **every Vulkan call so far has gone to the vendor driver**,
-and every claim in this document about Turnip on this device describes a binary
-that has not yet run. `TU_DEBUG=startup` remains the ground truth, and its
-absence from a session log is the signal.
+**libadrenotools is now vendored into the APK** (`app/src/main/cpp/adrenotools/`,
+BSD-2-Clause, commit `8fae8ce`). It loads a private, soname-patched copy of the
+platform loader into a linker namespace of its own with an `android_dlopen_ext`
+interposer preloaded in front of it, so the HAL that loader picks up is the
+driver in app storage. Asking the same question again, on the same device, in a
+process started the same way Wine is started:
+
+```
+driver_id=18  driver="turnip Mesa driver (whitebelyash branch)"
+driverInfo="Mesa 26.3.0-devel (git-9c475fc367)"
+device="Adreno (TM) 829 (unknown)"   api=1.4.358   vendor=0x5143
+```
+
+18 is `VK_DRIVER_ID_MESA_TURNIP`. That is our build answering, and it settles the
+`freedreno-kmds=kgsl` question in `build/turnip.sh` at the same time: a physical
+device enumerated, so KGSL alone is the right kernel-driver set.
+
+Four things hold this up, and each of them fails silently if it is undone:
+
+- **`jniLibs.useLegacyPackaging = true`.** libadrenotools loads its hook objects
+  by name from `applicationInfo.nativeLibraryDir`, and with legacy packaging off
+  that directory does not exist on disk.
+- **`ANDROID_STL=c++_shared`.** `libadrenotools` and `libhook_impl` exchange a
+  `std::string`-carrying struct across an `.so` boundary, and the driver
+  namespace needs a real `libc++_shared.so` file to satisfy Turnip's own NEEDED
+  entry. `build/turnip.sh` also ships a copy inside the `.wcp`, built by the same
+  NDK as the driver, so the package does not depend on the app module's NDK pin.
+- **`-z global` on the hook libraries.** It is what puts them in the namespace's
+  preload list; without it the `android_dlopen_ext` override never takes effect.
+- **`linkernsbypass` finding `__loader_dlopen`** by scanning forward from
+  `&dlopen` for the first `BL`. An AArch64 assumption about bionic's code
+  generation, verified on Android 16 / kernel 6.12.38. It fails closed.
+
+**The guest reaches it through a Wine patch, not through the environment alone.**
+`ADRENOTOOLS_DRIVER_PATH` and its two siblings have been in `SessionEnvironment`
+for a while, and on their own they did nothing at all, because nothing read them:
+win32u opens Vulkan with `dlopen(SONAME_LIBVULKAN)` and takes what answers.
+`patches/wine/0006` makes `vulkan_init_once` try libadrenotools first when those
+three variables are set, and report on the `winediag` channel either way — so a
+session log now says which driver the guest got, in words, including when it got
+the wrong one. DXVK and vkd3d reach Vulkan through winevulkan and therefore
+through that same handle; there is no second path to patch.
+
+`TU_DEBUG=startup` remains a second, independent ground truth, and its absence
+from a session log is still a signal.
+
+Two honest limits on what this buys today:
+
+- Turnip is built `-Dplatforms=android`, so its WSI is `VK_KHR_android_surface`.
+  Wine's X11 path wants `VK_KHR_xlib_surface`, which neither Turnip nor the stock
+  driver offers here. Headless rendering — which is what the D3D11/D3D12 probes
+  in `tools/device-graphics.sh` do — is unaffected; presentation still depends on
+  the AHardwareBuffer path listed under "Still missing".
+- The app process and the guest process load the driver independently. Two
+  namespaces, two copies, one GPU. That is how libadrenotools works everywhere
+  and it is fine, but it does mean the app's Drivers screen answering "Turnip" is
+  evidence about the app, not proof about the session; the session log line is
+  the proof about the session.
 
 ### Wine is three toolchains, not one
 

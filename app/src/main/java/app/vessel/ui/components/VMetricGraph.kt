@@ -347,32 +347,81 @@ private fun Legend(series: VMetricSeries) {
 }
 
 /**
- * The rail's form: the numbers in a grid, one graph under them, one caption.
+ * One quantity, one ceiling, one sparkline — the session rail's unit of layout.
  *
- * This is the composable the session rail embeds, and it draws no surface of its
- * own — the rail is one translucent card and this is its contents. It used to
- * take `vCard` here *and* embed [VMetricStrip], which takes another: a ringed
- * box drawn inside a ringed box, 8 dp apart, over a running Windows desktop.
+ * **The rail used to draw every series on one shared graph, and that could not
+ * be right.** A CPU percentage, a GPU percentage, a clock in MHz and a memory
+ * figure in MB have no common vertical axis, so any single ceiling was correct
+ * for at most one of them and the rest were drawn against a number that had
+ * nothing to do with them. Splitting them is what lets each keep its own honest
+ * ceiling — 100% for a load, the part's rated maximum for a clock, device RAM for
+ * memory — so that a line near the top of its box means *flat out* rather than
+ * *taller than its neighbour*.
  *
- * The readings are [VMetricGrid] rather than the strip for the same reason: four
- * of them across a 150 dp column is 37 dp a reading, and a reading that does not
- * fit does not shrink, it wraps.
+ * Compact, because four of these float over a desktop the user is trying to see:
+ * the name and the current reading share one line, and the graph under it is
+ * [SPARK_GRAPH_HEIGHT]. That is a glance, not a reading; the Metrics tab's
+ * [VMetricGraphCard] is where the same series gets room and statistics.
+ *
+ * It draws no surface of its own — the rail is one translucent card and these are
+ * its contents. Nesting a card here would be a ringed box inside a ringed box,
+ * 8 dp apart, over a running Windows desktop.
+ *
+ * [unavailable] is said instead of a graph. A series of nothing but nulls would
+ * otherwise draw an empty box that looks exactly like a working graph of a
+ * quantity pinned at zero, which is the one mistake this whole feature exists to
+ * avoid.
  */
 @Composable
-fun VMetricGraphStrip(
-    metrics: List<VMetricValue>,
-    series: List<VMetricSeries>,
+fun VMetricSpark(
+    label: String,
+    value: String?,
+    series: VMetricSeries?,
     modifier: Modifier = Modifier,
-    note: String? = null,
+    unit: String? = null,
+    tone: VMetricTone = VMetricTone.Normal,
+    unavailable: String? = null,
 ) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
-        if (metrics.isNotEmpty()) VMetricGrid(metrics)
-        if (series.isNotEmpty()) VMetricGraph(series, height = STRIP_GRAPH_HEIGHT)
-        if (note != null) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(verticalAlignment = Alignment.Bottom) {
             Text(
-                note,
-                style = Vessel.type.monoSmall,
+                label.uppercase(),
+                style = Vessel.type.overline,
                 color = Vessel.colors.textMuted,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.weight(1f),
+            )
+            // Never wraps, never shrinks. `573 MB` broken over three lines in a
+            // narrow rail renders as `57 / 3 / MB`, which is a plausible value
+            // and a wrong one — see the rule under Typography in DESIGN.md.
+            if (value != null) {
+                Text(
+                    value,
+                    style = Vessel.type.metricSmall,
+                    color = toneColor(tone),
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                if (unit != null) {
+                    Text(
+                        unit,
+                        style = Vessel.type.monoSmall,
+                        color = Vessel.colors.textMuted,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(start = Vessel.metrics.s3),
+                    )
+                }
+            }
+        }
+        if (series != null) {
+            VMetricGraph(listOf(series), height = SPARK_GRAPH_HEIGHT)
+        } else {
+            Text(
+                unavailable ?: NO_READING,
+                style = Vessel.type.monoSmall,
+                color = Vessel.colors.neutral600,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -389,8 +438,20 @@ private fun VSeriesTone.ink(colors: VColors): Color = when (this) {
 /** Tall enough to show a shape, short enough that four of them are one screen. */
 private val GRAPH_HEIGHT = 56.dp
 
-/** The rail's is shorter again: it is a glance, not a reading. */
-private val STRIP_GRAPH_HEIGHT = 38.dp
+/**
+ * The rail's, and the number the whole rail is budgeted around.
+ *
+ * Four sparks at 22 dp of graph plus their label lines come to 170 dp, which
+ * leaves the header, the two rules and five actions inside a landscape window on
+ * this phone. At 22 dp the box has 16 dp of drawable height after
+ * [VMetricGraph]'s own padding — enough for a shape to be a shape, and the point
+ * at which a fifth quantity would have to displace one of the four rather than
+ * squeeze in beside them.
+ */
+private val SPARK_GRAPH_HEIGHT = 22.dp
+
+/** A working source that has produced nothing yet. Not the same as a denied one. */
+private const val NO_READING = "no reading"
 
 private val LEGEND_MARK_WIDTH = 9.dp
 private val LEGEND_MARK_HEIGHT = 2.dp
@@ -455,29 +516,43 @@ private fun VMetricGraphCardPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 236)
+// At the rail's real inner width, which is the only width these have to work at.
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 150)
 @Composable
-private fun VMetricGraphStripPreview() {
+private fun VMetricSparkPreview() {
     VesselTheme {
-        VMetricGraphStrip(
-            metrics = listOf(
-                VMetricValue("cpu", "62", "%"),
-                VMetricValue("gpu", "77", "%", VMetricTone.Warn),
-                VMetricValue("ram", "3.4", "GB"),
-            ),
-            series = listOf(
+        Column(
+            Modifier.padding(Vessel.metrics.s8),
+            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+        ) {
+            VMetricSpark(
+                "cpu",
+                "62",
                 VMetricSeries("cpu", SampleCpu, ceiling = 100),
+                unit = "%",
+            )
+            VMetricSpark(
+                "gpu",
+                "77",
+                VMetricSeries("gpu", SampleGpu, ceiling = 100, tone = VSeriesTone.Secondary),
+                unit = "%",
+                tone = VMetricTone.Warn,
+            )
+            // The five-figure reading in a 134 dp box, which is the case that
+            // broke the old grid.
+            VMetricSpark(
+                "memory",
+                "3.4 GB",
                 VMetricSeries(
-                    "gpu",
-                    SampleGpu,
+                    "rss",
+                    SampleCpu,
                     ceiling = 100,
                     tone = VSeriesTone.Secondary,
                     form = VSeriesForm.Line,
                 ),
-            ),
-            note = "1 Hz · 40 s",
-            modifier = Modifier.padding(Vessel.metrics.s11),
-        )
+            )
+            VMetricSpark("clock", null, null, unavailable = "source unavailable")
+        }
     }
 }
 

@@ -11,6 +11,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.core.MetricHistory
 import app.vessel.core.MetricSample
@@ -24,11 +25,10 @@ import app.vessel.core.formatWatts
 import app.vessel.data.SessionMetricsState
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VMetricGraphCard
-import app.vessel.ui.components.VMetricGraphStrip
 import app.vessel.ui.components.VMetricSeries
+import app.vessel.ui.components.VMetricSpark
 import app.vessel.ui.components.VMetricStat
 import app.vessel.ui.components.VMetricTone
-import app.vessel.ui.components.VMetricValue
 import app.vessel.ui.components.VSectionHeader
 import app.vessel.ui.components.VSeriesForm
 import app.vessel.ui.components.VSeriesTone
@@ -50,51 +50,107 @@ import app.vessel.ui.theme.VesselTheme
  */
 
 /**
- * **The composable the session rail embeds.**
+ * **The composable the session rail embeds: four graphs, one per quantity.**
  *
- * One call, no arguments beyond the state, and it renders correctly for every
- * case including "nothing is running". Collect
- * [app.vessel.data.SessionMetricsRecorder.watched] to get the state — the act of
- * collecting is what raises the sample rate to 1 Hz, and dropping the collection
- * when the rail closes is what puts it back down.
+ * One shared graph was wrong on its own terms. CPU and GPU are percentages, the
+ * clock is MHz and memory is MB, so a single vertical axis was correct for one
+ * series and meaningless for the other three — and the two that could not fit on
+ * it were simply left off, which is why the rail showed a number for memory and
+ * no history of it at all. Each quantity now carries its own ceiling: 100 for the
+ * loads, the part's fastest core for the clock, the device's RAM for memory.
+ *
+ * Collect [app.vessel.data.SessionMetricsRecorder.watched] to get the state — the
+ * act of collecting is what raises the sample rate to 1 Hz, and dropping the
+ * collection when the rail closes is what puts it back down.
+ *
+ * [paused] is not cosmetic. A `SIGSTOP`ped guest keeps being sampled and every
+ * reading truthfully falls to idle, which is indistinguishable from a container
+ * that has finished loading and is waiting for input — so the caption says which
+ * it is rather than leaving four flat lines to be misread.
  */
 @Composable
-fun SessionMetricsRail(state: SessionMetricsState?, modifier: Modifier = Modifier) {
+fun SessionMetricsRail(
+    state: SessionMetricsState?,
+    paused: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     val sample = state?.history?.latest
     if (state == null || sample == null) {
-        VMetricGraphStrip(
-            metrics = emptyList(),
-            series = emptyList(),
+        Text(
             // The rail's own wording, not the panel's. Its caption is one line
-            // of 10 sp mono in a 138 dp column: the panel's "Sampling — the
+            // of 10 sp mono in a 134 dp column: the panel's "Sampling — the
             // first reading needs two ticks to become a rate." ellipsises to
             // "Sampling — the fir…", which says less than nothing.
-            note = if (state == null) NOT_RUNNING_SHORT else WARMING_UP_SHORT,
+            if (state == null) NOT_RUNNING_SHORT else WARMING_UP_SHORT,
+            style = Vessel.type.monoSmall,
+            color = Vessel.colors.textMuted,
+            maxLines = 1,
             modifier = modifier,
         )
         return
     }
 
     val history = state.history
-    VMetricGraphStrip(
-        // Four readings and no more. The rail is a narrow column over a running
-        // desktop, and a fifth would push the graph under the fold on a phone
-        // held in landscape — which is how this screen is always held.
-        metrics = listOfNotNull(
-            sample.cpuPercent?.let { VMetricValue("cpu", "$it", "%", loadTone(it)) },
-            sample.gpuPercent?.let { VMetricValue("gpu", "$it", "%", loadTone(it)) },
-            sample.sessionRssMb?.let { VMetricValue("rss", formatMegabytes(it), null) },
-            sample.cpuTempDeciC?.let {
-                VMetricValue("temp", formatDeciCelsius(it), "°C", tempTone(it))
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
+        // Loads take an area fill and levels take a bare line, which is
+        // [VSeriesForm]'s rule and not a decoration: the area under a proportion
+        // of a fixed whole is the work done, and there is nothing underneath a
+        // clock or a memory figure for a fill to mean.
+        VMetricSpark(
+            label = "cpu",
+            value = sample.cpuPercent?.toString(),
+            unit = "%",
+            tone = sample.cpuPercent?.let(::loadTone) ?: VMetricTone.Normal,
+            series = history.seriesOrNull(100, VSeriesTone.Primary, VSeriesForm.Area, "cpu") {
+                it.cpuPercent
             },
-        ),
-        series = listOfNotNull(
-            history.seriesOrNull(100, VSeriesTone.Primary, VSeriesForm.Area, "cpu") { it.cpuPercent },
-            history.seriesOrNull(100, VSeriesTone.Secondary, VSeriesForm.Line, "gpu") { it.gpuPercent },
-        ),
-        note = "${history.size} samples · t+${formatElapsed(sample.elapsedMs)}",
-        modifier = modifier,
-    )
+            unavailable = state.railGap("cpu"),
+        )
+        VMetricSpark(
+            label = "gpu",
+            value = sample.gpuPercent?.toString(),
+            unit = "%",
+            tone = sample.gpuPercent?.let(::loadTone) ?: VMetricTone.Normal,
+            series = history.seriesOrNull(100, VSeriesTone.Secondary, VSeriesForm.Area, "gpu") {
+                it.gpuPercent
+            },
+            unavailable = state.railGap("gpu"),
+        )
+        VMetricSpark(
+            label = "clock",
+            value = sample.clockMhz?.let(::formatMegahertz),
+            series = state.clockCeilingMhz?.let { ceiling ->
+                history.seriesOrNull(ceiling, VSeriesTone.Primary, VSeriesForm.Line, "mean") {
+                    it.clockMhz
+                }
+            },
+            unavailable = state.railGap("clock"),
+        )
+        VMetricSpark(
+            label = "memory",
+            value = sample.sessionRssMb?.let(::formatMegabytes),
+            // Against device RAM rather than its own range, for the same reason
+            // the Metrics tab does it: the question anyone brings to this line is
+            // whether the container is about to be killed.
+            series = sample.ramTotalMb?.let { total ->
+                history.seriesOrNull(total, VSeriesTone.Secondary, VSeriesForm.Line, "rss") {
+                    it.sessionRssMb
+                }
+            },
+            unavailable = state.railGap("ram"),
+        )
+        Text(
+            if (paused) {
+                PAUSED_NOTE
+            } else {
+                "${history.size} samples · t+${formatElapsed(sample.elapsedMs)}"
+            },
+            style = Vessel.type.monoSmall,
+            color = if (paused) Vessel.colors.warn else Vessel.colors.textMuted,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 /**
@@ -448,6 +504,18 @@ private fun SourceList(state: SessionMetricsState) {
 private fun SessionMetricsState.unavailable(label: String): String? =
     sources.firstOrNull { it.label == label }?.takeIf { !it.available }?.reason
 
+/**
+ * The same question, answered in the four words a 134 dp rail can hold.
+ *
+ * Null when the source works, in which case [VMetricSpark] says "no reading" —
+ * and the difference is the point. A GPU that is idle and a GPU whose counter
+ * cannot be opened both draw nothing; only the probe knows which, and the rail
+ * has to distinguish them in a phrase. The sentence itself lives on the Metrics
+ * tab, where there is room to quote the path.
+ */
+private fun SessionMetricsState.railGap(label: String): String? =
+    if (unavailable(label) == null) null else UNAVAILABLE_SHORT
+
 /** Absolute milliwatts. Charging is a negative draw, and the graph plots size. */
 private fun magnitude(milliwatts: Int?): Int? = milliwatts?.let { if (it < 0) -it else it }
 
@@ -504,13 +572,6 @@ private fun loadTone(percent: Int): VMetricTone = when {
     else -> VMetricTone.Normal
 }
 
-/** 45 °C is where this part starts throttling; 50 is where it is obvious. */
-private fun tempTone(deciC: Int): VMetricTone = when {
-    deciC >= 500 -> VMetricTone.Danger
-    deciC >= 450 -> VMetricTone.Warn
-    else -> VMetricTone.Normal
-}
-
 private const val WARN_PERCENT = 80
 private const val DANGER_PERCENT = 93
 
@@ -526,6 +587,19 @@ private const val NO_TRACE =
         "none, and neither does a session that failed before it started running."
 
 private const val NOT_RUNNING_SHORT = "not running"
+
+/** The rail's form of a denied source. The reason itself is on the Metrics tab. */
+private const val UNAVAILABLE_SHORT = "source unavailable"
+
+/**
+ * Said instead of the sample count while the guest is stopped.
+ *
+ * The readings are not wrong — a suspended process really does use no CPU — but
+ * four flat lines with no caption is exactly what a container sitting at an idle
+ * desktop looks like, and the difference between those two is the whole reason
+ * anyone would look at this while paused.
+ */
+private const val PAUSED_NOTE = "paused · the guest is stopped, so these fall to idle"
 
 private const val WARMING_UP = "Sampling — the first reading needs two ticks to become a rate."
 
@@ -549,11 +623,20 @@ private fun SessionMetricsPanelNoTracePreview() {
 }
 
 /** At the rail's real inner width, which is the only width this has to work at. */
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 146)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 150)
 @Composable
 private fun SessionMetricsRailPreview() {
     VesselTheme {
-        SessionMetricsRail(SampleState, Modifier.padding(Vessel.metrics.s8))
+        SessionMetricsRail(SampleState, modifier = Modifier.padding(Vessel.metrics.s8))
+    }
+}
+
+/** The case a caption exists for: four honest flat lines that are not idleness. */
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 150)
+@Composable
+private fun SessionMetricsRailPausedPreview() {
+    VesselTheme {
+        SessionMetricsRail(SampleState, paused = true, modifier = Modifier.padding(Vessel.metrics.s8))
     }
 }
 

@@ -170,6 +170,7 @@ solid.
 | `VParamRow` | One setting from the manifest: label, description, control |
 | `VMetricStrip` | The wide readout: a row of live values on a raised card |
 | `VMetricGrid` | The narrow readout: the same values in fixed columns, for the rail |
+| `VMetricSpark` | One quantity, one ceiling: name, reading and a 20 dp sparkline — the rail |
 | `VSparkline` | Compact frametime history |
 | `VProgressCard` | Download/build/install progress with speed and ETA |
 | `VEmptyState` | Icon, one sentence, one action |
@@ -210,8 +211,8 @@ resolved it).
 
 ### Session, in detail
 
-Five states, not one. Most designs for this screen only draw the happy one, and
-then the first real launch shows a black rectangle with no explanation.
+Five states, not one. Most designs for this only draw the happy one, and then
+the first real launch shows a black rectangle with no explanation.
 
 ```
 PREPARING ──► STARTING ──► RUNNING ──► EXITED
@@ -229,6 +230,64 @@ generic "something went wrong". **Exited** states the exit code plainly.
 
 States 1, 2 and 4 are where users will spend most of their time early on, and
 get the same design attention as 3.
+
+#### Four of the five states are not a screen
+
+**Only RUNNING gets a destination.** Preparing and Starting are a dialog over
+whatever the user was already looking at, Failed is a dialog, and a clean Exited
+is *nothing at all*.
+
+The old shape pushed one `session/{id}` screen the moment Launch was tapped, and
+that screen was a checklist which turned into a desktop. Three things were wrong
+with it and each is a rule now:
+
+- *A checklist is not a place.* Waiting for six rows to tick is not somewhere a
+  user navigated to; it is something happening to the thing they tapped. Giving
+  it a toolbar, a back arrow and a full screen of ground told them otherwise —
+  and the back arrow was a way out of a screen whose job was to be waited on.
+- *A clean exit is not news.* "The Windows desktop closed — exit code 0" is a
+  dialog that says the thing the user just did, and then makes them tap Close to
+  admit it. Exit code 0 now returns silently to wherever they were. **A non-zero
+  exit and a FAILED launch keep their dialog**, because that one is not a
+  notification, it is the diagnosis — and it is layered over the checklist, which
+  is the attribution: which of six steps got that far.
+- *Every screen the desktop is not is a screen in the desktop's way.* With the
+  checklist gone, the route holds exactly one thing, so entering it and leaving
+  it line up exactly with the session starting to draw and stopping.
+
+**The route survives, and does not become an overlay.** The tempting
+simplification is to drop `Routes.SESSION` entirely and draw the desktop as a
+`Box` over the `NavHost`. It is wrong for one concrete reason: **the rail's
+Session log button pushes a route**, and a desktop drawn over the `NavHost`
+would be drawn over the log it just opened. The back stack is what makes
+"desktop → log → back → desktop" work, and re-implementing it as a visibility
+flag is re-implementing the back stack. The route also keeps Back on the running
+desktop meaning what it already meant — leave the screen, the session keeps
+running, the foreground service owns it — which is behaviour with a bug fix
+behind it and no reason to relitigate.
+
+So: `Routes.SESSION` is the fullscreen desktop and nothing else. Navigation into
+and out of it is driven by the phase, in one place (`SessionHost` in
+`ui/Navigation.kt`), never by a button:
+
+| Phase | What is on screen |
+|---|---|
+| PREPARING / STARTING | The checklist, as a dialog over the current screen |
+| RUNNING | `Routes.SESSION` pushed — the desktop, full-bleed |
+| EXITED, code 0 | Nothing. The route is popped and the runtime cleared |
+| EXITED non-zero, FAILED | The route is popped; the outcome dialog states why |
+
+`MainActivity`'s `openSession` extra — the running-session notification, and
+`tools/device-display.sh` — starts the container rather than navigating to a
+screen, and the RUNNING rule above does the navigating. That is strictly more
+robust than the old behaviour: the extra used to push a screen that then had to
+decide whether to launch, so a second tap of the notification could stack a
+second copy of it.
+
+Dismissing the checklist dialog **does not cancel the launch** — it hides a
+progress report, and the notification is still there. Cancel does cancel, and
+unlike Stop it is not behind a confirmation: nothing inside a container that has
+not started yet can lose work.
 
 #### The running surface
 
@@ -252,29 +311,72 @@ only. Nothing is drawn over the desktop except on request.
 **The rail, not a sheet.** Controls live in a narrow vertical rail swiped in
 from the left edge, collapsed to a 4 dp handle. A bottom sheet is the obvious
 choice and the wrong one: this screen is usually landscape, where vertical space
-is scarce and horizontal space is not. The rail carries icon buttons only —
-keyboard, input mode, logs, stop — on a translucent `surface`, the sole place the
-design permits translucency.
+is scarce and horizontal space is not. It sits on a translucent `surface`, the
+sole place the design permits translucency.
 
-**The rail hugs, and it is one card.** 162 dp wide, sized by its content, and
-centred against the screen's vertical middle. Three rules, each of which the
-first build broke:
+**The rail hugs, and it is one card.** 178 dp wide, sized by its content, and
+centred against the screen's vertical middle.
 
 - *Nothing is `fillMaxHeight`.* A rail pinned to the full height with its content
   at the top is two thirds empty translucent slab over the guest's own window —
   which is not a control, it is an obstruction.
-- *The readings are a fixed two-column grid, never weighted cells.* Four
-  `weight(1f)` columns inside the rail give each reading 37 dp, and no memory
-  figure fits in 37 dp at any size worth reading. See the wrapping rule under
-  Typography: this is the layout that has to make it true.
-- *The buttons are a 2×2 block, not a stack.* Four stacked 44 dp actions are
-  200 dp of column for four glyphs, and they were what made the rail
-  full-height in the first place. Stop takes the corner diagonally opposite the
-  pointer toggle, so the destructive action is not the neighbour of the one a
-  thumb reaches for by habit.
+- *It scrolls rather than clips.* Four graphs plus a header plus five actions is
+  around 400 dp, and a landscape window on this phone is 421 dp before the
+  gesture inset. That fits, and the margin is one design change wide — so the
+  content column scrolls, and the failure mode of adding a row is a scrollbar
+  rather than a Stop button nobody can reach.
+- *A readout never wraps.* See the wrapping rule under Typography; the rail is
+  the layout that has to make it true, which is why every reading here is a
+  fixed-width cell and never a `weight(1f)` column.
 
 One card holds all of it. Nesting a readout card inside the rail card draws a
 ringed box inside a ringed box, 8 dp apart, over a running desktop.
+
+**Close and Pause are at the top right, and they are the only bare glyphs.**
+Session-lifetime controls belong in the header where a window's controls always
+are, not at the bottom of a list of unrelated toggles. Stop keeps `danger` and
+keeps its confirmation.
+
+**Everything else is a labelled row, not a glyph.** The rail used to be a 2×2
+grid of unlabelled squares — pointer mode, keyboard, files, log — and the honest
+summary of that design is that its author had to be asked what the icons were.
+A 24 dp glyph can carry a *known* action (a play triangle, a back arrow); it
+cannot introduce one. Four ambiguous glyphs stacked in a grid also hide their
+own state: the pointer toggle's icon is the mode it will switch *to*, which is
+unreadable without the word beside it. So each is an icon plus its name on one
+36 dp row, and the pointer row's label is the mode it will switch to.
+
+**Four graphs, one per quantity — CPU, GPU, mean clock, memory.** They were one
+shared graph, which cannot be right: a percentage, a percentage, a clock in MHz
+and a memory figure in MB have no common vertical axis, so three of the four
+lines were being drawn against a ceiling that had nothing to do with them.
+Separate graphs also let each keep its own honest ceiling — 100% for the loads,
+the part's rated maximum for the clock, device RAM for memory — which is what
+makes a line near the top mean "flat out" rather than "taller than the others".
+
+Each is one dense 38 dp block: name and current reading on one line, a 20 dp
+sparkline under it. That is the whole compromise this surface is under — it
+floats over a desktop the user is trying to see, so it earns its space by being
+four glances rather than one chart.
+
+**Pause is `SIGSTOP`, and it is real.** Pausing sends `SIGSTOP` to every process
+in the guest tree and `SIGCONT` to resume; the X server is ours and keeps
+running, so the desktop simply freezes on its last frame. Three details are the
+whole feature:
+
+- *Order.* Clients are stopped before `wineserver` and continued after it. A
+  client resumed while the server it talks to is still stopped blocks on its
+  first request, which is a hang that looks like the pause failed.
+- *A paused session is labelled, never silently idle.* The sampler keeps
+  sampling and every reading truthfully drops to nothing, which is
+  indistinguishable from a container that has finished loading and is waiting for
+  input. The rail says `PAUSED` and the readings say so too.
+- *Stop works while paused, and this is the part that bites.* A `SIGSTOP`ped
+  process cannot be killed by `SIGTERM`: the signal is queued and delivered when
+  the process next runs, which is never. Teardown therefore sends `SIGCONT` to
+  the whole tree **before** it destroys anything or runs `wineserver -k`. This is
+  the same class of bug as the `drain` deadlock in `data/WineProcessRunner.kt`,
+  where Stop appeared to do nothing at all.
 
 **The auxiliary key bar.** Android's IME has no `Esc`, `Tab`, `Ctrl`, function
 keys or arrows, and a Windows application is unusable without them. A compact
@@ -291,9 +393,10 @@ rather than a preference.
 corner when on. Deliberately small: this is the one screen where our UI competes
 with the content for attention, and the content wins.
 
-Stop is in the rail behind a confirmation. Android's back gesture does not exit;
-it is forwarded as `Esc`, because in a desktop application that is what a user
-means by back.
+Stop is in the rail behind a confirmation. Back closes the rail if it is open and
+otherwise leaves the screen with the session still running — it does not stop the
+container, and it is not forwarded as `Esc`, because a gesture that cannot be
+escaped from is how the first build trapped the user on a running desktop.
 
 **App profile** — per-executable overrides: component pins, memory ordering,
 launch arguments. Shows the detected architecture and how it was determined.

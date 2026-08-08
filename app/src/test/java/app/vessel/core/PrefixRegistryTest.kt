@@ -106,9 +106,6 @@ class PrefixRegistryTest {
             """[HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\x86]""",
             """@="libwow64fex.dll"""",
             "",
-            """[HKEY_CURRENT_USER\Control Panel\Desktop]""",
-            """"Wallpaper"="C:\\windows\\web\\wallpaper\\vessel.bmp"""",
-            "",
             """[HKEY_CURRENT_USER\Software\Wine\AppDefaults\winefile.exe\Explorer]""",
             """"Desktop"="vessel"""",
         ).joinToString("\r\n", postfix = "\r\n")
@@ -161,8 +158,8 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(5, PrefixRegistry.SEED_VERSION)
-        assertEquals(9, PrefixRegistry.seed.size)
+        assertEquals(6, PrefixRegistry.SEED_VERSION)
+        assertEquals(8, PrefixRegistry.seed.size)
     }
 
     @Test
@@ -232,9 +229,14 @@ class PrefixRegistryTest {
     }
 
     @Test
-    fun `the theme covers everything except the one colour that is derived`() {
+    fun `the theme covers every colour Wine draws from, with none left over`() {
+        // `Background` used to be the one exception, written per session by the
+        // wallpaper feature. That feature is gone and the desktop is simply
+        // Nocturne's ground, so the set is now exactly complete — and a name Wine
+        // does not read would be a value that looks load-bearing and is not.
         val written = PrefixRegistry.desktopTheme.values.map { it.name }.toSet()
-        assertEquals(setOf("Background"), wineColorNames - written)
+        assertEquals(emptySet<String>(), wineColorNames - written)
+        assertEquals(emptySet<String>(), written - wineColorNames)
     }
 
     @Test
@@ -264,57 +266,37 @@ class PrefixRegistryTest {
         assertTrue(PrefixRegistry.desktopTheme.values.all { triplet.matches(it.data) })
     }
 
-    @Test
-    fun `the derived colour and the theme land in the same key, so regedit merges them`() {
-        assertEquals(PrefixRegistry.desktopTheme.path, PrefixRegistry.desktopColor(0).path)
-    }
-
-    // — the desktop background ---------------------------------------------------
-
-    @Test
-    fun `the wallpaper value is the exact key Wine's desktop reads`() {
-        // programs/explorer/desktop.c calls SPI_SETDESKWALLPAPER with a NULL
-        // pointer as it creates the desktop window, which loads
-        // entry_DESKWALLPAPER — PATH_ENTRY(DESKWALLPAPER, DESKTOP_KEY,
-        // "Wallpaper") in dlls/win32u/sysparams.c, and DESKTOP_KEY is
-        // "Control Panel\Desktop". Both halves have to be exact; a near miss
-        // leaves the desktop at COLOR_BACKGROUND with nothing logged.
-        assertEquals("""HKEY_CURRENT_USER\Control Panel\Desktop""", PrefixRegistry.desktopWallpaper.path)
-        assertEquals(
-            listOf(RegistryValue("Wallpaper", """C:\windows\web\wallpaper\vessel.bmp""")),
-            PrefixRegistry.desktopWallpaper.values,
-        )
-    }
-
-    @Test
-    fun `the seed writes no WallpaperStyle, because Wine reads it nowhere`() {
-        // Grepping the 11.14 tree for WallpaperStyle returns nothing at all, and
-        // TileWallPaper comes from win.ini via GetProfileIntA rather than from the
-        // registry. Writing either would be a value that looks load-bearing and
-        // does nothing, which is the failure mode this project is least willing
-        // to ship.
-        val rendered = PrefixRegistry.render().lowercase()
-        assertTrue(!rendered.contains("wallpaperstyle"))
-        assertTrue(!rendered.contains("tilewallpaper"))
-    }
+    // — the desktop's own colour --------------------------------------------------
 
     @Test
     fun `the desktop colour is a decimal RGB triplet, which is the only form Wine parses`() {
         // get_rgb_entry reads it with three wcstoul calls separated by one
-        // character each. "#3A6EA5" and "58,110,165" both leave COLOR_BACKGROUND
-        // at Wine's built-in blue.
-        val key = PrefixRegistry.desktopColor(0xFF3A6EA5.toInt())
-        assertEquals("""HKEY_CURRENT_USER\Control Panel\Colors""", key.path)
-        assertEquals(listOf(RegistryValue("Background", "58 110 165")), key.values)
+        // character each, so "#161826" and "22,24,38" both leave COLOR_BACKGROUND
+        // at Wine's built-in RGB(58, 110, 165) — the medium blue a bare session
+        // shows — with nothing logged.
+        val background = PrefixRegistry.desktopTheme.values.single { it.name == "Background" }
+        assertEquals(rgbTriplet(GuestPalette.BG), background.data)
+        assertEquals("22 24 38", background.data)
     }
 
     @Test
-    fun `the desktop colour is not in the seed, because it is derived per session`() {
-        // The Colors key *is* in the seed — that is the guest's dark theme — but
-        // Background is the one value in it that depends on the phone's current
-        // wallpaper, so it is written per session and merged into the same key.
+    fun `the desktop colour is in the seed, because nothing derives it any more`() {
+        // It was written per session by the removed wallpaper feature, whose only
+        // reachable tier on this device was this colour: every WallpaperManager
+        // bitmap entry point refuses an app holding no storage permission. The
+        // desktop is Nocturne's ground because that is what it is, not because
+        // reading the phone failed.
         assertTrue(PrefixRegistry.seed.any { it.path.endsWith("""Control Panel\Colors""") })
-        assertTrue(PrefixRegistry.seed.flatMap { it.values }.none { it.name == "Background" })
+        assertTrue(PrefixRegistry.seed.flatMap { it.values }.any { it.name == "Background" })
+    }
+
+    @Test
+    fun `nothing in the seed mentions a wallpaper`() {
+        // Removed rather than disabled. A surviving Wallpaper value would point
+        // every prefix at a bitmap nothing writes any more, and Wine would paint
+        // the colour underneath it and look exactly like this — which is why the
+        // absence is worth a test rather than a glance.
+        assertTrue(!PrefixRegistry.render().lowercase().contains("wallpaper"))
     }
 
     @Test
@@ -340,9 +322,4 @@ class PrefixRegistryTest {
         assertTrue(PrefixRegistry.fileManagerDesktop.path.contains("""\$WINE_FILE_MANAGER\"""))
     }
 
-    @Test
-    fun `the wallpaper path is a DOS path, escaped as a reg file wants it`() {
-        val rendered = PrefixRegistry.render(listOf(PrefixRegistry.desktopWallpaper))
-        assertTrue(rendered.contains(""""Wallpaper"="C:\\windows\\web\\wallpaper\\vessel.bmp""""))
-    }
 }

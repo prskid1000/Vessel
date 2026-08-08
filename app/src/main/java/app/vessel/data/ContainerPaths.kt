@@ -114,46 +114,6 @@ data class ContainerLayout(
     val registrySeed: File get() = File(base, REGISTRY_SEED)
 
     /**
-     * The registry this session derived, as opposed to the one the container was
-     * provisioned with.
-     *
-     * Separate from [registrySeed] because the two have different lifetimes: the
-     * seed is written once per [app.vessel.core.PrefixRegistry.SEED_VERSION] and
-     * skipped thereafter, and this is rewritten every launch because the phone's
-     * wallpaper can change between them.
-     */
-    val desktopSeed: File get() = File(base, DESKTOP_SEED)
-
-    /**
-     * The Windows desktop's wallpaper bitmap.
-     *
-     * **Inside the prefix, and it has to be.** Wine's desktop loads it with
-     * `LoadImageW(LR_LOADFROMFILE)` on the literal string in
-     * `HKCU\Control Panel\Desktop` → `Wallpaper`, so the file has to sit at a path
-     * the prefix can name. Pinning it to a fixed `C:` location — rather than the
-     * container directory reached through `Z:` — is what lets
-     * [app.vessel.core.PrefixRegistry.WALLPAPER_PATH] be a constant instead of
-     * something assembled per container.
-     *
-     * It is still per-container state and never a component: it is derived from
-     * the phone, not downloaded, and two containers on one Wine build get their
-     * own copy. Deleting the container directory takes it with the prefix.
-     */
-    val wallpaper: File get() = File(prefix, WALLPAPER)
-
-    /**
-     * Where a user-supplied still goes, when the phone's own wallpaper cannot be
-     * read at all.
-     *
-     * The second tier of the degrade: a live wallpaper has no frame to capture and
-     * a restricted `WallpaperManager` has nothing to hand over, and in both cases
-     * an image the user chose is better than a flat colour. There is no picker
-     * yet, so the mechanism is a file with a known name — which is why the list is
-     * here rather than being one hardcoded extension somewhere in the reader.
-     */
-    val wallpaperOverrides: List<File> get() = WALLPAPER_OVERRIDES.map { File(base, it) }
-
-    /**
      * Where components used to be installed, before the shared store existed.
      *
      * Only [ComponentStore.migrate] should ever look at this. It is not part of
@@ -176,19 +136,7 @@ data class ContainerLayout(
         const val TMP = "tmp"
         const val PROVISION_STATE = "provisioned.json"
         const val REGISTRY_SEED = "prefix-seed.reg"
-        const val DESKTOP_SEED = "desktop-seed.reg"
         const val LEGACY_COMPONENTS = "components"
-
-        /** The Unix spelling of [app.vessel.core.PrefixRegistry.WALLPAPER_PATH]. */
-        const val WALLPAPER = "drive_c/windows/web/wallpaper/vessel.bmp"
-
-        val WALLPAPER_OVERRIDES = listOf(
-            "wallpaper.png",
-            "wallpaper.jpg",
-            "wallpaper.jpeg",
-            "wallpaper.webp",
-            "wallpaper.bmp",
-        )
     }
 }
 

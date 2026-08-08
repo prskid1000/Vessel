@@ -27,6 +27,15 @@ object VIcons {
     /** `folder` — open Wine's own file manager on the guest's `C:` drive. */
     val Folder: ImageVector by lazy { glyph("vessel.folder", FOLDER_PATH) }
 
+    /**
+     * `pause` — suspend the guest's process tree.
+     *
+     * Its counterpart is `Icons.Filled.PlayArrow`, which the core artifact does
+     * carry. Only one of the pair had to be drawn, which is the whole argument
+     * for this file over `material-icons-extended`.
+     */
+    val Pause: ImageVector by lazy { glyph("vessel.pause", PAUSE_PATH) }
+
     /** `mouse` — the session rail's pointer mode, when it is about to become trackpad. */
     val Mouse: ImageVector by lazy { glyph("vessel.mouse", MOUSE_PATH) }
 
@@ -57,6 +66,8 @@ private const val KEYBOARD_PATH =
 
 private const val FOLDER_PATH =
     "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"
+
+private const val PAUSE_PATH = "M6 19h4V5H6v14zm8-14v14h4V5h-4z"
 
 private const val MOUSE_PATH =
     "M13 1.07V9h7c0-4.08-3.05-7.44-7-7.93z" +

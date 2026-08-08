@@ -40,10 +40,19 @@ class GuestPaletteTest {
     }
 
     @Test
-    fun `the desktop fallback colour is the window ground, not an invented one`() {
-        // A colour lifted from the app's own palette reads as a Vessel decision.
-        // A plausible teal would read as a wallpaper that failed to load.
-        assertEquals(GuestPalette.BG, VESSEL_DESKTOP_COLOR)
+    fun `the Windows desktop is painted the app's own window ground`() {
+        // Not a fallback any more — the wallpaper feature is gone, and this is
+        // simply what colour the desktop is. A colour lifted from the app's own
+        // palette reads as a Vessel decision; a plausible teal would read as an
+        // image that failed to load.
+        assertEquals(
+            GuestPalette.BG,
+            0xFF161826.toInt(),
+        )
+        assertEquals(
+            rgbTriplet(GuestPalette.BG),
+            PrefixRegistry.desktopTheme.values.single { it.name == "Background" }.data,
+        )
     }
 
     @Test

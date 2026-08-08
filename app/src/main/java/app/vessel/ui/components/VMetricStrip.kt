@@ -165,8 +165,9 @@ fun VMetricGrid(
  */
 private val CELL_MIN_WIDTH: Dp = 62.dp
 
+/** Shared with [VMetricSpark], so one reading cannot be amber in two places and not a third. */
 @Composable
-private fun toneColor(tone: VMetricTone): Color = when (tone) {
+internal fun toneColor(tone: VMetricTone): Color = when (tone) {
     VMetricTone.Normal -> Vessel.colors.textPrimary
     VMetricTone.Ok -> Vessel.colors.ok
     VMetricTone.Warn -> Vessel.colors.warn

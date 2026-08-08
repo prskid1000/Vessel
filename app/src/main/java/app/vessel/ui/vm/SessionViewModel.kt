@@ -2,7 +2,6 @@ package app.vessel.ui.vm
 
 import android.content.Context
 import android.view.View
-import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.vessel.core.DisplayGeometry
@@ -16,7 +15,6 @@ import app.vessel.data.SessionRuntime
 import app.vessel.data.SessionState
 import app.vessel.input.PointerMode
 import app.vessel.service.SessionService
-import app.vessel.ui.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -27,12 +25,21 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * The Session screen's half of the launcher.
+ * The session's half of the launcher, for the whole app rather than for a screen.
  *
  * It owns almost nothing. [SessionRuntime] is a singleton holding the live
  * session, so the state survives this `ViewModel` being destroyed by a rotation
- * or by the user leaving the screen — which matters more here than anywhere else
- * in the product, because leaving the screen must not stop the container.
+ * or by the user leaving the desktop — which matters more here than anywhere else
+ * in the product, because leaving must not stop the container.
+ *
+ * **It no longer reads a `containerId` off a route, and that is the point.** The
+ * session used to be a screen with the container in its path, so this class took
+ * one from a `SavedStateHandle` and every question about the running session was
+ * answered by whichever copy of the screen happened to be composed. There is one
+ * session on this device; there is now one of these, hoisted above the `NavHost`
+ * in [app.vessel.ui.VesselApp], and the container it is about is whichever one
+ * [SessionRuntime] says is running. A launch names its container as an argument,
+ * which is the only moment anything needs to.
  *
  * Starting goes through [SessionService] rather than straight to the runtime, so
  * a session can never be running without the foreground service that keeps its
@@ -41,14 +48,11 @@ import javax.inject.Inject
 @HiltViewModel
 class SessionViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
-    savedState: SavedStateHandle,
     private val runtime: SessionRuntime,
     private val containers: ContainerRepository,
     private val display: SessionDisplayServer,
     recorder: SessionMetricsRecorder,
 ) : ViewModel() {
-
-    private val containerId: String = savedState.get<String>(Routes.ARG_CONTAINER_ID).orEmpty()
 
     val state: StateFlow<SessionState> = runtime.state
 
@@ -71,13 +75,14 @@ class SessionViewModel @Inject constructor(
     val pointerMode: StateFlow<PointerMode> = display.pointerMode
 
     /**
-     * The live sampling window, for the rail's graph strip.
+     * The live sampling window, for the rail's graphs.
      *
      * Injecting the recorder here is also what brings it into existence: it is a
      * singleton that observes [SessionRuntime] rather than being called by it, so
-     * something has to construct it, and this screen is the only way a session is
-     * ever reached. Once built it outlives this `ViewModel`, which is why leaving
-     * the Session screen does not stop the metrics reaching the log.
+     * something has to construct it. That used to be the Session screen, which
+     * meant no session reached before a screen was opened was ever recorded;
+     * hoisting this above the `NavHost` means the recorder exists from the first
+     * frame of the app and a session launched from a notification is traced too.
      *
      * Collect it only while the rail is open — see
      * [SessionMetricsRecorder.watched]. Nothing collecting means a tenth of the
@@ -115,28 +120,37 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
-     * Start this container unless it is already the running one.
+     * Start [containerId] unless something is already running.
      *
-     * Called from the screen on first composition, and idempotent, because
-     * composition is not a promise about how many times it happens: a rotation
-     * during Preparing must not queue a second launch.
+     * Idempotent, and called from two places that cannot coordinate: the launch
+     * button on a container card, and the `openSession` extra a notification or
+     * `adb` delivers. Composition is not a promise about how many times it
+     * happens either, so a recomposition during Preparing must not queue a second
+     * launch.
      *
-     * [native] is the phone's own panel size, which the composable measures and
-     * this layer has no way to. It is what `display.resolution: native` becomes.
+     * [native] is the phone's own panel size, which only a composable can
+     * measure. It is what `display.resolution: native` becomes.
      */
-    fun launchIfIdle(native: DisplayGeometry?) {
+    fun launch(containerId: String, native: DisplayGeometry?) {
         // Any non-idle state, not just this container's. There is room for one
-        // session on this device, so arriving here while another container is
-        // running shows that one rather than silently queueing a second.
-        if (state.value.phase != SessionPhase.IDLE) return
+        // session on this device, so asking for a second while one runs shows the
+        // first rather than silently queueing behind it.
+        if (containerId.isBlank() || state.value.phase != SessionPhase.IDLE) return
         viewModelScope.launch {
             val name = containers.get(containerId)?.name.orEmpty()
             SessionService.launch(appContext, containerId, name, native)
         }
     }
 
-    /** Relaunch after a failure, from the same screen. DESIGN.md's Retry. */
+    /**
+     * Relaunch after a failure. DESIGN.md's Retry.
+     *
+     * The container comes from the failed session's own state rather than from a
+     * route argument, because the failure dialog can be on screen over any
+     * destination — including one that has never heard of a container.
+     */
     fun retry(native: DisplayGeometry?) {
+        val containerId = state.value.containerId ?: return
         runtime.clear()
         viewModelScope.launch {
             val name = containers.get(containerId)?.name.orEmpty()
@@ -146,12 +160,19 @@ class SessionViewModel @Inject constructor(
 
     fun stop() = SessionService.stop(appContext)
 
+    /** `SIGSTOP` the guest, or `SIGCONT` it. See [SessionRuntime.setPaused]. */
+    fun togglePause() = runtime.setPaused(!state.value.paused)
+
     /**
-     * Drop a finished session so the screen is not left describing it.
+     * Drop a finished session so nothing is left describing it.
      *
-     * Only ever called when leaving a terminal state — the runtime refuses while
-     * a session is active, which is what stops a back gesture from wiping the
-     * state of a container that is still running.
+     * Only ever called from a terminal state — the runtime refuses while a
+     * session is active, which is what stops this from wiping the state of a
+     * container that is still running.
+     *
+     * Getting this wrong is a bug with history: an EXITED or FAILED session left
+     * in the runtime makes [launch] refuse, so the *next* container opened shows
+     * the *previous* run's outcome dialog before anything has launched.
      */
     fun dismiss() = runtime.clear()
 }

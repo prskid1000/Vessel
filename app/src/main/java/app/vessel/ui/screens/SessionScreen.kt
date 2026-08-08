@@ -2,7 +2,6 @@ package app.vessel.ui.screens
 
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -16,10 +15,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -33,23 +33,26 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionDiagnosis
@@ -66,206 +69,150 @@ import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VOutcomeDialog
 import app.vessel.ui.components.VOutcomeTone
-import app.vessel.ui.components.VPushToolbar
 import app.vessel.ui.components.VRule
-import app.vessel.ui.components.VScaffold
 import app.vessel.ui.components.VSectionHeader
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
+import app.vessel.ui.theme.vElevation
 import app.vessel.ui.theme.vRing
-import app.vessel.ui.vm.SessionViewModel
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Five states, not one.
+ * The session, which is a desktop and two dialogs — and no longer a screen.
  *
- * DESIGN.md is explicit that most designs for this screen draw only the happy
- * path and the first real launch is then a black rectangle with no explanation.
- * Preparing, Starting, Exited and Failed get the same attention as Running, and
- * on this device they are where the time is actually spent: nothing has ever run
- * a Windows program end to end here yet.
+ * DESIGN.md, *Four of the five states are not a screen*: Preparing and Starting
+ * are [SessionLaunchDialog] over whatever the user was already looking at,
+ * Failed and a non-zero Exited are [SessionOutcomeDialog], a clean exit is
+ * nothing at all, and only RUNNING gets a destination — [SessionDesktop]. The
+ * phase decides which is on screen and [app.vessel.ui.VesselApp] is the one place
+ * that decides it; nothing here navigates.
+ *
+ * The five states still get equal attention. Most designs for this draw only the
+ * happy one, and the first real launch is then a black rectangle with no
+ * explanation; on this device the other four are where the time is actually
+ * spent.
+ */
+
+// — Preparing and Starting, as a dialog ----------------------------------------
+
+/**
+ * The provisioning checklist, over whatever is behind it.
+ *
+ * **A checklist is not a place.** Waiting for six rows to tick is not somewhere
+ * a user navigated to, and the screen this used to be gave it a toolbar, a back
+ * arrow and a full page of ground to say so anyway. As a dialog it sits over the
+ * container the user tapped, which is the thing it is about.
+ *
+ * [onDismiss] hides the report; it does not cancel the launch. That distinction
+ * is why Cancel is a button rather than the dismiss gesture: a container takes
+ * minutes to provision on this phone, and a dialog that cannot be put down would
+ * be a modal wait — while a back gesture that silently killed a provisioning
+ * prefix would be much worse than either. The foreground-service notification is
+ * still there, and RUNNING brings the desktop up regardless.
+ *
+ * Cancel is deliberately *not* behind a confirmation, unlike Stop: nothing inside
+ * a container that has not started yet can lose work.
  */
 @Composable
-fun SessionScreen(
-    containerId: String,
-    onBack: () -> Unit,
-    onOpenLogs: (Long?) -> Unit,
-    viewModel: SessionViewModel = hiltViewModel(),
-) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
-    val surface by viewModel.surface.collectAsStateWithLifecycle()
-    val pointerMode by viewModel.pointerMode.collectAsStateWithLifecycle()
-    val fileManagerRefusal by viewModel.fileManagerRefusal.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-
-    // The panel's own size, which is what `display.resolution: native` means.
-    // `maximumWindowMetrics` rather than `Resources.displayMetrics`: the latter
-    // reports the *window*, and this activity is edge-to-edge but still not
-    // guaranteed to be the whole screen on a foldable or in split screen.
-    val native = remember(context) {
-        context.getSystemService(WindowManager::class.java)
-            ?.maximumWindowMetrics
-            ?.bounds
-            ?.let { DisplayGeometry(it.width(), it.height()) }
-    }
-
-    // Idempotent by contract — composition is not a promise about how many times
-    // it runs, and a rotation during Preparing must not queue a second launch.
-    LaunchedEffect(containerId) { viewModel.launchIfIdle(native) }
-
-    SessionContent(
-        state = state,
-        surface = surface,
-        pointerMode = pointerMode,
-        metrics = viewModel.metrics,
-        onBack = onBack,
-        onOpenLogs = { onOpenLogs(state.startedAt) },
-        onStop = viewModel::stop,
-        onRetry = { viewModel.retry(native) },
-        onTogglePointerMode = viewModel::togglePointerMode,
-        onShowKeyboard = viewModel::showKeyboard,
-        onOpenFiles = viewModel::launchFileManager,
-        onDismiss = {
-            viewModel.dismiss()
-            onBack()
-        },
-    )
-
-    // A refusal has to be visible. The file manager opens *inside* the guest's
-    // desktop, so a launch that fails draws nothing anywhere the user is looking
-    // — without this the button would simply appear dead, which is the one
-    // outcome this product treats as worse than an error.
-    fileManagerRefusal?.let { reason ->
-        VOutcomeDialog(
-            title = "The file manager did not open",
-            tone = VOutcomeTone.Danger,
-            evidence = listOf(reason),
-            onDismiss = viewModel::dismissFileManagerRefusal,
-            actions = {
-                VButton("Close", viewModel::dismissFileManagerRefusal, style = VButtonStyle.Primary)
-            },
-        )
-    }
-}
-
-@Composable
-private fun SessionContent(
+fun SessionLaunchDialog(
     state: SessionState,
-    onBack: () -> Unit,
-    onOpenLogs: () -> Unit,
-    onStop: () -> Unit,
-    onRetry: () -> Unit,
+    onCancel: () -> Unit,
     onDismiss: () -> Unit,
-    pointerMode: PointerMode = PointerMode.TRACKPAD,
-    onTogglePointerMode: () -> Unit = {},
-    onShowKeyboard: () -> Unit = {},
-    onOpenFiles: () -> Unit = {},
-    /**
-     * The sampler's window, collected only while the rail is open.
-     *
-     * Passed as the flow rather than as a collected value on purpose: collecting
-     * is what raises the sample rate from 0.1 Hz to 1 Hz, so the collection has
-     * to start and stop with the rail's own composition, not with this screen's.
-     * Null in previews.
-     */
-    metrics: Flow<SessionMetricsState>? = null,
-    /** The display server's compositor. Null in previews and when it is Absent. */
-    surface: View? = null,
 ) {
-    var confirmingStop by remember { mutableStateOf(false) }
-
-    // A finished session has to be dismissed on the way out, and the system back
-    // gesture is a way out that nothing was intercepting.
-    //
-    // The toolbar's arrow and the outcome dialog's buttons both called
-    // `onDismiss`, which clears the runtime; a swipe popped the back stack
-    // straight past them and left the runtime holding an EXITED or FAILED
-    // session. `launchIfIdle` then returns early — it refuses whenever the phase
-    // is not IDLE — so the *next* container opened showed the *previous* run's
-    // outcome dialog immediately, before anything had launched. That is the bug
-    // that reads as "pressing back opens a dialogue".
-    BackHandler(enabled = state.finished) { onDismiss() }
-
-    if (state.phase == SessionPhase.RUNNING) {
-        RunningSurface(
-            state = state,
-            surface = surface,
-            pointerMode = pointerMode,
-            metrics = metrics,
-            onOpenFiles = onOpenFiles,
-            onOpenLogs = onOpenLogs,
-            onStop = { confirmingStop = true },
-            onTogglePointerMode = onTogglePointerMode,
-            onShowKeyboard = onShowKeyboard,
+    SessionDialogCard(onDismiss = onDismiss) {
+        Text(
+            state.containerName.ifBlank { "Session" },
+            style = Vessel.type.subtitle,
+            color = Vessel.colors.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-    } else {
-        // The checklist stays up for every non-running phase, terminal ones
-        // included. It is the attribution — which of six steps got that far —
-        // and the outcome is layered over it rather than replacing it.
-        VScaffold(
-            toolbar = {
-                VPushToolbar(
-                    title = state.containerName.ifBlank { "Session" },
-                    subtitle = phaseLabel(state.phase),
-                    onBack = if (state.finished) onDismiss else onBack,
-                )
-            },
+        ProvisionChecklist(state)
+        Row(
+            Modifier.fillMaxWidth().padding(top = Vessel.metrics.s6),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8, Alignment.End),
         ) {
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                PreparingPane(state)
-                if (state.active) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s11),
-                        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-                    ) {
-                        VButton("Cancel", { confirmingStop = true }, style = VButtonStyle.Danger)
-                    }
-                }
-            }
+            VButton("Cancel", onCancel, style = VButtonStyle.Danger)
+            VButton("Hide", onDismiss, style = VButtonStyle.Secondary)
         }
     }
-
-    when (state.phase) {
-        SessionPhase.FAILED -> FailedDialog(state, onOpenLogs, onRetry, onDismiss)
-        SessionPhase.EXITED -> ExitedDialog(state, onOpenLogs, onDismiss)
-        else -> Unit
-    }
-
-    if (confirmingStop) {
-        VConfirmSheet(
-            title = "Stop ${state.containerName.ifBlank { "this session" }}?",
-            message = "Every program running inside the container is closed. Unsaved work " +
-                "in them is lost; the container itself and its files are not touched.",
-            confirmLabel = "Stop",
-            onConfirm = {
-                confirmingStop = false
-                onStop()
-            },
-            onDismiss = { confirmingStop = false },
-        )
-    }
 }
 
-// — Preparing and Starting -----------------------------------------------------
+/**
+ * The dialog shell [VOutcomeDialog] draws, for a body that is not strings.
+ *
+ * Not a call to that composable, and not a slot added to it: its `evidence` is a
+ * `List<String>` on purpose — it is the raw material a bug report quotes — and
+ * widening it to a composable slot would let any caller put a scrolling layout
+ * inside a dialog that is meant to hold three lines of mono. The checklist is
+ * rows with live status glyphs, so it needs the shell and not the component.
+ */
+@Composable
+private fun SessionDialogCard(
+    onDismiss: () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        // The platform's 280 dp card is narrower than this product's gutter and
+        // wraps a two-line message to four.
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            Modifier
+                .padding(horizontal = Vessel.metrics.screenGutter)
+                .widthIn(max = Vessel.metrics.dialogMaxWidth),
+        ) {
+            val shape = Vessel.metrics.shapeLg
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .vElevation(VElev.lg, shape)
+                    .background(Vessel.colors.surface, shape)
+                    .vRing(VElev.lg.ring, shape)
+                    .padding(Vessel.metrics.s17),
+                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+                content = content,
+            )
+        }
+    }
+}
 
 /**
  * A checklist, not a spinner.
  *
  * The point is attribution: when a launch fails, the row it failed on is the
  * whole diagnosis. A spinner turns six distinguishable failures into one.
+ *
+ * Capped and scrollable because it lives in a dialog now — six rows each with a
+ * detail line is taller than a landscape window, and a dialog that grows past the
+ * screen puts its own buttons out of reach.
  */
 @Composable
-private fun PreparingPane(state: SessionState) {
-    // The header is the tense, not the phase: after a run ends this list is a
-    // record of what happened, and calling it "Preparing" under a failure dialog
-    // reads as though it were still going.
-    VSectionHeader(if (state.finished) "Progress" else "Preparing")
-    state.steps.forEach { ChecklistRow(it) }
+private fun androidx.compose.foundation.layout.ColumnScope.ProvisionChecklist(state: SessionState) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = CHECKLIST_MAX)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        // The header is the tense, not the phase: after a run ends this list is a
+        // record of what happened, and calling it "Preparing" under a failure
+        // dialog reads as though it were still going.
+        VSectionHeader(if (state.finished) "Progress" else "Preparing")
+        state.steps.forEach { ChecklistRow(it) }
+    }
 
-    // DESIGN.md: Starting shows the last log line as it goes, "because that is
-    // where a missing DLL surfaces".
+    // **Outside the scroll, and that is the fix.** These two lived inside it, so
+    // the container's max height fell across them and cut the last one through
+    // the middle of its glyphs — text that is present, unreadable, and cannot be
+    // scrolled to because the steps above had already used the height.
+    //
+    // They are also the wrong things to hide. DESIGN.md: Starting shows the last
+    // log line as it goes, "because that is where a missing DLL surfaces". The
+    // checklist scrolls; the line that explains it stays put.
     val line = state.lastLine
     if (line != null) {
         Text(
@@ -273,7 +220,8 @@ private fun PreparingPane(state: SessionState) {
             style = Vessel.type.monoSmall,
             color = Vessel.colors.textMuted,
             maxLines = 3,
-            modifier = Modifier.padding(top = Vessel.metrics.s11),
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
     if (state.phase == SessionPhase.STARTING) {
@@ -281,7 +229,7 @@ private fun PreparingPane(state: SessionState) {
             "Starting the Windows desktop at ${state.geometry}.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textLabel,
-            modifier = Modifier.padding(top = Vessel.metrics.s8),
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }
@@ -319,7 +267,7 @@ private fun ChecklistRow(step: ProvisionStep) {
 }
 
 /**
- * The status cell: one 18 dp square whatever the state, so the labels beside it
+ * The status cell: one 16 dp square whatever the state, so the labels beside it
  * stay on one left edge instead of stepping in and out as rows complete.
  */
 @Composable
@@ -355,24 +303,48 @@ private val GLYPH = 16.dp
 /** The running/pending mark: one shape at two weights, filled and ringed. */
 private val DOT = 8.dp
 
-// — Exited and Failed ----------------------------------------------------------
-//
-// Both are dialogs over the checklist, not screens. "No Wine build is installed"
-// is two lines and two buttons; given a screen of its own it is two lines, two
-// buttons and 900 px of nothing, and it hides the one thing that says how far
-// the launch got.
+/** Six rows with details, and no more of a landscape window than a dialog may take. */
+private val CHECKLIST_MAX = 260.dp
 
+// — Exited and Failed ----------------------------------------------------------
+
+/**
+ * Why the session ended — when there is a why.
+ *
+ * **A clean exit shows nothing and this composable is never called for one.**
+ * "The Windows desktop closed · exit code 0" told the user the thing they had
+ * just done and then made them tap Close to acknowledge it. Exit code 0 returns
+ * silently to wherever they were; see [app.vessel.ui.VesselApp], which clears the
+ * runtime instead of calling this.
+ *
+ * A non-zero exit and a FAILED launch still get it, and must: that is the
+ * diagnosis, and swallowing it would leave a container that fell over
+ * indistinguishable from one the user closed. The checklist comes with it —
+ * [ProvisionChecklist] is the attribution, which of six steps got that far — so
+ * the dialog carries the same evidence the old screen did.
+ */
+@Composable
+fun SessionOutcomeDialog(
+    state: SessionState,
+    onOpenLogs: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    if (state.phase == SessionPhase.FAILED) {
+        FailedDialog(state, onOpenLogs, onRetry, onDismiss)
+    } else {
+        ExitedDialog(state, onOpenLogs, onDismiss)
+    }
+}
+
+/** A non-zero exit only. The guest chose it, so it is not a Vessel failure. */
 @Composable
 private fun ExitedDialog(state: SessionState, onOpenLogs: () -> Unit, onDismiss: () -> Unit) {
-    val code = state.exitCode ?: 0
     VOutcomeDialog(
-        title = "The Windows desktop closed",
-        // A non-zero exit is not a Vessel failure — the guest chose it — but it
-        // is the difference between "you closed it" and "it fell over", and the
-        // dialog is the only place that distinction is ever shown.
-        tone = if (code == 0) VOutcomeTone.Neutral else VOutcomeTone.Danger,
-        detail = if (code == 0) null else "The program inside the container ended with an error.",
-        evidence = listOf("exit code $code"),
+        title = "The program ended with an error",
+        tone = VOutcomeTone.Danger,
+        detail = "The Windows desktop closed on its own. Nothing in Vessel stopped it.",
+        evidence = listOfNotNull(state.lastError, "exit code ${state.exitCode}"),
         onDismiss = onDismiss,
         actions = {
             VButton("View log", onOpenLogs, style = VButtonStyle.Secondary)
@@ -421,31 +393,42 @@ private fun FailedDialog(
 // — Running --------------------------------------------------------------------
 
 /**
- * Full-bleed surface with a rail swiped in from the left edge.
+ * The one destination the session has: a full-bleed surface with a rail swiped in
+ * from the left edge.
  *
  * **A rail, not a bottom sheet.** This screen is usually landscape, where
  * vertical space is scarce and horizontal space is not, and a sheet spends the
  * scarce one.
  *
  * **The rail hugs.** It was `fillMaxHeight` with its content at the top, which
- * over a portrait desktop meant a 208 dp column two thirds of which was an empty
- * translucent slab covering the guest's own window. It is now sized by what is
- * in it and centred against the screen's vertical middle, so the amount of the
+ * over a portrait desktop meant a column two thirds of which was an empty
+ * translucent slab covering the guest's own window. It is now sized by what is in
+ * it and centred against the screen's vertical middle, so the amount of the
  * desktop it hides is the amount it needs.
  */
 @Composable
-private fun RunningSurface(
+fun SessionDesktop(
     state: SessionState,
     surface: View?,
     pointerMode: PointerMode,
-    metrics: Flow<SessionMetricsState>?,
-    onOpenFiles: () -> Unit,
     onOpenLogs: () -> Unit,
     onStop: () -> Unit,
+    onTogglePause: () -> Unit,
     onTogglePointerMode: () -> Unit,
     onShowKeyboard: () -> Unit,
+    onOpenFiles: () -> Unit,
+    /**
+     * The sampler's window, collected only while the rail is open.
+     *
+     * Passed as the flow rather than as a collected value on purpose: collecting
+     * is what raises the sample rate from 0.1 Hz to 1 Hz, so the collection has
+     * to start and stop with the rail's own composition, not with this screen's.
+     * Null in previews.
+     */
+    metrics: Flow<SessionMetricsState>? = null,
 ) {
     var railOpen by remember { mutableStateOf(false) }
+    var confirmingStop by remember { mutableStateOf(false) }
 
     // Back closes the rail if it is open, and otherwise leaves the screen — the
     // session keeps running, because the foreground service owns it and not this
@@ -453,9 +436,9 @@ private fun RunningSurface(
     //
     // It used to *open* the rail unconditionally, from a time when the rail had
     // no other way in. That made Back a trap: every press reopened the rail and
-    // nothing could ever leave a running session. The rail has a full-height
-    // edge handle now, so the gesture is free to mean what it means everywhere
-    // else. Stopping the container is still only ever the Stop button.
+    // nothing could ever leave a running session. The rail has a full-height edge
+    // handle now, so the gesture is free to mean what it means everywhere else.
+    // Stopping the container is still only ever the Stop button.
     BackHandler(enabled = railOpen) { railOpen = false }
 
     Box(Modifier.fillMaxSize().background(Vessel.colors.bg)) {
@@ -487,43 +470,17 @@ private fun RunningSurface(
                 enter = expandHorizontally(tween(Vessel.metrics.durationStandardMs)),
                 exit = shrinkHorizontally(tween(Vessel.metrics.durationStandardMs)),
             ) {
-                Column(
-                    Modifier
-                        .width(RAIL_WIDTH)
-                        // Insets, then the margin, then the card: the rail is
-                        // centred vertically but a tall one still has to clear
-                        // the status and gesture bars at its ends.
-                        .systemBarsPadding()
-                        .padding(Vessel.metrics.s6)
-                        // The one place this design permits translucency: the
-                        // rail sits over the guest's own output, and an opaque
-                        // slab would hide the thing it is a control for.
-                        .vCard(
-                            fill = Vessel.colors.surface.copy(alpha = 0.92f),
-                            elevation = VElev.md,
-                        )
-                        .padding(Vessel.metrics.s8),
-                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-                ) {
-                    // Composed only while the rail is open, which is the whole
-                    // contract: the sampler watches its own subscriber count and
-                    // drops back to a tenth of the rate when nothing is looking.
-                    // Collecting this at screen level instead would sample at
-                    // 1 Hz for the entire session to draw a panel nobody opened.
-                    if (metrics != null) {
-                        val sample by metrics.collectAsStateWithLifecycle(initialValue = null)
-                        SessionMetricsRail(sample)
-                        VRule(verticalMargin = 0.dp)
-                    }
-                    RailActions(
-                        pointerMode = pointerMode,
-                        onTogglePointerMode = onTogglePointerMode,
-                        onShowKeyboard = onShowKeyboard,
-                        onOpenFiles = onOpenFiles,
-                        onOpenLogs = onOpenLogs,
-                        onStop = onStop,
-                    )
-                }
+                SessionRail(
+                    state = state,
+                    pointerMode = pointerMode,
+                    metrics = metrics,
+                    onStop = { confirmingStop = true },
+                    onTogglePause = onTogglePause,
+                    onTogglePointerMode = onTogglePointerMode,
+                    onShowKeyboard = onShowKeyboard,
+                    onOpenFiles = onOpenFiles,
+                    onOpenLogs = onOpenLogs,
+                )
             }
 
             if (!railOpen) {
@@ -546,81 +503,150 @@ private fun RunningSurface(
             }
         }
     }
+
+    if (confirmingStop) {
+        VConfirmSheet(
+            title = "Stop ${state.containerName.ifBlank { "this session" }}?",
+            message = "Every program running inside the container is closed. Unsaved work " +
+                "in them is lost; the container itself and its files are not touched.",
+            confirmLabel = "Stop",
+            onConfirm = {
+                confirmingStop = false
+                onStop()
+            },
+            onDismiss = { confirmingStop = false },
+        )
+    }
 }
 
 /**
- * The rail's four controls, as a 2×2 block.
+ * One card, three bands: the session's own controls, its telemetry, its modes.
  *
- * A vertical stack of four is 4 × 44 dp plus its gaps — 200 dp of column for
- * four glyphs, which is what made the rail a full-height slab in the first
- * place. Two rows of two is 94 dp and reads as one control group rather than as
- * a list of unrelated boxes.
+ * **It scrolls.** Four graphs, a header and five actions come to a little over
+ * 400 dp, and a landscape window on this phone is 421 dp before the gesture
+ * inset. That fits today and the margin is one design change wide, so the failure
+ * mode of adding a row is a scrollbar rather than a Stop button below the fold.
  *
- * Stop keeps the bottom-right corner, diagonally opposite the pointer toggle
- * that gets used most: the destructive action should not be the neighbour of the
- * one a thumb reaches for by habit.
+ * Nothing inside draws a surface of its own. Nesting a readout card inside the
+ * rail card is a ringed box inside a ringed box, 8 dp apart, over a running
+ * Windows desktop.
  */
 @Composable
-private fun RailActions(
+private fun SessionRail(
+    state: SessionState,
     pointerMode: PointerMode,
+    metrics: Flow<SessionMetricsState>?,
+    onStop: () -> Unit,
+    onTogglePause: () -> Unit,
     onTogglePointerMode: () -> Unit,
     onShowKeyboard: () -> Unit,
     onOpenFiles: () -> Unit,
     onOpenLogs: () -> Unit,
-    onStop: () -> Unit,
 ) {
-    val gap = Arrangement.spacedBy(Vessel.metrics.s6)
-    Column(verticalArrangement = gap) {
-        Row(horizontalArrangement = gap) {
-            // The pointer mode's icon is the mode it will switch *to*, and the
-            // description says which that is — an icon alone on a two-state
-            // control is a coin toss, and getting it wrong here means the cursor
-            // stops behaving mid-game.
-            VIconAction(
-                icon = if (pointerMode == PointerMode.TRACKPAD) {
-                    VIcons.TouchApp
-                } else {
-                    VIcons.Mouse
-                },
-                contentDescription = if (pointerMode == PointerMode.TRACKPAD) {
-                    "Switch to direct touch — the cursor goes where you touch"
-                } else {
-                    "Switch to trackpad — drag to push the cursor"
-                },
-                onClick = onTogglePointerMode,
-                size = Vessel.metrics.touchTarget,
+    Column(
+        Modifier
+            .width(RAIL_WIDTH)
+            // Insets, then the margin, then the card: the rail is centred
+            // vertically but a tall one still has to clear the status and gesture
+            // bars at its ends.
+            .systemBarsPadding()
+            .padding(Vessel.metrics.s6)
+            // The one place this design permits translucency: the rail sits over
+            // the guest's own output, and an opaque slab would hide the thing it
+            // is a control for.
+            .vCard(
+                fill = Vessel.colors.surface.copy(alpha = 0.92f),
+                elevation = VElev.md,
             )
+            .padding(Vessel.metrics.s8)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        RailStatus(state)
+        VRule(verticalMargin = Vessel.metrics.s6)
+
+        // Composed only while the rail is open, which is the whole contract: the
+        // sampler watches its own subscriber count and drops back to a tenth of
+        // the rate when nothing is looking. Collecting this at screen level
+        // instead would sample at 1 Hz for the entire session to draw a panel
+        // nobody opened.
+        if (metrics != null) {
+            val sample by metrics.collectAsStateWithLifecycle(initialValue = null)
+            SessionMetricsRail(sample, paused = state.paused)
+            VRule(verticalMargin = Vessel.metrics.s6)
+        }
+
+        RailActions(
+            pointerMode = pointerMode,
+            onTogglePointerMode = onTogglePointerMode,
+            onShowKeyboard = onShowKeyboard,
+            onOpenFiles = onOpenFiles,
+            onOpenLogs = onOpenLogs,
+        )
+
+        VRule(verticalMargin = Vessel.metrics.s6)
+        RailTransport(state, onTogglePause, onStop)
+    }
+}
+
+/** What the session is doing, in one line at the top of the rail. */
+@Composable
+private fun RailStatus(state: SessionState) {
+    Text(
+        "${state.containerName.ifBlank { "Session" }} · ${if (state.paused) "paused" else "running"}",
+        style = Vessel.type.monoSmall,
+        color = if (state.paused) Vessel.colors.warn else Vessel.colors.textMuted,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/**
+ * Pause and Stop, at the foot of the rail, as two equal squares.
+ *
+ * **The lifetime controls are last because they end the thing above them.** They
+ * were briefly at the top right, where a window's controls live on a desktop —
+ * but this rail is a column read top to bottom, not a window, and putting the
+ * destructive action first meant the first thing under the reader's thumb was the
+ * one that closes everything.
+ *
+ * They stay bare glyphs while everything above them is a labelled row, and that
+ * asymmetry is deliberate: a play triangle and a cross are the two icons in this
+ * product that carry their meaning without a word, and giving them labels would
+ * make six identical rows in which the destructive one is distinguished only by
+ * being slightly red.
+ *
+ * The buttons stay **square** and the *columns* are what divide evenly: each sits
+ * centred in a `weight(1f)` box. Passing the weight to `VIconAction` directly
+ * does nothing useful — it applies `.size()` after the caller's modifier, so the
+ * square wins and the row ends up left-packed with a ragged gap after it.
+ */
+@Composable
+private fun RailTransport(state: SessionState, onTogglePause: () -> Unit, onStop: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+    ) {
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
             VIconAction(
-                VIcons.Keyboard,
-                "Keyboard",
-                onShowKeyboard,
+                icon = if (state.paused) Icons.Filled.PlayArrow else VIcons.Pause,
+                contentDescription = if (state.paused) {
+                    "Resume the session"
+                } else {
+                    "Pause the session — the guest stops until you resume it"
+                },
+                onClick = onTogglePause,
+                // Primary while paused: resuming is the one thing a frozen
+                // desktop is waiting for, and it should be the accented control.
+                style = if (state.paused) VButtonStyle.Primary else VButtonStyle.Secondary,
                 size = Vessel.metrics.touchTarget,
             )
         }
-        Row(horizontalArrangement = gap) {
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
             VIconAction(
-                VIcons.Folder,
-                "Open the file manager on C:",
-                onOpenFiles,
-                size = Vessel.metrics.touchTarget,
-            )
-            VIconAction(
-                Icons.AutoMirrored.Filled.List,
-                "Session log",
-                onOpenLogs,
-                size = Vessel.metrics.touchTarget,
-            )
-        }
-        // Stop on a row of its own, still bottom-right. A fifth control made the
-        // 2×2 an odd number, and of the two ways to break the grid — crowding
-        // Stop next to a new neighbour, or giving it its own line — separating
-        // the destructive action is the one worth having.
-        Row(horizontalArrangement = gap) {
-            Spacer(Modifier.size(Vessel.metrics.touchTarget))
-            VIconAction(
-                Icons.Filled.Close,
-                "Stop the session",
-                onStop,
+                icon = Icons.Filled.Close,
+                contentDescription = "Stop the session",
+                onClick = onStop,
                 style = VButtonStyle.Danger,
                 size = Vessel.metrics.touchTarget,
             )
@@ -629,12 +655,107 @@ private fun RailActions(
 }
 
 /**
+ * The four tools, one row, equal columns.
+ *
+ * They were labelled full-width rows, which read well and cost four rows of a
+ * column that also has to hold the metrics. As a single row the rail is shorter
+ * than the graphs above it, which is the right proportion for something floating
+ * over a desktop the user is trying to see.
+ *
+ * Each column keeps a **caption under its glyph**. The labels are not decoration:
+ * the first thing asked of the earlier icon-only grid was what the icons were,
+ * and a glyph can carry an action a user already knows but cannot introduce one.
+ * Two words at `overline` size buy that back for eleven dp of height.
+ *
+ * Pointer mode's caption is the mode it will switch *to*, matching its glyph —
+ * an icon alone on a two-state control is a coin toss, and losing that bet
+ * mid-game means the cursor stops behaving.
+ */
+@Composable
+private fun RailActions(
+    pointerMode: PointerMode,
+    onTogglePointerMode: () -> Unit,
+    onShowKeyboard: () -> Unit,
+    onOpenFiles: () -> Unit,
+    onOpenLogs: () -> Unit,
+) {
+    val trackpad = pointerMode == PointerMode.TRACKPAD
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+    ) {
+        RailAction(
+            icon = if (trackpad) VIcons.TouchApp else VIcons.Mouse,
+            caption = if (trackpad) "Touch" else "Pad",
+            contentDescription = if (trackpad) {
+                "Switch to direct touch — the cursor goes where you touch"
+            } else {
+                "Switch to trackpad — drag to push the cursor"
+            },
+            onClick = onTogglePointerMode,
+            modifier = Modifier.weight(1f),
+        )
+        RailAction(
+            VIcons.Keyboard, "Keys", "Show the on-screen keyboard",
+            onShowKeyboard, Modifier.weight(1f),
+        )
+        RailAction(
+            VIcons.Folder, "Files", "Open the file manager on C:",
+            onOpenFiles, Modifier.weight(1f),
+        )
+        RailAction(
+            Icons.AutoMirrored.Filled.List, "Log", "Open the session log",
+            onOpenLogs, Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * One column: a square button with a word under it.
+ *
+ * The square is the touch target and stays at `touchTarget`; the column around it
+ * is what `weight` divides, so the four sit on even centres whatever the rail's
+ * width. Sizing the *button* by weight instead would stretch four squares into
+ * four rectangles of whatever width was left over.
+ */
+@Composable
+private fun RailAction(
+    icon: ImageVector,
+    caption: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+    ) {
+        VIconAction(
+            icon = icon,
+            contentDescription = contentDescription,
+            onClick = onClick,
+            size = Vessel.metrics.touchTarget,
+        )
+        Text(
+            caption,
+            style = Vessel.type.overline,
+            color = Vessel.colors.textMuted,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
  * Where the Windows desktop is drawn.
  *
  * `app.vessel.core.SessionDisplayServer` owns the view and hands it over through
- * [SessionViewModel.surface]; nothing here references the vendored server's
- * types, and nothing here forwards input — the view is focusable and handles its
- * own touches, so a pointer keeps working while this composable is recomposing.
+ * [app.vessel.ui.vm.SessionViewModel.surface]; nothing here references the
+ * vendored server's types, and nothing here forwards input — the view is
+ * focusable and handles its own touches, so a pointer keeps working while this
+ * composable is recomposing.
  *
  * The `update` block re-parents rather than assuming: this composable leaves and
  * comes back whenever the phase does, while the view outlives all of it because
@@ -694,27 +815,18 @@ private val HANDLE_TOUCH = 20.dp
  * thing in it, the rail would breathe in and out by a few pixels every second as
  * the digits changed, over a desktop somebody is trying to read.
  *
- * The number is the metrics grid — two [app.vessel.ui.components.VMetricGrid]
- * cells at 62 dp with an 8 dp gutter — plus the card's padding and the 6 dp
- * margin. The action block is 94 dp and fits inside it with room. It replaces a
- * 208 dp *inner* width, which came out at 230 dp on screen: the rail was over
- * half the width of a portrait phone to show four numbers.
+ * 178 dp leaves 150 dp inside the card, which is what the labelled action rows
+ * need — a 18 dp glyph, an 8 dp gap and `Session log` at 12.5 sp with room to
+ * spare — and gives each sparkline a 138 dp box, wide enough that a 60-sample
+ * window is more than two pixels a sample. It was 162 dp when the rail held a
+ * two-column number grid and four unlabelled squares; both are gone.
  */
-private val RAIL_WIDTH = 162.dp
-
-private fun phaseLabel(phase: SessionPhase): String = when (phase) {
-    SessionPhase.IDLE -> "idle"
-    SessionPhase.PREPARING -> "preparing"
-    SessionPhase.STARTING -> "starting"
-    SessionPhase.RUNNING -> "running"
-    SessionPhase.EXITED -> "exited"
-    SessionPhase.FAILED -> "failed"
-}
+private val RAIL_WIDTH = 212.dp
 
 // — previews -------------------------------------------------------------------
 //
-// Fixed states, and only here. The screen itself reads the runtime, so a device
-// with nothing installed shows the failure rather than a plausible-looking run.
+// Fixed states, and only here. The real thing reads the runtime, so a device with
+// nothing installed shows the failure rather than a plausible-looking run.
 
 private val PreviewSteps = listOf(
     ProvisionStep("session:components", "Resolve components", ProvisionStatus.DONE, "Wine/1114 · DXVK/271"),
@@ -725,11 +837,11 @@ private val PreviewSteps = listOf(
     ProvisionStep("boot", "Initialise Wine prefix", ProvisionStatus.RUNNING),
 )
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 620)
 @Composable
-private fun SessionPreparingPreview() {
+private fun SessionLaunchDialogPreview() {
     VesselTheme {
-        SessionContent(
+        SessionLaunchDialog(
             state = SessionState(
                 containerId = "c1",
                 containerName = "Default",
@@ -738,22 +850,27 @@ private fun SessionPreparingPreview() {
                 lastLine = "loaddll:build_module Loaded L\"C:\\\\windows\\\\system32\\\\dxgi.dll\"",
                 geometry = DisplayGeometry(1280, 720),
             ),
-            onBack = {}, onOpenLogs = {}, onStop = {}, onRetry = {}, onDismiss = {},
+            onCancel = {},
+            onDismiss = {},
         )
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 620)
 @Composable
-private fun SessionFailedPreview() {
+private fun SessionFailedDialogPreview() {
     VesselTheme {
-        SessionContent(
+        SessionOutcomeDialog(
             state = SessionState(
                 containerId = "c1",
                 containerName = "Default",
                 phase = SessionPhase.FAILED,
                 steps = PreviewSteps.map {
-                    if (it.id == "boot") it.copy(status = ProvisionStatus.FAILED, detail = "wineboot exited with 1") else it
+                    if (it.id == "boot") {
+                        it.copy(status = ProvisionStatus.FAILED, detail = "wineboot exited with 1")
+                    } else {
+                        it
+                    }
                 },
                 lastError = "virtual:map_image_into_view failed to set 60000020 protection on " +
                     "ntdll.dll section .text, noexec filesystem?",
@@ -765,41 +882,32 @@ private fun SessionFailedPreview() {
                 ),
                 geometry = DisplayGeometry(1280, 720),
             ),
-            onBack = {}, onOpenLogs = {}, onStop = {}, onRetry = {}, onDismiss = {},
+            onOpenLogs = {},
+            onRetry = {},
+            onDismiss = {},
         )
     }
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 824, heightDp = 392)
 @Composable
-private fun SessionRunningPreview() {
+private fun SessionDesktopPreview() {
     VesselTheme {
-        SessionContent(
+        SessionDesktop(
             state = SessionState(
                 containerId = "c1",
                 containerName = "Default",
                 phase = SessionPhase.RUNNING,
                 geometry = DisplayGeometry(1280, 720),
             ),
-            onBack = {}, onOpenLogs = {}, onStop = {}, onRetry = {}, onDismiss = {},
-        )
-    }
-}
-
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
-@Composable
-private fun SessionExitedPreview() {
-    VesselTheme {
-        SessionContent(
-            state = SessionState(
-                containerId = "c1",
-                containerName = "Default",
-                phase = SessionPhase.EXITED,
-                exitCode = 0,
-                steps = PreviewSteps,
-                geometry = DisplayGeometry(1280, 720),
-            ),
-            onBack = {}, onOpenLogs = {}, onStop = {}, onRetry = {}, onDismiss = {},
+            surface = null,
+            pointerMode = PointerMode.TRACKPAD,
+            onOpenLogs = {},
+            onStop = {},
+            onTogglePause = {},
+            onTogglePointerMode = {},
+            onShowKeyboard = {},
+            onOpenFiles = {},
         )
     }
 }

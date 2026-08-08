@@ -1,12 +1,10 @@
 package app.vessel.data
 
 import android.content.Context
-import android.net.Uri
 import android.os.PowerManager
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
 import app.vessel.core.DEFAULT_DISPLAY
-import app.vessel.core.DesktopBackground
 import app.vessel.core.FILE_MANAGER_COMMAND
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.DisplayOutcome
@@ -25,7 +23,6 @@ import app.vessel.core.WINE_BOOT
 import app.vessel.core.WINE_FILE_MANAGER
 import app.vessel.core.WINE_REGEDIT
 import app.vessel.core.WINE_UNIX_ARCH
-import app.vessel.core.WallpaperOrigin
 import app.vessel.core.WineTree
 import app.vessel.core.desktopArgv
 import app.vessel.core.diagnoseSessionLine
@@ -104,16 +101,20 @@ data class SessionState(
     val geometry: DisplayGeometry? = null,
     val fpsLimit: Int? = null,
     /**
-     * What the Windows desktop's background resolved to, and why.
+     * Whether the guest's processes are `SIGSTOP`ped.
      *
-     * Published because the answer is frequently "not your wallpaper": on this
-     * device every `WallpaperManager` bitmap call is refused outright, so
-     * [DesktopBackground.summary] is the one plain sentence a user gets about it
-     * and [DesktopBackground.origin] is what a "Pick an image" affordance keys
-     * off. A UI that showed a colour without saying it was a fallback would be
-     * implying the wallpaper had been read.
+     * A flag on RUNNING rather than a sixth phase, and the reason is what reads
+     * the phase. [SessionMetricsRecorder] keys its sampler on `RUNNING`, and a
+     * `PAUSED` phase would silently stop the trace — so a run the user paused for
+     * five minutes would have a five-minute hole in it rather than five minutes
+     * of the flat line that is the honest record. `SessionService` reads the
+     * phase too, and a paused session is emphatically still a foreground one.
+     *
+     * Every reading therefore keeps arriving and every one of them falls to
+     * idle, which is indistinguishable from a container waiting for input. This
+     * flag is what the UI labels that with; see the rail.
      */
-    val background: DesktopBackground? = null,
+    val paused: Boolean = false,
 ) {
     val active: Boolean
         get() = phase == SessionPhase.PREPARING ||
@@ -143,22 +144,6 @@ sealed interface FileManagerLaunch {
     data object AlreadyRunning : FileManagerLaunch
 
     data class Unavailable(val reason: String) : FileManagerLaunch
-}
-
-/** What [SessionRuntime.useWallpaperImage] or [SessionRuntime.clearWallpaperImage] did. */
-sealed interface WallpaperChange {
-    /**
-     * The prefix now has this background.
-     *
-     * [live] is false in every case today and is a field rather than an omission
-     * on purpose: the caller has to tell the user the desktop will change on the
-     * next start, and a UI that said "done" over an unchanged screen would be the
-     * silent-failure shape this project refuses. It becomes true if something ever
-     * exists on the guest side that can send `WM_SETTINGCHANGE`.
-     */
-    data class Applied(val background: DesktopBackground, val live: Boolean) : WallpaperChange
-
-    data class Unavailable(val reason: String) : WallpaperChange
 }
 
 /**
@@ -198,8 +183,8 @@ class SessionRuntime @Inject constructor(
     private val paths: ContainerPaths,
     private val logs: SessionLogStore,
     private val runner: WineProcessRunner,
+    private val guest: GuestProcessTree,
     private val display: SessionDisplayServer,
-    private val wallpapers: AndroidWallpaper,
     private val json: Json,
 ) : PrefixBootstrap {
 
@@ -253,6 +238,21 @@ class SessionRuntime @Inject constructor(
     @Volatile
     private var stopRequested = false
 
+    /**
+     * Serialises pause against resume against teardown.
+     *
+     * Its own lock rather than [lifecycle], which `stop` holds across a
+     * `cancelAndJoin` — and teardown, which runs inside that join, has to be able
+     * to continue a stopped tree before anything tries to kill it. Sharing the
+     * lock would be a deadlock with the guest left suspended, which is the one
+     * state nothing can recover from.
+     */
+    private val signals = Mutex()
+
+    /** What [pause] stopped, so [resume] undoes exactly it. Empty when running. */
+    @Volatile
+    private var pausedPids: List<Int> = emptyList()
+
     private var wakeLock: PowerManager.WakeLock? = null
 
     /** Throttles [SessionState.lastLine]; the log itself is never throttled here. */
@@ -273,6 +273,10 @@ class SessionRuntime @Inject constructor(
             lifecycle.withLock {
                 if (session?.isActive == true) return@withLock
                 stopRequested = false
+                // The previous run's set, if teardown raced a pause. Nothing in
+                // it can be alive, and carrying it forward would send SIGCONT to
+                // whatever inherited those pids next.
+                pausedPids = emptyList()
                 session = scope.launch { runSession(containerId, native) }
             }
         }
@@ -284,6 +288,60 @@ class SessionRuntime @Inject constructor(
         scope.launch {
             lifecycle.withLock { session?.cancelAndJoin() }
         }
+    }
+
+    /**
+     * Suspend or resume the guest, with `SIGSTOP` and `SIGCONT`.
+     *
+     * The X server is ours and is not in the tree, so the last frame the guest
+     * drew stays on screen: a paused desktop looks frozen rather than blank,
+     * which is what a pause should look like.
+     *
+     * Not routed through [app.vessel.service.SessionService] the way Stop is.
+     * Stop goes that way because it ends the service's own reason to exist and
+     * the notification offers it too; a pause changes nothing about the
+     * service's lifetime, and putting it behind an intent would only add a way
+     * for the two to disagree about whether the tree is stopped.
+     */
+    fun setPaused(paused: Boolean) {
+        scope.launch {
+            signals.withLock { if (paused) pauseGuest() else resumeGuest() }
+        }
+    }
+
+    private fun pauseGuest() {
+        val current = _state.value
+        if (current.phase != SessionPhase.RUNNING || current.paused) return
+        val stopped = guest.pause()
+        pausedPids = stopped
+        // A pause that stopped nothing is not a pause, and saying so is cheaper
+        // than a frozen-looking UI over a desktop that is still running.
+        plan?.log?.line(
+            LogSource.VESSEL,
+            if (stopped.isEmpty()) LogLevel.WARN else LogLevel.INFO,
+            if (stopped.isEmpty()) {
+                "pause found no guest process to stop"
+            } else {
+                "paused ${stopped.size} guest process(es): ${stopped.joinToString(" ")}"
+            },
+        )
+        if (stopped.isEmpty()) return
+        _state.update { it.copy(paused = true) }
+    }
+
+    /**
+     * Continue the tree. Safe, and deliberately unconditional, when nothing is
+     * paused — teardown calls it on every path rather than checking first,
+     * because the check is exactly the thing that would be wrong in the case
+     * that matters.
+     */
+    private fun resumeGuest() {
+        val known = pausedPids
+        if (known.isEmpty() && !_state.value.paused) return
+        guest.resume(known)
+        pausedPids = emptyList()
+        plan?.log?.line(LogSource.VESSEL, LogLevel.INFO, "resumed ${known.size} guest process(es)")
+        _state.update { it.copy(paused = false) }
     }
 
     /** Forget a finished session, so the screen can be left without it lingering. */
@@ -317,55 +375,6 @@ class SessionRuntime @Inject constructor(
             )
         }
         startFileManager(current)
-    }
-
-    /**
-     * Use [source] as the desktop wallpaper for this container.
-     *
-     * The answer to a `WallpaperManager` that will not hand over the phone's own
-     * — measured on this device, every bitmap entry point answers
-     * `SecurityException: Permission android.permission.READ_EXTERNAL_STORAGE
-     * denied for package app.vessel`, and the app holds no storage permission by
-     * design. Android's photo picker returns a URI that needs none, so this is
-     * the one route to the user's own image that costs them nothing.
-     *
-     * **It takes effect at the next desktop start, and that is a real
-     * limitation.** The registry is updated immediately, but Wine's `explorer`
-     * only rereads the wallpaper on `WM_SETTINGCHANGE`/`SPI_SETDESKWALLPAPER`, and
-     * nothing here can send one: it would take a guest process calling
-     * `SystemParametersInfoW`, and the obvious candidate,
-     * `rundll32 user32.dll,UpdatePerUserSystemParameters`, is a stub in
-     * `user32.spec`. [WallpaperChange.Applied.live] carries the fact rather than
-     * leaving the UI to imply otherwise.
-     */
-    suspend fun useWallpaperImage(source: Uri): WallpaperChange = changeWallpaper { layout ->
-        if (!wallpapers.adopt(layout, source)) {
-            return@changeWallpaper "that image could not be read"
-        }
-        null
-    }
-
-    /** Forget a picked image and go back to whatever the phone will give us. */
-    suspend fun clearWallpaperImage(): WallpaperChange = changeWallpaper { layout ->
-        wallpapers.clear(layout)
-        null
-    }
-
-    private suspend fun changeWallpaper(
-        edit: suspend (ContainerLayout) -> String?,
-    ): WallpaperChange = lifecycle.withLock {
-        val current = plan
-        val geometry = _state.value.geometry
-        if (current == null || geometry == null) {
-            return@withLock WallpaperChange.Unavailable("there is no running container to set it on")
-        }
-        edit(current.layout)?.let { return@withLock WallpaperChange.Unavailable(it) }
-
-        val background = refreshBackground(current, current.layout, geometry)
-            ?: return@withLock WallpaperChange.Unavailable(
-                "the container's registry could not be updated",
-            )
-        WallpaperChange.Applied(background, live = false)
     }
 
     // — the session -----------------------------------------------------------
@@ -408,7 +417,7 @@ class SessionRuntime @Inject constructor(
         )
 
         try {
-            prepare(containerId, profile, manifest, log, geometry) ?: return
+            prepare(containerId, profile, manifest, log) ?: return
             runDesktop(log, geometry, fpsLimit, flag(profile, manifest, DisplayParams.FILE_MANAGER))
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
@@ -441,7 +450,6 @@ class SessionRuntime @Inject constructor(
         profile: ContainerProfile,
         manifest: ParamManifest?,
         log: SessionLog,
-        geometry: DisplayGeometry,
     ): LaunchPlan? {
         val layout = paths.of(containerId)
 
@@ -525,80 +533,7 @@ class SessionRuntime @Inject constructor(
             return null
         }
 
-        applyWallpaper(resolved, layout, geometry)
         return resolved
-    }
-
-    /**
-     * Derive the desktop background from the phone and put it in the prefix.
-     *
-     * Last in Preparing because it needs the prefix *booted*: the colour is
-     * per-session data, so it goes in through `regedit` rather than through the
-     * provisioner's seed, and there is no registry to write into until `wineboot`
-     * has made one.
-     *
-     * **It can never fail the session.** A desktop with the wrong background is a
-     * desktop; the step reports what tier it reached and moves on. The full list
-     * of `WallpaperManager` calls goes into the log at INFO, not TRACE — which
-     * entry point works on a given device and targetSdk is the one thing about
-     * this feature that cannot be looked up, so it belongs in every bug report.
-     */
-    private suspend fun applyWallpaper(
-        current: LaunchPlan,
-        layout: ContainerLayout,
-        geometry: DisplayGeometry,
-    ) {
-        mark(STEP_WALLPAPER, ProvisionStatus.RUNNING)
-        val background = refreshBackground(current, layout, geometry)
-        if (background == null) {
-            mark(STEP_WALLPAPER, ProvisionStatus.SKIPPED, _state.value.failure ?: WALLPAPER_NOT_APPLIED)
-            return
-        }
-        mark(STEP_WALLPAPER, ProvisionStatus.DONE, background.summary)
-    }
-
-    /**
-     * Derive the background, write the bitmap, and put the colour in the
-     * registry. Null when the registry could not be reached.
-     *
-     * Split out of [applyWallpaper] because [useWallpaperImage] runs the same
-     * three steps mid-session, where there is no checklist row to mark.
-     */
-    private suspend fun refreshBackground(
-        current: LaunchPlan,
-        layout: ContainerLayout,
-        geometry: DisplayGeometry,
-    ): DesktopBackground? {
-        val background = runCatching { wallpapers.derive(layout, geometry) }.getOrElse {
-            current.log.line(
-                LogSource.VESSEL,
-                LogLevel.WARN,
-                "wallpaper: ${it.message ?: it.javaClass.simpleName}",
-            )
-            return null
-        }
-        for (attempt in background.attempts) {
-            current.log.line(LogSource.VESSEL, LogLevel.INFO, "wallpaper: $attempt")
-        }
-        current.log.line(LogSource.VESSEL, LogLevel.INFO, "wallpaper: ${background.summary}")
-        _state.update { it.copy(background = background) }
-
-        val keys = buildList {
-            add(PrefixRegistry.desktopColor(background.color))
-            // The path is already in the seed, so the only reason to write it
-            // again is the case where the seed has it and the file does not: Wine
-            // loads nothing, paints the colour, and that is the intended result.
-            if (background.origin != WallpaperOrigin.DESKTOP_COLOR) add(PrefixRegistry.desktopWallpaper)
-        }
-        val written = runCatching {
-            layout.desktopSeed.writeText(PrefixRegistry.render(keys), Charsets.UTF_8)
-        }.isSuccess
-        if (!written) return null
-
-        return when (applyRegistry(layout, layout.desktopSeed)) {
-            is BootstrapOutcome.Applied -> background
-            is BootstrapOutcome.NotAvailable, is BootstrapOutcome.Failed -> null
-        }
     }
 
     /** DESIGN.md's Starting and Running states. */
@@ -812,9 +747,22 @@ class SessionRuntime @Inject constructor(
      * is not enough: every Windows process in the prefix is a child of the
      * *server*, not of us, so destroying the desktop leaves the rest running with
      * nothing on screen and no way to reach them. `-k` terminates all of them.
+     *
+     * **And `SIGCONT` before any of it.** A `SIGSTOP`ped process cannot be killed
+     * by `SIGTERM`: the signal is marked pending and delivered the next time the
+     * process is scheduled, which for a stopped process is never. So Stop on a
+     * paused session would queue a `destroy()` that never lands, then run
+     * `wineserver -k` — itself a fresh client that blocks talking to a server
+     * which cannot answer — and burn the eight-second timeout before forcing it,
+     * leaving a tree of stopped orphans behind. `SIGKILL` does reach a stopped
+     * process, which is exactly why the bug hides: the *forcible* half of teardown
+     * appears to work while the polite half silently does nothing. The same shape
+     * as the `drain` deadlock in [WineProcessRunner], and worth the two lines to
+     * never meet again.
      */
     private suspend fun teardown(log: SessionLog) {
         val current = plan
+        signals.withLock { resumeGuest() }
         desktop?.takeIf { it.isAlive }?.destroy()
         // Ahead of `wineserver -k` for the same reason as the desktop: these are
         // our own children as well as the server's, so closing their pipes first
@@ -1099,8 +1047,7 @@ class SessionRuntime @Inject constructor(
             ProvisionStep(STEP_COMPONENTS, "Resolve components"),
             ProvisionStep(STEP_FEX, "Install FEX"),
             ProvisionStep(STEP_D3D, "Install D3D layers"),
-        ) + provisioner.plan(emptyList()).filterNot { it.id == ContainerProvisioner.STEP_READY } +
-            ProvisionStep(STEP_WALLPAPER, "Desktop wallpaper")
+        ) + provisioner.plan(emptyList()).filterNot { it.id == ContainerProvisioner.STEP_READY }
 
     private fun mark(id: String, status: ProvisionStatus, detail: String? = null) {
         _state.update { state ->
@@ -1164,11 +1111,8 @@ class SessionRuntime @Inject constructor(
         const val STEP_COMPONENTS = "session:components"
         const val STEP_FEX = "session:fex"
         const val STEP_D3D = "session:d3d"
-        const val STEP_WALLPAPER = "session:wallpaper"
 
         const val NO_PLAN = "the session was torn down before the prefix could be booted"
-        const val WALLPAPER_NOT_APPLIED =
-            "the desktop background could not be written to the prefix; Wine's own blue stays"
         const val NO_D3D = "No D3D or OpenGL layer is installed"
 
         const val DRIVE_C_WINDOWS = "drive_c/windows"

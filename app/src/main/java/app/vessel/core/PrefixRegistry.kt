@@ -36,6 +36,20 @@ data class RegistryValue(
 data class RegistryKey(val path: String, val values: List<RegistryValue>)
 
 /**
+ * `r g b`, decimal and space-separated, which is the only form Wine parses.
+ *
+ * `get_rgb_entry` (`dlls/win32u/sysparams.c`) reads the value with three
+ * `wcstoul` calls and bails the moment one of them stops at a NUL, so `#161826`
+ * or a comma-separated triplet leaves the colour at its built-in default with
+ * nothing logged.
+ *
+ * Top level rather than private to [PrefixRegistry] because it is the shared
+ * spelling of a [GuestPalette] entry, and the two have to agree.
+ */
+fun rgbTriplet(argb: Int): String =
+    "${(argb shr 16) and 0xFF} ${(argb shr 8) and 0xFF} ${argb and 0xFF}"
+
+/**
  * The registry a fresh prefix needs, as data and as a `.reg` file.
  *
  * [app.vessel.data.ContainerProvisioner] renders it to `prefix-seed.reg`;
@@ -57,11 +71,14 @@ object PrefixRegistry {
      * re-applied. [app.vessel.data.ContainerProvisioner] stores it, so a seed
      * change re-runs the registry step and nothing else.
      *
-     * 2 added [desktopWallpaper] and [fileManagerDesktop]; 3 added [desktopTheme];
+     * 2 added a wallpaper key and [fileManagerDesktop]; 3 added [desktopTheme];
      * 4 added [visualStyles] and [windowsDarkMode]; 5 moved [visualStyles] off
-     * `Software\Wine\Themes`, which uxtheme never reads.
+     * `Software\Wine\Themes`, which uxtheme never reads; 6 removed the wallpaper
+     * key and folded the desktop's `Background` into [desktopTheme], which is
+     * what makes an already-provisioned container stop pointing at a bitmap that
+     * no longer gets written.
      */
-    const val SEED_VERSION: Int = 5
+    const val SEED_VERSION: Int = 6
 
     /** The mode the DLL override values carry. See [D3D_DLL_OVERRIDES]. */
     const val DLL_OVERRIDE_MODE: String = "native,builtin"
@@ -145,44 +162,6 @@ object PrefixRegistry {
     )
 
     /**
-     * The desktop wallpaper, as Wine sees it. Written by
-     * [app.vessel.data.AndroidWallpaper] to `ContainerLayout.wallpaper`.
-     *
-     * A fixed `C:` path rather than the container's own directory under `Z:`, and
-     * that is what keeps this file static data: the path is the same in every
-     * prefix, so the seed stays renderable and testable without a container.
-     *
-     * `web\wallpaper` is where Windows keeps its own, which makes the file
-     * recognisable to anyone who opens the prefix. The name is not: nothing
-     * shipped is called `vessel.bmp`, so it can never collide with a wallpaper a
-     * program installs.
-     */
-    const val WALLPAPER_PATH: String = """C:\windows\web\wallpaper\vessel.bmp"""
-
-    /**
-     * `Wallpaper`, which is the whole of what Wine's desktop reads.
-     *
-     * Verified against Wine 11.14 rather than assumed. `explorer` calls
-     * `SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, NULL, FALSE)` as it creates
-     * the desktop window (`programs/explorer/desktop.c`), that path loads this
-     * value, and `PaintDesktop` blits it on `WM_ERASEBKGND`. It runs on a
-     * `/desktop=` virtual desktop because all three of those are guarded by
-     * `!using_root`, and `using_root` is set only for the literal desktop name
-     * `root` — ours is [WINE_DESKTOP].
-     *
-     * **`WallpaperStyle` and `TileWallpaper` are deliberately absent.**
-     * `WallpaperStyle` is read nowhere in the Wine tree, and `TileWallPaper`
-     * comes from `win.ini`'s `[desktop]` section via `GetProfileIntA`, not from
-     * here — writing either would be two dead values that look like they are
-     * doing something. Wine's untiled path centres the bitmap at its own size and
-     * never scales it, so "fill" is the writer's job: see `encodeBmp24`.
-     */
-    val desktopWallpaper: RegistryKey = RegistryKey(
-        path = DESKTOP_KEY,
-        values = listOf(RegistryValue("Wallpaper", WALLPAPER_PATH)),
-    )
-
-    /**
      * Put the file manager on the session's virtual desktop, not on a second one.
      *
      * `explorer /desktop=vessel,WxH winefile.exe` gets the *first* one right for
@@ -213,9 +192,16 @@ object PrefixRegistry {
      * but visual styles need a `.msstyles` package and an active theme under
      * `HKCU\Software\Wine\Themes`; this project ships neither, so uxtheme stays in
      * classic mode and classic mode draws from exactly these values. Every name
-     * below is an `RGB_ENTRY` in `dlls/win32u/sysparams.c` — the full set is 31
-     * entries and `Background` is the only one missing here, because it is derived
-     * per session by [desktopColor].
+     * below is an `RGB_ENTRY` in `dlls/win32u/sysparams.c`.
+     *
+     * `Background` is here rather than derived per session, and that is the whole
+     * of what is left of the wallpaper feature. It used to be the fallback colour
+     * under a bitmap taken from the phone; on this device every
+     * `WallpaperManager` bitmap entry point refuses an app with no storage
+     * permission, so the fallback was the only tier that ever ran. The desktop is
+     * now simply Nocturne's window ground, chosen rather than settled for. Wine's
+     * own `COLOR_BACKGROUND` is `RGB(58, 110, 165)` — the medium blue a bare
+     * session shows — so this value is what stops it being that.
      *
      * The mapping is Nocturne's own: `bg` is the ground a window sits on,
      * `surface` is the raised chrome (dialogs, menus, toolbars), elevation is a
@@ -227,6 +213,9 @@ object PrefixRegistry {
     val desktopTheme: RegistryKey = RegistryKey(
         path = COLORS_KEY,
         values = listOf(
+            // The desktop itself — what `PaintDesktop` fills on WM_ERASEBKGND.
+            color("Background", GuestPalette.BG),
+
             // Windows and their text.
             color("Window", GuestPalette.BG),
             color("WindowText", GuestPalette.TEXT),
@@ -336,34 +325,13 @@ object PrefixRegistry {
         dllOverrides,
         arm64ecEmulator,
         x86Emulator,
-        desktopWallpaper,
         fileManagerDesktop,
         desktopTheme,
         visualStyles,
         windowsDarkMode,
     )
 
-    /**
-     * The desktop's flat colour, which is the one value that cannot be static.
-     *
-     * `COLOR_BACKGROUND` is what `PaintDesktop` fills with before it blits the
-     * wallpaper, and it is Wine's own `RGB(58, 110, 165)` until something writes
-     * this — that medium blue *is* the bare background a session currently shows.
-     * It stays load-bearing even when a wallpaper exists, because the bitmap is
-     * centred rather than stretched.
-     *
-     * Applied per session from a `.reg` of its own rather than folded into [seed],
-     * because it is derived from the phone's current wallpaper and changes when
-     * that does.
-     */
-    fun desktopColor(argb: Int): RegistryKey = RegistryKey(
-        path = COLORS_KEY,
-        values = listOf(RegistryValue("Background", rgbTriplet(argb))),
-    )
-
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))
-
-    private const val DESKTOP_KEY = """HKEY_CURRENT_USER\Control Panel\Desktop"""
 
     private const val COLORS_KEY = """HKEY_CURRENT_USER\Control Panel\Colors"""
 
