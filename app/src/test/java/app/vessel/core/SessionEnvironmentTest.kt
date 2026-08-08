@@ -492,4 +492,43 @@ class SessionEnvironmentTest {
             environment,
         )
     }
+
+    // — the prefix bootstrap's own, much smaller environment ---------------------
+
+    @Test
+    fun `the bootstrap environment carries no graphics variable at all`() {
+        // Measured on the device: handing `wineboot --init` the full session
+        // environment stalls it in `rundll32 setupapi,InstallHinfSection
+        // PreInstall` with `drive_c` still empty, and the last line in the log is
+        // `winediag:load_libvulkan_adrenotools`. Nothing about building a prefix
+        // needs a display or a driver, so none of it is passed — and the list is
+        // an allowlist so that a graphics variable added later cannot rejoin it.
+        val full = sessionEnvironment(profile = container(), manifest = null, paths = paths)
+        val bootstrap = full.filterKeys { it in BOOTSTRAP_SESSION_ENV }
+        val forbidden = listOf(
+            "DISPLAY", WINEDLLOVERRIDES_ENV, "TU_DEBUG",
+            "DXVK_LOG_LEVEL", "DXVK_LOG_PATH", "DXVK_STATE_CACHE_PATH",
+            "VKD3D_DEBUG", "VKD3D_SHADER_DEBUG", "VKD3D_CONFIG", "VKD3D_SHADER_CACHE_PATH",
+            "MESA_SHADER_CACHE_DISABLE", "MESA_SHADER_CACHE_DIR",
+            "ADRENOTOOLS_DRIVER_PATH", "ADRENOTOOLS_HOOKS_PATH", "ADRENOTOOLS_DRIVER_NAME",
+        )
+        forbidden.forEach { assertFalse("$it reached the prefix bootstrap", bootstrap.containsKey(it)) }
+    }
+
+    @Test
+    fun `the bootstrap environment still carries the exec model and the prefix`() {
+        // The other half of the same rule: strip too much and Wine cannot find
+        // its own ntdll. See WineTree.dllPath.
+        val launcher = wineLauncherEnvironment(
+            tree = WineTree(File("/data/user/0/app.vessel/files/components/Wine/1114")),
+            scratch = SessionScratch(home = prefix.parentFile, tmp = File(prefix.parentFile, "tmp")),
+        )
+        val full = launcher +
+            sessionEnvironment(profile = container(), manifest = null, paths = paths)
+        val bootstrap = full.filterKeys { it in BOOTSTRAP_SESSION_ENV }
+        listOf(
+            "WINEDLLPATH", "WINENLSDIR", "LD_LIBRARY_PATH", "PATH",
+            "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEDEBUG", "WINEESYNC",
+        ).forEach { assertTrue("$it is missing from the prefix bootstrap", bootstrap.containsKey(it)) }
+    }
 }

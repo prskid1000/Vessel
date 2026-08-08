@@ -48,10 +48,62 @@ val D3D_DLL_OVERRIDES: List<String> = listOf(
  * `WINEDLLOVERRIDES`, named because two places have to agree about it and one of
  * them has to be able to take it *out* again.
  *
- * See `SessionRuntime.LaunchPlan.bootstrapEnvironment`: this variable must not be
- * set while a prefix is being built.
+ * See [BOOTSTRAP_SESSION_ENV]: this variable must not be set while a prefix is
+ * being built.
  */
 const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
+
+/**
+ * The only variables `wineboot` and `regedit` are given while a prefix is being
+ * built.
+ *
+ * **An allowlist, and it is the reference scripts' own environment.**
+ * `tools/device-session.sh` and `tools/device-graphics.sh` both build a prefix
+ * from nothing, on this device, with exactly the exec-model variables plus
+ * `WINEPREFIX` and `WINEDEBUG` — and `device-graphics.sh` composes a *second*
+ * environment for its probe runs specifically so that the graphics variables do
+ * not reach `wineboot`, with the reason written beside it: "forcing native d3d
+ * during prefix creation would have wineboot's own DLL registration trip over
+ * files that are not in place yet".
+ *
+ * The app was handing `wineboot` the whole session environment, and the result
+ * was measured on the device: `wineboot --init` reaches
+ * `rundll32 setupapi,InstallHinfSection PreInstall`, logs
+ * `winediag:load_libvulkan_adrenotools`, and stops. Two minutes later `drive_c`
+ * is still empty and every process is still alive. Nothing about building a
+ * prefix needs a display, a Vulkan driver, a shader cache or a DLL override, so
+ * none of them is passed.
+ *
+ * Allow rather than deny, because the failure mode of a denylist is a graphics
+ * variable added later that silently rejoins the prefix bootstrap — which is a
+ * bug that looks like Wine hanging, six months after the change that caused it.
+ *
+ * The FEX flags stay because they are correctness rather than graphics: the
+ * second `wineboot --update` runs after the emulator key is applied, so it is a
+ * translated process, and a translated process with the wrong memory-ordering
+ * settings is wrong in the same way here as anywhere else. `WINEESYNC` stays
+ * because the server and its clients have to agree about it.
+ */
+val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
+    // The exec model. See `wineLauncherEnvironment` for why each is required.
+    "WINEDLLPATH",
+    "WINENLSDIR",
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+
+    "WINEPREFIX",
+    "WINEESYNC",
+    "WINEDEBUG",
+
+    "FEX_SILENTLOG",
+    "FEX_OUTPUTLOG",
+    "FEX_TSOENABLED",
+    "FEX_HALFBARRIERTSOENABLED",
+    "FEX_VECTORTSOENABLED",
+)
 
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"

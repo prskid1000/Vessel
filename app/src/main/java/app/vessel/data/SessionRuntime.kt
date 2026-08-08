@@ -20,7 +20,7 @@ import app.vessel.core.SessionScratch
 import app.vessel.core.TurnipDriver
 import app.vessel.core.WINE_BOOT
 import app.vessel.core.WINE_REGEDIT
-import app.vessel.core.WINEDLLOVERRIDES_ENV
+import app.vessel.core.BOOTSTRAP_SESSION_ENV
 import app.vessel.core.WINE_UNIX_ARCH
 import app.vessel.core.WineTree
 import app.vessel.core.desktopArgv
@@ -969,7 +969,7 @@ class SessionRuntime @Inject constructor(
         val server = wineserver ?: return
         val spec = ProcessSpec(
             argv = current.tree.serverArgv(listOf("-k")),
-            environment = current.environment,
+            environment = current.bootstrapEnvironment,
             workingDirectory = current.layout.base,
         )
         current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
@@ -1062,7 +1062,7 @@ class SessionRuntime @Inject constructor(
         if (wineserver?.isAlive == true) return null
         val spec = ProcessSpec(
             argv = current.tree.serverArgv(listOf("-f", "-p")),
-            environment = current.environment,
+            environment = current.bootstrapEnvironment,
             workingDirectory = current.layout.base,
         )
         current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
@@ -1468,31 +1468,29 @@ class SessionRuntime @Inject constructor(
         val log: SessionLog,
     ) {
         /**
-         * [environment] without `WINEDLLOVERRIDES`, for everything that builds the
-         * prefix rather than runs in it.
+         * What `wineboot`, `regedit` and `wineserver` are run with, which is a
+         * strict subset of [environment].
          *
-         * **`WINEDLLOVERRIDES=…=n` must not be set while `wineboot` is running**,
-         * and `tools/device-graphics.sh` says so where it composes the two
-         * environments separately: "forcing native d3d during prefix creation
-         * would have wineboot's own DLL registration trip over files that are not
-         * in place yet". `n` is native *only* — a name in that list with no file
-         * behind it is `STATUS_DLL_NOT_FOUND` and not a fallback.
+         * See [BOOTSTRAP_SESSION_ENV] for the list and the measurement behind it.
+         * The short version: nothing about building a prefix needs a display, a
+         * Vulkan driver or a DLL override, handing it all three stalls
+         * `wineboot --init` in `rundll32 … PreInstall` for as long as you care to
+         * wait, and the reference scripts have always composed the two
+         * environments separately for exactly that reason.
          *
-         * Measured on the device, and it is not a graceful failure: with the D3D
-         * payloads no longer copied in ahead of the boot, `wineboot --init` stalls
-         * in `rundll32 setupapi,InstallHinfSection PreInstall` and never returns.
-         * Four minutes in, `drive_c` was still empty and the process was still
-         * alive. The app only ever got away with it because it used to deploy DXVK
-         * into `system32` before booting, so every name in the list happened to
-         * resolve — which made a hard ordering requirement look like a free choice.
+         * `wineserver` is on this side of the line too. It loads no PE and opens
+         * no display, so it needs none of it — and it has to agree with its
+         * clients about `WINEESYNC`, which the allowlist keeps.
          *
-         * The prefix is not left without an opinion, either: the registry seed
-         * writes the same set under `HKCU\Software\Wine\DllOverrides` as
-         * `native,builtin`, which falls back instead of failing, so the second
+         * The prefix is not left without an opinion about its DLLs: the registry
+         * seed writes the same override set under `HKCU\Software\Wine\DllOverrides`
+         * as `native,builtin`, which falls back instead of failing. So the second
          * `wineboot --update` prefers the real DLLs where they exist and boots
-         * where they do not.
+         * where they do not, and the *desktop* — which does need them — is started
+         * from the full [environment].
          */
-        val bootstrapEnvironment: Map<String, String> get() = environment - WINEDLLOVERRIDES_ENV
+        val bootstrapEnvironment: Map<String, String>
+            get() = environment.filterKeys { it in BOOTSTRAP_SESSION_ENV }
     }
 
     private companion object {
