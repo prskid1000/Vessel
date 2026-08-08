@@ -1,0 +1,86 @@
+package app.vessel.data
+
+import android.content.Context
+import android.os.Environment
+import android.util.Log
+import app.vessel.core.DriveMap
+import app.vessel.core.GuestDrive
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * The phone's storage, as drives inside a container.
+ *
+ * [DriveMap] is the mechanism and knows nothing about Android; this is the part
+ * that knows what a phone has and what this app is allowed to read. The split
+ * is what keeps the letter allocation and the symlink rules unit-testable on a
+ * laptop, which matters because the one mistake this feature must not make —
+ * deleting a user's folder instead of a link — is a rule, not a permission.
+ */
+@Singleton
+class AndroidDrives @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
+
+    /**
+     * Whether this build can map a folder at all.
+     *
+     * `MANAGE_EXTERNAL_STORAGE` is a settings toggle rather than a runtime
+     * dialog, and only the sideload flavour declares it — see
+     * `src/sideload/AndroidManifest.xml`. False is a legitimate steady state,
+     * not an error: a `play` build simply has no mappable storage, and the UI
+     * says so rather than offering a picker that cannot work.
+     */
+    val canMap: Boolean get() = Environment.isExternalStorageManager()
+
+    /** Every drive the prefix has. Straight through; the reader is the truth. */
+    fun drives(prefix: File): List<GuestDrive> = DriveMap.drives(prefix)
+
+    /**
+     * Put the user-visible part of the phone on `D:`, if we may.
+     *
+     * Called on every provision rather than once, so a container created before
+     * the permission was granted picks the drive up on its next launch instead
+     * of having to be recreated. Idempotent: mapping the same target to the same
+     * letter rewrites a symlink to the value it already had.
+     *
+     * `D:` specifically and not the next free letter. This is the drive every
+     * user will type and half of them will have seen on a real machine, and a
+     * mapping that lands on `D:` for one container and `F:` for another is a
+     * mapping nobody can write a shortcut against.
+     */
+    fun mapSharedStorage(prefix: File): Boolean {
+        if (!canMap) return false
+        val shared = Environment.getExternalStorageDirectory()
+        if (shared == null || !shared.isDirectory) return false
+        val mapped = DriveMap.map(prefix, SHARED_STORAGE_DRIVE, shared)
+        if (!mapped) Log.w(TAG, "could not map ${shared.path} to D:")
+        return mapped
+    }
+
+    /**
+     * Map [folder] to the first free letter, and say which one it got.
+     *
+     * Null when every assignable letter is taken or the link could not be
+     * created. The caller reports it; there is no retry that would help, since
+     * both causes are facts about the device rather than transient.
+     */
+    fun mapFolder(prefix: File, folder: File): Char? {
+        if (!canMap || !folder.isDirectory) return null
+        val taken = DriveMap.drives(prefix).map { it.letter }
+        val letter = DriveMap.nextFreeLetter(taken) ?: return null
+        return if (DriveMap.map(prefix, letter, folder)) letter else null
+    }
+
+    /** Remove a mapping. Never touches what it pointed at — see [DriveMap.unmap]. */
+    fun unmap(prefix: File, letter: Char): Boolean = DriveMap.unmap(prefix, letter)
+
+    private companion object {
+        const val TAG = "VesselDrives"
+
+        /** What a second drive is called on every Windows machine anyone has used. */
+        const val SHARED_STORAGE_DRIVE = 'd'
+    }
+}

@@ -199,6 +199,7 @@ class ContainerProvisioner @Inject constructor(
     private val paths: ContainerPaths,
     private val store: ComponentStore,
     private val json: Json,
+    private val drives: AndroidDrives,
 ) {
 
     /** The checklist for [components], all pending. What the screen draws first. */
@@ -359,6 +360,12 @@ class ContainerProvisioner @Inject constructor(
                 "${PrefixRegistry.seed.size} keys written to ${layout.registrySeed.name}",
             )
         }
+
+        // Shared storage as a drive, once the prefix exists to put it in. After
+        // the registry and before the boot report, so a container that gains
+        // the permission later picks the drive up on its next launch rather
+        // than needing to be recreated.
+        drives.mapSharedStorage(layout.prefix)
 
         // — hand over ---------------------------------------------------------
         mark(STEP_BOOT, ProvisionStatus.RUNNING)

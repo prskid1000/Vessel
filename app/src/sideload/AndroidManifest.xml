@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Sideload only, and the split is deliberate.
+
+    A drive in a container is a symlink in `dosdevices`, and Wine reads through
+    it with this app's own uid — so reaching the phone's storage from the guest
+    needs the app to be allowed to read the phone's storage. That is
+    MANAGE_EXTERNAL_STORAGE: a settings toggle rather than a dialog, and a
+    Play-policy sensitive permission that this project has no grounds to claim
+    in a store build.
+
+    The `play` flavour therefore does not declare it and cannot map a folder.
+    The alternative there is SAF, which hands back a `content://` tree — not a
+    path, so there is nothing to symlink and Wine cannot open it. Better to
+    refuse in words than to ship a picker that half works. See
+    docs/DRIVE-MAPPING.md.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+</manifest>
