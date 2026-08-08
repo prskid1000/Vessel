@@ -167,6 +167,46 @@ data class VColors(
 ) {
     /** Nocturne drops a disabled control to 45% rather than recolouring it. */
     val disabledAlpha: Float get() = 0.45f
+
+    /**
+     * `.dialog-backdrop` — `neutral-900` at 50%.
+     *
+     * The one thing drawn behind a sheet or a dialog. Nocturne dims with its own
+     * darkest neutral rather than with black, so the scrim is the same family as
+     * everything it is dimming.
+     */
+    val scrim: Color get() = neutral900.copy(alpha = 0.50f)
+
+    /**
+     * `surface` at 92% — the session rail, and nothing else.
+     *
+     * The single place this design permits translucency: the rail floats over the
+     * guest's own output, and an opaque slab would hide the thing it is a control
+     * for. Named here rather than written as `.copy(alpha = 0.92f)` at the call
+     * site so "the rail is translucent" is a token and not a magic number in a
+     * screen file.
+     */
+    val surfaceFloating: Color get() = surface.copy(alpha = 0.92f)
+
+    /**
+     * The screen-edge marks: the rail's handle, and the gesture bar's tint while
+     * the taskbar is hidden. `accent` at 55% — present without competing with the
+     * guest's window for attention.
+     */
+    val edgeHandle: Color get() = accent.copy(alpha = 0.55f)
+
+    /**
+     * How far a *functional* tone is knocked back to become its own ground.
+     *
+     * The architecture badges and the arch-coloured file rows: ground is the tone
+     * at 18%, ink is the tone itself. This is the one deliberate deviation from
+     * [VTag]'s `-800`/`-100` ramp pair — the tag ramps are all violet, and a
+     * violet `x64` badge would destroy the signal the colour carries.
+     */
+    val tonalGroundAlpha: Float get() = 0.18f
+
+    /** A status token as a `.tag` ground — the same 16% `divider` sits at. */
+    val statusGroundAlpha: Float get() = 0.16f
 }
 
 /**
@@ -240,10 +280,196 @@ data class VMetrics(
     val iconMd: Dp = 18.dp,
     val iconSm: Dp = 14.dp,
 
+    /** An empty state's glyph, the one icon in the product with air around it. */
+    val iconLg: Dp = 22.dp,
+
+    /**
+     * The provisioning checklist's status cell.
+     *
+     * One size whatever the status — tick, cross, filled dot, empty ring — so the
+     * labels beside it stay on one left edge instead of stepping in and out as
+     * rows complete.
+     */
+    val iconStatus: Dp = 16.dp,
+
+    /** The running/pending mark inside [iconStatus]: one shape at two weights. */
+    val dot: Dp = 8.dp,
+
+    /**
+     * A program tile's icon square, and the launcher's.
+     *
+     * The same number as [touchTarget], and not a coincidence: the tile *is* the
+     * target. Named separately so a change to the touch floor does not silently
+     * resize every icon on the home screen.
+     */
+    val tileIcon: Dp = 44.dp,
+
+    // — `.tag` geometry ------------------------------------------------------
+
+    /** `.tag` — `padding: 3px 10px`. */
+    val tagPaddingH: Dp = 10.dp,
+    val tagPaddingV: Dp = 3.dp,
+
+    // — the sheet ------------------------------------------------------------
+
+    /** The grab handle at the top of every bottom sheet. */
+    val sheetHandleWidth: Dp = 36.dp,
+    val sheetHandleHeight: Dp = 4.dp,
+
+    // — the session rail -----------------------------------------------------
+
+    /**
+     * The rail's outer width, margins included.
+     *
+     * Fixed rather than intrinsic, because the content is live: sized to the
+     * widest thing in it, the rail would breathe in and out by a few pixels every
+     * second as the digits changed, over a desktop somebody is trying to read.
+     *
+     * 212 dp leaves ~184 dp inside the card, which is what the four-column tool
+     * row needs at a 44 dp target, and gives each sparkline a box wide enough that
+     * a 60-sample window is more than two pixels a sample.
+     */
+    val railWidth: Dp = 212.dp,
+
+    /** The visible accent mark of the closed rail's edge handle. */
+    val railHandle: Dp = 4.dp,
+
+    /** Its touch target — a full-height strip, so it is reachable without looking. */
+    val railHandleTouch: Dp = 20.dp,
+
+    /**
+     * The taskbar's own handle: the width of the system gesture bar, tinted.
+     *
+     * Two edges, two gestures, and they must not collide — the rail comes in from
+     * the left and the taskbar comes up from the bottom. Taking the gesture bar's
+     * own width for the mark is what makes the bottom one discoverable without
+     * adding a second bar of chrome to an edge that already has one.
+     */
+    val edgeHandleLength: Dp = 108.dp,
+
+    /** How wide the launcher panel is when it opens above the start button. */
+    val launcherWidth: Dp = 420.dp,
+
+    /** A taskbar entry's icon — smaller than a home tile's, because the bar is 44 dp tall. */
+    val taskbarIcon: Dp = 32.dp,
+
+    /** The separator between the start button and the window list. */
+    val taskbarDividerHeight: Dp = 26.dp,
+
+    // — graphs ---------------------------------------------------------------
+
+    /** A rail sparkline's box. Four of these plus a caption is the rail's middle band. */
+    val sparkHeight: Dp = 22.dp,
+
+    /** The Metrics tab's full graph. */
+    val graphHeight: Dp = 56.dp,
+
+    /** A slider's rail, and the flat thumb that rides it. */
+    val sliderTrack: Dp = 4.dp,
+    val sliderThumb: Dp = 16.dp,
+
+    /**
+     * Zero.
+     *
+     * Named so that "this edge has no padding" can be written without a bare
+     * `0.dp`, which is the one literal that would otherwise be waved through
+     * everywhere and make the no-hardcoded-dp rule unenforceable by grep.
+     */
+    val none: Dp = 0.dp,
+
+    /** The `.toggle` pill: track, its inset, and the thumb that travels inside it. */
+    val toggleWidth: Dp = 36.dp,
+    val toggleHeight: Dp = 20.dp,
+    val toggleInset: Dp = 2.dp,
+    val toggleThumb: Dp = 16.dp,
+
+    // — measures and caps ----------------------------------------------------
+    //
+    // Ceilings rather than spacing. Each one stops a layout growing past the
+    // point where it stops being readable, and each is here rather than at its
+    // call site so the whole product's set of them can be read in one place.
+
+    /** How far a freestanding rule fades at each end — one Nocturne baseline unit. */
+    val ruleFade: Dp = 48.dp,
+
+    /** Wide enough for one line of `bodySmall` help, narrow enough to read as a menu. */
+    val menuWidth: Dp = 260.dp,
+
+    /** About sixty characters of `bodySmall` — a readable measure, not a screen width. */
+    val proseMaxWidth: Dp = 320.dp,
+
+    /** The ceiling on a param row's right-hand value column. */
+    val valueMaxWidth: Dp = 140.dp,
+
+    /** A dialog's mono evidence block, before it scrolls. */
+    val evidenceMaxHeight: Dp = 180.dp,
+
+    /** Six checklist rows with details, and no more of a landscape window than a dialog may take. */
+    val checklistMaxHeight: Dp = 260.dp,
+
+    /** Three dropdown items, and then it scrolls. */
+    val menuMaxHeight: Dp = 160.dp,
+
+    /** A narrow metric cell: six mono digits and a two-character unit. */
+    val metricCellMinWidth: Dp = 62.dp,
+
+    /** The log viewer's source gutter — wide enough for `driver`, the longest name. */
+    val logGutterWidth: Dp = 38.dp,
+
+    /**
+     * The one gap below the spacing scale.
+     *
+     * Nocturne's scale starts at 3 dp, and inside a graph 3 dp is a visible band:
+     * the space between a sparkline's caption and its plot, or between two legend
+     * marks, is meant to read as *attached*, not as a step. Two dp, and only for
+     * that — a layout reaching for this where 3 would do is a layout ignoring the
+     * scale.
+     */
+    val hairGap: Dp = 2.dp,
+
+    /** A chart legend's colour swatch, and the segment length of its dashed form. */
+    val legendMarkWidth: Dp = 9.dp,
+    val legendMarkHeight: Dp = 2.dp,
+    val legendDashWidth: Dp = 3.5.dp,
+
+    /**
+     * A plotted line, and the dot a lone sample gets.
+     *
+     * Heavier than a hairline: a 1 dp trace over a `neutral-900` graph ground
+     * disappears at arm's length on a 480 dpi panel, and the sparkline in the rail
+     * is read at a glance or not at all.
+     */
+    val graphStroke: Dp = 1.6.dp,
+    val graphDot: Dp = 1.2.dp,
+
     /** Motion is confirmation, never decoration: one duration, no springs. */
     val durationStandardMs: Int = 150,
     val durationSheetMs: Int = 250,
 ) {
+    /**
+     * The spacing scale itself, in order.
+     *
+     * Exposed so the scale can be asserted as a scale rather than as six
+     * unrelated numbers — and so a screen that wants to iterate steps does not
+     * write its own list.
+     */
+    val scale: List<Dp> get() = listOf(s3, s6, s8, s11, s17, s22)
+
+    /** How far the thumb travels: the track, less its own diameter and both insets. */
+    val toggleTravel: Dp get() = toggleWidth - toggleThumb - toggleInset * 2
+
+    /**
+     * How much of the window a bottom sheet may take before its body scrolls.
+     *
+     * A fraction rather than a dp, because the thing it has to leave visible is
+     * the screen behind it — the sheet sits over the container it edits, and a
+     * sheet with no ground showing above it is a screen with a rounded top.
+     */
+    val sheetMaxHeightFraction: Float get() = 0.92f
+
+    /** How much of the screen's height the closed rail's handle mark covers. */
+    val railHandleFraction: Float get() = 0.25f
+
     val shapeSm: Shape = RoundedCornerShape(radiusSm)
     val shapeMd: Shape = RoundedCornerShape(radiusMd)
     val shapeLg: Shape = RoundedCornerShape(radiusLg)
@@ -251,6 +477,15 @@ data class VMetrics(
     /** `.tag` — `calc(var(--radius-md) * 0.75)`. */
     val shapeTag: Shape = RoundedCornerShape(6.dp)
     val shapePill: Shape = RoundedCornerShape(percent = 50)
+
+    /**
+     * A bottom sheet: `lg` at the top, square at the bottom.
+     *
+     * The bottom corners are off-screen, and rounding them anyway is how a sheet
+     * ends up with a visible notch above the gesture bar when the window insets
+     * are larger than expected.
+     */
+    val shapeSheet: Shape = RoundedCornerShape(topStart = radiusLg, topEnd = radiusLg)
 }
 
 // TODO: DESIGN.md specifies Inter and JetBrains Mono, bundled as variable fonts
@@ -580,6 +815,17 @@ fun Modifier.vRing(
     shape: Shape = Vessel.metrics.shapeMd,
     width: Dp = Vessel.metrics.hairline,
 ): Modifier = border(width, color, shape)
+
+/**
+ * The nominal size a vector asset is authored at.
+ *
+ * Not a layout value and not part of [VMetrics]: every call site sizes an icon
+ * with `Modifier.size(Vessel.metrics.iconMd)`, and this is only the intrinsic
+ * width an `ImageVector` reports when nobody does. It lives here because it is
+ * still a `dp`, and this file is the one place a `dp` literal is allowed to be
+ * written.
+ */
+val VIconCanvas: Dp = 24.dp
 
 /** Where a rule is drawn inside the box it decorates. */
 enum class VRulePosition { Top, Center, Bottom }
