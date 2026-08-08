@@ -34,12 +34,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -78,6 +86,17 @@ import kotlin.math.roundToInt
 fun VSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * The row that stays put — a title and the action that commits the sheet.
+     *
+     * **Outside the scroll, and that is not tidiness.** A landscape window on
+     * this phone is 422 dp tall and a five-field form does not fit in it, so the
+     * body scrolls; with the header inside that scroll, Save leaves the screen
+     * the moment anybody reaches the field they came to change. This is the same
+     * mistake the launch checklist made with its last log line, fixed the same
+     * way.
+     */
+    header: (@Composable ColumnScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
@@ -94,6 +113,26 @@ fun VSheet(
         val scope = rememberCoroutineScope()
         val settleMs = Vessel.metrics.durationStandardMs
         val dismissAfterPx = with(density) { DISMISS_TRAVEL_FRACTION * maxSheetHeight.toPx() }
+
+        // Nocturne's sheet elevation is `0 0 0 1px #9397ab, 0 -16px 40px` — a ring
+        // plus an *upward* shadow. Compose has neither: `Modifier.shadow` blurs
+        // evenly around the outline and `border` strokes all four sides.
+        //
+        // An earlier fix pushed the whole panel one corner-radius below the window
+        // so its bottom edge fell off-screen. That did hide the bottom edge, and it
+        // was not the artifact people were seeing. Measured off a screencap: the
+        // ring was painted at x=0 and x=1263 — the literal screen edges — for 1091
+        // rows, straight down to the last pixel. On a full-bleed sheet the side
+        // strokes are not panel edges at all, they are a hairline frame drawn
+        // around the phone, and where they stop the eye reads a chipped corner.
+        //
+        // So the ring fades instead of stopping, which is the design system's own
+        // rule for a free-standing rule ("rules fade to transparent at their ends
+        // rather than stopping cleanly"). The top arc is solid, the sides dissolve
+        // over the last [SHEET_RING_FADE], and there is no terminating corner left
+        // to look broken. That also retires the overshoot: with the stroke
+        // transparent down there, nothing needs pushing off-screen, and the bottom
+        // padding no longer has to compensate for a shift the user cannot see.
 
         // The scrim. Nocturne's `.dialog-backdrop` — `neutral-900` at 50%, never
         // black — so the screen behind stays legible as context.
@@ -123,7 +162,7 @@ fun VSheet(
                 .heightIn(max = maxSheetHeight)
                 .vElevation(VElev.lg, Vessel.metrics.shapeSheet)
                 .background(Vessel.colors.surface, Vessel.metrics.shapeSheet)
-                .vRing(VElev.lg.ring, Vessel.metrics.shapeSheet)
+                .vSheetRing(VElev.lg.ring, Vessel.metrics.shapeSheet)
                 // Swallow taps, or every press inside the sheet falls through to
                 // the scrim behind it and closes the thing being filled in.
                 .clickable(
@@ -156,6 +195,8 @@ fun VSheet(
                     start = Vessel.metrics.s17,
                     end = Vessel.metrics.s17,
                     top = Vessel.metrics.s11,
+                    // The gesture bar's inset is already applied above; this is
+                    // clear space over it.
                     bottom = Vessel.metrics.s22,
                 ),
         ) {
@@ -173,8 +214,22 @@ fun VSheet(
                     .background(Vessel.colors.neutral700, Vessel.metrics.shapePill),
             )
 
+            if (header != null) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+                    content = header,
+                )
+                // The rule under a pinned header is what says the body moves and
+                // this does not.
+                VRule(verticalMargin = Vessel.metrics.s6)
+            }
+
             Column(
-                Modifier.verticalScroll(rememberScrollState()),
+                // `weight` rather than a bare scroll: inside a `heightIn`-capped
+                // column an unweighted scrolling child measures at its content's
+                // height and pushes the header off the top instead of scrolling
+                // underneath it.
+                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
                 content = content,
             )
@@ -332,3 +387,50 @@ private fun VSheetPreview() {
         }
     }
 }
+
+/**
+ * How far up from the bottom the sheet's hairline dissolves.
+ *
+ * Nocturne fades a free-standing rule over 48 px a side. This is that number,
+ * applied to the two edges of a sheet that have nowhere to terminate.
+ */
+private val SHEET_RING_FADE: Dp = 48.dp
+
+/**
+ * The sheet's hairline: solid across the top arc, transparent by the bottom.
+ *
+ * `Modifier.border` cannot do this — it strokes the whole outline in one colour,
+ * and on a full-bleed sheet that paints a 1 px frame down both screen edges which
+ * then simply stops. Measured on the device before this existed: ring pixels at
+ * x=0 and x=1263 for 1091 consecutive rows. What a user reports is "the bottom
+ * corners are chipped", because a line that ends without closing reads as
+ * damage rather than as a choice.
+ *
+ * So the same outline is stroked with a vertical gradient instead. The stops are
+ * in fractions of the sheet's own height, which is why the fade is computed per
+ * draw rather than baked in: a short sheet and a full-height one must dissolve
+ * over the same 48 dp, not over the same proportion.
+ *
+ * `drawWithCache` and not `drawBehind`: the outline and the brush depend only on
+ * the size, so they are rebuilt when it changes and not once per frame while the
+ * sheet is being dragged.
+ */
+private fun Modifier.vSheetRing(color: Color, shape: Shape, width: Dp = 1.dp): Modifier =
+    this.drawWithCache {
+        val outline = shape.createOutline(size, layoutDirection, this)
+        val fade = (SHEET_RING_FADE.toPx() / size.height).coerceIn(0f, 1f)
+        val brush = Brush.verticalGradient(
+            // Solid until the fade begins, then out. Two stops at the same colour
+            // rather than one, or the gradient would start dissolving at the top
+            // arc — which is the one part of this outline that must stay crisp.
+            0f to color,
+            (1f - fade) to color,
+            1f to Color.Transparent,
+            startY = 0f,
+            endY = size.height,
+        )
+        onDrawWithContent {
+            drawContent()
+            drawOutline(outline, brush = brush, style = Stroke(width = width.toPx()))
+        }
+    }
