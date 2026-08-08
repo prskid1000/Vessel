@@ -294,7 +294,19 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                     )
                 }
             }
-        listener(list)
+        // **By id, which is creation order — not by the order they are stacked
+        // in.** The list above walks the X child list, and that list *is* the Z
+        // order: raising a window moves it to the end. So tapping the first
+        // button raised the right window and then redrew it as the *second*
+        // button, highlighted — which reads exactly like the wrong button
+        // lighting up, and was reported as such. A taskbar button has to stay
+        // where the user last saw it; the only thing a switch may move is the
+        // highlight.
+        //
+        // X ids rise as windows are created, per client, so this is creation
+        // order in practice and is stable for as long as a window lives — which
+        // is the whole requirement.
+        listener(list.sortedBy { it.id })
         if (Log.isLoggable(TREE_TAG, Log.DEBUG)) {
             // The tree, whenever it changes, at a tag nothing enables by
             // default. Deciding which window is a taskbar entry is a rule about
