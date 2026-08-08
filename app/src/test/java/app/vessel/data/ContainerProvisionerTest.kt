@@ -41,7 +41,10 @@ class ContainerProvisionerTest {
     fun setUp() {
         paths = ContainerPaths(temp.newFolder("files"))
         store = ComponentStore(paths, WcpInstaller(json), json)
-        provisioner = ContainerProvisioner(paths, store, json)
+        // No Android here, and that is the point of the seam: a provisioner test
+        // asserts where components land, and mapping shared storage is a device
+        // fact it has no business needing.
+        provisioner = ContainerProvisioner(paths, store, json, PrefixDrives { false })
         packages = temp.newFolder("packages")
     }
 

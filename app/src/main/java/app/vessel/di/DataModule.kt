@@ -132,4 +132,11 @@ object DataModule {
         produceFile = { context.dataStoreFile(SHORTCUTS_FILE) },
     )
 
+
+    /**
+     * The provisioner's narrow view of Android storage. See [PrefixDrives].
+     */
+    @Provides
+    @Singleton
+    fun prefixDrives(impl: app.vessel.data.AndroidDrives): app.vessel.data.PrefixDrives = impl
 }

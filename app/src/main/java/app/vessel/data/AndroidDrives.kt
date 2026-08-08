@@ -21,10 +21,24 @@ import javax.inject.Singleton
  * laptop, which matters because the one mistake this feature must not make —
  * deleting a user's folder instead of a link — is a rule, not a permission.
  */
+/**
+ * The one thing [ContainerProvisioner] needs from the Android side.
+ *
+ * A seam rather than the whole class, and for a testable reason: mapping
+ * shared storage is the provisioner's only interest in Android, while
+ * [AndroidDrives] needs a `Context` and `Environment`, neither of which exists
+ * in a JVM unit test. The provisioner's tests build a real provisioner and
+ * assert on where components land; they should not need a device to do it.
+ */
+fun interface PrefixDrives {
+    /** Put the phone's storage on `D:` in [prefix], if this build may. */
+    fun mapSharedStorage(prefix: File): Boolean
+}
+
 @Singleton
 class AndroidDrives @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : PrefixDrives {
 
     /**
      * Whether this build can map a folder at all.
@@ -53,7 +67,7 @@ class AndroidDrives @Inject constructor(
      * mapping that lands on `D:` for one container and `F:` for another is a
      * mapping nobody can write a shortcut against.
      */
-    fun mapSharedStorage(prefix: File): Boolean {
+    override fun mapSharedStorage(prefix: File): Boolean {
         if (!canMap) return false
         val shared = Environment.getExternalStorageDirectory()
         if (shared == null || !shared.isDirectory) return false

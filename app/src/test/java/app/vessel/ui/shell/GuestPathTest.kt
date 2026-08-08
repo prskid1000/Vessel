@@ -57,9 +57,16 @@ class GuestPathTest {
     }
 
     @Test
-    fun `resolve refuses anything that is not on C`() {
-        assertNull(GuestPath.resolve(drive, "Z:\\home\\user"))
+    fun `resolve refuses anything that does not name a drive`() {
+        // No longer "anything that is not on C". A container has more than one
+        // drive now — the phone's storage is D: — so the letter chooses which
+        // root a path resolves against and the caller passes that root. Another
+        // drive's path against this root is a caller error rather than a
+        // refusal this function can make. What it still refuses is a string
+        // with no drive in it at all.
         assertNull(GuestPath.resolve(drive, "/etc/passwd"))
+        assertNull(GuestPath.resolve(drive, "users"))
+        assertNull(GuestPath.resolve(drive, ""))
     }
 
     @Test

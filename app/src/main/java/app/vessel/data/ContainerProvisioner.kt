@@ -199,7 +199,7 @@ class ContainerProvisioner @Inject constructor(
     private val paths: ContainerPaths,
     private val store: ComponentStore,
     private val json: Json,
-    private val drives: AndroidDrives,
+    private val drives: PrefixDrives,
 ) {
 
     /** The checklist for [components], all pending. What the screen draws first. */
