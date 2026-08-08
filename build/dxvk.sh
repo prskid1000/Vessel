@@ -101,7 +101,8 @@ EOF
     --bindir "$OUTDIR" \
     --libdir "$OUTDIR" \
     --buildtype release \
-    -Dstrip=true
+    -Dstrip=true \
+    -Db_lto="$(lto_flag)"
 
   log "building $COMPONENT ($TRIPLE)"
   ninja -C "$BUILD" -j "$(build_jobs 1)"

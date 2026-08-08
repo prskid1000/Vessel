@@ -135,6 +135,21 @@ require_clang_major() {
 
 # --- Compiler flag probing ---------------------------------------------------
 
+# `true` / `false` for meson's -Db_lto, from VESSEL_LTO.
+#
+# Off by default and a switch rather than a constant, for the reason
+# docs/OPTIMIZATION.md exists: an optimization nobody benchmarked is a guess
+# wearing a commit message, and one nobody can re-test after a toolchain bump is
+# a guess that has stopped being falsifiable. FEX is the cautionary case — its
+# LTO was off for a judgement that turned out to be right for a reason nobody
+# had written down (ARM64EC hybrid symbols do not survive the archive merge).
+#
+# Mesa is deliberately not wired to this: it refuses LTO by explicit check in
+# its own meson.build. That is upstream's decision, not ours to route around.
+lto_flag() {
+  if [ "${VESSEL_LTO:-0}" = 1 ]; then printf 'true'; else printf 'false'; fi
+}
+
 # Returns 0 if the compiler accepts the flag. Used so tuning is either applied
 # or reported — never dropped in silence.
 probe_cflag() {

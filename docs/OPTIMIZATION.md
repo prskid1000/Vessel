@@ -93,46 +93,47 @@ the rest of the stack unreachable.
 | Wine PE side | `CROSSCFLAGS=-O2` | Correct. One flag covers arm64ec, aarch64 and i386 at once, so a chip flag has nowhere safe to live. |
 | DXVK / vkd3d | `--buildtype release` (`-O3`), `-Dstrip=true` | `-O3` is right; LTO is missing — see below. |
 
-### Candidate A — LTO for DXVK and vkd3d
+### Candidates A and B — LTO — **the whole avenue is closed**
 
-`build/dxvk.sh` and `build/vkd3d.sh` configure `--buildtype release` and nothing
-else. Neither passes `-Db_lto=true`. Both are pure translation layers where the
-hot path crosses many small functions, which is the case LTO is for, and neither
-carries Mesa's refusal.
+LTO was the obvious remaining build-flag win: FEX, DXVK and vkd3d are all C++
+translation layers whose hot paths cross many small functions, which is exactly
+the case LTO exists for. FEX had it off for a recorded judgement (*"LTO across
+the mingw link is unreliable"*); DXVK and vkd3d had simply never been asked.
 
-- **Cost:** longer link, larger peak build memory. No runtime risk beyond the
-  usual LTO miscompile tail.
-- **Expected:** small but real on draw-submission throughput.
-- **Status:** not applied. Cheap to try, must be benchmarked, and the ARM64EC PE
-  target is unusual enough that "it linked" is worth confirming separately from
-  "it is faster".
-
-### Candidate B — LTO for FEX — **tried, does not link**
-
-`build/fex.sh` sets `-DENABLE_LTO=False`. The original reason — *"LTO across the
-mingw link is unreliable and costs more build time than it wins"* — was recorded
-when the flag was set and lost in the refactor at `6d4a821`. It was a judgement,
-so it was tested.
-
-It fails, and the failure is specific:
+All three were tested. **None of them link**, and all three fail identically:
 
 ```
-ld.lld: error: undefined symbol: std::__1::mutex::lock() (EC symbol)
-ld.lld: error: undefined symbol: std::__1::__shared_mutex_base::lock() (EC symbol)
-…and roughly forty more, every one tagged (EC symbol)
+ld.lld: error: undefined symbol: std::__1::mutex::lock()                (EC symbol)
+ld.lld: error: undefined symbol: std::__1::__next_prime(unsigned long long) (EC symbol)
+ld.lld: error: undefined symbol: __gxx_personality_seh0                 (EC symbol)
+…roughly forty more per project, every one tagged (EC symbol)
 ```
 
-**Only the ARM64EC target.** Every missing symbol is from libc++, and ARM64EC
-reaches those through hybrid mapping — each needs its mangled EC counterpart to
-survive to the link. LTO merges the libc++ archive members before the linker
-applies that mapping, so the EC names are gone by the time anything looks for
-them. That is a limitation in llvm-mingw's ARM64EC support, not something to
-work around in this repo.
+**Only on the ARM64EC target, and every missing symbol is libc++.** ARM64EC
+reaches libc++ through hybrid mapping: each symbol needs its mangled EC
+counterpart to survive to the link. LTO merges the libc++ archive members before
+the linker applies that mapping, so the EC names are gone by the time anything
+looks for them.
 
-- **Status:** closed. Kept as a switch (`VESSEL_FEX_LTO=1 ./build/fex.sh`) so a
-  toolchain bump can be re-tested in one command. If a future llvm-mingw links
-  it, benchmark before keeping it — **2.28× on x86-32 integer is the number to
-  beat**, and it should be beaten visibly.
+That is a limitation in llvm-mingw's ARM64EC support, not a property of any of
+these three projects — which is why finding it once in FEX and once in DXVK is
+worth more than finding it once. Nothing here compiles for ARM64EC with LTO, and
+nothing in this repo should try to work around it.
+
+Mesa (Turnip, Zink) is unaffected by the reasoning and closed anyway: it refuses
+LTO by explicit check in its own `meson.build`.
+
+- **Status:** closed, all three. Kept as switches so a toolchain bump is one
+  command:
+
+  ```
+  VESSEL_FEX_LTO=1 ./build/fex.sh      # FEX has its own, predating the shared one
+  VESSEL_LTO=1 ./build/dxvk.sh         # meson -Db_lto, via lto_flag() in common.sh
+  VESSEL_LTO=1 ./build/vkd3d.sh
+  ```
+
+  If a future llvm-mingw links them, benchmark before keeping it — **2.28× on
+  x86-32 integer is the number to beat**, and it should be beaten visibly.
 
 ### Candidate C — `-mcpu=oryon-1` for Wine's unix side
 
