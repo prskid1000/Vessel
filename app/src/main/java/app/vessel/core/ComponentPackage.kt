@@ -47,9 +47,6 @@ enum class ComponentType(val wire: String, val label: String) {
  * The field names are the ones `build/gen_registry.py` writes, which are in
  * turn the `.wcp` `profile.json` keys. [installed] is the one field that is not
  * in the registry — it is this device's answer, not the registry's.
- *
- * TODO: the registry also carries `sha256` and `url`. They belong here once
- *  there is a downloader to verify against.
  */
 data class ComponentPackage(
     val id: String,
@@ -76,4 +73,38 @@ data class ComponentPackage(
     val target: String,
     val sourceSha: String,
     val cpuFlags: String,
-)
+
+    /**
+     * Where the archive is, and what it must hash to.
+     *
+     * Both are the registry's, and both are null for a package described from
+     * the store instead: an installed component has no download left to do, the
+     * registry is not kept on the device, and `profile.json` carries neither
+     * field. Null therefore means "not applicable here" rather than "missing" —
+     * which is why [isDownloadable] is the predicate to ask, not `url != null`.
+     *
+     * They are one pair rather than two independent fields on purpose. A URL
+     * with no digest is a download nothing can check, and a digest with no URL
+     * is a check with nothing to run against; `build/gen_registry.py` already
+     * refuses to publish a registry where the digest is missing, and
+     * [ComponentRegistry] refuses to *read* an entry where either is. The
+     * failure this closes is the plain one: before these fields existed nothing
+     * verified that an installed package was the one the registry described,
+     * because the only value that could have said so never reached the app.
+     */
+    val sha256: String? = null,
+    val url: String? = null,
+) {
+    /**
+     * True when this entry names both a place to fetch from and a digest to
+     * check it against — the only state in which a download may be started.
+     *
+     * Written as one predicate so no caller can decide it a different way. The
+     * digest is checked for shape as well as presence: a registry that carries
+     * `"sha256": "TODO"` would otherwise pass a `!= null` test and be verified
+     * against a string no file can ever hash to, which fails at the end of an
+     * 88 MB download rather than before it starts.
+     */
+    val isDownloadable: Boolean
+        get() = !url.isNullOrBlank() && Sha256.isWellFormed(sha256)
+}
