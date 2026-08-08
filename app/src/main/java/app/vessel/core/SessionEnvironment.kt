@@ -44,6 +44,15 @@ val D3D_DLL_OVERRIDES: List<String> = listOf(
     "d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi", "opengl32",
 )
 
+/**
+ * `WINEDLLOVERRIDES`, named because two places have to agree about it and one of
+ * them has to be able to take it *out* again.
+ *
+ * See `SessionRuntime.LaunchPlan.bootstrapEnvironment`: this variable must not be
+ * set while a prefix is being built.
+ */
+const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
+
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
 
@@ -75,7 +84,7 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "WINEPREFIX",
     "WINEESYNC",
     "WINEDEBUG",
-    "WINEDLLOVERRIDES",
+    WINEDLLOVERRIDES_ENV,
     "DISPLAY",
     "DXVK_LOG_LEVEL",
     "DXVK_LOG_PATH",
@@ -245,7 +254,7 @@ fun sessionEnvironment(
     environment["FEX_HALFBARRIERTSOENABLED"] = "1"
     environment["FEX_VECTORTSOENABLED"] = "0"
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
-    environment["WINEDLLOVERRIDES"] = dllOverrides(profile, manifest)
+    environment[WINEDLLOVERRIDES_ENV] = dllOverrides(profile, manifest)
     environment["DISPLAY"] = display
 
     environment["DXVK_LOG_LEVEL"] = "info"

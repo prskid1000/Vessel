@@ -92,8 +92,10 @@ class ContainerProvisionerTest {
         )
         assertEquals(
             listOf(
-                "Create prefix", "Install Wine", "Install FEX", "Install Turnip",
-                "Install DXVK", "Install vkd3d", "First-run registry",
+                // "Create container", not "Create prefix": this step makes
+                // directories, and the prefix is `wineboot`'s doing two rows down.
+                "Create container", "Install Wine", "Install FEX", "Install Turnip",
+                "Install DXVK", "Install vkd3d", "Write registry seed",
                 "Initialise Wine prefix", "Ready to start",
             ),
             steps.map { it.label },

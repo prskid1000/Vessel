@@ -298,4 +298,63 @@ class PrefixRegistryTest {
 
 
 
+
+    // — reading the hive back -----------------------------------------------------
+
+    @Test
+    fun `the required hive values are the two emulator DLLs and nothing else`() {
+        // Derived from the keys rather than spelled out, so renaming an emulator
+        // cannot leave the checker looking for the old name and reporting success
+        // against a prefix that no longer works.
+        assertEquals(
+            listOf("libarm64ecfex.dll", "libwow64fex.dll"),
+            PrefixRegistry.requiredHiveValues,
+        )
+    }
+
+    @Test
+    fun `a hive with both emulator keys is missing nothing`() {
+        // The shape Wine actually writes: roots stripped, separators doubled, a
+        // timestamp after the key. Not the `.reg` format the seed is rendered in,
+        // which is why the check is a substring search and not a parse.
+        val hive = """
+            [Software\Microsoft\Wow64\amd64] 1786175298
+            #time=1dd270a46d24a8c
+            @="libarm64ecfex.dll"
+
+            [Software\Microsoft\Wow64\x86] 1786175298
+            @="libwow64fex.dll"
+        """.trimIndent()
+        assertEquals(emptyList<String>(), PrefixRegistry.missingFromHive(hive))
+    }
+
+    @Test
+    fun `wine's own defaults count as missing, which is the case that was shipping`() {
+        // Measured on the device: `regedit` was never reached, so `wine.inf`'s
+        // NOCLOBBER defaults were what the hive held. Both of these are DLLs this
+        // project does not ship, and the symptom is a c0000135 much later.
+        val hive = """
+            [Software\Microsoft\Wow64\amd64] 1786175298
+            @="xtajit64.dll"
+
+            [Software\Microsoft\Wow64\x86] 1786175298
+            @="xtajit.dll"
+        """.trimIndent()
+        assertEquals(
+            listOf("libarm64ecfex.dll", "libwow64fex.dll"),
+            PrefixRegistry.missingFromHive(hive),
+        )
+    }
+
+    @Test
+    fun `one key applied and the other not is reported as the one that is not`() {
+        val hive = """@="libarm64ecfex.dll"
+@="xtajit.dll""""
+        assertEquals(listOf("libwow64fex.dll"), PrefixRegistry.missingFromHive(hive))
+    }
+
+    @Test
+    fun `an empty hive is missing everything rather than passing vacuously`() {
+        assertEquals(PrefixRegistry.requiredHiveValues, PrefixRegistry.missingFromHive(""))
+    }
 }

@@ -300,6 +300,40 @@ object PrefixRegistry {
         ),
     )
 
+    /**
+     * The values whose presence in a booted prefix's `system.reg` proves the seed
+     * reached the **hive** and not merely the `.reg` file beside it.
+     *
+     * Derived from [arm64ecEmulator] and [x86Emulator] rather than spelled out, so
+     * renaming an emulator DLL cannot leave a checker looking for the old name and
+     * reporting success against a prefix that no longer works.
+     *
+     * These two and no others. Every other key in [seed] is cosmetic or a
+     * fallback — a missing `Control Panel\Colors` entry costs a grey title bar —
+     * whereas without these nothing in the prefix runs at all: `load_arm64ec_module`
+     * ends in `NtTerminateProcess` when the DLL the `amd64` key names is absent,
+     * and `get_cpu_dll_name` falls back to Microsoft's `xtajit.dll`, which we do
+     * not ship, when the `x86` one is.
+     */
+    val requiredHiveValues: List<String> =
+        listOf(arm64ecEmulator, x86Emulator).flatMap { key -> key.values.map { it.data } }
+
+    /**
+     * Which of [requiredHiveValues] are missing from the text of a `system.reg`.
+     *
+     * A substring search over the hive rather than a parse of it. Wine's hive
+     * format is not the `.reg` format — keys are written as `[Software\\Microsoft
+     * \\Wow64\\amd64]` with a timestamp and the roots stripped — and the question
+     * being asked is narrow enough that the answer does not need a parser: these
+     * two strings are DLL filenames that appear nowhere else in a fresh hive, so
+     * finding one is finding the key.
+     *
+     * Empty means applied. The caller reports the returned names verbatim, which
+     * is why they are the DLL names a person can then look for themselves.
+     */
+    fun missingFromHive(hive: String): List<String> =
+        requiredHiveValues.filterNot { hive.contains(it) }
+
     /** Everything a new prefix gets, in the order it is written. */
     val seed: List<RegistryKey> = listOf(
         direct3D,

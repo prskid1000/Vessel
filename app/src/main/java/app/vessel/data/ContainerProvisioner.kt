@@ -203,9 +203,13 @@ class ContainerProvisioner @Inject constructor(
 
     /** The checklist for [components], all pending. What the screen draws first. */
     fun plan(components: List<ComponentInstall>): List<ProvisionStep> = buildList {
-        add(ProvisionStep(STEP_LAYOUT, "Create prefix"))
+        // "Create container", not "Create prefix": this step makes directories.
+        // The prefix itself is `wineboot`'s doing, three rows down, and two rows
+        // both claiming to create it is how a reader ends up unable to say which
+        // one failed.
+        add(ProvisionStep(STEP_LAYOUT, "Create container"))
         components.forEach { add(ProvisionStep(componentStepId(it.type), "Install ${it.type.label}")) }
-        add(ProvisionStep(STEP_REGISTRY, "First-run registry"))
+        add(ProvisionStep(STEP_REGISTRY, "Write registry seed"))
         add(ProvisionStep(STEP_BOOT, "Initialise Wine prefix"))
         add(ProvisionStep(STEP_READY, "Ready to start"))
     }

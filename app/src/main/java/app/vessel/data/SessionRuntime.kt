@@ -20,6 +20,7 @@ import app.vessel.core.SessionScratch
 import app.vessel.core.TurnipDriver
 import app.vessel.core.WINE_BOOT
 import app.vessel.core.WINE_REGEDIT
+import app.vessel.core.WINEDLLOVERRIDES_ENV
 import app.vessel.core.WINE_UNIX_ARCH
 import app.vessel.core.WineTree
 import app.vessel.core.desktopArgv
@@ -203,6 +204,18 @@ class SessionRuntime @Inject constructor(
      */
     @Volatile
     private var plan: LaunchPlan? = null
+
+    /**
+     * The container [PrefixBootstrap]'s callbacks are working on.
+     *
+     * Same reasoning as [plan], and the same guarantee behind it: those two
+     * methods take a [ContainerLayout] and nothing else, while the component store
+     * is keyed by container id, so the id has to arrive out of band. [lifecycle]
+     * makes one field safe — one session, and the provisioner is only ever driven
+     * from inside it.
+     */
+    @Volatile
+    private var provisioning: String? = null
 
     @Volatile
     private var wineserver: Process? = null
@@ -466,20 +479,41 @@ class SessionRuntime @Inject constructor(
     /**
      * DESIGN.md's Preparing state. Returns the plan, or null when a step failed.
      *
-     * **The order is forced, and the forcing constraint is not the obvious one.**
-     * The PE payloads go into `drive_c\windows\system32` *before* `wineboot`
-     * runs, not after, because [PrefixRegistry.arm64ecEmulator] makes
-     * `libarm64ecfex.dll` a load-time dependency of **every** process in the
-     * prefix — `load_arm64ec_module()` runs in `LdrInitializeThunk` before
-     * `kernel32` and terminates the process if the DLL named by the key is
-     * missing. Deploying afterwards would leave a window in which the registry
-     * points at a file that is not there yet, and the next thing to start —
-     * including a retry's own `wineboot` — would die on it.
+     * **Nothing is copied into the prefix here, and that is the fix.** The FEX and
+     * D3D payloads used to be deployed at this point, before `wineboot` had ever
+     * run, on the reasoning that [PrefixRegistry.arm64ecEmulator] makes
+     * `libarm64ecfex.dll` a load-time dependency of every process in the prefix.
+     * The dependency is real; the conclusion was one step too far. The registry
+     * key does not exist until `regedit` applies the seed, and `regedit` cannot
+     * run until there is a prefix — so the window that argument was closing is
+     * between the *seed* and the boot, not between the *launch* and the boot.
      *
-     * A fresh prefix bootstraps anyway because Wine builds its own stub
-     * `xtajit64.dll` (`configure.ac`: `enable_xtajit64=arm64ec`) as a builtin in
-     * `lib/wine/aarch64-windows`, which is what the key falls back to before
-     * `regedit` has run. That is the only reason this is not a deadlock.
+     * Deploying that early is what `tools/device-graphics.sh` warns against in so
+     * many words ("after the wineboot passes, never before"): `syswow64` does not
+     * exist until the 32-bit pass has created it, so the 32-bit half of DXVK was
+     * being written into a directory Wine had not made yet.
+     *
+     * The stronger half of that warning — that `wine.inf` puts its builtins back
+     * over the top — turns out **not** to happen, and it is worth writing down
+     * which part is measured. `create_dest_file` (`dlls/setupapi/fakedll.c`)
+     * refuses to overwrite a file that is not one of Wine's own placeholders, so a
+     * real DXVK `d3d11.dll` survives a `wineboot --update`; checked on the device,
+     * where `system32/d3d11.dll` kept its 4 087 808 bytes and its original
+     * timestamp through a pass that created `syswow64/kernel32.dll` beside it. The
+     * ordering here therefore removes a dependency on Wine's behaviour rather than
+     * fixing a live bug, and the live bug it *does* fix is `syswow64` not existing.
+     *
+     * So the order now lives in [createPrefix] and [applyRegistry], which are the
+     * only two places that know where `wineboot` is in its run:
+     *
+     * ```
+     * wineserver -f -p
+     * wineboot --init                 creates system32 and the hives
+     * FEX -> system32                 before the seed names it, after the boot
+     * regedit prefix-seed.reg         and read the hive back to prove it landed
+     * wineboot --update  (x2)         builds syswow64, needs libwow64fex.dll
+     * DXVK / vkd3d / Zink -> prefix   after the last wine.inf pass
+     * ```
      */
     private suspend fun prepare(
         containerId: String,
@@ -556,21 +590,17 @@ class SessionRuntime @Inject constructor(
                 if (adopted.isEmpty()) "" else " (${adopted.size} newly linked)",
         )
 
-        mark(STEP_FEX, ProvisionStatus.RUNNING)
-        val fex = runCatching { installFex(containerId, layout, log) }
-            .getOrElse { return failStep(STEP_FEX, it.message ?: "could not install FEX", log) }
-        mark(STEP_FEX, ProvisionStatus.DONE, fex)
+        // Which container the prefix callbacks are working on. They are handed a
+        // [ContainerLayout] and nothing else — the interface predates there being
+        // anything to launch — and the component store is keyed by container id.
+        provisioning = containerId
 
-        mark(STEP_D3D, ProvisionStatus.RUNNING)
-        val d3d = runCatching { installD3dLayers(containerId, layout, log) }
-            .getOrElse { return failStep(STEP_D3D, it.message ?: "could not install the D3D layers", log) }
-        mark(STEP_D3D, if (d3d == null) ProvisionStatus.SKIPPED else ProvisionStatus.DONE, d3d ?: NO_D3D)
-
-        // Empty component list: there is no downloader, so nothing here can hand
-        // the provisioner an archive. What it still owns — the directory layout,
-        // the registry seed, and the callbacks into `createPrefix` and
-        // `applyRegistry` below — is the part that has to happen before a process
-        // can start.
+        // Empty component list: components are installed once per device, either
+        // from the packages bundled in the APK ([BundledComponents]) or by a
+        // download, and both write straight into the shared store. What the
+        // provisioner still owns — the directory layout, the registry seed, and
+        // the callbacks into `createPrefix` and `applyRegistry` below — is the
+        // part that has to happen per container, before a process can start.
         var failed = false
         provisioner.provision(containerId, emptyList(), bootstrap = this).collect { progress ->
             merge(progress.steps)
@@ -673,20 +703,14 @@ class SessionRuntime @Inject constructor(
     // — PrefixBootstrap: the two things that need a live process ---------------
 
     /**
-     * `wineboot --init`, with a `wineserver` of our own started first.
+     * Pass one: `wineboot --init`, then FEX into `system32`.
      *
-     * `--init` rather than `-u`: this runs once on a prefix that does not exist
-     * yet, and it is the call that creates `drive_c`, `system.reg` and the rest.
-     */
-    /**
-     * Pass one: `wineboot --init`.
-     *
-     * **A non-zero exit here is expected and is not a failure.** Every PE program
-     * in this build is ARM64EC, and an ARM64EC process cannot resolve a single
-     * import until `HKLM\Software\Microsoft\Wow64\amd64` names an emulator — which
-     * is in the registry seed, which cannot be applied until a prefix exists. So
-     * the first boot lays down `system32` and the hives, gets as far as
-     * `services.exe`, and then dies on `start.exe` with
+     * **A non-zero exit from `wineboot --init` is expected and is not a failure.**
+     * Every PE program in this build is ARM64EC, and an ARM64EC process cannot
+     * resolve a single import until `HKLM\Software\Microsoft\Wow64\amd64` names an
+     * emulator — which is in the registry seed, which cannot be applied until a
+     * prefix exists. So the first boot lays down `system32` and the hives, gets as
+     * far as `services.exe`, and then dies on `start.exe` with
      *
      * ```
      * err:module:import_dll Library shell32.dll … not found
@@ -694,97 +718,305 @@ class SessionRuntime @Inject constructor(
      * wineboot exited with 53
      * ```
      *
-     * Treating that as fatal is what left every container unlaunchable: the seed
-     * was written to `prefix-seed.reg`, recorded as applied in `provisioned.json`,
-     * and never reached `system.reg`, because provisioning returned before
-     * [applyRegistry] ran. Measured on the device — the Wow64 keys were in the
-     * seed file and absent from the hive.
+     * What *is* believed is the hive on disk: a run that did not leave a
+     * `system.reg` worth the name did not build a prefix, whatever it exited with.
      *
-     * The exit code that actually means something is pass two's, in
-     * [applyRegistry]. This is the sequence `tools/device-session.sh` has used
-     * successfully all along; the app was doing one pass of a two-pass procedure.
+     * **FEX is deployed here, between the boot and the seed, and that is the one
+     * ordering constraint that has not moved.** `load_arm64ec_module()` runs in
+     * `LdrInitializeThunk` before `kernel32` and `NtTerminateProcess`es the process
+     * when the DLL the key names is missing, so the files have to be in place
+     * before [applyRegistry] writes the key — and they cannot be in place any
+     * earlier than this, because `system32` is what `wineboot --init` creates.
+     * This is `tools/device-graphics.sh` step 2, in the same order and for the same
+     * reason.
      */
     override suspend fun createPrefix(layout: ContainerLayout): BootstrapOutcome {
         val current = plan ?: return BootstrapOutcome.NotAvailable(NO_PLAN)
+        val container = provisioning ?: return BootstrapOutcome.NotAvailable(NO_PLAN)
         startWineserver(current)?.let { return it }
 
-        val first = runTool(current, WINE_BOOT, listOf("--init"), "wineboot")
-        if (first is BootstrapOutcome.Failed) {
-            current.log.line(
-                LogSource.VESSEL,
-                LogLevel.INFO,
-                "first-pass wineboot did not finish cleanly (${first.reason}); this is expected " +
-                    "before the emulator is registered — continuing to the registry seed",
-            )
+        if (hiveExists(layout)) {
+            bootProgress("prefix already initialised")
+        } else {
+            bootProgress("wineboot --init")
+            val first = runTool(current, WINE_BOOT, listOf("--init"), "wineboot", BOOT_TIMEOUT_MS)
+            if (first is BootstrapOutcome.Failed) {
+                current.log.line(
+                    LogSource.VESSEL,
+                    LogLevel.INFO,
+                    "first-pass wineboot did not finish cleanly (${first.reason}); this is " +
+                        "expected before the emulator is registered — continuing to the seed",
+                )
+            }
+            // The server still holds the hive in memory when `wineboot` returns,
+            // so this is what makes the check below read the real answer.
+            flushHive(current)
+            if (!hiveExists(layout)) {
+                return BootstrapOutcome.Failed(
+                    "wineboot --init left no usable registry: ${hiveSize(layout)} bytes in " +
+                        "prefix/$SYSTEM_REG, and a fresh prefix is over " +
+                        "${MIN_HIVE_BYTES / 1024} KB",
+                )
+            }
         }
-        // Without this the hive is still in the server's memory and regedit's
-        // keys land on top of a file that is about to be rewritten from under
-        // them. `wineboot` returns before `wineserver` has flushed.
-        flushRegistry(current)
+
+        mark(STEP_FEX, ProvisionStatus.RUNNING)
+        val fex = runCatching { installFex(container, layout, current.log) }
+            .getOrElse {
+                val reason = it.message ?: "could not install FEX"
+                mark(STEP_FEX, ProvisionStatus.FAILED, reason)
+                return BootstrapOutcome.Failed(reason)
+            }
+        mark(STEP_FEX, ProvisionStatus.DONE, fex)
         return BootstrapOutcome.Applied
     }
 
     /**
-     * Pass two: apply the seed, then boot again so the prefix finishes.
+     * Pass two: apply the seed, **read it back**, build the 32-bit world, and put
+     * the graphics layers in last.
      *
-     * The second `wineboot` is the one whose exit code is believed. `--update`
-     * rather than `--init` so it does not start from nothing, and
-     * `.update-timestamp` is removed first because `wineboot` compares that stamp
-     * against `wine.inf` and skips the entire run when they match — which, right
-     * after pass one, they do.
+     * ## Why the seed used to reach `prefix-seed.reg` and never the hive
+     *
+     * Not `regedit`. `regedit` was never reached at all, and the reason is one
+     * line: the step before it ran `wineserver -w`, which does not mean "flush",
+     * it means **wait for every other `wineserver` to exit** (`wait_for_lock`,
+     * `server/request.c`, an `F_SETLKW` on the master socket lock). This app
+     * starts its own server `-f -p` because Wine cannot exec its own — see the
+     * class comment — and `-p` is *persistent*, so there is no idle timeout and
+     * the server never exits. `wineserver -w` therefore blocked forever,
+     * `createPrefix` never returned, and provisioning sat in PREPARING until the
+     * process was killed, with `registrySeedVersion` already written.
+     *
+     * `tools/device-session.sh` uses `wineserver -w` perfectly happily because it
+     * never starts a server of its own: `wineboot` auto-starts a transient one
+     * that exits three seconds after it goes idle, and the wait then returns. The
+     * technique is correct there and is unusable here, which is exactly the shape
+     * of bug that copying a working script into an app produces.
+     *
+     * So the hive is flushed by **ending the server and starting a new one**
+     * ([flushHive]) — `flush_registry()` runs on the server's way out, which is
+     * measured to work on the device: `grep libarm64ecfex system.reg` finds
+     * nothing while the server is up and finds it immediately after `wineserver
+     * -k`.
+     *
+     * ## And then it is checked
+     *
+     * `regedit` exits 0 whether or not a key landed, so the exit code is not
+     * evidence. The hive is read back and the step fails loudly naming the DLLs
+     * that are missing, which is what `tools/device-session.sh` has done all along
+     * ("a silently unapplied key shows up much later as `xtajit64.dll not found`
+     * and looks like a Wine bug").
+     *
+     * ## Two `--update` passes
+     *
+     * `.update-timestamp` is deleted before each, because `wineboot` compares that
+     * stamp against `wine.inf` and skips its whole run when they match — which,
+     * right after pass one, they do. Two passes rather than one because one forced
+     * pass measurably leaves `syswow64` empty and the second fills it; what the
+     * first establishes that the second needs is still not understood, and the
+     * honest thing is to run both and say so.
      */
     override suspend fun applyRegistry(layout: ContainerLayout, regFile: File): BootstrapOutcome {
         val current = plan ?: return BootstrapOutcome.NotAvailable(NO_PLAN)
+        val container = provisioning ?: return BootstrapOutcome.NotAvailable(NO_PLAN)
         if (!regFile.isFile) return BootstrapOutcome.Failed("no ${regFile.name} to apply")
 
-        val applied = runTool(current, WINE_REGEDIT, listOf(regFile.absolutePath), "regedit")
-        if (applied is BootstrapOutcome.Failed) return applied
-        flushRegistry(current)
+        // The whole of the rest of this method is idempotent but slow — three Wine
+        // process lifetimes and two full `wine.inf` passes, minutes on this phone —
+        // so a prefix that already carries its result skips it. The condition is
+        // read from the prefix itself rather than from `provisioned.json`: a
+        // recorded claim is exactly what was wrong before.
+        if (bootstrapped(layout)) {
+            bootProgress("emulator keys applied · syswow64 ${wow64Entries(layout)} entries")
+        } else {
+            bootProgress("regedit ${regFile.name}")
+            val applied = runTool(
+                current,
+                WINE_REGEDIT,
+                listOf(regFile.absolutePath),
+                "regedit",
+                REGEDIT_TIMEOUT_MS,
+            )
+            if (applied is BootstrapOutcome.Failed) return applied
+            flushHive(current)
 
-        runCatching { File(layout.prefix, UPDATE_TIMESTAMP).delete() }
-        val second = runTool(current, WINE_BOOT, listOf("--update"), "wineboot (second pass)")
-        flushRegistry(current)
-        return second
+            val missing = PrefixRegistry.missingFromHive(hiveText(layout))
+            if (missing.isNotEmpty()) {
+                return BootstrapOutcome.Failed(
+                    "the registry seed did not reach the hive: prefix/$SYSTEM_REG still does " +
+                        "not name ${missing.joinToString(" or ")}, so no translated program " +
+                        "can start in this prefix",
+                )
+            }
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "emulator keys are in $SYSTEM_REG: ${PrefixRegistry.requiredHiveValues.joinToString(", ")}",
+            )
+
+            for (pass in 1..WINEBOOT_UPDATE_PASSES) {
+                bootProgress("wineboot --update, pass $pass of $WINEBOOT_UPDATE_PASSES")
+                runCatching { File(layout.prefix, UPDATE_TIMESTAMP).delete() }
+                val update = runTool(
+                    current,
+                    WINE_BOOT,
+                    listOf("--update"),
+                    "wineboot --update (pass $pass)",
+                    BOOT_TIMEOUT_MS,
+                )
+                if (update is BootstrapOutcome.Failed) return update
+            }
+            flushHive(current)
+
+            // **A warning and not a failure, deliberately.** The 32-bit world is
+            // one of three translation paths; the 64-bit desktop is the product.
+            // Refusing to start a container because `syswow64` came up short would
+            // turn a missing capability into a total failure, and the user would
+            // have nothing at all instead of everything but x86-32. It is said out
+            // loud at ERROR level and carried in the step's own detail, so it
+            // cannot be mistaken for working.
+            val entries = wow64Entries(layout)
+            if (entries < MIN_WOW64_ENTRIES) {
+                current.log.line(
+                    LogSource.VESSEL,
+                    LogLevel.ERROR,
+                    "the 32-bit world did not initialise: syswow64 has $entries entries after " +
+                        "$WINEBOOT_UPDATE_PASSES wineboot --update passes. 64-bit and ARM64 " +
+                        "programs are unaffected; 32-bit x86 ones cannot load kernel32.",
+                )
+            }
+            bootProgress("syswow64 $entries entries")
+        }
+
+        // Last, and after every `wine.inf` pass. See the note on [prepare].
+        mark(STEP_D3D, ProvisionStatus.RUNNING)
+        val d3d = runCatching { installD3dLayers(container, layout, current.log) }
+            .getOrElse {
+                val reason = it.message ?: "could not install the D3D layers"
+                mark(STEP_D3D, ProvisionStatus.FAILED, reason)
+                return BootstrapOutcome.Failed(reason)
+            }
+        mark(STEP_D3D, if (d3d == null) ProvisionStatus.SKIPPED else ProvisionStatus.DONE, d3d ?: NO_D3D)
+
+        return BootstrapOutcome.Applied
     }
 
+    // — reading the prefix back ------------------------------------------------
+
+    private fun hive(layout: ContainerLayout): File = File(layout.prefix, SYSTEM_REG)
+
+    private fun hiveSize(layout: ContainerLayout): Long = hive(layout).length()
+
     /**
-     * `wineserver -w` — wait for the registry to reach disk.
+     * Whether `wineboot --init` has produced a registry at all.
      *
-     * Not optional and not a delay in disguise. `wineboot` and `regedit` both
-     * return while the server still holds the hive in memory, so the next step
-     * reads a `system.reg` that does not yet contain what the last one wrote.
-     * Failure is logged and swallowed: a flush that did not happen is a slower
-     * boot, not a broken one.
+     * A size threshold rather than existence: the server creates the file early
+     * and a prefix that died during `wine.inf` leaves a short one. A finished
+     * prefix's `system.reg` is several megabytes; the reference scripts use the
+     * same 100 KB floor.
      */
-    private suspend fun flushRegistry(current: LaunchPlan) {
-        val spec = ProcessSpec(
-            argv = current.tree.serverArgv(listOf("-w")),
-            environment = current.environment,
-            workingDirectory = current.layout.base,
-        )
-        val result = runner.run(spec) { line -> record(current.log, line) }
-        if (result is ProcessResult.NotStarted) {
+    private fun hiveExists(layout: ContainerLayout): Boolean = hiveSize(layout) > MIN_HIVE_BYTES
+
+    /**
+     * The hive as text, or empty when there is none.
+     *
+     * Several megabytes read into memory once per launch. Streaming it would be
+     * tidier and is not worth the loss of [PrefixRegistry.missingFromHive] being a
+     * pure function over a string that a unit test can write by hand.
+     */
+    private fun hiveText(layout: ContainerLayout): String =
+        runCatching { hive(layout).readText(Charsets.UTF_8) }.getOrDefault("")
+
+    private fun wow64Entries(layout: ContainerLayout): Int =
+        File(File(layout.prefix, DRIVE_C_WINDOWS), SYSWOW64).list()?.size ?: 0
+
+    /** Everything [applyRegistry] would do, already true of this prefix. */
+    private fun bootstrapped(layout: ContainerLayout): Boolean =
+        hiveExists(layout) &&
+            PrefixRegistry.missingFromHive(hiveText(layout)).isEmpty() &&
+            wow64Entries(layout) >= MIN_WOW64_ENTRIES
+
+    /**
+     * Force the hive to disk, by ending the session's server and starting another.
+     *
+     * `wineserver -w` is the obvious call and it cannot be used — see
+     * [applyRegistry] for why at length. `flush_registry()` runs on the server's
+     * way out, so `-k` is what actually writes `system.reg`, and a new `-f -p`
+     * takes its place immediately because every later step needs a server that
+     * Wine itself is not allowed to start.
+     */
+    private suspend fun flushHive(current: LaunchPlan) {
+        stopWineserver(current)
+        startWineserver(current)?.let {
             current.log.line(
                 LogSource.VESSEL,
                 LogLevel.WARN,
-                "wineserver -w could not run: ${result.reason}",
+                "could not restart wineserver after flushing the registry: " +
+                    (it as? BootstrapOutcome.Failed)?.reason.orEmpty(),
             )
         }
     }
 
+    /**
+     * `wineserver -k`, and then reap our own child.
+     *
+     * Both halves. `-k` signals the server to shut down and write its hives, but
+     * the server is also a [Process] we started, and leaving it unreaped leaves a
+     * zombie plus a drain coroutine parked on a pipe with no writer left to close
+     * it.
+     */
+    private suspend fun stopWineserver(current: LaunchPlan) {
+        val server = wineserver ?: return
+        val spec = ProcessSpec(
+            argv = current.tree.serverArgv(listOf("-k")),
+            environment = current.environment,
+            workingDirectory = current.layout.base,
+        )
+        current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
+        withTimeoutOrNull(KILL_TIMEOUT_MS) { runner.run(spec) { line -> record(current.log, line) } }
+        val exited = withTimeoutOrNull(KILL_TIMEOUT_MS) {
+            withContext(Dispatchers.IO) { server.waitFor() }
+        }
+        if (exited == null) {
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "wineserver did not exit after -k; killing it",
+            )
+            server.destroyForcibly()
+        }
+        wineserver = null
+    }
+
+    /**
+     * Run one Wine tool to completion, or fail when it will not finish.
+     *
+     * **The timeout is not belt and braces.** Every one of these is a blocking
+     * wait on a child that shares one pipe with a whole prefix's worth of
+     * processes, and the bug this method now guards against was precisely a Wine
+     * tool that never returned: provisioning wedged in PREPARING with a checklist
+     * on screen, no error anywhere, and `provisioned.json` already claiming the
+     * step had happened. A step that hangs is a step that has failed slowly.
+     */
     private suspend fun runTool(
         current: LaunchPlan,
         tool: String,
         arguments: List<String>,
         label: String,
+        timeoutMs: Long,
     ): BootstrapOutcome {
         val spec = ProcessSpec(
             argv = current.tree.toolArgv(tool, arguments),
-            environment = current.environment,
+            environment = current.bootstrapEnvironment,
             workingDirectory = current.layout.base,
         )
         current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
-        return when (val result = runner.run(spec) { line -> record(current.log, line) }) {
+        val result = withTimeoutOrNull(timeoutMs) {
+            runner.run(spec) { line -> record(current.log, line) }
+        } ?: return BootstrapOutcome.Failed(
+            "$label did not finish in ${timeoutMs / 1000} s and was killed",
+        )
+        return when (result) {
             is ProcessResult.NotStarted -> BootstrapOutcome.Failed("$label could not start: ${result.reason}")
             is ProcessResult.Exited ->
                 if (result.code == 0) {
@@ -797,6 +1029,25 @@ class SessionRuntime @Inject constructor(
                         "$label exited with ${result.code}" + if (why == null) "" else " — $why",
                     )
                 }
+        }
+    }
+
+    /**
+     * Narrate the boot step while it runs.
+     *
+     * The provisioner owns that row's status — it marks it RUNNING before calling
+     * in and DONE or FAILED after — and this only ever writes its detail, so the
+     * two cannot disagree about whether the step finished. It is the one row that
+     * spans minutes, and without it the checklist shows a dot for the whole of a
+     * two-pass `wineboot` with nothing to say which pass is running.
+     */
+    private fun bootProgress(detail: String) {
+        _state.update { state ->
+            state.copy(
+                steps = state.steps.map {
+                    if (it.id == ContainerProvisioner.STEP_BOOT) it.copy(detail = detail) else it
+                },
+            )
         }
     }
 
@@ -1135,16 +1386,29 @@ class SessionRuntime @Inject constructor(
     /**
      * The Preparing rows, all pending, before anything runs.
      *
+     * **The order is the order things finish in**, which is not the order they are
+     * declared in anywhere else: FEX and the D3D layers are installed *inside* the
+     * boot step now, so they sit under it rather than above it. The boot row is
+     * the one that spans minutes, and it narrates itself through [bootProgress]
+     * while the two rows under it tick.
+     *
      * [ContainerProvisioner.plan]'s last step says "Ready to start" and is
      * dropped, because reaching Starting is what says that and a row claiming it
      * one frame earlier is a row nobody reads.
      */
-    private fun checklist(): List<ProvisionStep> =
-        listOf(
+    private fun checklist(): List<ProvisionStep> {
+        val provisioning = provisioner.plan(emptyList())
+            .filterNot { it.id == ContainerProvisioner.STEP_READY }
+            .associateBy { it.id }
+        return listOfNotNull(
+            provisioning[ContainerProvisioner.STEP_LAYOUT],
             ProvisionStep(STEP_COMPONENTS, "Resolve components"),
+            provisioning[ContainerProvisioner.STEP_REGISTRY],
+            provisioning[ContainerProvisioner.STEP_BOOT],
             ProvisionStep(STEP_FEX, "Install FEX"),
             ProvisionStep(STEP_D3D, "Install D3D layers"),
-        ) + provisioner.plan(emptyList()).filterNot { it.id == ContainerProvisioner.STEP_READY }
+        )
+    }
 
     private fun mark(id: String, status: ProvisionStatus, detail: String? = null) {
         _state.update { state ->
@@ -1202,7 +1466,34 @@ class SessionRuntime @Inject constructor(
         val environment: Map<String, String>,
         /** Carried so [PrefixBootstrap]'s callbacks can write to the same file. */
         val log: SessionLog,
-    )
+    ) {
+        /**
+         * [environment] without `WINEDLLOVERRIDES`, for everything that builds the
+         * prefix rather than runs in it.
+         *
+         * **`WINEDLLOVERRIDES=…=n` must not be set while `wineboot` is running**,
+         * and `tools/device-graphics.sh` says so where it composes the two
+         * environments separately: "forcing native d3d during prefix creation
+         * would have wineboot's own DLL registration trip over files that are not
+         * in place yet". `n` is native *only* — a name in that list with no file
+         * behind it is `STATUS_DLL_NOT_FOUND` and not a fallback.
+         *
+         * Measured on the device, and it is not a graceful failure: with the D3D
+         * payloads no longer copied in ahead of the boot, `wineboot --init` stalls
+         * in `rundll32 setupapi,InstallHinfSection PreInstall` and never returns.
+         * Four minutes in, `drive_c` was still empty and the process was still
+         * alive. The app only ever got away with it because it used to deploy DXVK
+         * into `system32` before booting, so every name in the list happened to
+         * resolve — which made a hard ordering requirement look like a free choice.
+         *
+         * The prefix is not left without an opinion, either: the registry seed
+         * writes the same set under `HKCU\Software\Wine\DllOverrides` as
+         * `native,builtin`, which falls back instead of failing, so the second
+         * `wineboot --update` prefers the real DLLs where they exist and boots
+         * where they do not.
+         */
+        val bootstrapEnvironment: Map<String, String> get() = environment - WINEDLLOVERRIDES_ENV
+    }
 
     private companion object {
         const val STEP_COMPONENTS = "session:components"
@@ -1223,6 +1514,52 @@ class SessionRuntime @Inject constructor(
         const val SYSTEM32 = "system32"
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
+
+        /** The 64-bit hive, and the only file that can prove a prefix was booted. */
+        const val SYSTEM_REG = "system.reg"
+
+        /**
+         * Below this, `system.reg` is a stub the server made and not a prefix.
+         *
+         * A finished one is several megabytes. The same floor as
+         * `tools/device-session.sh`, which is where the number was measured.
+         */
+        const val MIN_HIVE_BYTES = 100_000L
+
+        /**
+         * Below this, the 32-bit world did not come up.
+         *
+         * A populated `syswow64` has around 885 entries on this build; the handful
+         * that appear without a `wineboot --update` pass are whatever the graphics
+         * packages put there. 100 is far enough from both to be unambiguous, and
+         * is the reference scripts' own threshold.
+         */
+        const val MIN_WOW64_ENTRIES = 100
+
+        /**
+         * Two, and it is measured rather than superstitious.
+         *
+         * One forced `wineboot --update` leaves `syswow64` empty and a second
+         * identical pass fills it. What the first establishes that the second
+         * needs is not understood; the honest response is to run both and record
+         * that this is why.
+         */
+        const val WINEBOOT_UPDATE_PASSES = 2
+
+        /**
+         * How long a `wineboot` pass may take before it is treated as wedged.
+         *
+         * `wine.inf` on this phone is minutes, not seconds, and a cold first boot
+         * is the slowest thing this app does — so the ceiling is generous. It
+         * exists because the alternative is what actually happened: a Wine tool
+         * that never returned, a checklist that never moved, and nothing in the
+         * log to say which step it was in. The reference scripts wrap the same
+         * calls in `timeout 900`.
+         */
+        const val BOOT_TIMEOUT_MS = 900_000L
+
+        /** `regedit` on a 1.6 KB file is seconds; a minute is already pathological. */
+        const val REGEDIT_TIMEOUT_MS = 120_000L
 
         /** Named by [app.vessel.core.PrefixRegistry.arm64ecEmulator]; required. */
         const val ARM64EC_FEX = "libarm64ecfex.dll"
