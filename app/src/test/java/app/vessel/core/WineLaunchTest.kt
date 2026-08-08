@@ -61,6 +61,81 @@ class WineLaunchTest {
         assertEquals("/desktop=vessel,1600x900", argv.last())
     }
 
+    // — what starts on the desktop ------------------------------------------------
+
+    @Test
+    fun `a program on the desktop command line follows the desktop option`() {
+        // manage_desktop splits its argument at the first whitespace and
+        // CreateProcessWs the remainder, so the order is the whole mechanism:
+        // reversed, explorer parses "winefile.exe" as the desktop name.
+        val argv = tree.desktopArgv(
+            DisplayGeometry(1280, 720),
+            program = FILE_MANAGER_COMMAND,
+            hasBinary = false,
+        )
+        assertEquals(
+            listOf(
+                SYSTEM_LINKER,
+                tree.loader.absolutePath,
+                "explorer",
+                "/desktop=vessel,1280x720",
+                "winefile.exe",
+                """C:\""",
+            ),
+            argv,
+        )
+    }
+
+    @Test
+    fun `no program leaves the desktop command exactly as it was`() {
+        assertEquals(
+            tree.desktopArgv(DisplayGeometry(1280, 720), hasBinary = false),
+            tree.desktopArgv(DisplayGeometry(1280, 720), program = emptyList(), hasBinary = false),
+        )
+    }
+
+    @Test
+    fun `the file manager is relaunched by name through the loader`() {
+        // Not through bin/winefile, which exists as a symlink to bin/wine and
+        // would work: the AppDefaults key that puts this window on the vessel
+        // desktop is filed under the image's base name, and naming the program
+        // explicitly is what makes that name predictable.
+        assertEquals(
+            listOf(SYSTEM_LINKER, tree.loader.absolutePath, "winefile.exe", """C:\"""),
+            tree.fileManagerArgv(),
+        )
+    }
+
+    @Test
+    fun `the file manager opens on the container's C drive, not on the Android tree`() {
+        // With no argument winefile falls back to GetCurrentDirectoryW, and the
+        // session's working directory is a Unix path that Wine maps onto Z: — so
+        // the default view is the phone's filesystem rather than the container's
+        // Windows drive, which is the one place the user's programs are.
+        assertEquals("""C:\""", WINE_FILE_MANAGER_ROOT)
+        assertEquals(WINE_FILE_MANAGER_ROOT, tree.fileManagerArgv().last())
+        assertEquals(WINE_FILE_MANAGER_ROOT, FILE_MANAGER_COMMAND.last())
+        assertTrue(FILE_MANAGER_COMMAND.none { it.startsWith("Z:") || it.startsWith("/") })
+    }
+
+    @Test
+    fun `the file manager's name carries the extension the registry key is filed under`() {
+        assertTrue(WINE_FILE_MANAGER.endsWith(".exe"))
+        assertTrue(PrefixRegistry.fileManagerDesktop.path.endsWith("""\$WINE_FILE_MANAGER\Explorer"""))
+    }
+
+    @Test
+    fun `builtin programs are looked for in the PE directory, not in bin`() {
+        // `explorer` has no bin/ entry at all, so hasTool says nothing about
+        // whether Wine ships it. lib/wine/aarch64-windows is where both it and
+        // winefile.exe actually live — confirmed against the package, which holds
+        // aarch64-windows, i386-windows and aarch64-unix and no arm64ec-windows.
+        assertEquals(
+            File(tree.root, "lib/wine/aarch64-windows").absolutePath,
+            tree.peLib.absolutePath,
+        )
+    }
+
     @Test
     fun `wineserver is a real binary and is never routed through the loader`() {
         val argv = tree.serverArgv(listOf("-k"))
@@ -168,5 +243,6 @@ class WineLaunchTest {
     fun `the display param keys are the ones the shipped manifest declares`() {
         assertEquals("display.resolution", DisplayParams.RESOLUTION)
         assertEquals("display.fpsLimit", DisplayParams.FPS_LIMIT)
+        assertEquals("display.fileManager", DisplayParams.FILE_MANAGER)
     }
 }

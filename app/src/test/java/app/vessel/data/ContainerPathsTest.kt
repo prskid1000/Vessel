@@ -37,6 +37,48 @@ class ContainerPathsTest {
         assertEquals(File(filesDir, "containers/abc/tmp"), layout.tmp)
         assertEquals(File(filesDir, "containers/abc/provisioned.json"), layout.provisionState)
         assertEquals(File(filesDir, "containers/abc/prefix-seed.reg"), layout.registrySeed)
+        assertEquals(File(filesDir, "containers/abc/desktop-seed.reg"), layout.desktopSeed)
+    }
+
+    @Test
+    fun `the wallpaper sits at the C path the registry seed names`() {
+        // The two spellings of one location — a Unix path here and a DOS path in
+        // PrefixRegistry — have to describe the same file, and nothing at runtime
+        // would say if they drifted: Wine would load nothing and paint the flat
+        // colour, which is also what a genuine failure to read the wallpaper looks
+        // like.
+        val layout = paths.of("abc")
+        assertEquals(
+            File(filesDir, "containers/abc/prefix/drive_c/windows/web/wallpaper/vessel.bmp"),
+            layout.wallpaper,
+        )
+        val dos = app.vessel.core.PrefixRegistry.WALLPAPER_PATH
+            .removePrefix("""C:\""")
+            .replace('\\', '/')
+        assertEquals(
+            File(File(layout.prefix, "drive_c"), dos),
+            layout.wallpaper,
+        )
+    }
+
+    @Test
+    fun `a user-supplied still is looked for in the container directory`() {
+        val layout = paths.of("abc")
+        assertEquals(
+            listOf("wallpaper.png", "wallpaper.jpg", "wallpaper.jpeg", "wallpaper.webp", "wallpaper.bmp")
+                .map { File(filesDir, "containers/abc/$it") },
+            layout.wallpaperOverrides,
+        )
+    }
+
+    @Test
+    fun `the wallpaper is per container and never in the shared component store`() {
+        // It is derived from the phone rather than downloaded, so ComponentStore
+        // must never see it: prune() counts references and a stray file under
+        // components/ is bytes nothing can account for.
+        val layout = paths.of("abc")
+        assertTrue(layout.wallpaper.path.startsWith(layout.base.path))
+        assertFalse(layout.wallpaper.path.contains("components"))
     }
 
     @Test

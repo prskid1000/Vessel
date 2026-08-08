@@ -1,10 +1,13 @@
 package app.vessel.data
 
 import android.content.Context
+import android.net.Uri
 import android.os.PowerManager
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
 import app.vessel.core.DEFAULT_DISPLAY
+import app.vessel.core.DesktopBackground
+import app.vessel.core.FILE_MANAGER_COMMAND
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayParams
@@ -19,11 +22,14 @@ import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
 import app.vessel.core.TurnipDriver
 import app.vessel.core.WINE_BOOT
+import app.vessel.core.WINE_FILE_MANAGER
 import app.vessel.core.WINE_REGEDIT
 import app.vessel.core.WINE_UNIX_ARCH
+import app.vessel.core.WallpaperOrigin
 import app.vessel.core.WineTree
 import app.vessel.core.desktopArgv
 import app.vessel.core.diagnoseSessionLine
+import app.vessel.core.fileManagerArgv
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamValue
 import app.vessel.core.parseFpsLimit
@@ -97,6 +103,17 @@ data class SessionState(
     val startedAt: Long? = null,
     val geometry: DisplayGeometry? = null,
     val fpsLimit: Int? = null,
+    /**
+     * What the Windows desktop's background resolved to, and why.
+     *
+     * Published because the answer is frequently "not your wallpaper": on this
+     * device every `WallpaperManager` bitmap call is refused outright, so
+     * [DesktopBackground.summary] is the one plain sentence a user gets about it
+     * and [DesktopBackground.origin] is what a "Pick an image" affordance keys
+     * off. A UI that showed a colour without saying it was a fallback would be
+     * implying the wallpaper had been read.
+     */
+    val background: DesktopBackground? = null,
 ) {
     val active: Boolean
         get() = phase == SessionPhase.PREPARING ||
@@ -109,6 +126,39 @@ data class SessionState(
     /** The step the Failed state names. */
     val failedStep: ProvisionStep?
         get() = steps.firstOrNull { it.status == ProvisionStatus.FAILED }
+}
+
+/**
+ * What [SessionRuntime.launchFileManager] did.
+ *
+ * A result rather than a `Boolean` because the two ways it can decline are
+ * different things to say: one is "you already have one open" and the other names
+ * a package that cannot provide it. DESIGN.md's rule about a control that
+ * controls nothing applies to a button that silently does nothing too.
+ */
+sealed interface FileManagerLaunch {
+    data object Started : FileManagerLaunch
+
+    /** One this class started is still alive. Nothing was launched. */
+    data object AlreadyRunning : FileManagerLaunch
+
+    data class Unavailable(val reason: String) : FileManagerLaunch
+}
+
+/** What [SessionRuntime.useWallpaperImage] or [SessionRuntime.clearWallpaperImage] did. */
+sealed interface WallpaperChange {
+    /**
+     * The prefix now has this background.
+     *
+     * [live] is false in every case today and is a field rather than an omission
+     * on purpose: the caller has to tell the user the desktop will change on the
+     * next start, and a UI that said "done" over an unchanged screen would be the
+     * silent-failure shape this project refuses. It becomes true if something ever
+     * exists on the guest side that can send `WM_SETTINGCHANGE`.
+     */
+    data class Applied(val background: DesktopBackground, val live: Boolean) : WallpaperChange
+
+    data class Unavailable(val reason: String) : WallpaperChange
 }
 
 /**
@@ -149,6 +199,7 @@ class SessionRuntime @Inject constructor(
     private val logs: SessionLogStore,
     private val runner: WineProcessRunner,
     private val display: SessionDisplayServer,
+    private val wallpapers: AndroidWallpaper,
     private val json: Json,
 ) : PrefixBootstrap {
 
@@ -178,6 +229,17 @@ class SessionRuntime @Inject constructor(
 
     @Volatile
     private var desktop: Process? = null
+
+    /**
+     * Every file manager this class started, alive or not.
+     *
+     * A list rather than one slot because the rail button can be pressed again,
+     * and the point of the list is teardown: `wineserver -k` ends the guest
+     * processes but these are also *our* children, and a `Process` nobody
+     * destroys leaves a zombie and a drain coroutine reading a pipe that will
+     * never close. Guarded by [lifecycle] on every path that touches it.
+     */
+    private val fileManagers = mutableListOf<Process>()
 
     /**
      * Whether the user asked for this.
@@ -230,6 +292,82 @@ class SessionRuntime @Inject constructor(
         _state.value = SessionState()
     }
 
+    /**
+     * Open Wine's file manager on the running desktop. The rail's button.
+     *
+     * Independent of `display.fileManager`, which only decides what the desktop
+     * starts with: a button press is a request and overrides a preference.
+     *
+     * **This process is not the session.** It is started, drained into the same
+     * log, and destroyed at teardown, but nothing waits on it and its exit code is
+     * never read — the session still ends when and only when the desktop process
+     * exits. A failure to start is reported to the caller and does not touch
+     * [SessionState].
+     */
+    suspend fun launchFileManager(): FileManagerLaunch = lifecycle.withLock {
+        val current = plan
+        if (current == null || _state.value.phase != SessionPhase.RUNNING) {
+            return@withLock FileManagerLaunch.Unavailable("there is no running desktop to open it on")
+        }
+        fileManagers.removeAll { !it.isAlive }
+        if (fileManagers.isNotEmpty()) return@withLock FileManagerLaunch.AlreadyRunning
+        if (!current.tree.hasProgram(WINE_FILE_MANAGER)) {
+            return@withLock FileManagerLaunch.Unavailable(
+                "this Wine package has no $WINE_FILE_MANAGER in lib/wine/${current.tree.peLib.name}",
+            )
+        }
+        startFileManager(current)
+    }
+
+    /**
+     * Use [source] as the desktop wallpaper for this container.
+     *
+     * The answer to a `WallpaperManager` that will not hand over the phone's own
+     * — measured on this device, every bitmap entry point answers
+     * `SecurityException: Permission android.permission.READ_EXTERNAL_STORAGE
+     * denied for package app.vessel`, and the app holds no storage permission by
+     * design. Android's photo picker returns a URI that needs none, so this is
+     * the one route to the user's own image that costs them nothing.
+     *
+     * **It takes effect at the next desktop start, and that is a real
+     * limitation.** The registry is updated immediately, but Wine's `explorer`
+     * only rereads the wallpaper on `WM_SETTINGCHANGE`/`SPI_SETDESKWALLPAPER`, and
+     * nothing here can send one: it would take a guest process calling
+     * `SystemParametersInfoW`, and the obvious candidate,
+     * `rundll32 user32.dll,UpdatePerUserSystemParameters`, is a stub in
+     * `user32.spec`. [WallpaperChange.Applied.live] carries the fact rather than
+     * leaving the UI to imply otherwise.
+     */
+    suspend fun useWallpaperImage(source: Uri): WallpaperChange = changeWallpaper { layout ->
+        if (!wallpapers.adopt(layout, source)) {
+            return@changeWallpaper "that image could not be read"
+        }
+        null
+    }
+
+    /** Forget a picked image and go back to whatever the phone will give us. */
+    suspend fun clearWallpaperImage(): WallpaperChange = changeWallpaper { layout ->
+        wallpapers.clear(layout)
+        null
+    }
+
+    private suspend fun changeWallpaper(
+        edit: suspend (ContainerLayout) -> String?,
+    ): WallpaperChange = lifecycle.withLock {
+        val current = plan
+        val geometry = _state.value.geometry
+        if (current == null || geometry == null) {
+            return@withLock WallpaperChange.Unavailable("there is no running container to set it on")
+        }
+        edit(current.layout)?.let { return@withLock WallpaperChange.Unavailable(it) }
+
+        val background = refreshBackground(current, current.layout, geometry)
+            ?: return@withLock WallpaperChange.Unavailable(
+                "the container's registry could not be updated",
+            )
+        WallpaperChange.Applied(background, live = false)
+    }
+
     // — the session -----------------------------------------------------------
 
     private suspend fun runSession(containerId: String, native: DisplayGeometry?) {
@@ -270,8 +408,8 @@ class SessionRuntime @Inject constructor(
         )
 
         try {
-            prepare(containerId, profile, manifest, log) ?: return
-            runDesktop(log, geometry, fpsLimit)
+            prepare(containerId, profile, manifest, log, geometry) ?: return
+            runDesktop(log, geometry, fpsLimit, flag(profile, manifest, DisplayParams.FILE_MANAGER))
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
             // every step of it suspends, so it needs a context that is not
@@ -303,6 +441,7 @@ class SessionRuntime @Inject constructor(
         profile: ContainerProfile,
         manifest: ParamManifest?,
         log: SessionLog,
+        geometry: DisplayGeometry,
     ): LaunchPlan? {
         val layout = paths.of(containerId)
 
@@ -386,11 +525,89 @@ class SessionRuntime @Inject constructor(
             return null
         }
 
+        applyWallpaper(resolved, layout, geometry)
         return resolved
     }
 
+    /**
+     * Derive the desktop background from the phone and put it in the prefix.
+     *
+     * Last in Preparing because it needs the prefix *booted*: the colour is
+     * per-session data, so it goes in through `regedit` rather than through the
+     * provisioner's seed, and there is no registry to write into until `wineboot`
+     * has made one.
+     *
+     * **It can never fail the session.** A desktop with the wrong background is a
+     * desktop; the step reports what tier it reached and moves on. The full list
+     * of `WallpaperManager` calls goes into the log at INFO, not TRACE — which
+     * entry point works on a given device and targetSdk is the one thing about
+     * this feature that cannot be looked up, so it belongs in every bug report.
+     */
+    private suspend fun applyWallpaper(
+        current: LaunchPlan,
+        layout: ContainerLayout,
+        geometry: DisplayGeometry,
+    ) {
+        mark(STEP_WALLPAPER, ProvisionStatus.RUNNING)
+        val background = refreshBackground(current, layout, geometry)
+        if (background == null) {
+            mark(STEP_WALLPAPER, ProvisionStatus.SKIPPED, _state.value.failure ?: WALLPAPER_NOT_APPLIED)
+            return
+        }
+        mark(STEP_WALLPAPER, ProvisionStatus.DONE, background.summary)
+    }
+
+    /**
+     * Derive the background, write the bitmap, and put the colour in the
+     * registry. Null when the registry could not be reached.
+     *
+     * Split out of [applyWallpaper] because [useWallpaperImage] runs the same
+     * three steps mid-session, where there is no checklist row to mark.
+     */
+    private suspend fun refreshBackground(
+        current: LaunchPlan,
+        layout: ContainerLayout,
+        geometry: DisplayGeometry,
+    ): DesktopBackground? {
+        val background = runCatching { wallpapers.derive(layout, geometry) }.getOrElse {
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "wallpaper: ${it.message ?: it.javaClass.simpleName}",
+            )
+            return null
+        }
+        for (attempt in background.attempts) {
+            current.log.line(LogSource.VESSEL, LogLevel.INFO, "wallpaper: $attempt")
+        }
+        current.log.line(LogSource.VESSEL, LogLevel.INFO, "wallpaper: ${background.summary}")
+        _state.update { it.copy(background = background) }
+
+        val keys = buildList {
+            add(PrefixRegistry.desktopColor(background.color))
+            // The path is already in the seed, so the only reason to write it
+            // again is the case where the seed has it and the file does not: Wine
+            // loads nothing, paints the colour, and that is the intended result.
+            if (background.origin != WallpaperOrigin.DESKTOP_COLOR) add(PrefixRegistry.desktopWallpaper)
+        }
+        val written = runCatching {
+            layout.desktopSeed.writeText(PrefixRegistry.render(keys), Charsets.UTF_8)
+        }.isSuccess
+        if (!written) return null
+
+        return when (applyRegistry(layout, layout.desktopSeed)) {
+            is BootstrapOutcome.Applied -> background
+            is BootstrapOutcome.NotAvailable, is BootstrapOutcome.Failed -> null
+        }
+    }
+
     /** DESIGN.md's Starting and Running states. */
-    private suspend fun runDesktop(log: SessionLog, geometry: DisplayGeometry, fpsLimit: Int?) {
+    private suspend fun runDesktop(
+        log: SessionLog,
+        geometry: DisplayGeometry,
+        fpsLimit: Int?,
+        fileManager: Boolean,
+    ) {
         val current = plan ?: return
         _state.update { it.copy(phase = SessionPhase.STARTING) }
 
@@ -429,10 +646,32 @@ class SessionRuntime @Inject constructor(
             }
         }
 
+        // What the display server answered with becomes part of the plan, not just
+        // of this one command: `launchFileManager` starts a guest process later and
+        // it needs the same DISPLAY and the same shared-memory socket.
+        val running = current.copy(environment = current.environment + displayEnvironment)
+        plan = running
+
+        // Started by explorer rather than beside it. `explorer /desktop=` gives a
+        // bare background — no icons, no taskbar — so without something on it a
+        // new session is an empty rectangle with no way to reach a program.
+        val program = when {
+            !fileManager -> emptyList()
+            running.tree.hasProgram(WINE_FILE_MANAGER) -> FILE_MANAGER_COMMAND
+            else -> {
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.WARN,
+                    "this Wine package has no $WINE_FILE_MANAGER; the desktop will be empty",
+                )
+                emptyList()
+            }
+        }
+
         val spec = ProcessSpec(
-            argv = current.tree.desktopArgv(geometry),
-            environment = current.environment + displayEnvironment,
-            workingDirectory = current.layout.base,
+            argv = running.tree.desktopArgv(geometry, program),
+            environment = running.environment,
+            workingDirectory = running.layout.base,
         )
         log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
 
@@ -533,6 +772,37 @@ class SessionRuntime @Inject constructor(
         return null
     }
 
+    /**
+     * `wine winefile.exe`, as a process of its own.
+     *
+     * Nothing joins this: the drain runs on [scope], which outlives the session
+     * job, so a file manager the user leaves open cannot hold up a Stop and its
+     * exit cannot be mistaken for the desktop's. It reaches the `vessel` desktop
+     * through [PrefixRegistry.fileManagerDesktop] rather than through a second
+     * `explorer /desktop=`, which would put a full-size second desktop window over
+     * everything already on screen.
+     */
+    private fun startFileManager(current: LaunchPlan): FileManagerLaunch {
+        val spec = ProcessSpec(
+            argv = current.tree.fileManagerArgv(),
+            environment = current.environment,
+            workingDirectory = current.layout.base,
+        )
+        current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
+        val process = runner.start(spec).getOrElse {
+            val reason = it.message ?: it.javaClass.simpleName
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "$WINE_FILE_MANAGER could not start: $reason",
+            )
+            return FileManagerLaunch.Unavailable(reason)
+        }
+        fileManagers += process
+        scope.launch { runner.drain(process) { line -> record(current.log, line) } }
+        return FileManagerLaunch.Started
+    }
+
     // — teardown ---------------------------------------------------------------
 
     /**
@@ -546,6 +816,10 @@ class SessionRuntime @Inject constructor(
     private suspend fun teardown(log: SessionLog) {
         val current = plan
         desktop?.takeIf { it.isAlive }?.destroy()
+        // Ahead of `wineserver -k` for the same reason as the desktop: these are
+        // our own children as well as the server's, so closing their pipes first
+        // lets the drain coroutines finish instead of blocking on a read.
+        fileManagers.forEach { it.takeIf(Process::isAlive)?.destroy() }
 
         if (current != null && wineserver != null) {
             val spec = ProcessSpec(
@@ -564,8 +838,10 @@ class SessionRuntime @Inject constructor(
         }
 
         desktop?.destroyForcibly()
+        fileManagers.forEach { it.destroyForcibly() }
         wineserver?.destroyForcibly()
         desktop = null
+        fileManagers.clear()
         wineserver = null
         plan = null
 
@@ -797,6 +1073,18 @@ class SessionRuntime @Inject constructor(
         (profile.params[key] as? ParamValue.Text)?.value
             ?: (manifest?.spec(key)?.defaultValue() as? ParamValue.Text)?.value
 
+    /**
+     * A boolean param, defaulting to true when nothing can answer.
+     *
+     * The fallback is not neutral and is chosen for the one caller: with no
+     * manifest to read, an empty desktop is the failure this feature exists to
+     * remove, and a file manager nobody wanted is closable.
+     */
+    private fun flag(profile: ContainerProfile, manifest: ParamManifest?, key: String): Boolean =
+        (profile.params[key] as? ParamValue.Flag)?.value
+            ?: (manifest?.spec(key)?.defaultValue() as? ParamValue.Flag)?.value
+            ?: true
+
     // — checklist plumbing -----------------------------------------------------
 
     /**
@@ -811,7 +1099,8 @@ class SessionRuntime @Inject constructor(
             ProvisionStep(STEP_COMPONENTS, "Resolve components"),
             ProvisionStep(STEP_FEX, "Install FEX"),
             ProvisionStep(STEP_D3D, "Install D3D layers"),
-        ) + provisioner.plan(emptyList()).filterNot { it.id == ContainerProvisioner.STEP_READY }
+        ) + provisioner.plan(emptyList()).filterNot { it.id == ContainerProvisioner.STEP_READY } +
+            ProvisionStep(STEP_WALLPAPER, "Desktop wallpaper")
 
     private fun mark(id: String, status: ProvisionStatus, detail: String? = null) {
         _state.update { state ->
@@ -875,8 +1164,11 @@ class SessionRuntime @Inject constructor(
         const val STEP_COMPONENTS = "session:components"
         const val STEP_FEX = "session:fex"
         const val STEP_D3D = "session:d3d"
+        const val STEP_WALLPAPER = "session:wallpaper"
 
         const val NO_PLAN = "the session was torn down before the prefix could be booted"
+        const val WALLPAPER_NOT_APPLIED =
+            "the desktop background could not be written to the prefix; Wine's own blue stays"
         const val NO_D3D = "No D3D or OpenGL layer is installed"
 
         const val DRIVE_C_WINDOWS = "drive_c/windows"

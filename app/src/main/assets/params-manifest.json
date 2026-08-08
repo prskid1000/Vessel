@@ -27,7 +27,7 @@
     {
       "id": "display",
       "title": "Display",
-      "help": "Desktop size and frame rate.",
+      "help": "Desktop size, frame rate, and what opens on it.",
       "params": [
         {
           "key": "display.resolution",
@@ -90,6 +90,13 @@
             "120": "120 fps",
             "165": "165 fps  (panel maximum)"
           }
+        },
+        {
+          "key": "display.fileManager",
+          "title": "Open a file manager",
+          "help": "Starts Wine's file manager on the desktop, so there is something to browse and launch from.",
+          "type": "bool",
+          "default": true
         }
       ]
     },
