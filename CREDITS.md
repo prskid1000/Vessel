@@ -33,7 +33,7 @@ chain of work it builds on:
 
 ### Code shipped inside the app
 
-Two pieces of other people's work are compiled into the APK itself.
+Three pieces of other people's work are compiled into the APK itself.
 
 **libadrenotools**, by Billy Laws (bylaws), BSD-2-Clause, vendored at commit
 `8fae8ce` into `app/src/main/cpp/adrenotools/` with its `linkernsbypass`
@@ -44,6 +44,15 @@ load it, and only libadrenotools' `android_dlopen_ext` interposer can make that
 loader pick a driver out of app storage. Without it Vessel's chip-tuned Mesa
 build is a file on disk that nothing ever calls. `app/src/main/cpp/adrenotools/README.md`
 records what was taken and what was left.
+
+**Phosphor Icons**, by Tobias Fried and Helena Zhang, MIT. Every glyph in the
+interface is a Phosphor *regular* path, transcribed as its `d` attribute into
+`app/src/main/java/app/vessel/ui/components/VIcons.kt` from
+`@phosphor-icons/core` 2.1.1 and verified against the package. The paths are
+copied unaltered; nothing else of the project is used. It is transcription rather
+than a dependency because Phosphor ships no Compose artifact, and the Material
+alternative is several thousand glyphs and about a megabyte of dex for the two
+dozen this app draws.
 
 Vessel's display backend **is** Winlator's X server, vendored rather than
 reimplemented: the X11 server, the GL compositor, the socket connector and the
