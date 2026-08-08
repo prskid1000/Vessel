@@ -210,13 +210,24 @@ private const val UPLOAD_SIMPLE =
         "7.66,120,51.31V144a8,8,0,0,0,16,0V51.31l26.34,26.35a8,8,0,0,0,11.32-11.32l-40-40a8,8,0,0,0-11" +
         ".32,0l-40,40A8,8,0,0,0,93.66,77.66Z"
 
-/** Ours, not Phosphor's — see [VIcons.Terminal]. Frame, chevron, cursor rule. */
+/**
+ * Ours, not Phosphor's — see [VIcons.Terminal]. Frame, chevron, cursor rule.
+ *
+ * Straight lines only. The first attempt used rounded corners the way Phosphor's
+ * own paths do, and rendered as a solid block: the frame's inner subpath stopped
+ * cutting its hole, and the chevron and rule vanished inside the fill. Arcs are
+ * not worth debugging in a glyph this small, and square corners are what the
+ * rest of this product's chrome uses anyway.
+ *
+ * The hole works by winding. The outer rectangle runs clockwise — right, down,
+ * left, up — and the inner one runs counter-clockwise, which is what makes the
+ * non-zero fill rule subtract it. Reversing either one fills the frame in.
+ */
 private const val TERMINAL_WINDOW =
-    "M32,48H224a8,8,0,0,1,8,8V200a8,8,0,0,1-8,8H32a8,8,0,0,1-8-8V56A8,8,0,0,1,32,48ZM216,192H40V64H2" +
-        "16Z" +
-        "M70.34,98.34a8,8,0,0,1,11.32,0l32,32a8,8,0,0,1,0,11.32l-32,32a8,8,0,0,1-11.32-11.32L96.69," +
-        "136,70.34,109.66A8,8,0,0,1,70.34,98.34Z" +
-        "M136,160h48a8,8,0,0,1,0,16H136a8,8,0,0,1,0-16Z"
+    "M24,48H232V208H24Z" +
+        "M216,192H40V64H216Z" +
+        "M72,100L84,88L124,128L84,168L72,156L100,128Z" +
+        "M136,156H184V172H136Z"
 
 private const val FOLDER =
     "M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0," +

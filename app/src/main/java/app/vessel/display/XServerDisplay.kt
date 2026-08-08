@@ -45,6 +45,7 @@ import com.winlator.sysvshm.SysVSharedMemory
 import com.winlator.widget.XServerView
 import com.winlator.xconnector.UnixSocketConfig
 import com.winlator.xconnector.XConnectorEpoll
+import com.winlator.xserver.Atom
 import com.winlator.xserver.Pointer
 import com.winlator.xserver.Property
 import com.winlator.xserver.SHMSegmentManager
@@ -223,89 +224,116 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * the collector is a Compose recomposition on the main thread, and a list
      * being appended to underneath it is a crash waiting for the right timing.
      *
-     * **"Top level" is not "child of the root", and assuming it was is why the
-     * taskbar listed nothing.** It read `rootWindow.children` directly, which is
-     * correct for a rootless X session and wrong for the only kind this product
-     * runs. Under `explorer /desktop=`, Wine creates one X window for the whole
-     * virtual desktop and every program's window is a child of *that*. So the
-     * root had exactly one child — the desktop — the desktop was filtered out for
-     * having no interesting title or kept as a single entry, and a `wscript`
-     * dialog plainly visible on screen never appeared in the bar.
+     * **Written against a dump of the real tree, after two wrong guesses.** Both
+     * are worth recording, because both were plausible and both were confident.
      *
-     * This walks down instead, and the walk needs exactly two rules:
+     * The first was that a nameless window is not worth listing. The second was
+     * that under `explorer /desktop=` the guest's windows are children of the
+     * virtual-desktop window and the walk therefore had to descend. The tree
+     * says otherwise on both counts:
      *
-     * A **named, mapped window is an entry**, and the walk does not descend into
-     * it. Wine gives each Windows top-level window one named X window; below it
-     * are its own client areas, and listing those would put four buttons in the
-     * bar for one Notepad.
+     * ```
+     * root
+     *   id=8388615  mapped 1280x720  name=''  class='explorer.exe'  kids=8
+     *   …
+     *   id=29360129 mapped  656x400  name=''  class='conhost.exe'   kids=0
+     * ```
      *
-     * A window is a **container** — descended into, never listed — when it has no
-     * name of its own, or when something named and mapped is underneath it. The
-     * second half is what identifies the virtual desktop without hard-coding
-     * [app.vessel.core.WINE_DESKTOP] or guessing at geometry: the desktop is the
-     * window that has the programs inside it. It also means that on an empty
-     * desktop, where that test cannot fire because there is nothing underneath,
-     * the desktop is caught by [isVirtualDesktop] instead — a full-screen direct
-     * child of the root, which is what a virtual desktop is and what no guest
-     * window can be while one exists.
+     * A console window plainly on screen is a **direct child of the root**, a
+     * sibling of the desktop rather than a child of it — so the original flat
+     * read was right and the walk that replaced it fixed nothing. And **no
+     * window has a `WM_NAME` at all.** Wine sets `_NET_WM_NAME`, the UTF-8
+     * property, and does not bother with the legacy one; the vendored server has
+     * no constant for it because its `Atom` enum stops at the atoms Winlator
+     * needed, so `Window.getName()` looked up an empty slot and every window
+     * came back nameless. Dropping the nameless ones then dropped all of them.
+     * That was the whole bug, and it was there before either rewrite.
      *
-     * Windows with no `WM_NAME` yet are dropped rather than listed blank. A
-     * program sets its title a moment after mapping, and a nameless button that
-     * turns into "Notepad" a frame later reads as a glitch.
+     * So: the root's children, and a title from whichever of three sources has
+     * one. `_NET_WM_NAME` is looked up by name because it is interned at
+     * runtime. `WM_CLASS` is the last resort rather than nothing — a button
+     * saying `conhost` is worse than one saying "Command Prompt" and far better
+     * than a taskbar that stays empty while a window is on screen.
      *
-     * The depth bound is a backstop, not a tuning knob. Wine's tree is root →
-     * desktop → window → client, and a client that nested a thousand deep would
-     * otherwise walk the taskbar into a stack overflow on the X server's thread.
+     * Skipped: the virtual desktop itself, which is the full-screen one; the
+     * unmapped; and Wine's 1×1 message windows, of which there are a dozen and
+     * none is a window in any sense a user would recognise.
      */
     private fun publishWindows() {
         val listener = onWindowsChanged ?: return
         val manager = xServer.windowManager
+        val root = manager.rootWindow
         val focused = manager.focusedWindow?.id
-        val list = mutableListOf<TopLevelWindow>()
-        collectTopLevels(manager.rootWindow, manager.rootWindow, focused, MAX_WINDOW_DEPTH, list)
+        val list = root.children.mapNotNull { window ->
+            if (!window.attributes.isMapped) return@mapNotNull null
+            if (window.width <= MIN_WINDOW_EDGE || window.height <= MIN_WINDOW_EDGE) {
+                return@mapNotNull null
+            }
+            if (window.isVirtualDesktop(root)) return@mapNotNull null
+            TopLevelWindow(window.id, window.taskbarTitle(), focused = window.id == focused)
+        }
         listener(list)
+        if (Log.isLoggable(TREE_TAG, Log.DEBUG)) {
+            // The tree, whenever it changes, at a tag nothing enables by
+            // default. Deciding which window is a taskbar entry is a rule about
+            // a shape this code cannot see from here — parents, names, sizes —
+            // and every wrong answer so far has been a wrong belief about that
+            // shape rather than a wrong rule. `adb shell setprop log.tag.
+            // VesselWindows DEBUG` is cheaper than another round of guessing.
+            Log.d(TREE_TAG, "published ${list.size}: ${list.joinToString { it.title }}")
+            dumpTree(manager.rootWindow, 0)
+        }
     }
 
-    private fun collectTopLevels(
-        parent: Window,
-        root: Window,
-        focused: Int?,
-        remaining: Int,
-        into: MutableList<TopLevelWindow>,
-    ) {
-        if (remaining == 0) return
-        for (child in parent.children) {
-            if (!child.attributes.isMapped) continue
-            val title = child.name.orEmpty().trim()
-            val container = title.isEmpty() ||
-                child.isVirtualDesktop(parent, root) ||
-                child.hasNamedDescendant(MAX_WINDOW_DEPTH)
-            if (container) {
-                collectTopLevels(child, root, focused, remaining - 1, into)
-            } else {
-                into += TopLevelWindow(child.id, title, focused = child.id == focused)
-            }
+    private fun dumpTree(window: Window, depth: Int) {
+        if (depth > MAX_WINDOW_DEPTH) return
+        for (child in window.children) {
+            Log.d(
+                TREE_TAG,
+                "  ".repeat(depth + 1) +
+                    "id=${child.id} mapped=${child.attributes.isMapped} " +
+                    "${child.width}x${child.height} name='${child.name}' " +
+                    "class='${child.className}' kids=${child.children.size}",
+            )
+            dumpTree(child, depth + 1)
         }
     }
 
     /**
-     * The `explorer /desktop=` window: a direct child of the root that covers it.
+     * The `explorer /desktop=` window: the one that covers the whole screen.
      *
-     * Only ever true of one window, and only in the mode this product runs in.
-     * A guest window that is genuinely full-screen is a child of *the desktop*
-     * rather than of the root, so it does not match — which is the whole reason
-     * the parent is part of the test rather than the size alone.
+     * It is a sibling of the guest's windows rather than their parent, so size
+     * is what tells it apart. That is safe here for a reason worth stating: this
+     * product always runs under a virtual desktop, and a guest window can only
+     * ever be as large as the desktop it is inside — never larger, and if it
+     * were exactly as large it would be indistinguishable, which is a maximised
+     * window and the one case where losing the taskbar button is survivable.
      */
-    private fun Window.isVirtualDesktop(parent: Window, root: Window): Boolean =
-        parent === root && width >= root.width && height >= root.height
+    private fun Window.isVirtualDesktop(root: Window): Boolean =
+        width >= root.width && height >= root.height
 
-    /** Whether anything mapped and named sits below this window. */
-    private fun Window.hasNamedDescendant(remaining: Int): Boolean {
-        if (remaining == 0) return false
-        return children.any { child ->
-            child.attributes.isMapped &&
-                (child.name.orEmpty().isNotBlank() || child.hasNamedDescendant(remaining - 1))
-        }
+    /**
+     * What the taskbar button says, from whichever source has an answer.
+     *
+     * `_NET_WM_NAME` first because it is the one Wine actually sets, and it is
+     * fetched by name because the vendored `Atom` table has no constant for it —
+     * it is interned when the first client asks for it, so the id is not known
+     * until runtime and is looked up rather than hard-coded.
+     */
+    private fun Window.taskbarTitle(): String {
+        val netWmName = Atom.getId(NET_WM_NAME)
+            .takeIf { it > 0 }
+            ?.let { getProperty(it)?.toString() }
+            ?.trim()
+        if (!netWmName.isNullOrEmpty()) return netWmName
+
+        val wmName = name.orEmpty().trim()
+        if (wmName.isNotEmpty()) return wmName
+
+        // `conhost.exe` becomes `conhost`. Not a title, but it names the program
+        // the window belongs to, which is what the user is choosing between.
+        val className = className.orEmpty().trim().substringAfterLast('\\')
+        return className.removeSuffix(".exe").ifEmpty { UNTITLED_WINDOW }
     }
 
     /**
@@ -449,6 +477,21 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
          * this off the X server's thread.
          */
         const val MAX_WINDOW_DEPTH = 8
+
+        /** Off unless `setprop log.tag.VesselWindows DEBUG`. See [publishWindows]. */
+        const val TREE_TAG = "VesselWindows"
+
+        /** Interned at runtime; the vendored `Atom` table has no constant for it. */
+        const val NET_WM_NAME = "_NET_WM_NAME"
+
+        /**
+         * Wine litters the root with 1×1 message-only windows — a dozen of them
+         * in one session. Anything this small is plumbing, not a window.
+         */
+        const val MIN_WINDOW_EDGE = 1
+
+        /** A mapped window that will not say what it is. Should not happen. */
+        const val UNTITLED_WINDOW = "Window"
     }
 }
 

@@ -8,6 +8,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -270,7 +272,16 @@ fun SessionLauncher(
                 indication = null,
                 onClick = {},
             )
-            .padding(Vessel.metrics.s17),
+            .padding(Vessel.metrics.s17)
+            // **Scrolls, because the panel is taller than the space above the
+            // taskbar and was being cut off.** Six programs put the rule under
+            // the grid at the very bottom edge of the panel and everything below
+            // it — the terminal profiles, Browse C: — outside it, drawn and
+            // clipped. It read as a panel that simply ended there, which is the
+            // worst version: nothing looked broken, the rows were just missing.
+            // The grid inside is a plain Column of Rows rather than a lazy grid,
+            // so nesting a scroll here is legal.
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
         app.vessel.ui.components.VTextField(
@@ -372,7 +383,11 @@ fun BoxScope.TaskbarHandle(onReveal: () -> Unit) {
     ) {
         Box(
             Modifier
-                .padding(start = Vessel.metrics.screenGutter)
+                // Clear of the edge rather than against it. At the screen gutter
+                // the bar started where the rounded corner of the display is
+                // still curving away, which reads as a bar running off the side
+                // rather than one placed at it.
+                .padding(start = Vessel.metrics.s22)
                 // Square, like the rail's handle, and deliberately not a pill.
                 // Android draws its own gesture pill on this edge at very nearly
                 // this width — a rounded bar beside it reads as a second system

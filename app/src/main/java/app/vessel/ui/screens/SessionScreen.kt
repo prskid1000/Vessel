@@ -392,11 +392,20 @@ fun SessionDesktop(
                     Modifier
                         .width(Vessel.metrics.railHandleTouch)
                         .fillMaxHeight()
+                        // The mark goes at the bottom of this edge, not the
+                        // middle, so it meets the taskbar's mark at the corner
+                        // and the two read as one L rather than two unrelated
+                        // bars. The inset keeps it clear of the navigation band
+                        // that the horizontal one sits inside.
+                        .navigationBarsPadding()
                         .clickable(onClickLabel = "Show the session rail") { railOpen = true },
-                    contentAlignment = Alignment.CenterStart,
+                    contentAlignment = Alignment.BottomStart,
                 ) {
                     Box(
                         Modifier
+                            // The same gap from the bottom that the taskbar's
+                            // mark keeps from the left, so the corner is square.
+                            .padding(bottom = Vessel.metrics.s22)
                             // The same mark as the taskbar's, turned on its side:
                             // 4 dp thick and 108 dp long on both edges. It used to
                             // be a quarter of the screen's height, which on a 2780

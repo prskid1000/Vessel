@@ -57,12 +57,12 @@ enum class TerminalProfile(
         label = "PowerShell",
         program = """C:\Program Files\PowerShell\7\pwsh.exe""",
         installedAt = """C:\Program Files\PowerShell\7\pwsh.exe""",
-        // Deliberately names *which* PowerShell. Wine ships a `powershell.exe`
-        // that is a stub and cannot run a script, which is why `.ps1` is refused
-        // in Launchable; the thing that would work is Microsoft's PowerShell 7,
-        // which is a self-contained .NET application and a separate install.
-        missingReason = "PowerShell 7 is not installed in this container. Wine's own " +
-            "powershell.exe is a stub that cannot run scripts, so Vessel does not offer it.",
+        // Names *which* PowerShell in four words, because it matters: Wine ships
+        // a `powershell.exe` that is a stub and cannot run a script, which is
+        // why `.ps1` is refused in Launchable. The one that would work is
+        // Microsoft's 7, a self-contained .NET application and a separate
+        // install. The full explanation belongs in that file, not on this row.
+        missingReason = "PowerShell 7 is not installed.",
     ),
 
     /**
@@ -87,7 +87,7 @@ enum class TerminalProfile(
         label = "Shell",
         program = """C:\Program Files\Vessel Tools\busybox.exe""",
         installedAt = """C:\Program Files\Vessel Tools\busybox.exe""",
-        missingReason = "The Unix tools are not installed in this container.",
+        missingReason = "The Unix tools are not installed.",
     ),
     ;
 
