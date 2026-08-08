@@ -401,8 +401,30 @@ class SessionRuntime @Inject constructor(
         // would otherwise hold a Process object for every program ever started.
         launched.removeAll { !it.isAlive }
 
+        // **Through `explorer`, not straight to the program.** A bare
+        // `wine prog.exe` starts a process with no desktop, so its window is a
+        // rootless X window — and the vendored server is a compositor with no
+        // window manager in it, so nothing draws a caption. That is why a
+        // console came up with no title bar and therefore no minimise, maximise,
+        // close, drag or resize.
+        //
+        // Seeding `HKCU\Software\Wine\Explorer` was necessary and not
+        // sufficient: those keys are read by `explorer.exe`, which decides the
+        // desktop for programs *it* starts, and nothing was starting it.
+        //
+        // The desktop named here is the one the session is already running, and
+        // Wine desktops are named objects — so this attaches to it rather than
+        // creating the second full-size desktop window that would otherwise sit
+        // over the first. Same name, same geometry, one desktop.
         val spec = ProcessSpec(
-            argv = current.tree.programArgv(program, arguments),
+            argv = current.tree.desktopArgv(
+                geometry = current.geometry ?: return@withLock ProgramLaunch.Unavailable(
+                    "the desktop's size is not known yet",
+                ),
+                // The program and its arguments only — `desktopArgv` supplies
+                // the loader and `explorer` itself in front of them.
+                program = listOf(program) + arguments,
+            ),
             environment = current.environment,
             workingDirectory = workingDirectory?.takeIf { it.isDirectory } ?: current.layout.base,
         )
@@ -575,7 +597,12 @@ class SessionRuntime @Inject constructor(
             )
         }
 
-        val resolved = LaunchPlan(layout = layout, tree = tree, environment = environment, log = log)
+        val resolved = LaunchPlan(
+            layout = layout,
+            tree = tree,
+            environment = environment,
+            log = log,
+        )
         plan = resolved
 
         mark(
@@ -669,6 +696,7 @@ class SessionRuntime @Inject constructor(
         // Android side, over this surface, so starting a Windows program here to
         // give the user somewhere to click would put a second, worse shell
         // underneath the real one.
+        running.geometry = geometry
         val spec = ProcessSpec(
             argv = running.tree.desktopArgv(geometry, emptyList()),
             environment = running.environment,
@@ -1466,6 +1494,16 @@ class SessionRuntime @Inject constructor(
         val environment: Map<String, String>,
         /** Carried so [PrefixBootstrap]'s callbacks can write to the same file. */
         val log: SessionLog,
+        /**
+         * The desktop's size, set once the desktop is actually started.
+         *
+         * A `var` and not a constructor argument because the plan is built
+         * before the geometry is resolved — the resolution can be `native`,
+         * which only the composable that measures the panel can answer. Null
+         * until the desktop launches, and [launchProgram] cannot run before
+         * that because it refuses unless the phase is RUNNING.
+         */
+        var geometry: DisplayGeometry? = null,
     ) {
         /**
          * What `wineboot`, `regedit` and `wineserver` are run with, which is a
