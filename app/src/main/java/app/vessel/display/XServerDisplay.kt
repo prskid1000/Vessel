@@ -46,6 +46,8 @@ import com.winlator.widget.XServerView
 import com.winlator.xconnector.UnixSocketConfig
 import com.winlator.xconnector.XConnectorEpoll
 import com.winlator.xserver.Atom
+import com.winlator.xserver.events.ConfigureNotify
+import com.winlator.xserver.events.Event
 import com.winlator.xserver.Pointer
 import com.winlator.xserver.Property
 import com.winlator.xserver.SHMSegmentManager
@@ -334,6 +336,66 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     }
 
     /**
+     * Step a new window off the one already under it.
+     *
+     * **The single fact behind three complaints.** Every console opens at the
+     * same place — `conhost` takes its geometry from `HKCU\Console`, so the
+     * second is a pixel-perfect cover for the first. That is why switching
+     * looked broken (the raise worked; both windows are identical so nothing
+     * appeared to change), why min/max/close are hard to aim at, and why the
+     * desktop reads as one window rather than several.
+     *
+     * A window manager's job, done the way one does it: only when the position
+     * is already taken, one step of [CASCADE_STEP] per occupied slot, wrapped
+     * back to the origin before it walks off the desktop. A window the guest
+     * placed deliberately somewhere free is left exactly where it asked to be.
+     *
+     * **The client is told, and that is the part that must not be skipped.**
+     * Moving the X window without a `ConfigureNotify` would leave Wine drawing
+     * its caption and borders against a stale rectangle, so the title bar would
+     * drag from the wrong place — worse than not moving it. Both events go out:
+     * `STRUCTURE_NOTIFY` to the window for Wine's own top-level bookkeeping,
+     * `SUBSTRUCTURE_NOTIFY` to the desktop that owns it, which is exactly what
+     * [WindowManager.configureWindow] sends when a client asks for the same
+     * thing.
+     */
+    private fun cascade(window: Window) {
+        val desktop = window.parent ?: return
+        val taken = desktop.children.any { other ->
+            other !== window && other.isRealWindow() &&
+                other.getX() == window.getX() && other.getY() == window.getY()
+        }
+        if (!taken) return
+
+        val occupied = desktop.children.count { it !== window && it.isRealWindow() }
+        val step = (occupied % CASCADE_WRAP) * CASCADE_STEP
+        val x = (window.getX() + step).coerceAtMost(desktop.width - window.width).toShort()
+        val y = (window.getY() + step).coerceAtMost(desktop.height - window.height).toShort()
+        if (x == window.getX() && y == window.getY()) return
+
+        runCatching {
+            window.setX(x)
+            window.setY(y)
+            xServer.windowManager.triggerOnUpdateWindowGeometry(window, false)
+            val above = window.previousSibling()
+            val notify = ConfigureNotify(
+                window, window, above, x.toInt(), y.toInt(),
+                window.width.toInt(), window.height.toInt(),
+                window.borderWidth.toInt(), window.attributes.isOverrideRedirect,
+            )
+            window.sendEvent(Event.STRUCTURE_NOTIFY, notify)
+            desktop.sendEvent(
+                Event.SUBSTRUCTURE_NOTIFY,
+                ConfigureNotify(
+                    desktop, window, above, x.toInt(), y.toInt(),
+                    window.width.toInt(), window.height.toInt(),
+                    window.borderWidth.toInt(), window.attributes.isOverrideRedirect,
+                ),
+            )
+        }.onFailure { Log.w("VesselDisplay", "could not cascade a new window", it) }
+    }
+
+    /**
      * Mapped, and bigger than Wine's message-only plumbing.
      *
      * Wine litters both the root and the desktop with 1×1 windows it uses to
@@ -443,6 +505,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                     // per session and focusing one of those would take the
                     // keyboard away from the program that has it.
                     if (window.isRealWindow()) {
+                        cascade(window)
                         runCatching {
                             xServer.windowManager.setFocus(
                                 window,
@@ -558,6 +621,18 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 
         /** A mapped window that will not say what it is. Should not happen. */
         const val UNTITLED_WINDOW = "Window"
+
+        /**
+         * How far a cascaded window steps, in guest pixels.
+         *
+         * A caption's height plus a little, so the one underneath stays
+         * clickable by its title bar — which is the whole point of cascading
+         * rather than tiling.
+         */
+        const val CASCADE_STEP = 48
+
+        /** How many steps before the cascade returns to the origin. */
+        const val CASCADE_WRAP = 6
     }
 }
 
