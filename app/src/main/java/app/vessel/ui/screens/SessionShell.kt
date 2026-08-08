@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -34,6 +33,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -321,24 +323,78 @@ fun SessionLauncher(
 
         VRule(verticalMargin = Vessel.metrics.s3)
 
-        // Windows Terminal's profile list, in the place Windows Terminal is not.
-        // A row each rather than a submenu: three entries do not need a level of
-        // navigation, and a disabled one has to be *seen* to say what is missing.
-        terminals.forEach { option ->
-            VSheetRow(
-                icon = VIcons.Terminal,
-                title = option.profile.label,
-                help = option.unavailable,
-                enabled = option.enabled,
-                onClick = { onTerminal(option.profile) },
+        // **One row of buttons, not four stacked rows with sentences.**
+        // Windows Terminal's profiles as full-width rows took more of the panel
+        // than the programs did, and two of the three spent their line
+        // apologising for not being installed. These are four verbs; they belong
+        // side by side, the way the taskbar's own actions are.
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            terminals.forEach { option ->
+                LauncherAction(
+                    icon = VIcons.Terminal,
+                    caption = option.profile.shortLabel,
+                    description = option.unavailable ?: "Open ${option.profile.label}",
+                    enabled = option.enabled,
+                    onClick = { onTerminal(option.profile) },
+                )
+            }
+            LauncherAction(
+                icon = VIcons.Folder,
+                caption = "C:",
+                description = "Browse this container's C: drive",
+                enabled = true,
+                onClick = onBrowse,
             )
         }
+    }
+}
 
-        VSheetRow(
-            icon = VIcons.Folder,
-            title = "Browse C:",
-            help = null,
-            onClick = onBrowse,
+/**
+ * A square action in the launcher's bottom row: a glyph over three characters.
+ *
+ * The caption is not decoration — three terminal glyphs in a row are three
+ * identical buttons, and `cmd` against `pwsh` is the whole difference between
+ * them. It is `monoSmall`, which is what this product uses everywhere a literal
+ * command name appears.
+ *
+ * A disabled one stays in the row at [VColors.disabledAlpha] rather than being
+ * dropped, and its reason moves to the content description: the row answers
+ * "can Vessel open a PowerShell" by having a PowerShell button in it, and the
+ * sentence explaining why it is dim is worth a long press, not a line of prose
+ * under every entry.
+ */
+@Composable
+private fun LauncherAction(
+    icon: ImageVector,
+    caption: String,
+    description: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
+    Column(
+        Modifier
+            .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
+            .clickable(enabled = enabled, onClickLabel = description, onClick = onClick)
+            .padding(vertical = Vessel.metrics.s8, horizontal = Vessel.metrics.s11)
+            .semantics { contentDescription = description },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            Modifier.size(Vessel.metrics.iconMd),
+            tint = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
+        )
+        Text(
+            caption,
+            style = Vessel.type.monoSmall,
+            color = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
         )
     }
 }

@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -404,8 +405,19 @@ fun SessionDesktop(
                     Box(
                         Modifier
                             // The same gap from the bottom that the taskbar's
-                            // mark keeps from the left, so the corner is square.
-                            .padding(bottom = Vessel.metrics.s22)
+                            // mark keeps from the left, so the corner is square
+                            // — plus the bar's own height when the bar is up.
+                            //
+                            // Without that second term the two marks are the
+                            // same 108 dp and the vertical one *looks* shorter,
+                            // because its bottom third is behind the taskbar
+                            // that is drawn over it. Measured, not guessed: 322
+                            // device pixels of horizontal mark against 221 of
+                            // visible vertical one.
+                            .padding(
+                                bottom = Vessel.metrics.s22 +
+                                    if (taskbarOpen) Vessel.metrics.taskbarHeight else 0.dp,
+                            )
                             // The same mark as the taskbar's, turned on its side:
                             // 4 dp thick and 108 dp long on both edges. It used to
                             // be a quarter of the screen's height, which on a 2780

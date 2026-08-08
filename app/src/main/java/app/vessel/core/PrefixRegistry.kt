@@ -82,9 +82,14 @@ object PrefixRegistry {
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
      * 9 added [toolsPath], which is what puts the Unix tools on `PATH` in every
-     * shell rather than in one profile.
+     * shell rather than in one profile; 10 added [virtualDesktop], without which
+     * a program launched into a running session came up rootless and undecorated
+     * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 9
+    const val SEED_VERSION: Int = 10
+
+    /** Only used when a process somehow creates the desktop. See [virtualDesktop]. */
+    private const val DEFAULT_DESKTOP_SIZE = "1280x720"
 
     /** The mode the DLL override values carry. See [D3D_DLL_OVERRIDES]. */
     const val DLL_OVERRIDE_MODE: String = "native,builtin"
@@ -344,6 +349,55 @@ object PrefixRegistry {
     )
 
     /**
+     * **Every process joins the virtual desktop, which is what gives a window
+     * its title bar.**
+     *
+     * This is the answer to "where are the minimise, maximise and close
+     * buttons", and the tree dump is what found it. A program started into a
+     * live session — `wine wineconsole cmd.exe` — is a *new* Wine process, and
+     * it does not inherit the desktop the session's `explorer /desktop=` created
+     * on its command line. It starts rootless instead, so its window is a direct
+     * child of the X root rather than a child of the desktop window, which is
+     * exactly what the dump showed:
+     *
+     * ```
+     * root
+     *   id=8388615  1280x720  class='explorer.exe'   <- the desktop
+     *   id=29360129  656x400  class='conhost.exe'    <- a sibling, not a child
+     * ```
+     *
+     * A rootless X window is decorated by the window manager, and the vendored
+     * server is a compositor with no window manager in it. Nothing draws a
+     * caption, so there is no title bar, no buttons, no drag and no resize —
+     * not because the window lacks them but because nobody is drawing them.
+     *
+     * These two values are what winecfg's *Emulate a virtual desktop* writes,
+     * and they apply to the whole prefix rather than to one command line. Every
+     * process then attaches to the named desktop — Wine desktops are named
+     * objects, so the second process joins the first one's rather than making
+     * another — and Wine's own window manager inside that desktop draws the
+     * frame, the caption and the three buttons, and handles dragging and
+     * resizing. [windowMetrics] is what makes that frame finger-sized; until
+     * this key existed, those metrics were sizing a frame nothing drew.
+     *
+     * The size here is a fallback and not the truth. Whoever creates the desktop
+     * first fixes its size, and in a Vessel session that is always the explorer
+     * the runtime starts with the container's real geometry on its command line.
+     * This value only decides what a process would get if it somehow arrived
+     * first, so it matches the default rather than trying to track the setting.
+     */
+    val virtualDesktop: List<RegistryKey> = listOf(
+        RegistryKey(
+            path = """HKEY_CURRENT_USER\Software\Wine\Explorer""",
+            values = listOf(RegistryValue("Desktop", WINE_DESKTOP)),
+        ),
+        RegistryKey(
+            path = """HKEY_CURRENT_USER\Software\Wine\Explorer\Desktops""",
+            values = listOf(RegistryValue(WINE_DESKTOP, DEFAULT_DESKTOP_SIZE)),
+        ),
+    )
+
+    /**
      * The Unix tools on `PATH`, for every program in the container.
      *
      * **This is what makes one shell's tools available in all of them.** The
@@ -442,7 +496,7 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
-    )
+    ) + virtualDesktop
 
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))
 

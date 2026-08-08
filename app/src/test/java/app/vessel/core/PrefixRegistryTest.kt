@@ -155,11 +155,29 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(9, PrefixRegistry.SEED_VERSION)
+        assertEquals(10, PrefixRegistry.SEED_VERSION)
         // The two being equal is a coincidence — a version bump does not have to
         // add a key — but while it holds it is a cheap way to catch a key added
         // without the bump that makes existing containers pick it up.
-        assertEquals(9, PrefixRegistry.seed.size)
+        assertEquals(11, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `the virtual desktop is named the same as the one the session starts`() {
+        // The two have to agree or the second process makes its own desktop
+        // instead of joining the session's, which is a full-size window over
+        // the one already there.
+        val explorer = PrefixRegistry.virtualDesktop
+            .single { it.path.endsWith("""Wine\Explorer""") }
+        assertEquals(WINE_DESKTOP, explorer.values.single { it.name == "Desktop" }.data)
+
+        val desktops = PrefixRegistry.virtualDesktop
+            .single { it.path.endsWith("Desktops") }
+        assertTrue(
+            "the named desktop has a size",
+            desktops.values.single().name == WINE_DESKTOP &&
+                desktops.values.single().data.matches(Regex("""\d+x\d+""")),
+        )
     }
 
     @Test

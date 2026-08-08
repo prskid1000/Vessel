@@ -93,6 +93,19 @@ enum class TerminalProfile(
 
     /** Whether this shell is one Wine provides rather than one somebody installed. */
     val builtIn: Boolean get() = installedAt == null
+
+    /**
+     * The caption under the launcher's button — the command, not the product.
+     *
+     * `cmd`, `pwsh`, `sh`: what you would type, which is both shorter than the
+     * label and the thing that tells three identical terminal glyphs apart.
+     */
+    val shortLabel: String
+        get() = when (this) {
+            COMMAND_PROMPT -> "cmd"
+            POWERSHELL -> "pwsh"
+            BUSYBOX_SH -> "sh"
+        }
 }
 
 /**

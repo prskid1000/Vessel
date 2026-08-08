@@ -365,6 +365,16 @@ data class VMetrics(
     /** The separator between the start button and the window list. */
     val taskbarDividerHeight: Dp = 26.dp,
 
+    /**
+     * How tall the taskbar's own row is — [touchTarget] plus its `s6` padding
+     * top and bottom, which is the arithmetic `SessionTaskbar` does in layout.
+     *
+     * Named here rather than recomputed at the one call site that needs it: the
+     * session rail's edge mark has to clear the bar when it is up, and a literal
+     * there would drift the first time the bar's padding changed.
+     */
+    val taskbarHeight: Dp = 56.dp,
+
     // — graphs ---------------------------------------------------------------
 
     /** A rail sparkline's box. Four of these plus a caption is the rail's middle band. */
