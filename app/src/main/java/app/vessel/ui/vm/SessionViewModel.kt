@@ -7,7 +7,6 @@ import androidx.lifecycle.viewModelScope
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionDisplayServer
 import app.vessel.data.ContainerRepository
-import app.vessel.data.FileManagerLaunch
 import app.vessel.data.SessionMetricsRecorder
 import app.vessel.data.SessionMetricsState
 import app.vessel.data.SessionPhase
@@ -15,12 +14,16 @@ import app.vessel.data.SessionRuntime
 import app.vessel.data.SessionState
 import app.vessel.input.PointerMode
 import app.vessel.service.SessionService
+import app.vessel.ui.shell.AppRegistry
+import app.vessel.ui.shell.AppShortcut
+import app.vessel.ui.shell.ShellHost
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -51,8 +54,37 @@ class SessionViewModel @Inject constructor(
     private val runtime: SessionRuntime,
     private val containers: ContainerRepository,
     private val display: SessionDisplayServer,
+    private val shell: ShellHost,
+    registry: AppRegistry,
     recorder: SessionMetricsRecorder,
 ) : ViewModel() {
+
+    /** The taskbar's list of guest windows. Empty while nothing is running. */
+    val windows = shell.windows
+
+    /**
+     * The programs belonging to whichever container is running — the launcher's
+     * grid.
+     *
+     * Scoped to the session rather than showing everything, because a program in
+     * another container cannot be started into this one: it is a different prefix
+     * with a different registry, and the same `.exe` in two containers is two
+     * different things.
+     */
+    val shortcuts: Flow<List<AppShortcut>> =
+        combine(runtime.state, registry.shortcuts) { session, all ->
+            all.filter { it.containerId == session.containerId }
+        }
+
+    /** Whether the shell can see into and act on the running desktop at all. */
+    val shellAvailable: Boolean = shell.available
+
+    /** Why not, when it cannot. Printed verbatim by the taskbar and the launcher. */
+    val shellUnavailableReason: String? = shell.unavailableReason
+
+    fun focusWindow(id: Int) {
+        viewModelScope.launch { shell.focus(id) }
+    }
 
     val state: StateFlow<SessionState> = runtime.state
 
@@ -95,28 +127,36 @@ class SessionViewModel @Inject constructor(
     fun showKeyboard() = display.showKeyboard()
 
     /**
-     * Why the last file-manager attempt did nothing, or null when there is
-     * nothing to say.
+     * Why the last attempt to start a *program* did nothing.
      *
-     * A refusal has to be visible. Wine's file manager opens *inside* the guest's
-     * desktop, so a launch that fails produces no window and no error anywhere the
-     * user is looking — pressing the button would simply appear to do nothing,
-     * which is the failure mode this project treats as worse than a crash.
-     * [FileManagerLaunch.Started] and `AlreadyRunning` say nothing, because in
-     * both cases the window is on screen and that is the feedback.
+     * Separate from the file-manager refusal because they fail for different
+     * reasons and a user who sees one should not be told about the other.
      */
-    private val _fileManagerRefusal = MutableStateFlow<String?>(null)
-    val fileManagerRefusal: StateFlow<String?> = _fileManagerRefusal.asStateFlow()
+    private val _shellRefusal = MutableStateFlow<String?>(null)
+    val shellRefusal: StateFlow<String?> = _shellRefusal.asStateFlow()
 
-    fun launchFileManager() {
-        viewModelScope.launch {
-            _fileManagerRefusal.value =
-                (runtime.launchFileManager() as? FileManagerLaunch.Unavailable)?.reason
-        }
+    fun dismissShellRefusal() {
+        _shellRefusal.value = null
     }
 
-    fun dismissFileManagerRefusal() {
-        _fileManagerRefusal.value = null
+    /**
+     * Start one program inside its container.
+     *
+     * **This currently always refuses, and it refuses out loud.**
+     * [SessionRuntime.start] takes a container and nothing else, so there is no
+     * way to ask a prefix — running or cold — to run a named executable. The
+     * mechanism exists and is proven: `SessionRuntime.launchFileManager` does
+     * exactly this for `winefile`. It is simply not generalised, and generalising
+     * it is `data/`'s to do — see `out/ui-needs-from-core.md`.
+     *
+     * The alternative considered and rejected was to start the container's plain
+     * desktop instead and say nothing. That is a launcher that appears to work:
+     * the user taps Notepad++, a Windows desktop appears, and Notepad++ is not on
+     * it. A sentence naming the missing piece is worth more than a desktop nobody
+     * asked for.
+     */
+    fun launchApp(shortcut: AppShortcut) {
+        viewModelScope.launch { _shellRefusal.value = shell.launch(shortcut) }
     }
 
     /**

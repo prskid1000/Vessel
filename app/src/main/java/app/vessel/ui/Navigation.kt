@@ -2,9 +2,6 @@ package app.vessel.ui
 
 import android.net.Uri
 import android.view.WindowManager
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -17,38 +14,52 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import app.vessel.core.DisplayGeometry
 import app.vessel.data.SessionPhase
 import app.vessel.data.SessionState
-import app.vessel.ui.components.VNavDestination
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VOutcomeDialog
 import app.vessel.ui.components.VOutcomeTone
-import app.vessel.ui.screens.AppProfileScreen
-import app.vessel.ui.screens.AppsScreen
-import app.vessel.ui.screens.ContainerEditorScreen
-import app.vessel.ui.screens.ContainersScreen
 import app.vessel.ui.screens.FilesScreen
+import app.vessel.ui.screens.HomeScreen
 import app.vessel.ui.screens.SessionDesktop
 import app.vessel.ui.screens.SessionLaunchDialog
 import app.vessel.ui.screens.SessionLogScreen
 import app.vessel.ui.screens.SessionLogsScreen
 import app.vessel.ui.screens.SessionOutcomeDialog
-import app.vessel.ui.vm.NEW_CONTAINER
 import app.vessel.ui.vm.SessionViewModel
 
+/**
+ * Three destinations, and one of them is the desktop.
+ *
+ * **Home is the only root and there is no bottom navigation.** Apps was the
+ * second root and no longer exists: a program is listed inside the container that
+ * owns it, so the list that used to be a tab is now four columns on a card.
+ * Everything short — new container, container settings, a program's profile — is
+ * a bottom sheet over home rather than a route, because a sheet keeps the thing
+ * it is about on screen and a push throws it away.
+ *
+ * What is left as a push is what you genuinely navigate *into*: the file browser,
+ * the session history, one session's log, and the running desktop.
+ */
 object Routes {
-    const val CONTAINERS = "containers"
-    const val APPS = "apps"
+    const val HOME = "home"
 
-    const val CONTAINER_EDITOR = "containerEditor/{containerId}"
-    const val APP_PROFILE = "appProfile/{appId}"
-    const val FILES = "files"
+    /**
+     * A container's `C:`.
+     *
+     * The container is in the path and not optional, which is what stops the
+     * browser ever being reachable without one — the objection that killed Files
+     * as a root. `pick` distinguishes browsing from choosing a file for a
+     * shortcut; the primary action changes and the result is handed back.
+     */
+    const val FILES = "files/{containerId}?pick={pick}"
 
     /**
      * The running desktop, and only the running desktop.
@@ -57,27 +68,24 @@ object Routes {
      * [app.vessel.data.SessionRuntime] has room for exactly one session on this
      * device, so the id in the route was never a parameter — it was a second copy
      * of a fact the runtime already owned, and one that could disagree with it
-     * after a Retry. The four non-running states used to share this route and are
-     * dialogs now; see DESIGN.md, *Four of the five states are not a screen*.
+     * after a Retry. The four non-running states are dialogs; see DESIGN.md,
+     * *Four of the five states are not a screen*.
      */
     const val SESSION = "session"
 
     /**
      * Logs hang off a container and are not a destination of their own.
      *
-     * There is no global "Logs" screen and no bottom-nav entry for one, because
-     * a log is a property of the run that produced it: a list of every session
-     * across every container would be a list whose first column is the container
-     * name, which is the shape of a screen that should have been two.
+     * There is no global "Logs" screen, because a log is a property of the run
+     * that produced it: a list of every session across every container would be a
+     * list whose first column is the container name, which is the shape of a
+     * screen that should have been two.
      */
     const val SESSION_LOGS = "logs/{containerId}"
     const val SESSION_LOG = "logs/{containerId}/{startedAt}"
 
-    /** Null is "create one", which the editor is told by [NEW_CONTAINER] rather than by a flag. */
-    fun containerEditor(containerId: String? = null) =
-        "containerEditor/${Uri.encode(containerId ?: NEW_CONTAINER)}"
-
-    fun appProfile(appId: String) = "appProfile/${Uri.encode(appId)}"
+    fun files(containerId: String, pick: Boolean = false) =
+        "files/${Uri.encode(containerId)}?pick=$pick"
 
     fun sessionLogs(containerId: String) = "logs/${Uri.encode(containerId)}"
 
@@ -85,29 +93,19 @@ object Routes {
         "logs/${Uri.encode(containerId)}/$startedAt"
 
     const val ARG_CONTAINER_ID = "containerId"
-    const val ARG_APP_ID = "appId"
+    const val ARG_PICK = "pick"
     const val ARG_STARTED_AT = "startedAt"
-}
 
-/**
- * Two roots and no more.
- *
- * Everything else — the editor, the desktop, files — is pushed on top of one of
- * these. The two here are the two things a user comes to this app to do: pick a
- * container, or pick a program.
- *
- * There is no Settings, Components or GPU drivers destination. Each was a screen
- * whose content the user could not act on: this build compiles in exactly one
- * version of each component and one driver, so those screens could only recite
- * what was already decided at build time. Settings went the same way earlier —
- * a destination whose only content was the names of other destinations.
- *
- * TODO: Material icons stand in for the bespoke set DESIGN.md implies.
- */
-val BottomDestinations = listOf(
-    VNavDestination("Containers", Icons.Filled.Home, Routes.CONTAINERS),
-    VNavDestination("Apps", Icons.AutoMirrored.Filled.List, Routes.APPS),
-)
+    /**
+     * Where the browser leaves a chosen file for home to pick up.
+     *
+     * A `SavedStateHandle` key on home's own back-stack entry rather than a
+     * shared view model, because that is the one channel whose lifetime is
+     * exactly "until home is destroyed" — which is also when the sheet waiting
+     * for the answer stops existing.
+     */
+    const val PICKED_EXECUTABLE = "pickedExecutable"
+}
 
 @Composable
 fun VesselApp(
@@ -116,22 +114,12 @@ fun VesselApp(
     /**
      * A container to launch straight away.
      *
-     * This is how the running-session notification gets back to the thing it is
-     * a notification *for*, and it is the only way to reach a session from `adb`,
+     * This is how the running-session notification gets back to the thing it is a
+     * notification *for*, and it is the only way to reach a session from `adb`,
      * which is what the device scripts under `tools/` need.
-     *
-     * It used to navigate to a screen that then decided whether to launch. It now
-     * asks [SessionViewModel] to start the container and lets [SessionHost] do
-     * the navigating, which is strictly more robust: a second tap of the
-     * notification cannot stack a second copy of the desktop, and a tap that
-     * arrives while the container is only *preparing* lands on the checklist
-     * dialog rather than on a black rectangle.
      */
     openSession: String? = null,
 ) {
-    val backStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = backStackEntry?.destination?.route
-
     // One session view model for the whole app, above the NavHost. There is one
     // session on this device; hoisting it here is what lets the checklist and the
     // outcome be dialogs over any destination, and what makes the metrics
@@ -160,45 +148,54 @@ fun VesselApp(
 
     NavHost(
         navController = navController,
-        startDestination = Routes.CONTAINERS,
+        startDestination = Routes.HOME,
         modifier = modifier,
     ) {
-        composable(Routes.CONTAINERS) {
-            ContainersScreen(
-                currentRoute = currentRoute,
-                onNavigate = { navController.navigateToRoot(it) },
-                onOpenContainer = { navController.navigate(Routes.containerEditor(it)) },
-                onCreateContainer = { navController.navigate(Routes.containerEditor()) },
+        composable(Routes.HOME) { entry ->
+            // A file the browser handed back, if the user went and chose one.
+            val picked by entry.savedStateHandle
+                .getStateFlow<String?>(Routes.PICKED_EXECUTABLE, null)
+                .collectAsStateWithLifecycle()
+
+            HomeScreen(
+                onOpenFiles = { navController.navigate(Routes.files(it)) },
+                onPickFile = { navController.navigate(Routes.files(it, pick = true)) },
+                onOpenLogs = { navController.navigate(Routes.sessionLogs(it)) },
                 // Launch is not a navigation. The checklist appears over this
                 // list, and the desktop pushes itself once there is one.
                 onLaunch = { session.launch(it, native) },
-                // Files hangs off the container, not off Apps. It used to be
-                // an action on the Apps empty state, which knew nothing about
-                // containers and so could not say whose drive it was opening.
-                onBrowseFiles = { navController.navigate(Routes.FILES) },
-            )
-        }
-        composable(Routes.APPS) {
-            AppsScreen(
-                currentRoute = currentRoute,
-                onNavigate = { navController.navigateToRoot(it) },
+                onLaunchApp = session::launchApp,
+                pickedExecutable = picked,
+                onPickConsumed = {
+                    entry.savedStateHandle[Routes.PICKED_EXECUTABLE] = null
+                },
             )
         }
 
-        // — pushes —
-        // The editor takes no id argument: it reads `containerId` off the route
-        // through its SavedStateHandle, which is also how it survives the
-        // process being killed with the screen open.
-        composable(Routes.CONTAINER_EDITOR) { entry ->
-            val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
-            ContainerEditorScreen(
+        composable(
+            Routes.FILES,
+            arguments = listOf(
+                navArgument(Routes.ARG_PICK) {
+                    type = NavType.BoolType
+                    defaultValue = false
+                },
+            ),
+        ) { entry ->
+            FilesScreen(
+                picking = entry.arguments?.getBoolean(Routes.ARG_PICK) == true,
                 onBack = { navController.popBackStack() },
-                onOpenLogs = { navController.navigate(Routes.sessionLogs(containerId)) },
+                onPicked = { guestPath ->
+                    // Left on the *previous* entry — home's — because that is the
+                    // screen still holding the sheet that asked for it.
+                    navController.previousBackStackEntry
+                        ?.savedStateHandle?.set(Routes.PICKED_EXECUTABLE, guestPath)
+                    navController.popBackStack()
+                },
             )
         }
 
-        // Both log routes take the container in the path, which is what keeps
-        // the viewer from ever being reachable without one.
+        // Both log routes take the container in the path, which is what keeps the
+        // viewer from ever being reachable without one.
         composable(Routes.SESSION_LOGS) { entry ->
             val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
             SessionLogsScreen(
@@ -219,26 +216,28 @@ fun VesselApp(
         composable(Routes.SESSION) {
             val surface by session.surface.collectAsStateWithLifecycle()
             val pointerMode by session.pointerMode.collectAsStateWithLifecycle()
+            val windows by session.windows.collectAsStateWithLifecycle(emptyList())
+            val shortcuts by session.shortcuts.collectAsStateWithLifecycle(emptyList())
             SessionDesktop(
                 state = state,
                 surface = surface,
                 pointerMode = pointerMode,
+                windows = windows,
+                shortcuts = shortcuts,
+                shellUnavailableReason = session.shellUnavailableReason,
                 metrics = session.metrics,
                 onOpenLogs = { navController.navigate(state.logRoute()) },
+                onOpenFiles = {
+                    state.containerId?.let { navController.navigate(Routes.files(it)) }
+                },
                 onStop = session::stop,
                 onTogglePause = session::togglePause,
                 onTogglePointerMode = session::togglePointerMode,
                 onShowKeyboard = session::showKeyboard,
-                onOpenFiles = session::launchFileManager,
+                onLaunchApp = session::launchApp,
+                onFocusWindow = session::focusWindow,
             )
         }
-        composable(Routes.APP_PROFILE) { entry ->
-            AppProfileScreen(
-                appId = entry.arguments?.getString(Routes.ARG_APP_ID).orEmpty(),
-                onBack = { navController.popBackStack() },
-            )
-        }
-        composable(Routes.FILES) { FilesScreen(onBack = { navController.popBackStack() }) }
     }
 
     SessionHost(state, session, navController, native)
@@ -268,9 +267,9 @@ private fun SessionHost(
     navController: NavHostController,
     native: DisplayGeometry?,
 ) {
-    // Whether the checklist is up. Dismissing it hides a progress report and
-    // does not cancel anything — see SessionLaunchDialog. Saveable so a process
-    // death mid-launch does not reopen a dialog the user put down.
+    // Whether the checklist is up. Dismissing it hides a progress report and does
+    // not cancel anything — see SessionLaunchDialog. Saveable so a process death
+    // mid-launch does not reopen a dialog the user put down.
     var showChecklist by rememberSaveable { mutableStateOf(true) }
     // A new run is a new report. Keyed on the start time rather than on the
     // container, so relaunching the same one after a failure shows it again.
@@ -325,20 +324,19 @@ private fun SessionHost(
             )
     }
 
-    // The file manager opens *inside* the guest's desktop, so a launch that fails
-    // draws nothing anywhere the user is looking — without this the button would
-    // simply appear dead, which is the one outcome this product treats as worse
-    // than an error. Hosted here rather than on the desktop because it outlives
-    // the route: a refusal raised as the session ends still has to be readable.
-    val refusal by session.fileManagerRefusal.collectAsStateWithLifecycle()
-    refusal?.let { reason ->
+    // Hosted above the NavHost because it outlives the screen that asked: a
+    // program launch is not implemented at all, so the failure draws nothing
+    // anywhere the user is looking — the one outcome this product treats as
+    // worse than an error.
+    val shellRefusal by session.shellRefusal.collectAsStateWithLifecycle()
+    shellRefusal?.let { reason ->
         VOutcomeDialog(
-            title = "The file manager did not open",
+            title = "Vessel cannot start a program yet",
             tone = VOutcomeTone.Danger,
-            evidence = listOf(reason),
-            onDismiss = session::dismissFileManagerRefusal,
+            detail = reason,
+            onDismiss = session::dismissShellRefusal,
             actions = {
-                VButton("Close", session::dismissFileManagerRefusal, style = VButtonStyle.Primary)
+                VButton("Close", session::dismissShellRefusal, style = VButtonStyle.Primary)
             },
         )
     }
@@ -351,14 +349,9 @@ private fun SessionHost(
 private fun SessionState.logRoute(): String {
     val container = containerId.orEmpty()
     val opened = startedAt
-    return if (opened == null) Routes.sessionLogs(container) else Routes.sessionLog(container, opened)
-}
-
-/** Roots are singletons: switching tabs restores rather than stacks. */
-private fun NavHostController.navigateToRoot(route: String) {
-    navigate(route) {
-        popUpTo(graph.startDestinationId) { saveState = true }
-        launchSingleTop = true
-        restoreState = true
+    return if (opened == null) {
+        Routes.sessionLogs(container)
+    } else {
+        Routes.sessionLog(container, opened)
     }
 }
