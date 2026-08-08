@@ -3,12 +3,19 @@ package app.vessel.display
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.text.InputType
 import android.util.Log
 import android.view.InputDevice
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayRequest
@@ -16,6 +23,20 @@ import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDisplayServer
 import app.vessel.core.displayNumber
 import app.vessel.core.xSocketName
+import app.vessel.input.GamepadControl
+import app.vessel.input.GamepadTranslator
+import app.vessel.input.GuestInput
+import app.vessel.input.PointerButton
+import app.vessel.input.PointerGestures
+import app.vessel.input.PointerMode
+import app.vessel.input.ScrollAxis
+import app.vessel.input.SubPixel
+import app.vessel.input.Touch
+import app.vessel.input.TouchPhase
+import app.vessel.input.X11
+import app.vessel.input.X11KeyMap
+import app.vessel.input.buttons
+import app.vessel.input.toPixel
 import com.winlator.renderer.ViewTransformation
 import com.winlator.sysvshm.SysVSHMConnectionHandler
 import com.winlator.sysvshm.SysVSHMRequestHandler
@@ -84,10 +105,30 @@ class XServerDisplay @Inject constructor(
     private val _surface = MutableStateFlow<View?>(null)
     override val surface: StateFlow<View?> = _surface.asStateFlow()
 
+    private val _pointerMode = MutableStateFlow(PointerMode.TRACKPAD)
+    override val pointerMode: StateFlow<PointerMode> = _pointerMode.asStateFlow()
+
     /** Serialises start against stop, so a fast Retry cannot bind X0 twice. */
     private val lifecycle = Mutex()
 
     private var session: DisplaySession? = null
+
+    /**
+     * Both of these are main-thread-only on the view side but are called from
+     * the rail, which is already on it — so they post rather than assert. A
+     * setter that threw when a user tapped a button would be a worse trade than
+     * one frame of latency.
+     */
+    override fun setPointerMode(mode: PointerMode) {
+        _pointerMode.value = mode
+        val view = session?.view ?: return
+        view.post { view.pointerMode = mode }
+    }
+
+    override fun showKeyboard() {
+        val view = session?.view ?: return
+        view.post { view.showSoftKeyboard() }
+    }
 
     override suspend fun start(request: DisplayRequest): DisplayOutcome = lifecycle.withLock {
         withContext(Dispatchers.Main) {
@@ -236,12 +277,145 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 }
 
 /**
+ * The one place `GuestInput` becomes an X11 event.
+ *
+ * Every input source in this file — fingers, a real mouse, a keyboard, a pad —
+ * produces `GuestInput` and stops there. That is what lets the gesture machine
+ * and the gamepad translator be plain unit-tested Kotlin with no `XServer` in
+ * sight; this class is the part that cannot be tested that way, so it is kept
+ * as close to a `when` over a sealed type as it can be.
+ */
+private class GuestInputSink(
+    private val xServer: XServer,
+    private val transformation: () -> ViewTransformation,
+    private val viewSize: () -> Pair<Int, Int>,
+) {
+
+    private val subPixel = SubPixel()
+
+    fun accept(inputs: List<GuestInput>) = inputs.forEach { accept(it) }
+
+    fun accept(input: GuestInput) {
+        when (input) {
+            is GuestInput.MoveTo -> moveTo(input.x, input.y)
+            is GuestInput.MoveBy -> moveBy(input.dx, input.dy)
+            is GuestInput.Button -> button(input.button, input.pressed)
+            is GuestInput.Scroll -> input.buttons().forEach { button(it.button, it.pressed) }
+            is GuestInput.Zoom -> zoom(input.ticks)
+            is GuestInput.Key -> key(input)
+        }
+    }
+
+    /** Anything held, released. Called when the view loses its window. */
+    fun releaseAll() {
+        PointerButton.entries.forEach { xServer.injectPointerButtonRelease(it.toVendored()) }
+        subPixel.reset()
+    }
+
+    /**
+     * View pixels to X screen pixels.
+     *
+     * The compositor letterboxes: [ViewTransformation] fits the desktop into the
+     * surface at one uniform scale and centres what is left over. Undoing exactly
+     * that is what keeps the cursor under the finger — scaling by the view's own
+     * size instead puts it progressively further off towards the edges, which
+     * reads as "the touch is broken" rather than "the maths is wrong".
+     */
+    private fun moveTo(viewX: Float, viewY: Float) {
+        val t = transformation()
+        val screen = xServer.screenInfo
+        val (w, h) = viewSize()
+        val x: Int
+        val y: Int
+        if (t.aspect > 0f) {
+            x = ((viewX - t.viewOffsetX) / t.aspect).toPixel()
+            y = ((viewY - t.viewOffsetY) / t.aspect).toPixel()
+        } else {
+            // Before the first onSurfaceChanged there is no transformation yet.
+            // Stretching to the view is wrong, but it is wrong for one frame and
+            // the alternative is dropping the event that started the gesture.
+            x = (viewX * screen.width / w.coerceAtLeast(1)).toPixel()
+            y = (viewY * screen.height / h.coerceAtLeast(1)).toPixel()
+        }
+        xServer.injectPointerMove(
+            x.coerceIn(0, screen.width - 1),
+            y.coerceIn(0, screen.height - 1),
+        )
+    }
+
+    /**
+     * A relative move, in view pixels, converted at the same scale.
+     *
+     * Dividing by the letterbox scale is what makes the cursor keep up with the
+     * finger: on a 1280×720 desktop letterboxed into a 2712 px panel the scale is
+     * over two, and skipping this makes a trackpad drag feel like it is moving
+     * through treacle at exactly the moment the desktop looks fine.
+     *
+     * `injectPointerMoveDelta` rather than a position of our own, because a
+     * fullscreen guest that has warped the cursor is the authority on where it
+     * is and a cached copy here would fight it.
+     */
+    private fun moveBy(dx: Float, dy: Float) {
+        val scale = transformation().aspect.takeIf { it > 0f } ?: 1f
+        val (x, y) = subPixel.take(dx / scale, dy / scale)
+        if (x != 0 || y != 0) xServer.injectPointerMoveDelta(x, y)
+    }
+
+    private fun button(button: PointerButton, pressed: Boolean) {
+        val vendored = button.toVendored()
+        if (pressed) {
+            xServer.injectPointerButtonPress(vendored)
+        } else {
+            xServer.injectPointerButtonRelease(vendored)
+        }
+    }
+
+    /**
+     * `Ctrl` held across the whole run of detents.
+     *
+     * The ordering is the reason `GuestInput.Zoom` is not decomposed by the
+     * caller: a modifier that goes down after the first detent zooms once and
+     * then scrolls, which reads as the pinch being ignored.
+     */
+    private fun zoom(ticks: Int) {
+        if (ticks == 0) return
+        xServer.injectKeyPress(X11.CTRL_L.toByte(), 0)
+        accept(GuestInput.Scroll(ScrollAxis.VERTICAL, ticks))
+        xServer.injectKeyRelease(X11.CTRL_L.toByte())
+    }
+
+    private fun key(key: GuestInput.Key) {
+        val keycode = key.keycode.toByte()
+        if (key.pressed) {
+            xServer.injectKeyPress(keycode, key.keysym)
+        } else {
+            xServer.injectKeyRelease(keycode)
+        }
+    }
+
+    /**
+     * `PointerButton` is a copy of `Pointer.Button` — see `GuestInput` for why —
+     * and this is the crossing. By ordinal rather than by name because the two
+     * disagree on the last two: X calls buttons 6 and 7 horizontal scroll, the
+     * vendored enum calls them `SCROLL_CLICK_LEFT`/`RIGHT`. The orders match, and
+     * `PointerButtonMapTest` is what keeps them matching.
+     */
+    private fun PointerButton.toVendored(): Pointer.Button = VENDORED_BUTTONS[ordinal]
+
+    private companion object {
+        val VENDORED_BUTTONS: Array<Pointer.Button> = Pointer.Button.values()
+    }
+}
+
+/**
  * The compositor plus input, as one focusable view.
  *
  * Winlator's own display activity puts a stack of overlays over `XServerView` —
  * a touchpad widget, an on-screen gamepad, a magnifier — none of which is
- * vendored. This is the minimum that makes a desktop usable: absolute touch,
- * real mouse buttons and wheel, and hardware keys.
+ * vendored. What is here instead is `app.vessel.input`: one gesture machine for
+ * fingers, one translator for pads, and [GuestInputSink] between them and the
+ * server. A real mouse and a real keyboard bypass both, because there is nothing
+ * to interpret — the hardware already means what it says.
  */
 private class SessionSurfaceView(
     context: Context,
@@ -252,6 +426,34 @@ private class SessionSurfaceView(
     private val xServerView = PacedXServerView(context, xServer, fpsLimit)
 
     val renderer get() = xServerView.renderer
+
+    private val sink = GuestInputSink(
+        xServer = xServer,
+        transformation = { renderer.viewTransformation },
+        viewSize = { width to height },
+    )
+    private val gestures = PointerGestures()
+    private val gamepad = GamepadTranslator()
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** Trackpad or direct touch. Read and written by the Session rail. */
+    var pointerMode: PointerMode
+        get() = gestures.mode
+        set(value) {
+            sink.accept(gestures.reset())
+            gestures.mode = value
+        }
+
+    private val longPress = Runnable { sink.accept(gestures.onTimeout(now())) }
+
+    /** Only alive while a look stick is off centre; see [GamepadTranslator.looking]. */
+    private val look = object : Runnable {
+        override fun run() {
+            sink.accept(gamepad.tick(now()))
+            if (gamepad.looking) handler.postDelayed(this, LOOK_INTERVAL_MS)
+        }
+    }
+    private var looking = false
 
     init {
         addView(xServerView)
@@ -269,51 +471,108 @@ private class SessionSurfaceView(
         requestFocus()
     }
 
+    override fun onDetachedFromWindow() {
+        // A view that goes away mid-drag leaves the guest holding the button
+        // forever, and the symptom — every later click selecting a rectangle —
+        // looks nothing like its cause.
+        handler.removeCallbacks(longPress)
+        handler.removeCallbacks(look)
+        looking = false
+        sink.accept(gestures.reset())
+        sink.accept(gamepad.reset())
+        sink.releaseAll()
+        super.onDetachedFromWindow()
+    }
+
     /** Release the GL thread. Separate from detach: the view outlives composition. */
     fun shutdown() = xServerView.onPause()
 
-    // — pointer -----------------------------------------------------------------
+    /** The rail's keyboard button. There is no hardware keyboard on most phones. */
+    fun showSoftKeyboard() {
+        requestFocus()
+        context.getSystemService(InputMethodManager::class.java)
+            ?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    /**
+     * Yes, this view takes text — which is the only reason the IME will open.
+     *
+     * `showSoftInput` is not a request the framework honours for an arbitrary
+     * view: it asks the *focused* view for an `InputConnection` first, and a view
+     * that answers null gets no keyboard and no error. The rail's keyboard button
+     * did nothing at all for exactly this reason.
+     */
+    override fun onCheckIsTextEditor(): Boolean = true
+
+    /**
+     * `TYPE_NULL` is load-bearing.
+     *
+     * It tells the IME there is no text field to edit, which makes a soft
+     * keyboard fall back to delivering raw `KeyEvent`s instead of composing text
+     * against an editor that does not exist. Those arrive at [dispatchKeyEvent]
+     * with `deviceId == VIRTUAL_KEYBOARD` and go to the vendored path, which is
+     * written for them — it carries `getUnicodeChar` and `ACTION_MULTIPLE`, so a
+     * character no keycode names still reaches the guest.
+     *
+     * `fullEditor = false` for the same reason: a full editor would have
+     * `BaseInputConnection` buffer the text locally and never send a key at all.
+     */
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        outAttrs.inputType = InputType.TYPE_NULL
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            EditorInfo.IME_ACTION_NONE
+        return BaseInputConnection(this, false)
+    }
+
+    // — fingers ---------------------------------------------------------------------
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) return mouse(event)
 
-        // A finger is an absolute pointing device, so the cursor goes where the
-        // finger is rather than being dragged relative to it. Press on DOWN
-        // rather than on a tap gesture: it costs the ability to move the cursor
-        // without clicking, and buys drag, which is what resizes a window and
-        // works a scrollbar.
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                moveTo(event)
-                xServer.injectPointerButtonPress(Pointer.Button.BUTTON_LEFT)
-            }
-
-            MotionEvent.ACTION_MOVE -> moveTo(event)
-
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                moveTo(event)
-                xServer.injectPointerButtonRelease(Pointer.Button.BUTTON_LEFT)
-            }
-
+        val phase = when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> TouchPhase.DOWN
+            MotionEvent.ACTION_POINTER_DOWN -> TouchPhase.POINTER_DOWN
+            MotionEvent.ACTION_MOVE -> TouchPhase.MOVE
+            MotionEvent.ACTION_POINTER_UP -> TouchPhase.POINTER_UP
+            MotionEvent.ACTION_UP -> TouchPhase.UP
+            MotionEvent.ACTION_CANCEL -> TouchPhase.CANCEL
             else -> return false
         }
+
+        sink.accept(gestures.onTouch(phase, event.touches(), event.eventTime))
+
+        // Rescheduled from scratch every event rather than cancelled selectively:
+        // the machine owns the deadline and this only mirrors it, so there is no
+        // second copy of the long-press rule to get out of step.
+        handler.removeCallbacks(longPress)
+        gestures.timeoutAt?.let { handler.postDelayed(longPress, (it - now()).coerceAtLeast(0)) }
         return true
     }
 
-    override fun onGenericMotionEvent(event: MotionEvent): Boolean = when (event.actionMasked) {
-        MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER -> {
-            moveTo(event)
-            true
+    /** Every finger currently down, in the order Android indexes them. */
+    private fun MotionEvent.touches(): List<Touch> =
+        (0 until pointerCount).map { Touch(getPointerId(it), getX(it), getY(it)) }
+
+    // — a real mouse ------------------------------------------------------------------
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.isFromSource(InputDevice.SOURCE_JOYSTICK)) return joystick(event)
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER -> {
+                sink.accept(GuestInput.MoveTo(event.x, event.y))
+                true
+            }
+
+            MotionEvent.ACTION_SCROLL -> {
+                scroll(event)
+                true
+            }
+
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> mouse(event)
+
+            else -> super.onGenericMotionEvent(event)
         }
-
-        MotionEvent.ACTION_SCROLL -> {
-            scroll(event.getAxisValue(MotionEvent.AXIS_VSCROLL))
-            true
-        }
-
-        MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> mouse(event)
-
-        else -> super.onGenericMotionEvent(event)
     }
 
     /**
@@ -325,76 +584,161 @@ private class SessionSurfaceView(
      * that arrived inside a gesture Android coalesced.
      */
     private fun mouse(event: MotionEvent): Boolean {
-        moveTo(event)
         val state = event.buttonState
-        button(Pointer.Button.BUTTON_LEFT, state and MotionEvent.BUTTON_PRIMARY != 0)
-        button(Pointer.Button.BUTTON_RIGHT, state and MotionEvent.BUTTON_SECONDARY != 0)
-        button(Pointer.Button.BUTTON_MIDDLE, state and MotionEvent.BUTTON_TERTIARY != 0)
+        sink.accept(
+            listOf(
+                GuestInput.MoveTo(event.x, event.y),
+                GuestInput.Button(PointerButton.LEFT, state and MotionEvent.BUTTON_PRIMARY != 0),
+                GuestInput.Button(PointerButton.RIGHT, state and MotionEvent.BUTTON_SECONDARY != 0),
+                GuestInput.Button(PointerButton.MIDDLE, state and MotionEvent.BUTTON_TERTIARY != 0),
+            ),
+        )
         return true
     }
 
-    private fun button(button: Pointer.Button, pressed: Boolean) {
-        if (pressed) xServer.injectPointerButtonPress(button) else xServer.injectPointerButtonRelease(button)
-    }
-
-    /** X11 has no wheel axis: a scroll is a press and release of button 4 or 5. */
-    private fun scroll(amount: Float) {
-        if (abs(amount) < SCROLL_DEADZONE) return
-        val button =
-            if (amount > 0) Pointer.Button.BUTTON_SCROLL_UP else Pointer.Button.BUTTON_SCROLL_DOWN
-        xServer.injectPointerButtonPress(button)
-        xServer.injectPointerButtonRelease(button)
-    }
-
-    /**
-     * View pixels to X screen pixels.
-     *
-     * The compositor letterboxes: [ViewTransformation] fits the desktop into the
-     * surface at one uniform scale and centres what is left over. Undoing exactly
-     * that is what keeps the cursor under the finger — scaling by the view's own
-     * size instead puts it progressively further off towards the edges, which
-     * reads as "the touch is broken" rather than "the maths is wrong".
-     */
-    private fun moveTo(event: MotionEvent) {
-        val transformation = renderer.viewTransformation
-        val scale = transformation.aspect
-        val screen = xServer.screenInfo
-        val x: Int
-        val y: Int
-        if (scale > 0f) {
-            x = ((event.x - transformation.viewOffsetX) / scale).toInt()
-            y = ((event.y - transformation.viewOffsetY) / scale).toInt()
-        } else {
-            // Before the first onSurfaceChanged there is no transformation yet.
-            // Stretching to the view is wrong, but it is wrong for one frame and
-            // the alternative is dropping the event that started the gesture.
-            x = (event.x * screen.width / width.coerceAtLeast(1)).toInt()
-            y = (event.y * screen.height / height.coerceAtLeast(1)).toInt()
+    private fun scroll(event: MotionEvent) {
+        val vertical = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+        val horizontal = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+        // A wheel reports whole detents already, so this rounds rather than
+        // accumulating: a high-resolution wheel that reports 0.25 at a time would
+        // otherwise scroll nothing at all.
+        if (abs(vertical) >= SCROLL_DEADZONE) {
+            sink.accept(GuestInput.Scroll(ScrollAxis.VERTICAL, vertical.roundAwayFromZero()))
         }
-        xServer.injectPointerMove(
-            x.coerceIn(0, screen.width - 1),
-            y.coerceIn(0, screen.height - 1),
+        if (abs(horizontal) >= SCROLL_DEADZONE) {
+            sink.accept(GuestInput.Scroll(ScrollAxis.HORIZONTAL, horizontal.roundAwayFromZero()))
+        }
+    }
+
+    private fun Float.roundAwayFromZero(): Int =
+        if (this > 0) kotlin.math.ceil(this).toInt() else kotlin.math.floor(this).toInt()
+
+    // — gamepad -------------------------------------------------------------------------
+
+    private fun joystick(event: MotionEvent): Boolean {
+        sink.accept(
+            gamepad.onSticks(
+                lx = event.getAxisValue(MotionEvent.AXIS_X),
+                ly = event.getAxisValue(MotionEvent.AXIS_Y),
+                rx = event.getAxisValue(MotionEvent.AXIS_Z),
+                ry = event.getAxisValue(MotionEvent.AXIS_RZ),
+            ),
         )
+        sink.accept(gamepad.onHat(event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_HAT_Y)))
+        // BRAKE/GAS are what a pad reports when it has no LTRIGGER/RTRIGGER axis;
+        // taking the larger covers both without knowing which kind this is.
+        sink.accept(
+            gamepad.onTrigger(
+                GamepadControl.L2,
+                maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)),
+            ),
+        )
+        sink.accept(
+            gamepad.onTrigger(
+                GamepadControl.R2,
+                maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)),
+            ),
+        )
+        syncLookTimer()
+        return true
+    }
+
+    /** A held stick emits no events at all, so the cursor needs a heartbeat. */
+    private fun syncLookTimer() {
+        if (gamepad.looking && !looking) {
+            looking = true
+            gamepad.tick(now())   // seed, so the first real tick has an interval
+            handler.postDelayed(look, LOOK_INTERVAL_MS)
+        } else if (!gamepad.looking && looking) {
+            looking = false
+            handler.removeCallbacks(look)
+        }
     }
 
     // — keyboard ------------------------------------------------------------------
 
     /**
-     * Hardware keys straight into the vendored mapping.
+     * Three sources, three paths.
      *
-     * Back is deliberately excluded. `Keyboard.onKeyEvent` does not map it, but
-     * saying so here is what guarantees the Session screen's rail — the only way
-     * to reach Stop once a desktop is on screen — cannot be swallowed by a guest
-     * that has grabbed the keyboard.
+     * Back is excluded first and unconditionally. `Keyboard.onKeyEvent` does not
+     * map it either, but saying so here is what guarantees the Session screen's
+     * rail — the only way to reach Stop once a desktop is on screen — cannot be
+     * swallowed by a guest that has grabbed the keyboard.
+     *
+     * A **pad** goes to the translator. A **soft keyboard** goes to the vendored
+     * path, which is written for exactly that: it carries `getUnicodeChar` and
+     * `ACTION_MULTIPLE`, so an IME can type a character no keycode names. A
+     * **physical keyboard** goes to [X11KeyMap], because the vendored path
+     * synthesises a `Shift_L` press from `isShiftPressed()` and releases it on
+     * any key up, which turns a held shift into `Abc`.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
-        return xServer.keyboard.onKeyEvent(event) || super.dispatchKeyEvent(event)
+
+        gamepadControl(event)?.let { control ->
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> sink.accept(gamepad.onButton(control, true))
+                KeyEvent.ACTION_UP -> sink.accept(gamepad.onButton(control, false))
+            }
+            return true
+        }
+
+        if (event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD) {
+            return xServer.keyboard.onKeyEvent(event) || super.dispatchKeyEvent(event)
+        }
+
+        val binding = X11KeyMap[event.keyCode] ?: return super.dispatchKeyEvent(event)
+        when (event.action) {
+            KeyEvent.ACTION_DOWN ->
+                sink.accept(X11KeyMap.edgesForDown(binding, repeat = event.repeatCount > 0))
+
+            KeyEvent.ACTION_UP ->
+                sink.accept(GuestInput.Key(binding.keycode, pressed = false))
+
+            else -> return super.dispatchKeyEvent(event)
+        }
+        return true
     }
+
+    /**
+     * The pad button this event is, or null if it is not from a pad.
+     *
+     * Sourced rather than keycode-only: `KEYCODE_DPAD_LEFT` arrives from a pad
+     * and from an arrow key, and the two want different destinations.
+     */
+    private fun gamepadControl(event: KeyEvent): GamepadControl? {
+        val fromPad = event.source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
+            event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+        if (!fromPad) return null
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_BUTTON_A -> GamepadControl.A
+            KeyEvent.KEYCODE_BUTTON_B -> GamepadControl.B
+            KeyEvent.KEYCODE_BUTTON_X -> GamepadControl.X
+            KeyEvent.KEYCODE_BUTTON_Y -> GamepadControl.Y
+            KeyEvent.KEYCODE_BUTTON_L1 -> GamepadControl.L1
+            KeyEvent.KEYCODE_BUTTON_R1 -> GamepadControl.R1
+            KeyEvent.KEYCODE_BUTTON_L2 -> GamepadControl.L2
+            KeyEvent.KEYCODE_BUTTON_R2 -> GamepadControl.R2
+            KeyEvent.KEYCODE_BUTTON_SELECT -> GamepadControl.SELECT
+            KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_MODE -> GamepadControl.START
+            KeyEvent.KEYCODE_BUTTON_THUMBL -> GamepadControl.THUMB_L
+            KeyEvent.KEYCODE_BUTTON_THUMBR -> GamepadControl.THUMB_R
+            KeyEvent.KEYCODE_DPAD_UP -> GamepadControl.DPAD_UP
+            KeyEvent.KEYCODE_DPAD_DOWN -> GamepadControl.DPAD_DOWN
+            KeyEvent.KEYCODE_DPAD_LEFT -> GamepadControl.DPAD_LEFT
+            KeyEvent.KEYCODE_DPAD_RIGHT -> GamepadControl.DPAD_RIGHT
+            else -> null
+        }
+    }
+
+    private fun now() = SystemClock.uptimeMillis()
 
     private companion object {
         /** Below this a wheel event is a stray sub-detent report, not a scroll. */
         const val SCROLL_DEADZONE = 0.1f
+
+        /** ~120 Hz. Faster than the panel is pointless; slower is visibly steppy. */
+        const val LOOK_INTERVAL_MS = 8L
     }
 }
 

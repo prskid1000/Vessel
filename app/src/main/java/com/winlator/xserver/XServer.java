@@ -191,6 +191,29 @@ public class XServer {
         }
     }
 
+    // VESSEL: the same two calls, addressed by raw keycode.
+    //
+    // XKeycode is a closed enum of the keys upstream's soft keyboard and its
+    // gamepad profiles can produce, and it has no entry for Super, Menu or
+    // PrtScn — keys a Bluetooth keyboard has and a Windows guest reads. Going
+    // around it via keyboard.setKeyPress directly would skip the lock these two
+    // take, and the callback that runs under it reaches into windowManager.
+    //
+    // Additive only: nothing above changes, so upstream diffs still apply. The
+    // byte is deliberate rather than an int silently narrowed — see
+    // app.vessel.input.X11.MAX_KEYCODE for why 128 is not a keycode here.
+    public void injectKeyPress(byte keycode, int keysym) {
+        try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
+            keyboard.setKeyPress(keycode, keysym);
+        }
+    }
+
+    public void injectKeyRelease(byte keycode) {
+        try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
+            keyboard.setKeyRelease(keycode);
+        }
+    }
+
     private Extension[] setupExtensions() {
         byte opcode = Extension.START_MAJOR_OPCODE;
         return new Extension[]{

@@ -1,6 +1,7 @@
 package app.vessel.core
 
 import android.view.View
+import app.vessel.input.PointerMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -82,6 +83,29 @@ interface SessionDisplayServer {
     val surface: StateFlow<View?>
 
     /**
+     * Whether one finger moves the cursor to itself or pushes it along.
+     *
+     * On the seam rather than inside the view because it is the one input
+     * setting the *user* changes mid-session, from the Session rail, and the
+     * rail has no reference to the view — it only knows this interface. It is a
+     * flow rather than a getter so the rail's label matches reality after a
+     * session restart, which resets it.
+     */
+    val pointerMode: StateFlow<PointerMode>
+
+    fun setPointerMode(mode: PointerMode)
+
+    /**
+     * Raise the IME over the guest's output.
+     *
+     * There is no hardware keyboard on a phone, and a Windows desktop with no
+     * way to type is a demo rather than a tool. Nothing dismisses it explicitly:
+     * the system back gesture does, and the rail's own Back is already spoken
+     * for by Stop.
+     */
+    fun showKeyboard()
+
+    /**
      * A working configuration, not a stub: no server, said out loud.
      *
      * The session log gets [REASON] as a Vessel line, so a run that dies at
@@ -94,6 +118,13 @@ interface SessionDisplayServer {
                 "needs a window will fail to open one"
 
         override val surface: StateFlow<View?> = MutableStateFlow<View?>(null).asStateFlow()
+
+        override val pointerMode: StateFlow<PointerMode> =
+            MutableStateFlow(PointerMode.TRACKPAD).asStateFlow()
+
+        override fun setPointerMode(mode: PointerMode) = Unit
+
+        override fun showKeyboard() = Unit
 
         override suspend fun start(request: DisplayRequest): DisplayOutcome =
             DisplayOutcome.NotAvailable(REASON)

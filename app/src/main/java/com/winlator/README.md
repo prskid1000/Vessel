@@ -77,7 +77,13 @@ At time of vendoring there are these:
 9. **`xconnector_epoll.c: createServerSocket`** — binds into the abstract
    namespace when the path starts with `@`, which is what the factory above
    produces. Filesystem paths behave exactly as upstream, `unlink` included.
-10. **Trimmed support classes** — `core/{AppUtils,ArrayUtils,FileUtils,ImageUtils,StringUtils}`
+10. **`XServer`** — two additive overloads, `injectKeyPress(byte, int)` and
+   `injectKeyRelease(byte)`. Upstream addresses keys only through the `XKeycode`
+   enum, which has no entry for Super, Menu or PrtScn; a physical keyboard has
+   all three. Reaching `keyboard.setKeyPress` directly would skip the lock the
+   existing overloads take, and the listener that runs under it touches
+   `windowManager`. Nothing existing changed, so upstream diffs still apply.
+11. **Trimmed support classes** — `core/{AppUtils,ArrayUtils,FileUtils,ImageUtils,StringUtils}`
    and `inputcontrols/ExternalController` are subsets, each with a header
    comment listing what survived. Diffs to those files will not apply cleanly;
    diffs to everything else should.
