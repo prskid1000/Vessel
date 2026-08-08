@@ -81,12 +81,30 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 11 narrowed the caption buttons and darkened the 3D highlight, both of
+     * which only became visible once seed 8 enlarged the frame;
      * 9 added [toolsPath], which is what puts the Unix tools on `PATH` in every
      * shell rather than in one profile; 10 added [virtualDesktop], without which
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 10
+    const val SEED_VERSION: Int = 11
+
+    /**
+     * A value written into the hive that names the seed version that wrote it.
+     *
+     * The prefix's own record of which seed it carries, and the thing
+     * `SessionRuntime` looks for before deciding it can skip `regedit`. It has
+     * to live in the hive rather than in `provisioned.json` because that file
+     * records what the app *believes* it did — and believing a step happened
+     * when it had not is the whole defect this exists to stop.
+     */
+    val SEED_MARKER: String get() = "VesselSeed$SEED_VERSION"
+
+    private val seedStamp: RegistryKey = RegistryKey(
+        path = """HKEY_CURRENT_USER\Software\Vessel""",
+        values = listOf(RegistryValue("Seed", SEED_MARKER)),
+    )
 
     /** Only used when a process somehow creates the desktop. See [virtualDesktop]. */
     private const val DEFAULT_DESKTOP_SIZE = "1280x720"
@@ -218,8 +236,14 @@ object PrefixRegistry {
             // and dark differ just enough to keep a focus ring visible.
             color("ButtonFace", GuestPalette.SURFACE),
             color("ButtonText", GuestPalette.TEXT),
-            color("ButtonHilight", GuestPalette.NEUTRAL_700),
-            color("ButtonLight", GuestPalette.NEUTRAL_800),
+            // **The raised edge, deliberately almost invisible.** These two are
+            // the light half of a classic 3D bevel, and seed 8 made them matter:
+            // at a 1 px border nobody saw them, at 4+4 px they became a bright
+            // rim around every window that read as a white border against a
+            // near-black desktop. Nocturne has no bevel, so the light half is
+            // one step off the ground rather than a highlight.
+            color("ButtonHilight", GuestPalette.NEUTRAL_800),
+            color("ButtonLight", GuestPalette.NEUTRAL_900),
             color("ButtonShadow", GuestPalette.NEUTRAL_900),
             color("ButtonDkShadow", GuestPalette.BG),
             color("ButtonAlternateFace", GuestPalette.NEUTRAL_900),
@@ -336,7 +360,13 @@ object PrefixRegistry {
         path = """HKEY_CURRENT_USER\Control Panel\Desktop\WindowMetrics""",
         values = listOf(
             twips("CaptionHeight", CAPTION_PX),
-            twips("CaptionWidth", CAPTION_PX),
+            // Narrower than the caption is tall. `CaptionWidth` sizes the
+            // *buttons*, and Wine scales their glyphs to fit — at 40 px square
+            // the close cross and the maximise box came out as large white
+            // marks that read as three lit panels rather than three buttons.
+            // 32 keeps them comfortably thumb-sized with the glyph in
+            // proportion.
+            twips("CaptionWidth", SMALL_CAPTION_PX),
             twips("SmCaptionHeight", SMALL_CAPTION_PX),
             twips("SmCaptionWidth", SMALL_CAPTION_PX),
             twips("MenuHeight", SMALL_CAPTION_PX),
@@ -496,6 +526,7 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
+        seedStamp,
     ) + virtualDesktop
 
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))

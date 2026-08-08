@@ -854,7 +854,22 @@ class SessionRuntime @Inject constructor(
         // so a prefix that already carries its result skips it. The condition is
         // read from the prefix itself rather than from `provisioned.json`: a
         // recorded claim is exactly what was wrong before.
-        if (bootstrapped(layout)) {
+        // **The skip is about the emulator keys, and it must not swallow a seed
+        // change.** `bootstrapped` asks whether the two DLL values Wine cannot
+        // run without are in the hive. They are, for every prefix that has ever
+        // booted — so once this returned true, `regedit` never ran again and no
+        // later seed reached an existing container. Seeds 9, 10 and 11 were all
+        // written to `prefix-seed.reg`, recorded in `provisioned.json`, and
+        // never applied; the hive was still carrying seed 8's values. It looked
+        // like "the metrics only work on a fresh container", which is what I
+        // wrote down, and it was this instead.
+        //
+        // The seed's own version decides now. It is read from the prefix rather
+        // than from `provisioned.json` for the reason the comment below already
+        // gives — a recorded claim is exactly what was wrong before — so the
+        // marker is a value inside the hive, written by the seed itself.
+        val seedApplied = hiveText(layout).contains(PrefixRegistry.SEED_MARKER)
+        if (bootstrapped(layout) && seedApplied) {
             bootProgress("emulator keys applied · syswow64 ${wow64Entries(layout)} entries")
         } else {
             bootProgress("regedit ${regFile.name}")

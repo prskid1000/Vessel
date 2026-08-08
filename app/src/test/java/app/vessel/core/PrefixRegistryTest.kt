@@ -155,11 +155,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(10, PrefixRegistry.SEED_VERSION)
+        assertEquals(11, PrefixRegistry.SEED_VERSION)
         // The two being equal is a coincidence — a version bump does not have to
         // add a key — but while it holds it is a cheap way to catch a key added
         // without the bump that makes existing containers pick it up.
-        assertEquals(11, PrefixRegistry.seed.size)
+        assertEquals(12, PrefixRegistry.seed.size)
     }
 
     @Test
@@ -197,6 +197,9 @@ class PrefixRegistryTest {
         // forty points tall. Fifteen twips to the pixel at 96 dpi.
         val values = PrefixRegistry.windowMetrics.values.associate { it.name to it.data }
         assertEquals("-600", values["CaptionHeight"])
+        // The buttons are narrower than the caption is tall, so their glyphs
+        // stay in proportion. See the note on CaptionWidth.
+        assertEquals("-480", values["CaptionWidth"])
         assertEquals("-360", values["ScrollWidth"])
         assertEquals("-60", values["BorderWidth"])
         assertEquals("-60", values["PaddedBorderWidth"])
