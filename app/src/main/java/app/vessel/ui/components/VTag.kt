@@ -9,7 +9,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -53,8 +52,8 @@ fun VTag(
         VTagTone.Accent2 -> colors.accent2800
         VTagTone.Neutral -> colors.neutral800
         VTagTone.Outline -> Color.Transparent
-        VTagTone.Ok -> colors.ok.copy(alpha = STATUS_GROUND_ALPHA)
-        VTagTone.Danger -> colors.danger.copy(alpha = STATUS_GROUND_ALPHA)
+        VTagTone.Ok -> colors.ok.copy(alpha = colors.statusGroundAlpha)
+        VTagTone.Danger -> colors.danger.copy(alpha = colors.statusGroundAlpha)
     }
     val ink = when (tone) {
         VTagTone.Accent -> colors.accent100
@@ -75,25 +74,20 @@ fun VTag(
             .background(ground, shape)
             .let { if (tone == VTagTone.Outline) it.vRing(colors.accent, shape) else it }
             // `padding: 3px 10px`
-            .padding(horizontal = 10.dp, vertical = 3.dp),
+            .padding(
+                horizontal = Vessel.metrics.tagPaddingH,
+                vertical = Vessel.metrics.tagPaddingV,
+            ),
     )
 }
 
-/**
- * How far a status token is knocked back to become a ground.
- *
- * The same 16% the `divider` token sits at, which is the alpha in this system
- * that means "present, not loud".
- */
-private const val STATUS_GROUND_ALPHA = 0.16f
-
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421)
 @Composable
 private fun VTagPreview() {
     VesselTheme {
         Row(
-            Modifier.padding(18.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            Modifier.padding(Vessel.metrics.s17),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
         ) {
             VTagTone.entries.forEach { VTag(it.name.lowercase(), tone = it) }
         }

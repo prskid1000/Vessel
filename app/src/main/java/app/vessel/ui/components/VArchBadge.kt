@@ -8,7 +8,6 @@ import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
 import app.vessel.core.PeArchitecture
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -60,8 +59,11 @@ fun VTonalPill(
         style = Vessel.type.monoSmall,
         color = tone,
         modifier = modifier
-            .background(tone.copy(alpha = 0.18f), shape)
-            .padding(horizontal = 10.dp, vertical = 3.dp),
+            .background(tone.copy(alpha = Vessel.colors.tonalGroundAlpha), shape)
+            .padding(
+                horizontal = Vessel.metrics.tagPaddingH,
+                vertical = Vessel.metrics.tagPaddingV,
+            ),
     )
 }
 
@@ -70,8 +72,9 @@ fun VTonalPill(
 private fun VArchBadgePreview() {
     VesselTheme {
         androidx.compose.foundation.layout.Row(
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement
+                .spacedBy(Vessel.metrics.s8),
+            modifier = Modifier.padding(Vessel.metrics.s17),
         ) {
             PeArchitecture.entries.forEach { VArchBadge(it) }
         }

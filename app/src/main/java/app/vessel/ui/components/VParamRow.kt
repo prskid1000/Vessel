@@ -22,8 +22,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -47,7 +45,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vRing
@@ -102,7 +99,7 @@ fun VParamRow(
                     textAlign = TextAlign.End,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = VALUE_MAX_WIDTH),
+                    modifier = Modifier.widthIn(max = Vessel.metrics.valueMaxWidth),
                 )
             }
             trailing?.invoke()
@@ -139,15 +136,6 @@ fun VParamRow(
 }
 
 /**
- * How wide the right-hand value column may grow.
- *
- * Not a spacing token, because it is not spacing: it is the ceiling that stops a
- * long value from eating the title's line. Every value the manifest can produce
- * is far shorter than this, and the cap only ever fires on a pathological one.
- */
-private val VALUE_MAX_WIDTH = 140.dp
-
-/**
  * The height of a field, a dropdown and a stepper button — they align in a column.
  *
  * `controlHeight` rather than a value of its own, so a text button placed beside
@@ -156,16 +144,6 @@ private val VALUE_MAX_WIDTH = 140.dp
  */
 private val fieldHeight: Dp
     @Composable @ReadOnlyComposable get() = Vessel.metrics.controlHeight
-
-/**
- * How tall an open dropdown may get: three items, and then it scrolls.
- *
- * Material's `DropdownMenuItem` has a 48 dp minimum height and the menu adds
- * 8 dp of padding at each end, so three rows and the padding is 160 dp. The
- * fourth item is cut rather than hidden, which is what tells you there is more
- * without needing a scrollbar.
- */
-private val MENU_MAX_HEIGHT = 160.dp
 
 /**
  * The `enum` control: a full-width bordered box showing the current label, with
@@ -196,7 +174,8 @@ fun VDropdownField(
     // shares. Measuring the field is the only way to match it: DropdownMenu has
     // no "same width as anchor" option, and Material's ExposedDropdownMenuBox,
     // which does, brings a TextField and its whole look with it.
-    var fieldWidth by remember { mutableStateOf(0.dp) }
+    val zeroWidth = Vessel.metrics.none
+    var fieldWidth by remember { mutableStateOf(zeroWidth) }
     val density = LocalDensity.current
 
     Box(
@@ -224,7 +203,7 @@ fun VDropdownField(
                 modifier = Modifier.weight(1f),
             )
             Icon(
-                Icons.Filled.KeyboardArrowDown,
+                VIcons.CaretDown,
                 contentDescription = null,
                 tint = Vessel.colors.textMuted,
                 modifier = Modifier.size(Vessel.metrics.iconMd),
@@ -245,7 +224,7 @@ fun VDropdownField(
             // it needs is a ceiling.
             modifier = Modifier
                 .width(fieldWidth)
-                .heightIn(max = MENU_MAX_HEIGHT),
+                .heightIn(max = Vessel.metrics.menuMaxHeight),
         ) {
             options.forEach { option ->
                 val isSelected = option == selected
@@ -299,35 +278,23 @@ fun VToggle(
         label = "thumb",
     )
     val thumbOffset by animateDpAsState(
-        targetValue = if (checked) TOGGLE_TRAVEL else 0.dp,
+        targetValue = if (checked) Vessel.metrics.toggleTravel else Vessel.metrics.none,
         animationSpec = tween(Vessel.metrics.durationStandardMs),
         label = "toggle",
     )
 
     Box(
         modifier
-            .size(width = TOGGLE_WIDTH, height = TOGGLE_HEIGHT)
+            .size(width = Vessel.metrics.toggleWidth, height = Vessel.metrics.toggleHeight)
             .background(track, shape)
             .vRing(Vessel.colors.divider, shape)
             .clickable { onCheckedChange(!checked) }
-            .padding(TOGGLE_INSET),
+            .padding(Vessel.metrics.toggleInset),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.offset(x = thumbOffset).size(TOGGLE_THUMB).background(thumb, shape))
+        Box(Modifier.offset(x = thumbOffset).size(Vessel.metrics.toggleThumb).background(thumb, shape))
     }
 }
-
-/**
- * The switch, one step down from the reference app's 40×23 so it matches the
- * 36 dp control row it sits on. The thumb travels the track minus its own
- * diameter minus both insets, which is the arithmetic that keeps it from
- * overhanging the right edge when the geometry changes.
- */
-private val TOGGLE_WIDTH = 36.dp
-private val TOGGLE_HEIGHT = 20.dp
-private val TOGGLE_INSET = 2.dp
-private val TOGGLE_THUMB = 16.dp
-private val TOGGLE_TRAVEL = TOGGLE_WIDTH - TOGGLE_THUMB - TOGGLE_INSET * 2
 
 /**
  * The `int` control: minus, slider, plus.
@@ -433,7 +400,7 @@ private fun VSlider(
         thumb = {
             Box(
                 Modifier
-                    .size(16.dp)
+                    .size(Vessel.metrics.sliderThumb)
                     .background(
                         if (enabled) colors.accent else colors.neutral600,
                         Vessel.metrics.shapePill,
@@ -446,13 +413,13 @@ private fun VSlider(
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(TRACK_HEIGHT)
+                    .height(Vessel.metrics.sliderTrack)
                     .background(colors.neutral800, Vessel.metrics.shapePill),
             ) {
                 Box(
                     Modifier
                         .fillMaxWidth(fraction.coerceIn(0f, 1f))
-                        .height(TRACK_HEIGHT)
+                        .height(Vessel.metrics.sliderTrack)
                         .background(
                             if (enabled) colors.accent else colors.neutral700,
                             Vessel.metrics.shapePill,
@@ -462,8 +429,6 @@ private fun VSlider(
         },
     )
 }
-
-private val TRACK_HEIGHT: Dp = 4.dp
 
 /** One line of the `multi` control: a box, a tick, and the option's label. */
 @Composable

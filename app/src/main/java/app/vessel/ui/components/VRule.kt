@@ -11,7 +11,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import app.vessel.ui.theme.VRulePosition
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -37,14 +36,14 @@ import app.vessel.ui.theme.vFadingRule
 fun VRule(
     modifier: Modifier = Modifier,
     color: Color = Vessel.colors.divider,
-    fadeWidth: Dp = 48.dp,
+    fadeWidth: Dp = Vessel.metrics.ruleFade,
     verticalMargin: Dp = Vessel.metrics.s11,
 ) {
     Box(
         modifier
             .fillMaxWidth()
             .padding(vertical = verticalMargin)
-            .height(1.dp)
+            .height(Vessel.metrics.hairline)
             // Centre, not bottom: the box is exactly the rule, so there is no
             // edge to hang it off.
             .vFadingRule(color, fadeWidth, VRulePosition.Center),
@@ -55,12 +54,12 @@ fun VRule(
 @Composable
 private fun VRulePreview() {
     VesselTheme {
-        Column(Modifier.padding(horizontal = 18.dp)) {
+        Column(Modifier.padding(horizontal = Vessel.metrics.s17)) {
             VRule()
             VRule(color = Vessel.colors.accent)
             // Narrower than two fades: degrade to one soft mark rather than
             // losing the middle.
-            Box(Modifier.width(60.dp)) { VRule() }
+            Box(Modifier.width(Vessel.metrics.metricCellMinWidth)) { VRule() }
         }
     }
 }

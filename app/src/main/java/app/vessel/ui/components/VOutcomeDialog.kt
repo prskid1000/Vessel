@@ -17,7 +17,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import app.vessel.ui.theme.VElev
@@ -97,7 +96,7 @@ fun VOutcomeDialog(
                             // Capped and scrollable: a Wine backtrace is not
                             // three lines, and a dialog that grows past the
                             // screen puts its own buttons out of reach.
-                            .heightIn(max = EVIDENCE_MAX)
+                            .heightIn(max = Vessel.metrics.evidenceMaxHeight)
                             .vCard()
                             .verticalScroll(rememberScrollState())
                             .padding(Vessel.metrics.s11),
@@ -119,9 +118,7 @@ fun VOutcomeDialog(
     }
 }
 
-private val EVIDENCE_MAX = 180.dp
-
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 460)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 460)
 @Composable
 private fun VOutcomeDialogFailedPreview() {
     VesselTheme {

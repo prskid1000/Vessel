@@ -10,9 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -28,6 +25,7 @@ import app.vessel.data.SessionExit
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VIconButton
+import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VPushToolbar
 import app.vessel.ui.components.VScaffold
 import app.vessel.ui.components.VTag
@@ -85,7 +83,7 @@ private fun SessionLogsContent(
                 trailing = {
                     if (state.rows.isNotEmpty()) {
                         VIconButton(
-                            Icons.Filled.Delete,
+                            VIcons.Trash,
                             "Delete all logs",
                             { confirmingClear = true },
                             tint = Vessel.colors.danger,
@@ -99,7 +97,7 @@ private fun SessionLogsContent(
 
         if (state.rows.isEmpty()) {
             VEmptyState(
-                icon = Icons.AutoMirrored.Filled.List,
+                icon = VIcons.List,
                 message = "This container has never run, so there is nothing to read. A log is " +
                     "written from the moment you launch it until the program exits.",
             )

@@ -27,7 +27,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import app.vessel.ui.theme.VColors
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
@@ -94,7 +93,7 @@ data class VMetricSeries(
 fun VMetricGraph(
     series: List<VMetricSeries>,
     modifier: Modifier = Modifier,
-    height: Dp = GRAPH_HEIGHT,
+    height: Dp = Vessel.metrics.graphHeight,
 ) {
     val colors = Vessel.colors
     val metrics = Vessel.metrics
@@ -112,25 +111,40 @@ fun VMetricGraph(
             color = divider,
             start = Offset(0f, size.height / 2f),
             end = Offset(size.width, size.height / 2f),
-            strokeWidth = 1f,
+            strokeWidth = metrics.hairline.toPx(),
         )
 
         resolved.forEach { (line, ink) ->
             // Each run of consecutive readings is its own path. Two runs either
             // side of a gap are two separate strokes, which is what makes a
             // missing sample look missing.
-            runsOf(line).forEach { run -> drawRun(run, line.form, ink) }
+            runsOf(line).forEach { run ->
+                drawRun(run, line.form, ink, metrics.graphStroke.toPx(), metrics.graphDot.toPx())
+            }
         }
     }
 }
 
-/** One unbroken run of points, already mapped to the canvas. */
-private fun DrawScope.drawRun(points: List<Offset>, form: VSeriesForm, ink: Color) {
+/**
+ * One unbroken run of points, already mapped to the canvas.
+ *
+ * The two widths arrive in pixels rather than being read from the theme, because
+ * a `DrawScope` extension is not a composable and cannot reach a
+ * `CompositionLocal`. Converting them at the one call site above keeps the tokens
+ * as the source and this function as arithmetic.
+ */
+private fun DrawScope.drawRun(
+    points: List<Offset>,
+    form: VSeriesForm,
+    ink: Color,
+    strokePx: Float,
+    dotRadiusPx: Float,
+) {
     if (points.isEmpty()) return
     if (points.size == 1) {
         // A single reading between two gaps still happened, and a zero-length
         // path draws nothing at all. It gets a dot.
-        drawCircle(ink, radius = DOT_RADIUS_DP.dp.toPx(), center = points.first())
+        drawCircle(ink, radius = dotRadiusPx, center = points.first())
         return
     }
 
@@ -158,7 +172,7 @@ private fun DrawScope.drawRun(points: List<Offset>, form: VSeriesForm, ink: Colo
         },
         color = ink,
         style = Stroke(
-            width = STROKE_DP.dp.toPx(),
+            width = strokePx,
             pathEffect = if (form == VSeriesForm.Dashed) {
                 PathEffect.dashPathEffect(floatArrayOf(DASH_ON, DASH_OFF))
             } else {
@@ -253,7 +267,10 @@ fun VMetricGraphCard(
                         unit,
                         style = Vessel.type.monoSmall,
                         color = Vessel.colors.textMuted,
-                        modifier = Modifier.padding(start = 2.dp, bottom = 3.dp),
+                        modifier = Modifier.padding(
+                            start = Vessel.metrics.hairGap,
+                            bottom = Vessel.metrics.s3,
+                        ),
                     )
                 }
             }
@@ -298,7 +315,7 @@ fun VMetricStatRow(stats: List<VMetricStat>, modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
     ) {
         stats.forEach { stat ->
-            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.hairline)) {
                 Text(stat.value, style = Vessel.type.mono, color = Vessel.colors.textPrimary)
                 Text(
                     stat.label.uppercase(),
@@ -326,11 +343,11 @@ private fun Legend(series: VMetricSeries) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (series.form == VSeriesForm.Dashed) {
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.hairGap)) {
                 repeat(2) {
                     Box(
                         Modifier
-                            .size(width = LEGEND_DASH_WIDTH, height = LEGEND_MARK_HEIGHT)
+                            .size(width = Vessel.metrics.legendDashWidth, height = Vessel.metrics.legendMarkHeight)
                             .background(ink),
                     )
                 }
@@ -338,7 +355,7 @@ private fun Legend(series: VMetricSeries) {
         } else {
             Box(
                 Modifier
-                    .size(width = LEGEND_MARK_WIDTH, height = LEGEND_MARK_HEIGHT)
+                    .size(width = Vessel.metrics.legendMarkWidth, height = Vessel.metrics.legendMarkHeight)
                     .background(ink),
             )
         }
@@ -382,7 +399,7 @@ fun VMetricSpark(
     tone: VMetricTone = VMetricTone.Normal,
     unavailable: String? = null,
 ) {
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Vessel.metrics.hairGap)) {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
                 label.uppercase(),
@@ -416,7 +433,7 @@ fun VMetricSpark(
             }
         }
         if (series != null) {
-            VMetricGraph(listOf(series), height = SPARK_GRAPH_HEIGHT)
+            VMetricGraph(listOf(series), height = Vessel.metrics.sparkHeight)
         } else {
             Text(
                 unavailable ?: NO_READING,
@@ -435,32 +452,24 @@ private fun VSeriesTone.ink(colors: VColors): Color = when (this) {
     VSeriesTone.Neutral -> colors.neutral500
 }
 
-/** Tall enough to show a shape, short enough that four of them are one screen. */
-private val GRAPH_HEIGHT = 56.dp
-
-/**
- * The rail's, and the number the whole rail is budgeted around.
- *
- * Four sparks at 22 dp of graph plus their label lines come to 170 dp, which
- * leaves the header, the two rules and five actions inside a landscape window on
- * this phone. At 22 dp the box has 16 dp of drawable height after
- * [VMetricGraph]'s own padding — enough for a shape to be a shape, and the point
- * at which a fifth quantity would have to displace one of the four rather than
- * squeeze in beside them.
- */
-private val SPARK_GRAPH_HEIGHT = 22.dp
-
 /** A working source that has produced nothing yet. Not the same as a denied one. */
 private const val NO_READING = "no reading"
 
-private val LEGEND_MARK_WIDTH = 9.dp
-private val LEGEND_MARK_HEIGHT = 2.dp
+/**
+ * Where a live value sits against its thresholds.
+ *
+ * Shared by [VMetricSpark] and every caller that formats a reading, so one number
+ * cannot be amber in the rail and plain on the Metrics tab.
+ */
+enum class VMetricTone { Normal, Ok, Warn, Danger }
 
-/** Two of these plus the gap add up to [LEGEND_MARK_WIDTH], so marks stay aligned. */
-private val LEGEND_DASH_WIDTH = 3.5.dp
-
-private const val STROKE_DP = 1.6f
-private const val DOT_RADIUS_DP = 1.2f
+@Composable
+internal fun toneColor(tone: VMetricTone): Color = when (tone) {
+    VMetricTone.Normal -> Vessel.colors.textPrimary
+    VMetricTone.Ok -> Vessel.colors.ok
+    VMetricTone.Warn -> Vessel.colors.warn
+    VMetricTone.Danger -> Vessel.colors.danger
+}
 
 /** Nocturne's fills sit low; these are the two ends of the area gradient. */
 private const val AREA_TOP_ALPHA = 0.26f

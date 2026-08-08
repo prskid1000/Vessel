@@ -6,8 +6,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,13 +39,13 @@ fun VEmptyState(
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(icon, null, Modifier.size(Vessel.metrics.s22), tint = Vessel.colors.textMuted)
+        Icon(icon, null, Modifier.size(Vessel.metrics.iconLg), tint = Vessel.colors.textMuted)
         Text(
             message,
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textLabel,
             textAlign = TextAlign.Center,
-            modifier = Modifier.widthIn(max = MESSAGE_MAX_WIDTH),
+            modifier = Modifier.widthIn(max = Vessel.metrics.proseMaxWidth),
         )
         if (actionLabel != null && onAction != null) {
             VButton(actionLabel, onAction, style = VButtonStyle.Primary)
@@ -55,15 +53,12 @@ fun VEmptyState(
     }
 }
 
-/** About sixty characters of `bodySmall` — a readable measure, not a screen width. */
-private val MESSAGE_MAX_WIDTH = 320.dp
-
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 400)
+@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 400)
 @Composable
 private fun VEmptyStatePreview() {
     VesselTheme {
         VEmptyState(
-            icon = Icons.Filled.Add,
+            icon = VIcons.Plus,
             message = "No containers yet. A new one is configured correctly for this device " +
                 "without you setting anything.",
             actionLabel = "New container",

@@ -14,9 +14,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,7 +30,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
+
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -185,8 +182,8 @@ private fun SessionLogContent(
                 onBack = onBack,
                 trailing = {
                     if (!state.missing) {
-                        VIconButton(VIcons.CopyAll, "Copy all", onCopy)
-                        VIconButton(Icons.Filled.Share, "Share log", onShare)
+                        VIconButton(VIcons.Copy, "Copy all", onCopy)
+                        VIconButton(VIcons.Share, "Share log", onShare)
                     }
                 },
             )
@@ -194,7 +191,7 @@ private fun SessionLogContent(
     ) {
         if (state.missing) {
             VEmptyState(
-                icon = Icons.Filled.Info,
+                icon = VIcons.Info,
                 message = "This session's log is no longer on the device. Ten are kept per " +
                     "container, and the oldest is removed when an eleventh starts.",
             )
@@ -212,7 +209,7 @@ private fun SessionLogContent(
 
         if (state.entries.isEmpty()) {
             VEmptyState(
-                icon = Icons.Filled.Info,
+                icon = VIcons.Info,
                 message = "This session produced no output at all.",
             )
             return@VScaffold
@@ -263,7 +260,7 @@ private fun LogRow(entry: LogEntry) {
             entry.source.label,
             style = Vessel.type.monoSmall,
             color = Vessel.colors.neutral700,
-            modifier = Modifier.width(GUTTER_WIDTH),
+            modifier = Modifier.width(Vessel.metrics.logGutterWidth),
         )
         // Wraps rather than clips. A truncated `err:module:import_dll` is a line
         // that has kept the part everybody already knows and dropped the name of
@@ -338,8 +335,8 @@ private fun tabLabel(tab: SessionLogTab) = when (tab) {
     SessionLogTab.METRICS -> "Metrics"
 }
 
-/** Wide enough for `driver`, the longest source name, at `monoSmall`. */
-private val GUTTER_WIDTH = 38.dp
+
+
 
 /** How close to the loaded end the list gets before the next page is asked for. */
 private const val LOAD_AHEAD_LINES = 200
