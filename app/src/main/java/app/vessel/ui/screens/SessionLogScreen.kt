@@ -235,6 +235,16 @@ private fun SessionLogContent(
             ),
         ) {
             items(state.entries, key = { it.index }) { entry -> LogRow(entry, pan) }
+            if (state.truncated) {
+                item(key = "truncated") {
+                    Text(
+                        "This is as far as the viewer reads. Share exports the whole log.",
+                        style = Vessel.type.bodySmall,
+                        color = Vessel.colors.warn,
+                        modifier = Modifier.padding(vertical = Vessel.metrics.s11),
+                    )
+                }
+            }
         }
     }
 }
