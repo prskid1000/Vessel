@@ -137,6 +137,20 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         surfaceHeight = (short)height;
         viewTransformation.update(width, height, xServer.screenInfo.width, xServer.screenInfo.height);
         viewportNeedsUpdate = true;
+        // VESSEL: ask for a frame, because nothing else will.
+        //
+        // The view is RENDERMODE_WHEN_DIRTY, so it draws only when the X server
+        // reports damage. A desktop that has finished starting has nothing left
+        // to damage — so after the surface is created the screen stayed blank
+        // until the user moved the cursor, which was the first thing to call
+        // requestRender(). Reported as "blank screen after container start
+        // until I move the cursor", which is exactly that and nothing more.
+        //
+        // Upstream never sees it: Winlator's surface is created before its guest
+        // starts, so the first damage always arrives after the first frame.
+        // Vessel's desktop can already be running when the surface appears —
+        // coming back to a session does exactly that.
+        xServerView.requestRender();
     }
 
     @Override
