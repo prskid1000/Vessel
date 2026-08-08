@@ -24,7 +24,6 @@ import app.vessel.ui.theme.VesselTheme
 fun AppsScreen(
     currentRoute: String?,
     onNavigate: (String) -> Unit,
-    onOpenFiles: () -> Unit,
 ) {
     VScaffold(
         toolbar = { VRootToolbar(title = "Apps") },
@@ -34,8 +33,6 @@ fun AppsScreen(
             icon = Icons.AutoMirrored.Filled.List,
             message = "No Windows applications found. Import an installer or an .exe into a " +
                 "container drive and it will appear here with the architecture it was built for.",
-            actionLabel = "Browse container drives",
-            onAction = onOpenFiles,
         )
     }
 }
@@ -44,6 +41,6 @@ fun AppsScreen(
 @Composable
 private fun AppsPreview() {
     VesselTheme {
-        AppsScreen(currentRoute = Routes.APPS, onNavigate = {}, onOpenFiles = {})
+        AppsScreen(currentRoute = Routes.APPS, onNavigate = {})
     }
 }

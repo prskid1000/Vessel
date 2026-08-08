@@ -172,13 +172,16 @@ fun VesselApp(
                 // Launch is not a navigation. The checklist appears over this
                 // list, and the desktop pushes itself once there is one.
                 onLaunch = { session.launch(it, native) },
+                // Files hangs off the container, not off Apps. It used to be
+                // an action on the Apps empty state, which knew nothing about
+                // containers and so could not say whose drive it was opening.
+                onBrowseFiles = { navController.navigate(Routes.FILES) },
             )
         }
         composable(Routes.APPS) {
             AppsScreen(
                 currentRoute = currentRoute,
                 onNavigate = { navController.navigateToRoot(it) },
-                onOpenFiles = { navController.navigate(Routes.FILES) },
             )
         }
 

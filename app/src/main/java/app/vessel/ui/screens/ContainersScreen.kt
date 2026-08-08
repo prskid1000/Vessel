@@ -48,6 +48,7 @@ fun ContainersScreen(
     onOpenContainer: (String) -> Unit,
     onCreateContainer: () -> Unit,
     onLaunch: (String) -> Unit,
+    onBrowseFiles: (String) -> Unit,
     viewModel: ContainersViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -58,6 +59,7 @@ fun ContainersScreen(
         onOpenContainer = onOpenContainer,
         onCreateContainer = onCreateContainer,
         onLaunch = onLaunch,
+        onBrowseFiles = onBrowseFiles,
         onDelete = viewModel::delete,
     )
 }
@@ -70,6 +72,7 @@ private fun ContainersContent(
     onOpenContainer: (String) -> Unit,
     onCreateContainer: () -> Unit,
     onLaunch: (String) -> Unit,
+    onBrowseFiles: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
     // The row a long press is asking about, held here rather than in the view
@@ -125,6 +128,10 @@ private fun ContainersContent(
                         meta = row.lastRunLabel,
                         onOpen = { onOpenContainer(row.profile.id) },
                         onLaunch = { onLaunch(row.profile.id) },
+                        // Only once there is a drive_c to open. `lastRunLabel`
+                        // is non-null exactly when the container has run, which
+                        // is when the prefix exists.
+                        onBrowseFiles = row.lastRunLabel?.let { { onBrowseFiles(row.profile.id) } },
                         onLongPress = { pendingDelete = row },
                     )
                 }
@@ -158,6 +165,7 @@ private fun ContainersPreview() {
             onOpenContainer = {},
             onCreateContainer = {},
             onLaunch = {},
+            onBrowseFiles = {},
             onDelete = {},
         )
     }
@@ -174,6 +182,7 @@ private fun ContainersEmptyPreview() {
             onOpenContainer = {},
             onCreateContainer = {},
             onLaunch = {},
+            onBrowseFiles = {},
             onDelete = {},
         )
     }

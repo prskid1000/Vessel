@@ -44,6 +44,15 @@ fun VContainerCard(
     modifier: Modifier = Modifier,
     meta: String? = null,
     onLongPress: (() -> Unit)? = null,
+    /**
+     * Browse this container's `C:` drive, or null when there is nothing to
+     * browse.
+     *
+     * Null until the container has been provisioned: before its first launch
+     * there is no `drive_c`, and an icon that opens an empty folder reads as a
+     * broken feature rather than an empty one.
+     */
+    onBrowseFiles: (() -> Unit)? = null,
 ) {
     Row(
         modifier
@@ -81,6 +90,19 @@ fun VContainerCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+
+        // Files sits on the row rather than one level down in the editor,
+        // because browsing a container's C: is a daily action and the editor is
+        // configuration. The row is also the only place the container is
+        // unambiguous without asking — which was the whole objection to giving
+        // Files a bottom-nav tab of its own.
+        if (onBrowseFiles != null) {
+            VIconAction(
+                icon = VIcons.Folder,
+                contentDescription = "Browse ${container.name} files",
+                onClick = onBrowseFiles,
+            )
         }
 
         // Outlined and unlabelled, like every primary action in the system. A
