@@ -43,6 +43,7 @@ import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.Launchable
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
+import app.vessel.ui.theme.vRing
 import app.vessel.ui.theme.vRuleBelow
 import app.vessel.ui.vm.FileRow
 import app.vessel.ui.vm.FilesUiState
@@ -150,15 +151,32 @@ private fun FilesContent(
                     onAddAsApp,
                     modifier = Modifier.weight(1f),
                     style = VButtonStyle.Primary,
-                    // Only a file the engine can actually start. A `.ps1` is
-                    // refused here rather than at launch, because Wine's
-                    // PowerShell is a stub that would appear to work.
-                    enabled = selected?.launchable?.runnable == true,
+                    // Only a file the engine can actually start, and only one that
+                    // is not already a program. A `.ps1` is refused here rather
+                    // than at launch, because Wine's PowerShell is a stub that
+                    // would appear to work; something already on the home row is
+                    // refused because adding it again is a press with no visible
+                    // effect. The row itself says which of the two it is.
+                    enabled = state.canAddAsApp,
                 )
             }
         },
     ) {
         Breadcrumb(state.guestPath, onCrumb)
+
+        // Why "Add as app" is greyed out for a file that plainly runs. Without
+        // this the button is simply dead and the user has to guess; the design's
+        // rule is that anything which cannot happen says so and names the reason.
+        if (state.selectedAlreadyAdded) {
+            Text(
+                "${state.selected?.name} is already a program on ${state.containerName}.",
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.warn,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s3),
+            )
+        }
 
         state.notice?.let { notice ->
             Text(
@@ -295,21 +313,7 @@ private fun FileListRow(row: FileRow, selected: Boolean, onClick: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (row.isDirectory) {
-            Icon(
-                VIcons.Folder,
-                contentDescription = null,
-                Modifier.size(Vessel.metrics.iconMd),
-                tint = Vessel.colors.accent,
-            )
-        } else {
-            Icon(
-                if (row.arch != null) VIcons.FileCode else VIcons.File,
-                contentDescription = null,
-                Modifier.size(Vessel.metrics.iconMd),
-                tint = row.arch?.let { archColor(it) } ?: Vessel.colors.neutral700,
-            )
-        }
+        FileMark(row)
         Column(
             Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
@@ -325,6 +329,39 @@ private fun FileListRow(row: FileRow, selected: Boolean, onClick: () -> Unit) {
             }
         }
         row.arch?.let { VArchBadge(it) }
+    }
+}
+
+/**
+ * The row's leading mark.
+ *
+ * A folder gets the accent glyph. **A program gets a ringed square in its own
+ * architecture's colour with an `E` in it, and a data file gets the same square
+ * empty and grey** — which is the design's own treatment and better than a file
+ * glyph here: in a folder of downloads the fact anybody is looking for is which
+ * of these will run natively, and a colour answers that before a name is read.
+ */
+@Composable
+private fun FileMark(row: FileRow) {
+    if (row.isDirectory) {
+        Icon(
+            VIcons.Folder,
+            contentDescription = null,
+            Modifier.size(Vessel.metrics.iconMd),
+            tint = Vessel.colors.accent,
+        )
+        return
+    }
+    val tone = row.arch?.let { archColor(it) } ?: Vessel.colors.neutral700
+    Box(
+        Modifier
+            .size(Vessel.metrics.iconMd)
+            .vRing(tone, Vessel.metrics.shapeSm),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (row.arch != null) {
+            Text("E", style = Vessel.type.monoSmall, color = tone)
+        }
     }
 }
 

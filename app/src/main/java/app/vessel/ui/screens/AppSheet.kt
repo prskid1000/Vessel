@@ -2,9 +2,12 @@ package app.vessel.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -20,6 +23,7 @@ import app.vessel.ui.components.VAppIcon
 import app.vessel.ui.components.VArchBadge
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
+import app.vessel.ui.components.VIconButton
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
 import app.vessel.ui.components.VRule
@@ -30,6 +34,7 @@ import app.vessel.ui.components.VTextField
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
+import app.vessel.ui.theme.vRing
 import app.vessel.ui.vm.AppSheetUiState
 import app.vessel.ui.vm.AppSheetViewModel
 
@@ -121,24 +126,27 @@ private fun AppSheetContent(
     onBrowse: () -> Unit,
     onImport: () -> Unit,
 ) {
-    VSheet(onDismiss = onDismiss) {
-        if (state.creating) {
-            VSheetHeader(
-                title = "Add a program",
-                subtitle = "to ${state.containerName}",
-                trailing = { VButton("Add", onSave, enabled = state.canSave) },
-            )
-        } else {
-            VSheetHeader(
-                title = state.name,
-                subtitle = "in ${state.containerName}",
-                leading = { VAppIcon(state.name.firstOrNull()?.uppercase() ?: "?") },
-                trailing = {
-                    VButton("Launch", onLaunch, style = VButtonStyle.Primary, icon = VIcons.Play)
-                },
-            )
-        }
-
+    VSheet(
+        onDismiss = onDismiss,
+        header = {
+            if (state.creating) {
+                VSheetHeader(
+                    title = "Add a program",
+                    subtitle = "to ${state.containerName}",
+                    trailing = { VButton("Add", onSave, enabled = state.canSave) },
+                )
+            } else {
+                VSheetHeader(
+                    title = state.name,
+                    subtitle = "in ${state.containerName}",
+                    leading = { VAppIcon(state.name.firstOrNull()?.uppercase() ?: "?") },
+                    trailing = {
+                        VButton("Launch", onLaunch, style = VButtonStyle.Primary, icon = VIcons.Play)
+                    },
+                )
+            }
+        },
+    ) {
         VLabeledField(
             label = "Executable",
             help = when {
@@ -150,8 +158,21 @@ private fun AppSheetContent(
                 else -> state.archNote.ifBlank { null }
             },
         ) {
+            // The same box every other field on the sheet wears, even though this
+            // one is a readout. A bare line of mono between two bordered fields
+            // reads as a caption rather than as the sheet's most important value.
             Row(
-                Modifier.fillMaxWidth(),
+                Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = Vessel.metrics.controlHeight)
+                    .background(Vessel.colors.surfaceRaised, Vessel.metrics.shapeMd)
+                    .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
+                    .padding(
+                        start = Vessel.metrics.s8,
+                        end = if (state.creating) Vessel.metrics.s3 else Vessel.metrics.s8,
+                        top = Vessel.metrics.s3,
+                        bottom = Vessel.metrics.s3,
+                    ),
                 horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -170,6 +191,12 @@ private fun AppSheetContent(
                 if (state.executable.isNotBlank() && state.refusal == null) {
                     VArchBadge(state.arch)
                 }
+                // The field is a readout, so the way to fill it lives on it. The
+                // two rows below are the same two routes written out; this is the
+                // one a user reaches for first.
+                if (state.creating) {
+                    VIconButton(VIcons.Folder, "Browse this container's C:", onBrowse)
+                }
             }
         }
 
@@ -181,6 +208,13 @@ private fun AppSheetContent(
             Text(it, style = Vessel.type.bodySmall, color = Vessel.colors.danger)
         }
         state.caveat?.let {
+            Text(it, style = Vessel.type.bodySmall, color = Vessel.colors.warn)
+        }
+        // Already on the home row. Not a refusal — the registry would replace it
+        // quite happily — but Add would then be a button whose effect nobody can
+        // see, so it is disabled and this says why. Warn rather than danger:
+        // nothing is wrong, there is just nothing to do.
+        state.alreadyAdded?.let {
             Text(it, style = Vessel.type.bodySmall, color = Vessel.colors.warn)
         }
         state.notice?.let {

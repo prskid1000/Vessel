@@ -66,8 +66,30 @@ data class FilesUiState(
     val selected: FileRow? = null,
     /** One-shot prose: an import that failed, a refusal, a completed export. */
     val notice: String? = null,
+    /**
+     * Guest paths this container already has a shortcut to, lower-cased.
+     *
+     * Lower-cased because these are Windows paths: `C:\x.exe` and `c:\X.EXE` are
+     * one file, and the registry matches them that way too.
+     */
+    val addedExecutables: Set<String> = emptySet(),
 ) {
     val atRoot: Boolean get() = GuestPath.segments(guestPath).size <= 1
+
+    /** True when [selected] is already on this container's home row. */
+    val selectedAlreadyAdded: Boolean
+        get() = selected?.guestPath?.lowercase() in addedExecutables
+
+    /**
+     * Whether "Add as app" does anything.
+     *
+     * Runnable, and not already there. Adding a second time is not an error — the
+     * registry replaces rather than duplicating — but it is a press with no
+     * visible effect, and a control that controls nothing is the thing DESIGN.md
+     * is most insistent about.
+     */
+    val canAddAsApp: Boolean
+        get() = selected?.launchable?.runnable == true && !selectedAlreadyAdded
 }
 
 /**
@@ -105,6 +127,17 @@ class FilesViewModel @Inject constructor(
         viewModelScope.launch {
             val name = containers.get(containerId)?.name.orEmpty()
             _state.update { it.copy(containerName = name) }
+        }
+        // Collected rather than read once, because "Add as app" adds to this very
+        // list — the button has to disable itself the moment it is pressed, not on
+        // the next visit to the folder.
+        viewModelScope.launch {
+            registry.shortcuts.collect { shortcuts ->
+                val added = shortcuts
+                    .filter { it.containerId == containerId }
+                    .mapTo(mutableSetOf()) { it.executable.lowercase() }
+                _state.update { it.copy(addedExecutables = added) }
+            }
         }
         navigateTo(GuestPath.DRIVE + SEPARATOR)
     }

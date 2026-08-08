@@ -50,9 +50,25 @@ data class AppSheetUiState(
     val notice: String? = null,
     /** One-shot: the sheet closes. */
     val finished: Boolean = false,
+    /**
+     * Set when this container already has a shortcut to the chosen executable.
+     *
+     * Adding it again is not an error — the registry replaces rather than
+     * duplicating — but offering Add for something already on the home screen is
+     * a button whose effect the user cannot see. So it is disabled and this
+     * sentence says why, rather than letting a press appear to do nothing.
+     *
+     * Only while [creating]. Editing a shortcut is *supposed* to hit the same
+     * executable, and disabling Save there would make the sheet read-only.
+     */
+    val alreadyAdded: String? = null,
 ) {
-    /** Add stays disabled until a runnable file has been chosen. */
-    val canSave: Boolean get() = executable.isNotBlank() && refusal == null
+    /**
+     * Add stays disabled until a runnable file has been chosen — and stays
+     * disabled if that file is already on this container's home row.
+     */
+    val canSave: Boolean
+        get() = executable.isNotBlank() && refusal == null && alreadyAdded == null
 }
 
 /**
@@ -151,11 +167,27 @@ class AppSheetViewModel @Inject constructor(
             }
             val verdict = withContext(Dispatchers.IO) { launchabilityOf(file) }
             val arch = (verdict as? Launchable.Runs)?.arch ?: PeArchitecture.UNKNOWN
+
+            // Only while creating: an existing shortcut is *supposed* to point at
+            // its own executable, and flagging that would make editing one
+            // impossible. Case-insensitive, and matched the same way the registry
+            // matches — a Windows path, so `C:\x.exe` and `c:\X.EXE` are one file.
+            val duplicate = state.value.creating &&
+                registry.shortcuts.first().any {
+                    it.containerId == containerId &&
+                        it.executable.equals(guestPath, ignoreCase = true)
+                }
+
             _state.update {
                 it.copy(
                     executable = guestPath,
                     name = it.name.ifBlank { file.nameWithoutExtension },
                     arch = arch,
+                    alreadyAdded = if (duplicate) {
+                        "${file.name} is already on ${it.containerName}'s home row."
+                    } else {
+                        null
+                    },
                     archNote = when (verdict) {
                         is Launchable.Runs ->
                             if (verdict.arch != null) {
