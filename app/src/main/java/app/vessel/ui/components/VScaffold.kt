@@ -25,9 +25,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -140,7 +137,6 @@ fun VPushToolbar(
                 // is centred in a 44 dp touch box, so 13 dp of that box is
                 // already inside the button. Adding the 11 dp gutter on top puts
                 // the arrow 13 dp right of the content column it heads.
-                start = 0.dp,
                 end = Vessel.metrics.s6,
                 top = Vessel.metrics.s6,
                 bottom = Vessel.metrics.s6,
@@ -148,7 +144,7 @@ fun VPushToolbar(
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        VIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", onBack)
+        VIconButton(VIcons.ArrowLeft, "Back", onBack)
         Column(Modifier.weight(1f).padding(start = Vessel.metrics.s3)) {
             Text(title, style = Vessel.type.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle != null) {
@@ -165,21 +161,24 @@ fun VPushToolbar(
     }
 }
 
-/** One destination in the bottom bar. */
-@Immutable
-data class VNavDestination(
-    val label: String,
-    val icon: ImageVector,
-    val route: String,
-)
-
-/** Two roots and no more — see the design principle, not an oversight. */
+/**
+ * A bar along the bottom of a pushed screen — Files' import/export/add row.
+ *
+ * **There is no bottom navigation, and this is not it.** Vessel had two roots,
+ * Containers and Apps, and Apps stopped existing when a program became something
+ * listed inside the container that owns it: a bar with one destination on it is a
+ * bar advertising that the app has somewhere else to be when it does not. The
+ * bottom edge is now left clear on every root, because on a running session that
+ * edge belongs to the taskbar's reveal gesture and a nav bar there would fight it.
+ *
+ * The ground and the hairline run edge to edge while the actions sit inside the
+ * same capped column as the content above them, so the bar reads as structure and
+ * its contents line up with the list.
+ */
 @Composable
-fun VBottomNav(
-    destinations: List<VNavDestination>,
-    currentRoute: String?,
+fun VBottomBar(
     modifier: Modifier = Modifier,
-    onSelect: (VNavDestination) -> Unit,
+    content: @Composable RowScope.() -> Unit,
 ) {
     Box(
         modifier
@@ -189,32 +188,18 @@ fun VBottomNav(
             .background(Vessel.colors.bg)
             .vRuleAbove(Vessel.colors.divider)
             .padding(
-                top = Vessel.metrics.s6,
-                bottom = Vessel.metrics.s6 +
+                top = Vessel.metrics.s8,
+                bottom = Vessel.metrics.s11 +
                     WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
             ),
         contentAlignment = Alignment.Center,
     ) {
-        // The ground spans the window; the destinations do not. Two tabs spread
-        // across a 927 dp landscape window put "Containers" and "Apps" a hand's
-        // width apart with nothing between them.
-        Row(Modifier.vContentColumn()) {
-            destinations.forEach { destination ->
-                val selected = currentRoute == destination.route
-                val tint = if (selected) Vessel.colors.accent else Vessel.colors.textMuted
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .clickable { onSelect(destination) }
-                        .padding(vertical = Vessel.metrics.s6),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
-                ) {
-                    Icon(destination.icon, null, Modifier.size(Vessel.metrics.iconMd), tint = tint)
-                    Text(destination.label, style = Vessel.type.label, color = tint)
-                }
-            }
-        }
+        Row(
+            Modifier.vContentColumn().padding(horizontal = Vessel.metrics.screenGutter),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
     }
 }
 
@@ -453,7 +438,7 @@ fun VOverflowMenu(
 ) {
     var open by remember { mutableStateOf(false) }
     Box(modifier) {
-        VIconButton(Icons.Filled.MoreVert, contentDescription, onClick = { open = true })
+        VIconButton(VIcons.DotsThreeVertical, contentDescription, onClick = { open = true })
         if (open) {
             // Anchored to the button's own bounds: aligned to its trailing edge
             // and dropped by its height, so the menu hangs directly below the
@@ -468,7 +453,7 @@ fun VOverflowMenu(
                 val shape = Vessel.metrics.shapeMd
                 Column(
                     Modifier
-                        .width(MENU_WIDTH)
+                        .width(Vessel.metrics.menuWidth)
                         .vElevation(VElev.md, shape)
                         .background(Vessel.colors.surface, shape)
                         .vRing(VElev.md.ring, shape)
@@ -504,9 +489,6 @@ fun VOverflowMenu(
         }
     }
 }
-
-/** Wide enough for one line of `bodySmall` help, narrow enough to read as a menu. */
-private val MENU_WIDTH = 260.dp
 
 /**
  * The kicker that names a group on every screen.

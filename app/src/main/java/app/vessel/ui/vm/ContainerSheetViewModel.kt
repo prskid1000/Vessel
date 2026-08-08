@@ -1,6 +1,5 @@
 package app.vessel.ui.vm
 
-import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.vessel.core.ComponentType
@@ -13,7 +12,7 @@ import app.vessel.core.params.resolve
 import app.vessel.data.ContainerRepository
 import app.vessel.data.InstalledComponents
 import app.vessel.data.ParamManifestStore
-import app.vessel.ui.Routes
+import app.vessel.ui.shell.AppRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,10 +21,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/** The id the editor is given when there is no container yet. */
+/** The id the sheet is given when there is no container yet. */
 const val NEW_CONTAINER: String = "new"
 
-/** One group as the editor draws it — the manifest's own grouping, in its order. */
+/** One group as the sheet draws it — the manifest's own grouping, in its order. */
 data class EditorGroup(
     val id: String,
     val title: String,
@@ -36,10 +35,10 @@ data class EditorGroup(
 /**
  * One param, ready to draw.
  *
- * [componentId] and [componentNote] are filled for [ParamType.COMPONENT] only,
- * by resolving the selector against what is installed. Doing it here rather than
- * in the composable is what keeps the renderer to one branch per *type*: the
- * control receives a resolved id or a null, and never learns what a `.wcp` is.
+ * [componentId] and [componentNote] are filled for [ParamType.COMPONENT] only, by
+ * resolving the selector against what is installed. Doing it here rather than in
+ * the composable is what keeps the renderer to one branch per *type*: the control
+ * receives a resolved id or a null, and never learns what a `.wcp` is.
  */
 data class EditorParam(
     val resolved: ResolvedParam,
@@ -47,50 +46,70 @@ data class EditorParam(
     val componentNote: String? = null,
 )
 
-data class EditorUiState(
+data class ContainerSheetUiState(
     val loading: Boolean = true,
     /** True for a container that has not been saved yet. */
     val creating: Boolean = false,
     val name: String = "",
+    /** Empty until saved; the sheet needs it to open this container's logs. */
+    val containerId: String = "",
     val groups: List<EditorGroup> = emptyList(),
     /** Set when the manifest or the container could not be read. Shown, not swallowed. */
     val error: String? = null,
-    /** One-shot: the screen pops back and the editor is gone. */
+    /** One-shot: the sheet closes and this view model is done with. */
     val finished: Boolean = false,
 )
 
 /**
- * The container editor.
+ * The container sheet — five fields, and the manifest decides which five.
  *
- * Everything the screen draws is computed here, including the clamps and the
- * component resolutions, so `ContainerEditorScreen` has exactly one `when` in it
- * — over [ParamType] — and no knowledge of any individual key. That boundary is
- * the whole promise of the manifest: adding a `FEX_*` knob is a data change, and
- * if a key ever needs code, it has leaked.
+ * **It is not a screen any more.** Creating and editing a container were two
+ * pushed destinations with toolbars and back arrows, for a form whose whole
+ * content is a name and four settings *about the card the user just tapped*.
+ * Pushing a screen to show them threw away the context that made them make sense.
+ *
+ * What did not change is that everything below the name is rendered from
+ * `assets/params-manifest.json`, and the manifest currently declares exactly the
+ * four the design asks for — resolution, frame rate, the file manager toggle and
+ * the DLL overrides. That is not a coincidence to rely on: the sheet draws
+ * whatever the manifest holds, and a fifth entry would appear here without a line
+ * of UI changing. If the manifest ever grows past what a sheet can hold, the
+ * answer is to cut knobs, not to add a disclosure.
+ *
+ * **No `SavedStateHandle`.** A sheet has no route to read an argument off, so
+ * [open] is called once by the composable that raises it. Keyed by container id
+ * at the call site, so opening a second container does not reuse the first one's
+ * draft.
  */
 @HiltViewModel
-class ContainerEditorViewModel @Inject constructor(
-    savedState: SavedStateHandle,
+class ContainerSheetViewModel @Inject constructor(
     private val containers: ContainerRepository,
     private val manifests: ParamManifestStore,
     private val components: InstalledComponents,
+    private val registry: AppRegistry,
 ) : ViewModel() {
 
-    private val containerId: String =
-        savedState.get<String>(Routes.ARG_CONTAINER_ID) ?: NEW_CONTAINER
-
-    private val _state = MutableStateFlow(EditorUiState())
-    val state: StateFlow<EditorUiState> = _state.asStateFlow()
+    private val _state = MutableStateFlow(ContainerSheetUiState())
+    val state: StateFlow<ContainerSheetUiState> = _state.asStateFlow()
 
     /** The container being edited. Persisted only when Save is pressed. */
     private var draft: ContainerProfile? = null
     private var manifest: ParamManifest? = null
+    private var opened = false
 
-    init {
-        viewModelScope.launch { load() }
+    /**
+     * Load [containerId], or a fresh draft when it is null or [NEW_CONTAINER].
+     *
+     * Idempotent, because it is called from a `LaunchedEffect` and composition is
+     * not a promise about how many times something happens.
+     */
+    fun open(containerId: String?) {
+        if (opened) return
+        opened = true
+        viewModelScope.launch { load(containerId ?: NEW_CONTAINER) }
     }
 
-    private suspend fun load() {
+    private suspend fun load(containerId: String) {
         components.refresh()
         val loadedManifest = manifests.load()
         if (loadedManifest.isFailure) {
@@ -124,6 +143,7 @@ class ContainerEditorViewModel @Inject constructor(
                 loading = false,
                 creating = creating,
                 name = profile.name,
+                containerId = profile.id,
             )
         }
         rebuild()
@@ -131,6 +151,13 @@ class ContainerEditorViewModel @Inject constructor(
 
     // — edits ----------------------------------------------------------------
 
+    /**
+     * Rename.
+     *
+     * Anything the user types is accepted. A container's directory is its UUID
+     * put through `ContainerPaths.safeName`, so the name never reaches the
+     * filesystem and there is nothing here to sanitise or limit.
+     */
     fun setName(name: String) {
         draft = draft?.copy(name = name)
         _state.update { it.copy(name = name) }
@@ -151,7 +178,7 @@ class ContainerEditorViewModel @Inject constructor(
         viewModelScope.launch {
             containers.save(
                 current.copy(
-                    // An unnamed container would be an unidentifiable tile on the
+                    // An unnamed container would be an unidentifiable card on the
                     // home screen, so a blank field falls back rather than
                     // blocking Save.
                     name = current.name.trim().ifBlank { "Container" },
@@ -166,23 +193,25 @@ class ContainerEditorViewModel @Inject constructor(
         val current = draft ?: return
         viewModelScope.launch {
             containers.delete(current.id)
+            // The programs inside it go with it. A shortcut whose container has
+            // been deleted is a tile that launches nothing.
+            registry.removeAllIn(current.id)
             _state.update { it.copy(finished = true) }
         }
     }
 
     /**
-     * Store what the editor was showing, not what was underneath it.
+     * Store what the sheet was showing, not what was underneath it.
      *
      * A clamp can start holding after a value was set, because the param its
      * condition names was changed afterwards, and writing the stale value would
-     * mean the file disagreed with the screen — the sort of gap that surfaces
-     * much later as a container behaving unlike its settings. Running every value
-     * back through [resolve] is generic: it clamps whatever the manifest says to
-     * clamp and touches nothing else.
+     * mean the file disagreed with the screen. Running every value back through
+     * [resolve] is generic: it clamps whatever the manifest says to clamp and
+     * touches nothing else.
      *
      * Keys the manifest no longer declares are dropped rather than carried
-     * forward, so settings for a component that has left the build do not live
-     * on in every container document.
+     * forward, so settings for a component that has left the build do not live on
+     * in every container document.
      */
     private fun clampedParams(profile: ContainerProfile): Map<String, ParamValue> {
         val currentManifest = manifest ?: return profile.params
@@ -198,7 +227,7 @@ class ContainerEditorViewModel @Inject constructor(
     /**
      * Every group, every param, in manifest order — no filter. Hierarchy is the
      * manifest's ordering, and the only thing that can remove a param from the
-     * screen is [resolve] failing to give it a value at all.
+     * sheet is [resolve] failing to give it a value at all.
      */
     private fun rebuild() {
         val currentManifest = manifest ?: return
