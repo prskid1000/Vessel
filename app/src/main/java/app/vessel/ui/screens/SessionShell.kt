@@ -42,6 +42,8 @@ import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestWindow
+import app.vessel.ui.shell.TerminalOption
+import app.vessel.ui.shell.TerminalProfile
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -244,6 +246,8 @@ fun SessionLauncher(
     onLaunch: (AppShortcut) -> Unit,
     onBrowse: () -> Unit,
     modifier: Modifier = Modifier,
+    terminals: List<TerminalOption> = emptyList(),
+    onTerminal: (TerminalProfile) -> Unit = {},
 ) {
     val shape = Vessel.metrics.shapeLg
     val matching = remember(shortcuts, query) {
@@ -302,6 +306,19 @@ fun SessionLauncher(
         }
 
         VRule(verticalMargin = Vessel.metrics.s3)
+
+        // Windows Terminal's profile list, in the place Windows Terminal is not.
+        // A row each rather than a submenu: three entries do not need a level of
+        // navigation, and a disabled one has to be *seen* to say what is missing.
+        terminals.forEach { option ->
+            VSheetRow(
+                icon = VIcons.Terminal,
+                title = option.profile.label,
+                help = option.unavailable,
+                enabled = option.enabled,
+                onClick = { onTerminal(option.profile) },
+            )
+        }
 
         VSheetRow(
             icon = VIcons.Folder,

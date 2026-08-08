@@ -65,6 +65,8 @@ import app.vessel.ui.components.VSectionHeader
 import app.vessel.ui.components.VStepRow
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestWindow
+import app.vessel.ui.shell.TerminalOption
+import app.vessel.ui.shell.TerminalProfile
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -300,6 +302,8 @@ fun SessionDesktop(
     onFocusWindow: (Int) -> Unit,
     windows: List<GuestWindow> = emptyList(),
     shortcuts: List<AppShortcut> = emptyList(),
+    terminals: List<TerminalOption> = emptyList(),
+    onTerminal: (TerminalProfile) -> Unit = {},
     shellUnavailableReason: String? = null,
     /**
      * The sampler's window, collected only while the rail is open.
@@ -425,6 +429,11 @@ fun SessionDesktop(
                 SessionLauncher(
                     containerName = state.containerName.ifBlank { "this container" },
                     shortcuts = shortcuts,
+                    terminals = terminals,
+                    onTerminal = {
+                        launcherOpen = false
+                        onTerminal(it)
+                    },
                     unavailableReason = shellUnavailableReason,
                     query = launcherQuery,
                     onQuery = { launcherQuery = it },

@@ -243,6 +243,7 @@ fun VesselApp(
             val pointerMode by session.pointerMode.collectAsStateWithLifecycle()
             val windows by session.windows.collectAsStateWithLifecycle(emptyList())
             val shortcuts by session.shortcuts.collectAsStateWithLifecycle(emptyList())
+            val terminals by session.terminalProfiles.collectAsStateWithLifecycle(emptyList())
             SessionDesktop(
                 state = state,
                 surface = surface,
@@ -261,6 +262,8 @@ fun VesselApp(
                 onShowKeyboard = session::showKeyboard,
                 onLaunchApp = session::launchApp,
                 onFocusWindow = session::focusWindow,
+                terminals = terminals,
+                onTerminal = session::openTerminal,
             )
         }
     }

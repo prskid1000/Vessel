@@ -155,11 +155,21 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(8, PrefixRegistry.SEED_VERSION)
+        assertEquals(9, PrefixRegistry.SEED_VERSION)
         // The two being equal is a coincidence — a version bump does not have to
         // add a key — but while it holds it is a cheap way to catch a key added
         // without the bump that makes existing containers pick it up.
-        assertEquals(8, PrefixRegistry.seed.size)
+        assertEquals(9, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `the tools directory is on PATH without losing the Windows entries`() {
+        // Written whole rather than appended, so a program that needs
+        // system32 on PATH must still find it here.
+        val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data
+        assertTrue("system32 survives", path.contains("""C:\windows\system32"""))
+        assertTrue("wbem survives", path.contains("""C:\windows\system32\wbem"""))
+        assertTrue("the tools directory is on it", path.endsWith(PrefixRegistry.TOOLS_DIR))
     }
 
     @Test

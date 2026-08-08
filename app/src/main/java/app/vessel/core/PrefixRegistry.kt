@@ -80,9 +80,11 @@ object PrefixRegistry {
      * with the file manager itself — Vessel's own C: browser replaced it, so
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
-     * and scrollbars a finger can hit rather than Windows' mouse-sized ones.
+     * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 9 added [toolsPath], which is what puts the Unix tools on `PATH` in every
+     * shell rather than in one profile.
      */
-    const val SEED_VERSION: Int = 8
+    const val SEED_VERSION: Int = 9
 
     /** The mode the DLL override values carry. See [D3D_DLL_OVERRIDES]. */
     const val DLL_OVERRIDE_MODE: String = "native,builtin"
@@ -342,6 +344,39 @@ object PrefixRegistry {
     )
 
     /**
+     * The Unix tools on `PATH`, for every program in the container.
+     *
+     * **This is what makes one shell's tools available in all of them.** The
+     * thing people mean by "give me Git Bash" is almost never `bash` itself —
+     * it is `ls`, `grep`, `sed`, `awk`, `find`, `tar`, `curl`. Putting the
+     * directory that holds them on the machine `PATH` means they work from
+     * Command Prompt, from PowerShell, from a program that shells out, and from
+     * the BusyBox shell, rather than only inside one profile that happens to
+     * prepend it. That is strictly more useful than a per-profile environment
+     * and it is one registry value instead of a launch-time variable per shell.
+     *
+     * The value replaces rather than appends, because there is nothing to append
+     * to yet: Wine seeds exactly the three entries below and this is the first
+     * thing that has ever wanted a fourth. Written whole so the result does not
+     * depend on what a previous seed left behind.
+     *
+     * `REG_EXPAND_SZ` would be the Windows-correct type for a `PATH` — it is how
+     * a real system stores `%SystemRoot%` in it — and this is deliberately plain
+     * [RegistryKind.SZ] instead, because nothing here needs expanding and
+     * `RegistryValue` renders one type of string. The literal `C:\windows` paths
+     * are the same ones `wine.inf` writes.
+     */
+    val toolsPath: RegistryKey = RegistryKey(
+        path = """HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment""",
+        values = listOf(
+            RegistryValue(
+                "PATH",
+                """C:\windows\system32;C:\windows;C:\windows\system32\wbem;$TOOLS_DIR""",
+            ),
+        ),
+    )
+
+    /**
      * Tell dark-aware Windows programs that this is a dark system.
      *
      * `ShouldAppsUseDarkMode` and `ShouldSystemUseDarkMode`
@@ -406,6 +441,7 @@ object PrefixRegistry {
         windowMetrics,
         visualStyles,
         windowsDarkMode,
+        toolsPath,
     )
 
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))
@@ -428,6 +464,16 @@ object PrefixRegistry {
     private const val SCROLLBAR_PX = 24
     private const val BORDER_PX = 4
     private const val PADDED_BORDER_PX = 4
+
+    /**
+     * Where the container's Unix tools live.
+     *
+     * Under `Program Files` rather than somewhere Vessel-shaped like
+     * `C:\vessel\bin`, because a container is a Windows machine and a user who
+     * opens a shell in one should find it laid out the way Windows is. The name
+     * is ours because the contents are.
+     */
+    const val TOOLS_DIR: String = """C:\Program Files\Vessel Tools"""
 
     private const val COLORS_KEY = """HKEY_CURRENT_USER\Control Panel\Colors"""
 

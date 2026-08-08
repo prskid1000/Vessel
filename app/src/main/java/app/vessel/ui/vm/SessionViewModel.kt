@@ -17,6 +17,8 @@ import app.vessel.service.SessionService
 import app.vessel.ui.shell.AppRegistry
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.ShellHost
+import app.vessel.ui.shell.TerminalOption
+import app.vessel.ui.shell.TerminalProfile
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -24,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -169,6 +172,31 @@ class SessionViewModel @Inject constructor(
      */
     fun launchApp(shortcut: AppShortcut) {
         viewModelScope.launch { _shellRefusal.value = shell.launch(shortcut) }
+    }
+
+    /**
+     * The shells the running container can open a console on.
+     *
+     * Recomputed whenever the session changes rather than held as a value,
+     * because whether PowerShell is installed is a fact about a container's `C:`
+     * and the running container is not fixed. Empty while nothing runs — the
+     * launcher only exists over a session, but a container id of `""` would
+     * otherwise be looked up and answer "not installed" for everything.
+     */
+    val terminalProfiles: Flow<List<TerminalOption>> =
+        runtime.state.map { session ->
+            val id = session.containerId
+            if (id.isNullOrBlank()) emptyList() else shell.terminalProfiles(id)
+        }
+
+    fun openTerminal(profile: TerminalProfile) {
+        val id = state.value.containerId
+        // Nothing is running, so there is no prefix to open a console in. Not a
+        // refusal to print either: the launcher only exists over a session, so
+        // reaching here at all means the session ended between the tap and this
+        // line, and a sentence about it would be about a window already gone.
+        if (id.isNullOrBlank()) return
+        viewModelScope.launch { _shellRefusal.value = shell.openTerminal(id, profile) }
     }
 
     /**

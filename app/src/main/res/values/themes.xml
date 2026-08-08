@@ -11,5 +11,22 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
+        <!--
+            Into the cutout in every orientation, not only portrait.
+
+            The default mode lets a window under the cutout on the *short* edges
+            only, which means portrait. Rotate to landscape and the cutout moves
+            to a long edge, so the system letterboxes the window away from it —
+            a black strip down one side of a running desktop, and a window whose
+            centre is no longer the display's centre. That second part is what
+            made the taskbar's reveal handle sit left of Android's own gesture
+            pill: both were centred, on two different things.
+
+            `always` is the mode a full-screen desktop wants. Compose is already
+            edge-to-edge and every surface that needs to keep clear of the
+            cutout applies its own inset; the guest's output is the one thing
+            that should use every pixel there is.
+        -->
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
     </style>
 </resources>

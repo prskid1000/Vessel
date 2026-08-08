@@ -78,6 +78,25 @@ interface ShellHost {
      * Returns null on success, or the sentence to show the user on refusal.
      */
     suspend fun launch(shortcut: AppShortcut): String?
+
+    /**
+     * The shells this container can open a console on, in menu order.
+     *
+     * Every [TerminalProfile] comes back, including the ones that cannot be
+     * opened — a profile the container lacks is returned with its reason rather
+     * than filtered out, so the launcher can draw it disabled. Suspending
+     * because deciding means looking at `C:`.
+     */
+    suspend fun terminalProfiles(containerId: String): List<TerminalOption>
+
+    /**
+     * Open a console on [profile] inside the session that is already running.
+     *
+     * Returns null on success, or the sentence to show. Same contract as
+     * [launch], and the same mechanism underneath — this is one more program
+     * started in a live prefix, which happens to be a shell.
+     */
+    suspend fun openTerminal(containerId: String, profile: TerminalProfile): String?
 }
 
 /**
@@ -104,4 +123,20 @@ class UnavailableShellHost @Inject constructor() : ShellHost {
     override suspend fun focus(windowId: Int) = Unit
 
     override suspend fun launch(shortcut: AppShortcut): String = unavailableReason
+
+    /**
+     * Every profile, all refused with the same sentence.
+     *
+     * The list is not empty even here. A launcher with no Terminal section at
+     * all says Vessel has no terminal; a disabled one that names the missing
+     * piece says the terminal is not reachable *yet*, which is the true
+     * statement and the one this class exists to make.
+     */
+    override suspend fun terminalProfiles(containerId: String): List<TerminalOption> =
+        TerminalProfile.entries.map { TerminalOption(it, unavailableReason) }
+
+    override suspend fun openTerminal(
+        containerId: String,
+        profile: TerminalProfile,
+    ): String = unavailableReason
 }

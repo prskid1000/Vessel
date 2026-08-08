@@ -5,6 +5,8 @@ import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.GuestWindow
 import app.vessel.ui.shell.ShellHost
+import app.vessel.ui.shell.TerminalOption
+import app.vessel.ui.shell.TerminalProfile
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.io.File
@@ -90,7 +92,71 @@ class SessionShellHost @Inject constructor(
             is ProgramLaunch.Unavailable -> "${shortcut.name} did not start: ${outcome.reason}"
         }
     }
+
+    /**
+     * Which shells this container actually has.
+     *
+     * [TerminalProfile.COMMAND_PROMPT] needs no check: `cmd.exe` is built from
+     * `programs/cmd` in the Wine tree this project compiles, so a prefix that can
+     * run anything has it. The other two are looked for on `C:` at the path they
+     * would install to, and a profile whose file is not there comes back disabled
+     * with its own sentence rather than being dropped from the list.
+     */
+    override suspend fun terminalProfiles(containerId: String): List<TerminalOption> {
+        val driveC = File(paths.of(containerId).prefix, GuestPath.DRIVE_C)
+        return TerminalProfile.entries.map { profile ->
+            val installed = profile.installedAt
+                ?.let { GuestPath.resolve(driveC, it)?.isFile } ?: true
+            TerminalOption(profile, if (installed) null else profile.missingReason)
+        }
+    }
+
+    override suspend fun openTerminal(containerId: String, profile: TerminalProfile): String? {
+        val running = runtime.state.value
+        if (running.containerId != containerId) {
+            return "That container is not the one running. Stop this session first."
+        }
+
+        val driveC = File(paths.of(containerId).prefix, GuestPath.DRIVE_C)
+        val installedAt = profile.installedAt
+        if (installedAt != null && GuestPath.resolve(driveC, installedAt)?.isFile != true) {
+            return profile.missingReason
+        }
+
+        return when (
+            val outcome = runtime.launchProgram(
+                program = WINE_CONSOLE,
+                arguments = listOf(profile.program),
+                // The user's own drive, not the shell's install directory. A
+                // terminal that opens in `C:\Program Files\PowerShell\7` has put
+                // the user somewhere they did not ask to be and cannot write to.
+                workingDirectory = driveC,
+            )
+        ) {
+            ProgramLaunch.Started -> null
+            is ProgramLaunch.Unavailable ->
+                "${profile.label} did not open: ${outcome.reason}"
+        }
+    }
 }
+
+/**
+ * The console front end Wine ships, and what it is for.
+ *
+ * `wineconsole <program>` starts that program with a real Win32 console
+ * attached, and `conhost.exe` draws the console as a window — through `win32u`
+ * and `winex11.drv` and out to the X server this app is already running. It is
+ * why Vessel does not write a terminal: there is a real Windows console in the
+ * tree this project compiles, and a program that inspects its console gets true
+ * answers from it rather than the shape of one.
+ *
+ * Not `cmd.exe` directly. A program started the way [SessionShellHost.launch]
+ * starts one has its standard handles on a pipe, and Wine gives a console
+ * application with redirected handles no console and therefore no window — which
+ * is exactly right for a `.bat` whose output belongs in the session log, and
+ * exactly wrong for a shell the user is going to type into.
+ */
+private const val WINE_CONSOLE = "wineconsole"
 
 /** An executable Wine can be handed, and the arguments to hand it with. */
 private data class GuestCommand(val program: String, val arguments: List<String>)

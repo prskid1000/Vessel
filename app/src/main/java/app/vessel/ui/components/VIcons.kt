@@ -95,6 +95,19 @@ object VIcons {
     /** `file-code` — a PE executable, tinted by its architecture. */
     val FileCode: ImageVector by lazy { glyph("phosphor.fileCode", FILE_CODE) }
 
+    /**
+     * A console window — the launcher's terminal profiles.
+     *
+     * **Drawn here, not transcribed.** Every other constant in this file is the
+     * `d` attribute of a Phosphor SVG copied unaltered, and the licensing table
+     * says so; Phosphor's `terminal-window` was not to hand to copy, and path
+     * data written from memory and labelled Phosphor would make that table
+     * false. This one is ours — a frame, a prompt chevron and a cursor rule, on
+     * the same 256 grid and at the same 16-unit weight so it sits with them.
+     * Replace it with the real transcription whenever the asset is available.
+     */
+    val Terminal: ImageVector by lazy { glyph("vessel.terminal", TERMINAL_WINDOW) }
+
     /** `list-bullets` — the session log, and its history. */
     val List: ImageVector by lazy { glyph("phosphor.list", LIST_BULLETS) }
 
@@ -196,6 +209,14 @@ private const val UPLOAD_SIMPLE =
     "M224,144v64a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V144a8,8,0,0,1,16,0v56H208V144a8,8,0,0,1,16,0ZM93.66,7" +
         "7.66,120,51.31V144a8,8,0,0,0,16,0V51.31l26.34,26.35a8,8,0,0,0,11.32-11.32l-40-40a8,8,0,0,0-11" +
         ".32,0l-40,40A8,8,0,0,0,93.66,77.66Z"
+
+/** Ours, not Phosphor's — see [VIcons.Terminal]. Frame, chevron, cursor rule. */
+private const val TERMINAL_WINDOW =
+    "M32,48H224a8,8,0,0,1,8,8V200a8,8,0,0,1-8,8H32a8,8,0,0,1-8-8V56A8,8,0,0,1,32,48ZM216,192H40V64H2" +
+        "16Z" +
+        "M70.34,98.34a8,8,0,0,1,11.32,0l32,32a8,8,0,0,1,0,11.32l-32,32a8,8,0,0,1-11.32-11.32L96.69," +
+        "136,70.34,109.66A8,8,0,0,1,70.34,98.34Z" +
+        "M136,160h48a8,8,0,0,1,0,16H136a8,8,0,0,1,0-16Z"
 
 private const val FOLDER =
     "M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0," +
