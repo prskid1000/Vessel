@@ -150,14 +150,23 @@ the unix user is the app's uid.)
   (`out/vulkan/vkdriverprobe`). Disabled, no banner.
 
 **The taskbar never lists anything, and that is a defect of its own.** With
-`wscript`'s dialog visibly on the desktop, the bar still reads *"Nothing has
-opened a window yet."* `DisplaySession.publishWindows` lists mapped, named
+`wscript`'s dialog visibly on the desktop, the bar still read *"Nothing has
+opened a window yet."* `DisplaySession.publishWindows` listed mapped, named
 children of the **root** window; under `explorer /desktop=vessel,1280x720` every
-guest window is a child of the virtual-desktop window instead, and the desktop
-window itself has no `WM_NAME` to be listed by. That reading is consistent with
-everything observed but has not been confirmed against the live window tree, so
-it is a suspicion with a mechanism, not a finding. Fixing it means descending to
-the innermost named, mapped windows rather than looking one level down.
+guest window is a child of the virtual-desktop window instead, so the root had
+exactly one child and it was the desktop.
+
+**Code fixed, not yet watched working.** `publishWindows` walks down now: a
+named mapped window is an entry and the walk stops there, and a window is a
+container — descended into, never listed — when it has no name or when something
+named and mapped is underneath it. That second rule identifies the virtual
+desktop as *the window with the programs inside it*, without hard-coding
+`WINE_DESKTOP` or matching on geometry; an empty desktop, where it cannot fire,
+is caught by being a full-screen direct child of the root instead. The walk is
+depth-bounded so a client nesting windows without limit cannot recurse it off
+the X server's thread. **What still has to be confirmed on the device** is that
+a `wscript` dialog now produces exactly one button and that a program with a
+client-area child produces one rather than two.
 
 The last three are the point, not an afterthought. They cannot work here —
 Android is bionic, not glibc, and Vessel ships FEX as Wine's two translation
@@ -189,13 +198,32 @@ Four things the interface said that were not true, and one that still is.
   there is no machine field in a batch file — and the wrong word. The badge
   wants `Launchable.Runs.via` ("cmd.exe /c", "msiexec.exe /i", "wscript.exe")
   carried into the shortcut beside the arch.
-- [ ] **Returning to the desktop leaves a black surface.** Navigating away
-  destroys the `SurfaceView`; coming back creates a new one and nothing
-  repaints, because the X server has no damage left to send and no backing store
-  to replay. Reproduced twice: the route is right, the orientation lock is
-  right, the pixels are gone. This is the most likely explanation for a black
-  desktop in a screenshot taken after a round trip, and it is **not** the old
-  Turnip wedge — see §1.
+- [~] **Returning to the desktop leaves a black surface.** Reproduced twice: the
+  route is right, the orientation lock is right, the pixels are gone. Not the
+  old Turnip wedge — see §1.
+
+  **Cause found, fix not yet watched working.** It is not that there is no
+  damage to replay; the window contents are still in the X server's drawables
+  the whole time. Destroying the `SurfaceView` destroys the EGL context and
+  every texture object in it, but the `Texture` objects survive holding
+  non-zero ids — so `isAllocated()` answered yes, `updateFromDrawable()` skipped
+  both the allocate and the upload, and the renderer bound texture names that no
+  longer referred to anything. Every window sampled black, and an idle desktop
+  never repaints itself to recover. Fixed with a static context-generation
+  counter stamped onto each id when it is generated and checked by
+  `isAllocated()` and `destroy()` — the latter because a fresh context issues
+  names from 1 again, so deleting a stale id would very likely blank whatever
+  now owns that number. `preserveEGLContextOnPause` is set as well, so the
+  common case avoids the loss rather than recovering from it. Vendored item 13.
+  **To confirm on the device:** leave the desktop and come back, twice, and
+  check the pixels return without touching the guest.
+- [x] **The bottom edge had no reveal handle** while the rail's left edge had a
+  plainly visible one. `navigationBarsPadding()` was on the 4 dp mark rather
+  than the 20 dp touch box around it, so the mark asked to reserve the
+  navigation bar inside a parent with no room for it and was clipped away
+  entirely. The bar was never missing from the code, it was laid out off-screen.
+  It is also square now rather than a pill: Android draws its own gesture pill
+  on that edge, centred, at very nearly the same width.
 
 ## 4. Real, not blocking
 
@@ -360,6 +388,24 @@ answers inside a Wine session with the desktop drawing at the same time, proven
 by `driverID 18`, `Found compatible device '/dev/kgsl-3d0'`, the winediag line
 and three `#161826` pixels out of one screenshot. The **interface is done** and
 verified in portrait and in landscape.
+
+The **shell is not** — the taskbar, the desktop it sits over, and the windows on
+it. Three faults were found in one screenshot on 2026-08-08 and all three are
+fixed in code and unverified on the device: the bar listed nothing because it
+looked one level down instead of walking the tree, the bottom edge's reveal
+handle was clipped off-screen by an inset applied to the mark rather than its
+touch box, and a desktop you left and came back to sampled black because every
+texture id belonged to a destroyed EGL context. Above those sits the one piece
+of real feature work nobody has started: **more than one resizable window,
+themed to match the product**, which is what the user asked for with a Windows
+screenshot for reference. The guest is a bare `explorer /desktop=` background
+today, with no decoration story at all. Wine's caption height, border width,
+scrollbar width and DPI are registry-driven, so *themed and finger-sized* is
+mostly configuration; *several real windows on the desktop* is not.
+
+The prose has also come out of the interface, on the same instruction that
+emptied the Metrics tab: the taskbar's tray-helper paragraph, the launcher's
+empty state, and the `Browse C:` help line.
 
 What is not proven is still the middle — a Windows program drawing through DXVK
 onto the screen — but it is no longer a mystery. Every D3D probe now loads DXVK,
