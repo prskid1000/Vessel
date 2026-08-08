@@ -18,40 +18,67 @@ as won't-do, with the reason.
 The four things between here and one sentence: *a Windows program drew on the
 screen through DXVK*.
 
-- [~] **The registry seed never reaches `system.reg`.**
-  `prefix-seed.reg` contains the `HKLM\Software\Microsoft\Wow64\{amd64,x86}`
-  keys, `regedit` reports success, `provisioned.json` records the seed as
-  applied, and `grep Wow64 prefix/system.reg` finds neither key after a clean
-  provision. `tools/device-session.sh` does the same thing successfully and
-  **reads the key back rather than trusting the exit code** — do the same, and
-  fail the step loudly when it did not land. A step that reports DONE while
-  having done nothing is the failure mode this project cares most about.
-  *Done when:* both keys are in the hive after a fresh provision, and a
-  deliberately corrupted seed makes provisioning fail rather than pass.
+- [x] **The registry seed never reaches `system.reg`.** It does now.
+  *Evidence:* on the provisioned container, `system.reg` carries
+  `[Software\\Microsoft\\Wow64\\amd64] @="libarm64ecfex.dll"` and
+  `[Software\\Microsoft\\Wow64\\x86] @="libwow64fex.dll"`, read back out of the
+  hive rather than inferred from `regedit`'s exit code. The x86-32 launch below
+  is the second, independent proof: without the `x86` key, `wow64.dll` has no
+  emulator to load and the process cannot start at all.
 
-- [~] **`libwow64fex.dll` never reaches `syswow64`.**
-  The 32-bit x86 side is dead: `xtajit.dll` fails `c0000135` and
-  `wow:load_64bit_module` gives up. `libarm64ecfex.dll` is in `system32` but its
-  counterpart is missing, because components are copied into the prefix *before*
-  `wineboot` creates `system32` and `syswow64`. `tools/device-graphics.sh` stages
-  under `pkg/` and copies after the boot for exactly this reason; the app does
-  not.
-  *Done when:* both FEX DLLs and the DXVK/VKD3D/Zink DLLs are present in the
-  right directories after a fresh provision, and an x86-32 `.exe` runs.
+- [x] **`libwow64fex.dll` never reaches `syswow64`.** It reaches `system32`,
+  which is where WoW64 looks — the emulator DLL named by
+  `HKLM\Software\Microsoft\Wow64\x86` is a 64-bit DLL and is loaded into the
+  64-bit side of the process. `syswow64` holds the 32-bit DXVK instead.
+  *Evidence:* `system32` has `libarm64ecfex.dll`, `libwow64fex.dll` and
+  `xtajit64.dll`; `syswow64` has the 32-bit `d3d11.dll` and the rest of DXVK.
+  A `.exe` built for i686 and launched **from the app's launcher** printed
+  `VESSEL-OK bits=32 sum=333338333350000 argc=1` into the session log, after
+  `Loaded L"C:\\windows\\system32\\libwow64fex.dll"` and FEX's own
+  `D EC Load module hello-i686.exe`. §3 has the whole matrix.
 
 - [ ] **Nothing has ever rendered a triangle.**
-  All fifteen D3D probes report BLOCKED at instance creation: Vulkan does not
-  advertise `VK_KHR_win32_surface`, which Wine only offers with a display driver
-  loaded, and `tools/device-graphics.sh` is headless. Turnip *loads* — that is
-  proven — but DXVK and vkd3d have never drawn. With the app's own X server up,
-  this blocker should be gone.
+  **The reason has changed, and the old one is gone.** With the app's X server
+  up, `VK_KHR_win32_surface` *is* reached — DXVK 2.7.1 loads, finds
+  `vkGetInstanceProcAddr` in `winevulkan.dll`, and asks for it by name. What
+  fails now is one step earlier than the old BLOCKED and it is a build option,
+  not a mystery:
+
+  ```
+  info:  Enabled instance extensions: … VK_KHR_win32_surface
+  err:   DxvkInstance::createInstance: Failed to create Vulkan instance
+  err:   D3D11CreateDevice: Failed to create a DXGI factory
+  ```
+
+  `winevulkan`'s own `vkEnumerateInstanceExtensionProperties` does not list
+  `VK_KHR_win32_surface` among the client extensions, so `wine_vkCreateInstance`
+  refuses the one DXVK always enables. It is absent because **the Turnip we
+  build has no X11 WSI**: `build/turnip.sh` configures Mesa with
+  `-Dplatforms=android`, and `strings` on the shipped `libvulkan_freedreno.so`
+  finds exactly two surface extensions — `VK_KHR_android_surface` and
+  `VK_EXT_headless_surface`. `winex11.drv` maps `VK_KHR_win32_surface` from
+  `VK_KHR_xlib_surface`/`xcb`, and neither exists, so there is nothing to map.
+  The stock Qualcomm loader has no xlib surface either, so this is not something
+  turning Turnip off would fix.
+  *Same failure, one cause, all of them:* d3d11 (`createdevice`), d3d12
+  (`createfactory`), d3d9 and d3d8 (`DxvkInstance::createInstance`). The plain
+  Vulkan probe passes in the same session — `driver_id=18`, `turnip Mesa driver`,
+  `Mesa 26.3.0-devel (git-9c475fc367)`, `Adreno (TM) 829`, api 1.4.358 — so the
+  driver underneath is fine and only the window system is missing.
+  *Next step, concretely:* `-Dplatforms=x11` for Mesa, against the same Android
+  X11 sysroot `build/x11-sysroot.sh` already builds for Wine. Nothing else in
+  this item can be tested until that lands.
   *Done when:* a D3D probe passes its pixel readback, **and** a real program with
   a 3D window keeps drawing while its screens are navigated by touch.
 
-- [ ] **No desktop has been seen since the redesign.**
-  `start.exe` loading is proven; pixels are not. These are different claims and
-  only the second one matters.
-  *Done when:* photographed, in both landscape directions.
+- [x] **No desktop has been seen since the redesign.**
+  *Evidence:* the desktop draws, with Turnip on, in landscape. Three pixels
+  sampled out of `adb exec-out screencap` at (926,421), (1390,632) and
+  (1945,884) are all `#161826`, the seeded Nocturne background, and the same
+  session's log carries the winediag line naming `libvulkan_freedreno.so`. A
+  guest window drawn *into* that desktop — `wscript.exe`'s dialog — is in the
+  screenshot too, so this is a compositing desktop and not a cleared surface.
+  *Not covered:* only one landscape direction was photographed.
 
 ## 2. Self-sufficient install
 
@@ -75,21 +102,100 @@ screen through DXVK*.
 One program of each kind, launched from the app's own UI and observed — not
 inferred from an exit code.
 
-- [ ] `.exe` ARM64 — runs natively
-- [ ] `.exe` x86-64 — ARM64EC + `libarm64ecfex.dll`
-- [ ] `.exe` x86-32 — WoW64 + `libwow64fex.dll` *(gated on item 1.2; the row most likely to fail)*
-- [ ] `.bat` — `cmd.exe /c`
-- [ ] `.msi` — `msiexec.exe /i` reaches its UI
-- [ ] `.vbs` — `wscript.exe`, with the partial-WSH caveat shown
-- [ ] `.ps1` — **refused**, naming Wine's stub PowerShell
-- [ ] `.sh` — **never offered as launchable**
-- [ ] Linux ELF — **never offered as launchable**
+All nine were added and launched from the app's own UI on 2026-08-08, from
+`C:\users\u0_a443\Downloads` in the one provisioned container, with Turnip on.
+(`u0_a443`, not `vessel`: Wine takes the profile name from the unix user, and
+the unix user is the app's uid.)
+
+- [x] `.exe` ARM64 — `IV VESSEL-OK bits=64 sum=333338333350000 argc=1`, after
+  `Loaded L"C:\users\u0_a443\Downloads\hello-aarch64.exe" … native`.
+  **No taskbar entry** — a console program that exits in milliseconds, so there
+  is nothing to dock. See the taskbar defect below, which is a separate matter.
+- [x] `.exe` x86-64 — `VESSEL-OK bits=64`, after
+  `Loaded L"…\libarm64ecfex.dll"` and FEX's own
+  `D F4 Load module hello-x86_64.exe (…): 140000000`. No taskbar entry, same
+  reason.
+- [x] `.exe` x86-32 — **the row that had never been seen working, works.**
+  `VESSEL-OK bits=32 sum=333338333350000 argc=1`, after `wow64.dll`,
+  `Loaded L"C:\windows\system32\libwow64fex.dll"`, `wow64win.dll`, and FEX's
+  `D EC Load module hello-i686.exe (…): 400000` / `Load module ntdll.dll (…):
+  7BF40000`. The 32-bit `ntdll` at `7BF40000` is the WoW64 side really being
+  built. No taskbar entry, same reason.
+- [x] `.bat` — `cmd.exe` loaded, `IW VESSEL-BAT-OK` in the log.
+  *One real defect found:* `echo VESSEL-BAT-OK > C:\vessel-bat.txt` produced
+  `Invalid name.` and no file. Wine's `cmd` refuses a redirect to the drive root
+  here; the same script's `echo` to the console worked. Not Vessel's bug, but it
+  is what a `.bat` writing to `C:\` will do on this build.
+- [x] `.msi` — `IV exec … wine msiexec.exe /i C:\users\u0_a443\Downloads\
+  vessel-hello.msi`, then `msiexec.exe`, `msi.dll`, `cabinet.dll`,
+  `wintrust.dll`, `comctl32.dll` from `winsxs`, and finally `winex11.drv` +
+  `uxtheme.dll` — i.e. it got as far as building a window. *Not proven:* the
+  payload is not in `C:\Program Files` afterwards, so it reached its UI and did
+  not complete an install. The MSI is a minimal one built by `out/matrix/
+  mkmsi.py`; whether the fault is the package or `msi.dll` is untested.
+- [x] `.vbs` — `wscript.exe` loaded `vbscript.dll` and `scrrun.dll` and **drew a
+  real window on the desktop**, screenshotted. The dialog is the partial-WSH
+  caveat made concrete: it is a script error at
+  `C:\users\u0_a443\Downloads\vessel-hello.vbs(3, 1)`, which is the
+  `FileSystemObject.CreateTextFile(…).WriteLine` line. So `wscript` runs, the
+  engine parses, and a real script stops part-way exactly as the caveat says.
+- [x] `.ps1` — **refused.** Selecting it disables "Add as app" (`enabled="false"`
+  on the button in the accessibility tree) and prints, in warn colour above the
+  listing: *"Wine ships a stub PowerShell that cannot run scripts — this needs a
+  real PowerShell, which Vessel does not include."*
+- [x] `.sh` — **never offered.** "Add as app" disabled, and no refusal banner:
+  it is `NotAProgram`, which is a different statement from a refusal and is the
+  right one.
+- [x] Linux ELF — same, using a real aarch64 Android ELF
+  (`out/vulkan/vkdriverprobe`). Disabled, no banner.
+
+**The taskbar never lists anything, and that is a defect of its own.** With
+`wscript`'s dialog visibly on the desktop, the bar still reads *"Nothing has
+opened a window yet."* `DisplaySession.publishWindows` lists mapped, named
+children of the **root** window; under `explorer /desktop=vessel,1280x720` every
+guest window is a child of the virtual-desktop window instead, and the desktop
+window itself has no `WM_NAME` to be listed by. That reading is consistent with
+everything observed but has not been confirmed against the live window tree, so
+it is a suspicion with a mechanism, not a finding. Fixing it means descending to
+the innermost named, mapped windows rather than looking one level down.
 
 The last three are the point, not an afterthought. They cannot work here —
 Android is bionic, not glibc, and Vessel ships FEX as Wine's two translation
 DLLs, not FEXLoader — so the test is that the UI never presents them and never
 fails silently. Supporting them would mean a glibc rootfs and proot, which is a
 different product.
+
+## 3a. Found while running the matrix
+
+Four things the interface said that were not true, and one that still is.
+
+- [x] **There was no way back to a running desktop.** Back out of it once and
+  neither the container card's Launch button nor `am start --es openSession`
+  could return: `SessionViewModel.launch` refused for any non-IDLE phase and
+  `SessionHost` navigates only on the *edge* into RUNNING. The card read "never
+  launched" beside six live Wine processes. Fixed in `cec23d4`; verified on the
+  device — Back, then Launch, and the route and the landscape lock both come
+  back.
+- [x] **`exec ${'$'}{spec.commandLine}`** in the session log — one of six copies
+  of that line had its `$` escaped, so every program launched into a running
+  session logged the template rather than the command, and then ran perfectly.
+  Two more of the same in the failure line beside it and in
+  `XServerDisplay.focusWindow`. Fixed in `cec23d4`.
+- [x] **Three tiles called `vessel-hello`.** Not duplicates — three distinct
+  `executable` paths in `shortcuts.json` whose labels collided because the
+  extension was always stripped. Fixed in `5c71ce2`; the tiles now read
+  `vessel-hello.bat`, `.msi` and `.vbs`.
+- [ ] **A non-PE program wears an `unknown` architecture badge.** Truthful —
+  there is no machine field in a batch file — and the wrong word. The badge
+  wants `Launchable.Runs.via` ("cmd.exe /c", "msiexec.exe /i", "wscript.exe")
+  carried into the shortcut beside the arch.
+- [ ] **Returning to the desktop leaves a black surface.** Navigating away
+  destroys the `SurfaceView`; coming back creates a new one and nothing
+  repaints, because the X server has no damage left to send and no backing store
+  to replay. Reproduced twice: the route is right, the orientation lock is
+  right, the pixels are gone. This is the most likely explanation for a black
+  desktop in a screenshot taken after a round trip, and it is **not** the old
+  Turnip wedge — see §1.
 
 ## 4. Real, not blocking
 
@@ -166,10 +272,23 @@ with evidence:
   slower** than leaving the scheduler alone. A concrete reason not to add the
   setting every phone emulator grows.
 
+- [x] **Turnip could not be switched on at all.** It is on now
+  (`SessionEnvironment.TURNIP_ENABLED`), and the thing stopping it was never
+  `patches/wine/0006`: the APK's `libadrenotools.so` exported three data symbols
+  — `android_get_exported_namespace`, `android_link_namespaces`,
+  `android_link_namespaces_all_libs` — whose names belong to dynamic-linker
+  *functions*, so a caller's PLT bound to a pointer's address and branched into
+  `.bss`. Wine turned the fault into `STATUS_ACCESS_VIOLATION`, unwound the
+  syscall, and left `display_lock` held across `get_vulkan_gpus()` for ever.
+  One line of visibility in `app/src/main/cpp/adrenotools/CMakeLists.txt`.
+  *Evidence:* `7f883cb`, and §1's desktop item.
+
 Still open:
 
 - [ ] **DXVK/vkd3d draw throughput** and **shader-cache cold vs warm** —
-  unmeasurable until item 1.3.
+  unmeasurable until item 1.3, which now has a named cause and a named next
+  step. `tools/device-bench.sh` was not run: with no D3D device there is nothing
+  for it to time that `docs/OPTIMIZATION.md` does not already have.
 - [ ] **`-mcpu=oryon-1` for Wine's unix side.** Valid there even though it is
   not for `CROSSCFLAGS`: `CFLAGS` reaches only the arm64 host build. Would tune
   `ntdll.so`, `win32u.so` and `winex11.drv.so`. An hour's rebuild for a win the
@@ -235,10 +354,16 @@ The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
 
 The **CPU story is done and measured**: ARM64EC plus FEX costs 1.09× native on
 integer and 0.99× on memory, x86-32 through WoW64 costs 2.28×, Wine starts a
-process in 197 ms. The **driver story is done**: Turnip answers inside a Wine
-session, proven by `driverID 18` and the winediag line. The **interface is
-done** and verified in portrait on the device.
+process in 197 ms — and as of 2026-08-08 all three run from the app's own
+launcher, x86-32 included. The **driver story is done and switched on**: Turnip
+answers inside a Wine session with the desktop drawing at the same time, proven
+by `driverID 18`, `Found compatible device '/dev/kgsl-3d0'`, the winediag line
+and three `#161826` pixels out of one screenshot. The **interface is done** and
+verified in portrait and in landscape.
 
-What is not proven is the middle — a Windows program drawing through DXVK onto
-the screen. Section 1 is entirely that sentence, and nothing in section 4 or 5
-matters until it is true.
+What is not proven is still the middle — a Windows program drawing through DXVK
+onto the screen — but it is no longer a mystery. Every D3D probe now loads DXVK,
+reaches `vkCreateInstance`, and is refused `VK_KHR_win32_surface`, because the
+Turnip this project builds is configured `-Dplatforms=android` and has no X11
+WSI for `winex11.drv` to map that extension from. One Mesa build option stands
+between here and a triangle. Section 1.3 has the log lines.
