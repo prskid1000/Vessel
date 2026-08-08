@@ -25,8 +25,28 @@ fetch_source "$SOURCE_NAME" "$MESA_REPO" "$MESA_REF" "${MESA_SHA:-}"
 SRC="$NATIVE_DIR/$SOURCE_NAME"
 BUILD="$WORK_DIR/$COMPONENT"
 STAGE="$WORK_DIR/stage-$COMPONENT"
+SYSROOT="$WORK_DIR/androidsysroot"
 rm -rf "$BUILD" "$STAGE"
 mkdir -p "$STAGE"
+
+# --- X11, for the WSI ----------------------------------------------------------
+# Turnip is built for two window systems, not one. `android` is what the plain
+# Vulkan probe goes through and is the only thing proven to work on this device,
+# so it stays. `x11` is added because Wine's winex11.drv can only advertise
+# VK_KHR_win32_surface to DXVK if the implementation underneath offers
+# VK_KHR_xlib_surface or VK_KHR_xcb_surface, and an android-only Turnip offers
+# neither — which is why every D3D probe dies in vkCreateInstance.
+#
+# Same sysroot Wine links against; no-op when it is already built to the pins.
+"$COMMON_SH_DIR/x11-sysroot.sh" \
+  || die "x11-sysroot.sh failed; Turnip cannot be built with X11 WSI without it"
+for pc in xcb xcb-dri3 xcb-present xcb-sync xcb-shm xcb-xfixes xcb-randr \
+          x11-xcb xshmfence; do
+  [ -f "$SYSROOT/usr/lib/pkgconfig/$pc.pc" ] \
+    || die "x11-sysroot.sh left no $pc.pc in $SYSROOT/usr/lib/pkgconfig — Mesa's
+     x11 platform needs all of xcb, xcb-dri3, xcb-present, xcb-sync, xcb-shm,
+     xcb-xfixes, xcb-randr, x11-xcb and xshmfence."
+done
 
 # MESA_REF is a branch, not a tag: gen8 Vulkan is out-of-tree and moves weekly.
 # Mesa's own VERSION file only says something like "26.0.0-devel", which is the
@@ -59,17 +79,25 @@ fi
 PKG_CONFIG="$(command -v pkg-config || true)"
 [ -n "$PKG_CONFIG" ] || die "pkg-config not found on PATH; meson needs it even for a stubbed Android build"
 
-# pkg_config_libdir points at an EMPTY directory on purpose, and this is not
-# belt-and-braces. Without it meson resolves `auto` dependencies against the
-# BUILD machine's pkg-config and cheerfully reports that the container's x86-64
-# Linux zlib satisfies an aarch64 Android build, which fails at link:
+# pkg_config_libdir used to point at an EMPTY directory, and the reason is still
+# live: without a restricted search path meson resolves `auto` dependencies
+# against the BUILD machine's pkg-config and cheerfully reports that the
+# container's x86-64 Linux zlib satisfies an aarch64 Android build, which fails
+# at link:
 #   ld.lld: /usr/lib/x86_64-linux-gnu/libz.so is incompatible with aarch64linux
-# An empty search path makes host packages invisible, so an auto feature
-# resolves to "not found" and falls back to a wrap subproject built for the
-# target — instead of "found, wrong architecture".
-EMPTY_PKGDIR="$WORK_DIR/$COMPONENT-empty-pkgconfig"
-rm -rf "$EMPTY_PKGDIR"
-mkdir -p "$EMPTY_PKGDIR"
+#
+# The X11 WSI needs nine real packages, so the path is now the Android sysroot
+# rather than nothing. That keeps the property that matters — every host package
+# is still invisible, because the sysroot contains only cross-built aarch64
+# libraries — while letting xcb, x11-xcb and xshmfence be found. Anything not in
+# the sysroot (zlib, libdrm, expat) still resolves to "not found" and falls back
+# to a wrap subproject built for the target.
+#
+# sys_root is required alongside it, not optional: the .pc files carry a clean
+# /usr prefix, so without PKG_CONFIG_SYSROOT_DIR meson would emit -I/usr/include
+# and -L/usr/lib and compile against the container's X11 headers.
+PKGDIR="$SYSROOT/usr/lib/pkgconfig"
+PKGDIR_SHARE="$SYSROOT/usr/share/pkgconfig"
 
 # VESSEL_CPU_FLAGS is a shell string ("-mcpu=oryon-1"); meson wants a list.
 CPU_ARGS=""
@@ -88,7 +116,8 @@ strip = '$NDK_BIN/llvm-strip'
 pkg-config = '$PKG_CONFIG'
 
 [properties]
-pkg_config_libdir = ['$EMPTY_PKGDIR']
+sys_root = '$SYSROOT'
+pkg_config_libdir = ['$PKGDIR', '$PKGDIR_SHARE']
 
 [host_machine]
 system = 'android'
@@ -142,7 +171,7 @@ log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $NDK_API)"
 # against in the container, and libbacktrace is disabled for the same reason.
 meson setup "$BUILD" "$SRC" \
   --cross-file "$CROSS" \
-  -Dplatforms=android \
+  -Dplatforms=android,x11 \
   -Dplatform-sdk-version="$NDK_API" \
   -Dandroid-stub=true \
   -Dandroid-libbacktrace=disabled \
@@ -212,18 +241,55 @@ NDK_STL="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarc
 install -m 0644 "$NDK_STL" "$STAGE/libc++_shared.so"
 "$NDK_BIN/llvm-strip" --strip-unneeded "$STAGE/libc++_shared.so" || true
 
-# Every NEEDED entry must be either in this package or provided by Android. Same
-# check as build/wine.sh does for its tree, and for the same reason: a missing
-# one is invisible until a dlopen fails on the phone.
-TURNIP_BIONIC_PROVIDED="libc.so libm.so libdl.so libz.so liblog.so libandroid.so
+# --- the X11 client libraries the WSI links against ---------------------------
+# -Dplatforms=x11 puts libxcb and friends in the driver's NEEDED list, and none
+# of them exist on Android. The Wine package ships its own copies, but they are
+# out of reach here: libadrenotools loads the driver into a linker namespace
+# whose ld_library_path is THIS package's directory, so Wine's lib directory is
+# not on the search path. A missing one means the driver dlopen fails,
+# libadrenotools falls through, and the stock Qualcomm blob answers silently —
+# the failure shape this component exists to prevent.
+#
+# The closure is walked rather than the whole sysroot copied: libX11-xcb pulls
+# libX11 which pulls libxcb which pulls libXau, and copying only the direct
+# NEEDED entries would leave the second hop missing.
+BIONIC_LIBS="libc.so libm.so libdl.so libz.so liblog.so libandroid.so
 libnativewindow.so libsync.so libhardware.so libvulkan.so ld-android.so"
+
+# Word-splitting over the variable, not a substring match on it: the list spans
+# two lines, and `case " $VAR " in *" $need "*` never matches the first name
+# after a newline. That silently reported libnativewindow.so as missing.
+bionic_provides() {
+  local lib
+  for lib in $BIONIC_LIBS; do [ "$lib" = "$1" ] && return 0; done
+  return 1
+}
+
+needed_of() {
+  "$NDK_BIN/llvm-readelf" -d "$1" 2>/dev/null | grep NEEDED | sed 's/.*\[//;s/\]//'
+}
+
+log "resolving the driver's shared-library closure"
+pending="$STAGE/libvulkan_freedreno.so"
+copied=""
 turnip_missing=""
-for need in $("$NDK_BIN/llvm-readelf" -d "$STAGE/libvulkan_freedreno.so" \
-              | grep NEEDED | sed 's/.*\[//;s/\]//'); do
-  case " $TURNIP_BIONIC_PROVIDED " in *" $need "*) continue ;; esac
-  [ -f "$STAGE/$need" ] && continue
-  turnip_missing="$turnip_missing $need"
+while [ -n "$pending" ]; do
+  elf="${pending%% *}"
+  case "$pending" in *" "*) pending="${pending#* }" ;; *) pending="" ;; esac
+  for need in $(needed_of "$elf"); do
+    bionic_provides "$need" && continue
+    [ -f "$STAGE/$need" ] && continue
+    if [ -f "$SYSROOT/usr/lib/$need" ]; then
+      install -m 0644 "$SYSROOT/usr/lib/$need" "$STAGE/$need"
+      "$NDK_BIN/llvm-strip" --strip-unneeded "$STAGE/$need" 2>/dev/null || true
+      copied="$copied $need"
+      pending="$pending $STAGE/$need"
+      continue
+    fi
+    turnip_missing="$turnip_missing $need"
+  done
 done
+[ -z "$copied" ] || ok "bundled from the X11 sysroot:$copied"
 [ -z "$turnip_missing" ] \
   || die "the driver needs libraries neither the package nor Android provides:$turnip_missing"
 ok "every NEEDED entry of the driver resolves"

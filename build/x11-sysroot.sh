@@ -46,6 +46,15 @@ PACKAGES=(
   "$XORG_BASE/xcb/xcb-proto-$X11_XCBPROTO.tar.xz|xcb-proto-$X11_XCBPROTO|"
   "$XORG_BASE/xcb/libpthread-stubs-$X11_PTHREAD_STUBS.tar.xz|libpthread-stubs-$X11_PTHREAD_STUBS|"
   "$XORG_BASE/xcb/libxcb-$X11_LIBXCB.tar.xz|libxcb-$X11_LIBXCB|"
+  # Not Wine's dependency — Mesa's. wsi_x11 keeps one shared-memory fence per
+  # DRI3 buffer, so Mesa's `-Dplatforms=x11` will not configure without
+  # xshmfence.pc. --with-shared-memory-dir is pinned rather than autodetected:
+  # left to itself, configure probes the *container's* directories and bakes
+  # whichever it finds into SHMDIR. Neither /dev/shm nor /run/shm exists on
+  # Android, but the value is dead code there — xshmfence_alloc() prefers
+  # memfd_create(), which bionic has had since API 30 and we compile against 35.
+  # Pinning it keeps the built library identical whatever the container has.
+  "$XORG_BASE/lib/libxshmfence-$X11_LIBXSHMFENCE.tar.xz|libxshmfence-$X11_LIBXSHMFENCE|--with-shared-memory-dir=/dev/shm"
   "$XORG_BASE/lib/libX11-$X11_LIBX11.tar.xz|libX11-$X11_LIBX11|--disable-specs --without-xmlto --without-fop --without-xsltproc"
   "$XORG_BASE/lib/libXext-$X11_LIBXEXT.tar.xz|libXext-$X11_LIBXEXT|--disable-specs"
   "$XORG_BASE/lib/libXrender-$X11_LIBXRENDER.tar.xz|libXrender-$X11_LIBXRENDER|"
@@ -116,6 +125,54 @@ for stub in pthread rt; do
     || die "could not create the lib$stub.a stub with $AR"
 done
 
+# <values.h> is a glibc-only compatibility header from 4.3BSD and bionic has
+# never shipped it. libxshmfence's futex backend includes it for one identifier,
+# MAXINT, in one call:
+#
+#   src/xshmfence_futex.h:51:10: fatal error: 'values.h' file not found
+#   src/xshmfence_futex.h:66:  sys_futex(addr, FUTEX_WAKE, MAXINT, ...)
+#
+# The alternative is --disable-futex, which builds the pthread backend instead —
+# but that changes what a fence *is* in shared memory, from a 32-bit futex word
+# to a process-shared pthread mutex and condvar. Anything on the other end of
+# the fd (an X server implementing DRI3 FenceFromFD) has to agree on that
+# layout, and a futex word is the only layout anyone implements. So the futex
+# backend is kept and the missing header is supplied.
+#
+# glibc's values.h is nothing but these aliases over <limits.h>; MAXINT is the
+# only one anything here uses, and the others cost nothing and stop the next
+# package that reaches for the header from failing the same way.
+cat > "$SYSROOT/usr/include/values.h" <<'EOF'
+/* Written by build/x11-sysroot.sh. bionic has no <values.h>; this is the
+ * legacy BSD spelling of <limits.h>, which libxshmfence's futex backend
+ * includes for MAXINT. Not installed on the device — build-time only. */
+#ifndef _VESSEL_VALUES_H
+#define _VESSEL_VALUES_H
+#include <limits.h>
+#include <float.h>
+#define BITSPERBYTE CHAR_BIT
+#define CHARBITS    CHAR_BIT
+#define SHORTBITS   (sizeof(short) * CHAR_BIT)
+#define INTBITS     (sizeof(int) * CHAR_BIT)
+#define LONGBITS    (sizeof(long) * CHAR_BIT)
+#define PTRBITS     (sizeof(void *) * CHAR_BIT)
+#define MAXSHORT    SHRT_MAX
+#define MAXINT      INT_MAX
+#define MAXLONG     LONG_MAX
+#define MINSHORT    SHRT_MIN
+#define MININT      INT_MIN
+#define MINLONG     LONG_MIN
+#define MAXDOUBLE   DBL_MAX
+#define MAXFLOAT    FLT_MAX
+#define MINDOUBLE   DBL_MIN
+#define MINFLOAT    FLT_MIN
+#define DMINEXP     DBL_MIN_EXP
+#define FMINEXP     FLT_MIN_EXP
+#define DMAXEXP     DBL_MAX_EXP
+#define FMAXEXP     FLT_MAX_EXP
+#endif
+EOF
+
 for entry in "${PACKAGES[@]}"; do
   IFS='|' read -r url dirname extra <<< "$entry"
   tarball="$SRC_CACHE/$(basename "$url")"
@@ -183,7 +240,7 @@ done
 # one built by the wrong compiler.
 
 for pc in xproto xau xcb x11 xext xrender xfixes xi xrandr xcursor xcomposite \
-          xxf86vm xinerama xtrans freetype2; do
+          xxf86vm xinerama xtrans xshmfence freetype2; do
   [ -f "$SYSROOT/usr/lib/pkgconfig/$pc.pc" ] || [ -f "$SYSROOT/usr/share/pkgconfig/$pc.pc" ] \
     || die "no $pc.pc in the sysroot — the package that provides it did not install.
      Look for '$pc' in the log above."
@@ -191,7 +248,7 @@ done
 
 for lib in libX11.so libXext.so libXrender.so libXfixes.so libXi.so \
            libXrandr.so libXcursor.so libXcomposite.so libXxf86vm.so \
-           libXinerama.so libxcb.so libXau.so libfreetype.so; do
+           libXinerama.so libxcb.so libXau.so libxshmfence.so libfreetype.so; do
   path="$SYSROOT/usr/lib/$lib"
   [ -e "$path" ] || die "the sysroot has no $lib"
   # A host build reads "x86-64" here, and Wine links against it happily right up
