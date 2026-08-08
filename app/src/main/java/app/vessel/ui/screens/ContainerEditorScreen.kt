@@ -295,21 +295,29 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
 }
 
 /**
- * What the right-hand column of the label line says.
+ * What the right-hand column of the label line says, when the control does not
+ * already say it.
  *
  * One line per [ParamType] and nothing per key, so it stays inside the same
- * boundary the renderer does. A boolean has no entry because its switch already
- * sits in that column, and a `multi` reports a count rather than a list — seven
- * Turnip flag names would not fit and would truncate to nothing readable.
+ * boundary the renderer does.
+ *
+ * **The rule is non-duplication**, and it is the rule this got wrong. An `enum`
+ * used to print its own label here — so every dropdown on the screen read
+ * `Resolution        1280 x 720 (720p)` with `1280 x 720 (720p)` in the box
+ * directly beneath it, twice on one row, three rows in a column. A summary that
+ * repeats the control is not a summary; it is the same word said louder. So:
+ * a `bool`'s switch is already in that column, an `enum`'s and a `text`'s value
+ * is already in the field below it, and what is left is the two that genuinely
+ * cannot show themselves — an `int`, whose control is a slider with no number on
+ * it, and a `component`, whose field shows the *resolved* build while this shows
+ * the selector that resolved it.
  */
 private fun summarise(spec: ParamSpec, value: ParamValue): String? = when (spec.type) {
-    ParamType.BOOL -> null
+    ParamType.BOOL, ParamType.ENUM, ParamType.TEXT -> null
     ParamType.INT -> (value as? ParamValue.Count)?.value?.toString()
-    ParamType.ENUM -> (value as? ParamValue.Text)?.value?.let(spec::label)
     ParamType.COMPONENT -> (value as? ParamValue.Text)?.value
-    // The field itself already shows the text, and an override list is far too
-    // long for the value column — it would ellipsise to nothing useful.
-    ParamType.TEXT -> null
+    // A count rather than a list: seven Turnip flag names would not fit and
+    // would truncate to nothing readable.
     ParamType.MULTI -> (value as? ParamValue.Choices)?.values.orEmpty()
         .let { if (it.isEmpty()) "none" else "${it.size} on" }
 }

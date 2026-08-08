@@ -31,6 +31,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,7 +83,7 @@ fun VParamRow(
     trailing: (@Composable () -> Unit)? = null,
     control: (@Composable () -> Unit)? = null,
 ) {
-    Column(modifier.fillMaxWidth().padding(bottom = Vessel.metrics.s8)) {
+    Column(modifier.fillMaxWidth().padding(bottom = Vessel.metrics.s11)) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
@@ -146,8 +147,15 @@ fun VParamRow(
  */
 private val VALUE_MAX_WIDTH = 140.dp
 
-/** The height of a field, a dropdown and a stepper button — they align in a column. */
-private val FIELD_HEIGHT = 40.dp
+/**
+ * The height of a field, a dropdown and a stepper button — they align in a column.
+ *
+ * `controlHeight` rather than a value of its own, so a text button placed beside
+ * a dropdown is exactly as tall as it. It was 40 dp against a 40 dp button; both
+ * came down together.
+ */
+private val fieldHeight: Dp
+    @Composable @ReadOnlyComposable get() = Vessel.metrics.controlHeight
 
 /**
  * How tall an open dropdown may get: three items, and then it scrolls.
@@ -199,11 +207,11 @@ fun VDropdownField(
         Row(
             Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = FIELD_HEIGHT)
+                .defaultMinSize(minHeight = fieldHeight)
                 .background(Vessel.colors.surface, shape)
                 .vRing(if (expanded) Vessel.colors.accent else Vessel.colors.divider, shape)
                 .clickable { expanded = true }
-                .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+                .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s6),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -219,7 +227,7 @@ fun VDropdownField(
                 Icons.Filled.KeyboardArrowDown,
                 contentDescription = null,
                 tint = Vessel.colors.textMuted,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(Vessel.metrics.iconMd),
             )
         }
 
@@ -268,9 +276,8 @@ fun VDropdownField(
  *
  * Hand-built rather than Material's `Switch`, which is 52×32 with a shadowed
  * thumb and its own spring — a control a third taller than every field beside
- * it, and the one thing on the screen that would still be casting a shadow. This
- * is the reference app's geometry exactly: a 40×23 track, a 17 dp thumb, a
- * `divider` hairline, and one 150 ms slide, because DESIGN.md's motion rule is
+ * it, and the one thing on the screen that would still be casting a shadow.
+ * A `divider` hairline and one 150 ms slide, because DESIGN.md's motion rule is
  * confirmation and never decoration.
  */
 @Composable
@@ -292,23 +299,35 @@ fun VToggle(
         label = "thumb",
     )
     val thumbOffset by animateDpAsState(
-        targetValue = if (checked) 17.dp else 0.dp,
+        targetValue = if (checked) TOGGLE_TRAVEL else 0.dp,
         animationSpec = tween(Vessel.metrics.durationStandardMs),
         label = "toggle",
     )
 
     Box(
         modifier
-            .size(width = 40.dp, height = 23.dp)
+            .size(width = TOGGLE_WIDTH, height = TOGGLE_HEIGHT)
             .background(track, shape)
             .vRing(Vessel.colors.divider, shape)
             .clickable { onCheckedChange(!checked) }
-            .padding(2.dp),
+            .padding(TOGGLE_INSET),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.offset(x = thumbOffset).size(17.dp).background(thumb, shape))
+        Box(Modifier.offset(x = thumbOffset).size(TOGGLE_THUMB).background(thumb, shape))
     }
 }
+
+/**
+ * The switch, one step down from the reference app's 40×23 so it matches the
+ * 36 dp control row it sits on. The thumb travels the track minus its own
+ * diameter minus both insets, which is the arithmetic that keeps it from
+ * overhanging the right edge when the geometry changes.
+ */
+private val TOGGLE_WIDTH = 36.dp
+private val TOGGLE_HEIGHT = 20.dp
+private val TOGGLE_INSET = 2.dp
+private val TOGGLE_THUMB = 16.dp
+private val TOGGLE_TRAVEL = TOGGLE_WIDTH - TOGGLE_THUMB - TOGGLE_INSET * 2
 
 /**
  * The `int` control: minus, slider, plus.
@@ -366,12 +385,12 @@ private fun VStepperButton(
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Box(
         Modifier
-            .size(FIELD_HEIGHT)
+            .size(fieldHeight)
             .vRing(Vessel.colors.divider.copy(alpha = Vessel.colors.divider.alpha * alpha), shape)
             .clickable(enabled = enabled, onClickLabel = contentDescription, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(glyph, style = Vessel.type.subtitle, color = Vessel.colors.accent.copy(alpha = alpha))
+        Text(glyph, style = Vessel.type.cardTitle, color = Vessel.colors.accent.copy(alpha = alpha))
     }
 }
 
@@ -400,7 +419,7 @@ private fun VSlider(
         valueRange = valueRange,
         steps = steps,
         enabled = enabled,
-        modifier = modifier.height(FIELD_HEIGHT),
+        modifier = modifier.height(fieldHeight),
         colors = SliderDefaults.colors(
             thumbColor = colors.accent,
             activeTrackColor = colors.accent,
@@ -465,7 +484,7 @@ fun VCheckRow(
     ) {
         Box(
             Modifier
-                .size(18.dp)
+                .size(Vessel.metrics.iconMd)
                 .background(if (checked) Vessel.colors.accentSoft else Color.Transparent, shape)
                 .vRing(if (checked) Vessel.colors.accent else Vessel.colors.divider, shape),
             contentAlignment = Alignment.Center,
@@ -505,10 +524,10 @@ fun VTextField(
     Box(
         modifier
             .fillMaxWidth()
-            .defaultMinSize(minHeight = FIELD_HEIGHT)
+            .defaultMinSize(minHeight = fieldHeight)
             .background(Vessel.colors.surface, shape)
             .vRing(if (focused) Vessel.colors.accent else Vessel.colors.divider, shape)
-            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+            .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s6),
         contentAlignment = Alignment.CenterStart,
     ) {
         if (value.isEmpty() && placeholder != null) {
@@ -547,10 +566,10 @@ fun VComponentReadout(
     Row(
         modifier
             .fillMaxWidth()
-            .defaultMinSize(minHeight = FIELD_HEIGHT)
+            .defaultMinSize(minHeight = fieldHeight)
             .background(Vessel.colors.surface, shape)
             .vRing(Vessel.colors.divider, shape)
-            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+            .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s6),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         verticalAlignment = Alignment.CenterVertically,
     ) {

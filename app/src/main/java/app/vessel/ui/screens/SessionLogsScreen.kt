@@ -148,8 +148,8 @@ private fun SessionListRow(row: SessionRow, onClick: () -> Unit) {
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .vRuleBelow(Vessel.colors.divider)
-            .padding(vertical = Vessel.metrics.s11),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+            .padding(vertical = Vessel.metrics.s8),
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
     ) {
         Row(
             Modifier.fillMaxWidth(),
@@ -159,7 +159,7 @@ private fun SessionListRow(row: SessionRow, onClick: () -> Unit) {
             Text(row.whenLabel, style = Vessel.type.body, modifier = Modifier.weight(1f))
             VTag(statusLabel(row.status), tone = statusTone(row.status))
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
             Text(row.durationLabel, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
             Text(row.sizeLabel, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
             // Only said when it is true, and only for a session that thinks it

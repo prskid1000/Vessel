@@ -3,6 +3,8 @@ package app.vessel.ui.theme
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.TextSelectionColors
@@ -200,6 +202,44 @@ data class VMetrics(
     val screenGutter: Dp = s11,
     val touchTarget: Dp = 44.dp,
 
+    /**
+     * How wide a column of content is allowed to get.
+     *
+     * This phone is 927 dp across in landscape. Left alone, every list row
+     * stretches to that: a session's status tag ends up 800 dp away from the
+     * timestamp it belongs to, and the container card becomes a metre of empty
+     * card with a play button stranded on the far edge. Capping the column and
+     * centring it is the whole of the landscape adaptation — the layouts
+     * themselves are already correct at phone width, and were only ever wrong
+     * because nothing stopped them growing.
+     *
+     * 560 dp rather than a typographic measure: this content is rows of controls
+     * and mono readouts, not prose, and at 480 dp the param rows start wrapping
+     * their help sentences to four lines on a screen that has the room.
+     */
+    val contentMaxWidth: Dp = 560.dp,
+
+    /** A dialog is narrower than a screen column, or it stops reading as a dialog. */
+    val dialogMaxWidth: Dp = 420.dp,
+
+    /**
+     * The height every field, dropdown, stepper button and text button shares.
+     *
+     * One number, because the thing that makes a settings screen look built
+     * rather than assembled is that a text field and the button beside it are
+     * the same height. 36 dp is Nocturne's control size; it is under the touch
+     * floor on purpose and the *tappable* controls extend past it — see
+     * [touchTarget], which is what a bare icon action takes.
+     */
+    val controlHeight: Dp = 36.dp,
+
+    /** A square icon control in a toolbar or a card: smaller than the touch floor, padded to it. */
+    val iconButton: Dp = 40.dp,
+
+    /** Glyph sizes. `md` is a toolbar or button icon; `sm` is inline with text. */
+    val iconMd: Dp = 18.dp,
+    val iconSm: Dp = 14.dp,
+
     /** Motion is confirmation, never decoration: one duration, no springs. */
     val durationStandardMs: Int = 150,
     val durationSheetMs: Int = 250,
@@ -231,66 +271,78 @@ private const val TABULAR_FIGURES = "tnum"
 private val Heading = FontWeight.Medium
 
 /**
- * The type scale from `docs/DESIGN.md`, which is `styles.css`'s scale.
+ * The type scale from `docs/DESIGN.md`, which is `styles.css`'s scale **as the
+ * phone screens use it**, not as the desktop stylesheet declares it.
  *
- * Headings carry `-0.015em` tracking and a 1.12 line height. Every machine fact
- * is one of the mono styles.
+ * That distinction is the whole of this scale's history. The sizes here were
+ * transcribed straight out of the CSS — 25 sp screen titles, 17 sp card titles,
+ * a 15 sp body, a 22 sp metric — and on a 480 dpi phone the result read as a
+ * consumer app with the accessibility text size turned up: a container tile
+ * 78 dp tall to say one word, four metrics that could not fit on one line of a
+ * rail. The reference app (`On Device AI`, `ui/theme/NocturneType.kt`) is the
+ * same design system shipped on the same class of device, and its screens run a
+ * scale step below the CSS: 21 root title, 17 pushed title, 14 card title,
+ * 12.5–13 rows, 11 meta, 10–12 mono. This matches that, because two products in
+ * one family should not disagree about how big a card title is.
+ *
+ * Headings carry `-0.015em` tracking. Every machine fact is one of the mono
+ * styles.
  */
 @Immutable
 data class VType(
-    /** `h2` — 32 / 36. */
+    /** The largest thing in the product, and nothing on a phone currently uses it. */
     val display: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = Heading,
-        fontSize = 32.sp,
-        lineHeight = 36.sp,
+        fontSize = 26.sp,
+        lineHeight = 30.sp,
         letterSpacing = (-0.015).em,
     ),
-    /** `h3` — 25 / 28. */
+    /** A root destination's header — the reference app's `RootTitle`, 21 / 25. */
     val title: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = Heading,
-        fontSize = 25.sp,
-        lineHeight = 28.sp,
+        fontSize = 21.sp,
+        lineHeight = 25.sp,
         letterSpacing = (-0.015).em,
     ),
-    /** `h4` — 20 / 24. */
+    /** A pushed toolbar's title and a dialog's — `ScreenTitle`, 17 / 21. */
     val subtitle: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = Heading,
-        fontSize = 20.sp,
-        lineHeight = 24.sp,
+        fontSize = 17.sp,
+        lineHeight = 21.sp,
     ),
-    /** `.card-title` — 17 / 20. */
+    /** `.card-title` at screen scale — 14 / 18. */
     val cardTitle: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = Heading,
-        fontSize = 17.sp,
-        lineHeight = 20.sp,
+        fontSize = 14.sp,
+        lineHeight = 18.sp,
     ),
-    /** `body` — the document default, 15 / 23. */
+    /** An ordinary interface row: a param's title, a list row's label. 13.5 / 19. */
     val body: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = FontWeight.Normal,
-        fontSize = 15.sp,
-        lineHeight = 23.sp,
+        fontSize = 13.5.sp,
+        lineHeight = 19.sp,
     ),
-    /** `.card-body` — 13 / 19. */
+    /** `.card-body` — the help sentence under a control. 12 / 17. */
     val bodySmall: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = FontWeight.Normal,
-        fontSize = 13.sp,
-        lineHeight = 19.sp,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
     ),
-    /** `.field > label` — 12 / 16. */
+    /** `.field > label` and the bottom-nav label — 11 / 14. */
     val label: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = FontWeight.Normal,
-        fontSize = 12.sp,
-        lineHeight = 16.sp,
+        fontSize = 11.sp,
+        lineHeight = 14.sp,
     ),
     /**
-     * `h6` — 11 / 14, `letter-spacing: 0.08em`, uppercase.
+     * `h6` — 10 / 13, `letter-spacing: 0.08em`, uppercase.
      *
      * The uppercasing is not in the style: Compose has no `text-transform`, so
      * the call site passes `text.uppercase()`. [app.vessel.ui.components.VSectionHeader]
@@ -299,36 +351,64 @@ data class VType(
     val overline: TextStyle = TextStyle(
         fontFamily = VSans,
         fontWeight = FontWeight.Normal,
-        fontSize = 11.sp,
-        lineHeight = 14.sp,
+        fontSize = 10.sp,
+        lineHeight = 13.sp,
         letterSpacing = 0.08.em,
     ),
-    /** Every version, flag, hash and path — 13 / 18, tabular. */
+    /** Every version, flag, hash and path — 11.5 / 16, tabular. */
     val mono: TextStyle = TextStyle(
         fontFamily = VMono,
         fontWeight = FontWeight.Normal,
-        fontSize = 13.sp,
-        lineHeight = 18.sp,
+        fontSize = 11.5.sp,
+        lineHeight = 16.sp,
         fontFeatureSettings = TABULAR_FIGURES,
     ),
+    /** Log lines, captions and legends — 10 / 14, tabular. */
     val monoSmall: TextStyle = TextStyle(
         fontFamily = VMono,
         fontWeight = FontWeight.Normal,
-        fontSize = 11.sp,
-        lineHeight = 15.sp,
+        fontSize = 10.sp,
+        lineHeight = 14.sp,
         fontFeatureSettings = TABULAR_FIGURES,
     ),
-    /** Live numbers only — FPS, frame time, memory. 22 / 26, tabular. */
+    /**
+     * Live numbers with room around them — the Metrics tab's card headline.
+     * 17 / 20, tabular.
+     *
+     * It was 22 / 26, sized for a full-width strip across a 392 dp phone. The
+     * rail is not that: four readings in a column 150 dp wide, where 22 sp meant
+     * `573 MB` broke across three lines and rendered as `57 / 3 / MB`. Numbers
+     * that wrap are worse than no numbers, because they are still read.
+     */
     val metric: TextStyle = TextStyle(
         fontFamily = VMono,
         fontWeight = Heading,
-        fontSize = 22.sp,
-        lineHeight = 26.sp,
+        fontSize = 17.sp,
+        lineHeight = 20.sp,
+        fontFeatureSettings = TABULAR_FIGURES,
+    ),
+    /**
+     * The same reading where space is the constraint — the session rail.
+     *
+     * A separate step rather than a scale factor at the call site: the rail's
+     * cell is sized around this, and a caller free to shrink the type is a
+     * caller free to break the grid it sits in.
+     */
+    val metricSmall: TextStyle = TextStyle(
+        fontFamily = VMono,
+        fontWeight = Heading,
+        fontSize = 13.sp,
+        lineHeight = 16.sp,
         fontFeatureSettings = TABULAR_FIGURES,
     ),
 ) {
-    /** `.btn` / `.input` sit at one size so they align in a row: 13 / 500. */
-    val control: TextStyle get() = bodySmall.copy(fontWeight = Heading)
+    /** `.btn` / `.input` sit at one size so they align in a row: 12.5 / 500. */
+    val control: TextStyle get() = TextStyle(
+        fontFamily = VSans,
+        fontWeight = Heading,
+        fontSize = 12.5.sp,
+        lineHeight = 16.sp,
+    )
 }
 
 val LocalVColors = staticCompositionLocalOf { VColors() }
@@ -458,6 +538,25 @@ fun Modifier.vCard(
     shape: Shape = Vessel.metrics.shapeMd,
     elevation: VElevation = VElev.sm,
 ): Modifier = vElevation(elevation, shape).background(fill, shape).vRing(elevation.ring, shape)
+
+/**
+ * The column every screen's content lives in.
+ *
+ * **The order is the whole modifier.** `widthIn` narrows the incoming maximum;
+ * `fillMaxWidth` then pins the child to whatever maximum it was handed. Written
+ * the other way round the cap does nothing at all — `fillMaxWidth` has already
+ * fixed `min == max == window`, and `widthIn` coerces its own bound back into
+ * that range. The result compiles, reads correctly, and stretches to 927 dp.
+ *
+ * Both halves are needed: `widthIn` alone leaves a wrap-content child hugging
+ * its text. The parent's `horizontalAlignment` centres what is left.
+ *
+ * Bars are deliberately *not* wrapped in this: a bottom nav's ground and its
+ * hairline run edge to edge, and only the destinations inside it are capped.
+ */
+@Composable
+fun Modifier.vContentColumn(): Modifier =
+    widthIn(max = Vessel.metrics.contentMaxWidth).fillMaxWidth()
 
 /** The shadow half of an elevation, if it has one. */
 @Composable

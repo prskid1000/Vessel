@@ -16,12 +16,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -53,13 +55,19 @@ import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionDiagnosis
 import app.vessel.data.ProvisionStatus
 import app.vessel.data.ProvisionStep
+import app.vessel.data.SessionMetricsState
 import app.vessel.data.SessionPhase
 import app.vessel.data.SessionState
+import app.vessel.input.PointerMode
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VIconAction
+import app.vessel.ui.components.VIcons
+import app.vessel.ui.components.VOutcomeDialog
+import app.vessel.ui.components.VOutcomeTone
 import app.vessel.ui.components.VPushToolbar
+import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VScaffold
 import app.vessel.ui.components.VSectionHeader
 import app.vessel.ui.theme.VElev
@@ -68,6 +76,7 @@ import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
 import app.vessel.ui.theme.vRing
 import app.vessel.ui.vm.SessionViewModel
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Five states, not one.
@@ -87,6 +96,8 @@ fun SessionScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val surface by viewModel.surface.collectAsStateWithLifecycle()
+    val pointerMode by viewModel.pointerMode.collectAsStateWithLifecycle()
+    val fileManagerRefusal by viewModel.fileManagerRefusal.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // The panel's own size, which is what `display.resolution: native` means.
@@ -107,15 +118,36 @@ fun SessionScreen(
     SessionContent(
         state = state,
         surface = surface,
+        pointerMode = pointerMode,
+        metrics = viewModel.metrics,
         onBack = onBack,
         onOpenLogs = { onOpenLogs(state.startedAt) },
         onStop = viewModel::stop,
         onRetry = { viewModel.retry(native) },
+        onTogglePointerMode = viewModel::togglePointerMode,
+        onShowKeyboard = viewModel::showKeyboard,
+        onOpenFiles = viewModel::launchFileManager,
         onDismiss = {
             viewModel.dismiss()
             onBack()
         },
     )
+
+    // A refusal has to be visible. The file manager opens *inside* the guest's
+    // desktop, so a launch that fails draws nothing anywhere the user is looking
+    // — without this the button would simply appear dead, which is the one
+    // outcome this product treats as worse than an error.
+    fileManagerRefusal?.let { reason ->
+        VOutcomeDialog(
+            title = "The file manager did not open",
+            tone = VOutcomeTone.Danger,
+            evidence = listOf(reason),
+            onDismiss = viewModel::dismissFileManagerRefusal,
+            actions = {
+                VButton("Close", viewModel::dismissFileManagerRefusal, style = VButtonStyle.Primary)
+            },
+        )
+    }
 }
 
 @Composable
@@ -126,6 +158,19 @@ private fun SessionContent(
     onStop: () -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    pointerMode: PointerMode = PointerMode.TRACKPAD,
+    onTogglePointerMode: () -> Unit = {},
+    onShowKeyboard: () -> Unit = {},
+    onOpenFiles: () -> Unit = {},
+    /**
+     * The sampler's window, collected only while the rail is open.
+     *
+     * Passed as the flow rather than as a collected value on purpose: collecting
+     * is what raises the sample rate from 0.1 Hz to 1 Hz, so the collection has
+     * to start and stop with the rail's own composition, not with this screen's.
+     * Null in previews.
+     */
+    metrics: Flow<SessionMetricsState>? = null,
     /** The display server's compositor. Null in previews and when it is Absent. */
     surface: View? = null,
 ) {
@@ -135,10 +180,18 @@ private fun SessionContent(
         RunningSurface(
             state = state,
             surface = surface,
+            pointerMode = pointerMode,
+            metrics = metrics,
+            onOpenFiles = onOpenFiles,
             onOpenLogs = onOpenLogs,
             onStop = { confirmingStop = true },
+            onTogglePointerMode = onTogglePointerMode,
+            onShowKeyboard = onShowKeyboard,
         )
     } else {
+        // The checklist stays up for every non-running phase, terminal ones
+        // included. It is the attribution — which of six steps got that far —
+        // and the outcome is layered over it rather than replacing it.
         VScaffold(
             toolbar = {
                 VPushToolbar(
@@ -149,14 +202,10 @@ private fun SessionContent(
             },
         ) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                when (state.phase) {
-                    SessionPhase.EXITED -> ExitedPane(state, onOpenLogs)
-                    SessionPhase.FAILED -> FailedPane(state, onOpenLogs, onRetry)
-                    else -> PreparingPane(state)
-                }
+                PreparingPane(state)
                 if (state.active) {
                     Row(
-                        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s17),
+                        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s11),
                         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
                     ) {
                         VButton("Cancel", { confirmingStop = true }, style = VButtonStyle.Danger)
@@ -164,6 +213,12 @@ private fun SessionContent(
                 }
             }
         }
+    }
+
+    when (state.phase) {
+        SessionPhase.FAILED -> FailedDialog(state, onOpenLogs, onRetry, onDismiss)
+        SessionPhase.EXITED -> ExitedDialog(state, onOpenLogs, onDismiss)
+        else -> Unit
     }
 
     if (confirmingStop) {
@@ -191,7 +246,10 @@ private fun SessionContent(
  */
 @Composable
 private fun PreparingPane(state: SessionState) {
-    VSectionHeader("Preparing")
+    // The header is the tense, not the phase: after a run ends this list is a
+    // record of what happened, and calling it "Preparing" under a failure dialog
+    // reads as though it were still going.
+    VSectionHeader(if (state.finished) "Progress" else "Preparing")
     state.steps.forEach { ChecklistRow(it) }
 
     // DESIGN.md: Starting shows the last log line as it goes, "because that is
@@ -219,8 +277,8 @@ private fun PreparingPane(state: SessionState) {
 @Composable
 private fun ChecklistRow(step: ProvisionStep) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s6),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s3),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
     ) {
         StepGlyph(step.status)
         Column(Modifier.weight(1f)) {
@@ -254,7 +312,10 @@ private fun ChecklistRow(step: ProvisionStep) {
  */
 @Composable
 private fun StepGlyph(status: ProvisionStatus) {
-    Box(Modifier.padding(top = 3.dp).size(GLYPH), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier.padding(top = Vessel.metrics.s3).size(GLYPH),
+        contentAlignment = Alignment.Center,
+    ) {
         when (status) {
             ProvisionStatus.DONE ->
                 Icon(Icons.Filled.Check, null, Modifier.size(GLYPH), tint = Vessel.colors.ok)
@@ -269,37 +330,43 @@ private fun StepGlyph(status: ProvisionStatus) {
             // shape at two weights, which reads as progress down the column
             // without a second animation competing with the log line below it.
             ProvisionStatus.RUNNING ->
-                Box(Modifier.size(9.dp).background(Vessel.colors.accent, CircleShape))
+                Box(Modifier.size(DOT).background(Vessel.colors.accent, CircleShape))
 
             ProvisionStatus.PENDING ->
-                Box(Modifier.size(9.dp).vRing(Vessel.colors.divider, CircleShape))
+                Box(Modifier.size(DOT).vRing(Vessel.colors.divider, CircleShape))
         }
     }
 }
 
-private val GLYPH = 18.dp
+private val GLYPH = 16.dp
+
+/** The running/pending mark: one shape at two weights, filled and ringed. */
+private val DOT = 8.dp
 
 // — Exited and Failed ----------------------------------------------------------
+//
+// Both are dialogs over the checklist, not screens. "No Wine build is installed"
+// is two lines and two buttons; given a screen of its own it is two lines, two
+// buttons and 900 px of nothing, and it hides the one thing that says how far
+// the launch got.
 
 @Composable
-private fun ExitedPane(state: SessionState, onOpenLogs: () -> Unit) {
-    VSectionHeader("Exited")
-    Text(
-        "The Windows desktop closed.",
-        style = Vessel.type.body,
+private fun ExitedDialog(state: SessionState, onOpenLogs: () -> Unit, onDismiss: () -> Unit) {
+    val code = state.exitCode ?: 0
+    VOutcomeDialog(
+        title = "The Windows desktop closed",
+        // A non-zero exit is not a Vessel failure — the guest chose it — but it
+        // is the difference between "you closed it" and "it fell over", and the
+        // dialog is the only place that distinction is ever shown.
+        tone = if (code == 0) VOutcomeTone.Neutral else VOutcomeTone.Danger,
+        detail = if (code == 0) null else "The program inside the container ended with an error.",
+        evidence = listOf("exit code $code"),
+        onDismiss = onDismiss,
+        actions = {
+            VButton("View log", onOpenLogs, style = VButtonStyle.Secondary)
+            VButton("Close", onDismiss, style = VButtonStyle.Primary)
+        },
     )
-    Text(
-        "exit code ${state.exitCode ?: 0}",
-        style = Vessel.type.mono,
-        color = Vessel.colors.textMuted,
-        modifier = Modifier.padding(top = Vessel.metrics.s6),
-    )
-    Row(
-        Modifier.padding(top = Vessel.metrics.s17),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-    ) {
-        VButton("View log", onOpenLogs, style = VButtonStyle.Secondary)
-    }
 }
 
 /**
@@ -312,54 +379,31 @@ private fun ExitedPane(state: SessionState, onOpenLogs: () -> Unit) {
  * mono, since that is what a bug report quotes.
  */
 @Composable
-private fun FailedPane(state: SessionState, onOpenLogs: () -> Unit, onRetry: () -> Unit) {
-    VSectionHeader("Failed")
-
+private fun FailedDialog(
+    state: SessionState,
+    onOpenLogs: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     val step = state.failedStep
-    Text(
-        state.diagnosis?.headline
+    VOutcomeDialog(
+        title = state.diagnosis?.headline
             ?: state.failure
             ?: step?.label?.let { "$it did not finish" }
             ?: "The session stopped.",
-        style = Vessel.type.cardTitle,
-        color = Vessel.colors.danger,
+        tone = VOutcomeTone.Danger,
+        detail = state.diagnosis?.detail,
+        evidence = listOfNotNull(
+            step?.detail?.takeIf { it != state.failure },
+            state.lastError,
+            state.exitCode?.let { "exit code $it" },
+        ),
+        onDismiss = onDismiss,
+        actions = {
+            VButton("View log", onOpenLogs, style = VButtonStyle.Secondary)
+            VButton("Retry", onRetry, style = VButtonStyle.Primary, icon = Icons.Filled.Refresh)
+        },
     )
-    state.diagnosis?.detail?.let {
-        Text(
-            it,
-            style = Vessel.type.bodySmall,
-            color = Vessel.colors.textLabel,
-            modifier = Modifier.padding(top = Vessel.metrics.s6),
-        )
-    }
-
-    val evidence = listOfNotNull(
-        step?.detail?.takeIf { it != state.failure },
-        state.lastError,
-        state.exitCode?.let { "exit code $it" },
-    )
-    if (evidence.isNotEmpty()) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(top = Vessel.metrics.s11)
-                .vCard()
-                .padding(Vessel.metrics.s11),
-            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
-        ) {
-            evidence.forEach {
-                Text(it, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
-            }
-        }
-    }
-
-    Row(
-        Modifier.padding(top = Vessel.metrics.s17),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-    ) {
-        VButton("View log", onOpenLogs, style = VButtonStyle.Secondary)
-        VButton("Retry", onRetry, style = VButtonStyle.Primary, icon = Icons.Filled.Refresh)
-    }
 }
 
 // — Running --------------------------------------------------------------------
@@ -370,13 +414,24 @@ private fun FailedPane(state: SessionState, onOpenLogs: () -> Unit, onRetry: () 
  * **A rail, not a bottom sheet.** This screen is usually landscape, where
  * vertical space is scarce and horizontal space is not, and a sheet spends the
  * scarce one.
+ *
+ * **The rail hugs.** It was `fillMaxHeight` with its content at the top, which
+ * over a portrait desktop meant a 208 dp column two thirds of which was an empty
+ * translucent slab covering the guest's own window. It is now sized by what is
+ * in it and centred against the screen's vertical middle, so the amount of the
+ * desktop it hides is the amount it needs.
  */
 @Composable
 private fun RunningSurface(
     state: SessionState,
     surface: View?,
+    pointerMode: PointerMode,
+    metrics: Flow<SessionMetricsState>?,
+    onOpenFiles: () -> Unit,
     onOpenLogs: () -> Unit,
     onStop: () -> Unit,
+    onTogglePointerMode: () -> Unit,
+    onShowKeyboard: () -> Unit,
 ) {
     var railOpen by remember { mutableStateOf(false) }
 
@@ -389,7 +444,27 @@ private fun RunningSurface(
     Box(Modifier.fillMaxSize().background(Vessel.colors.bg)) {
         SessionSurface(state, surface)
 
-        Row(Modifier.fillMaxHeight()) {
+        // **Before the rail, not after.** A Box stacks in declaration order and
+        // hit-tests from the top down, so a full-size scrim declared last covers
+        // the rail it is a scrim *for*: every button tap landed on this and
+        // closed the rail instead of firing. It looked like four dead buttons.
+        if (railOpen) {
+            // Invisible on purpose — the guest's output stays fully readable
+            // while the rail is open.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { railOpen = false },
+            )
+        }
+
+        Row(
+            Modifier.fillMaxHeight(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             AnimatedVisibility(
                 visible = railOpen,
                 enter = expandHorizontally(tween(Vessel.metrics.durationStandardMs)),
@@ -397,9 +472,12 @@ private fun RunningSurface(
             ) {
                 Column(
                     Modifier
-                        .fillMaxHeight()
+                        .width(RAIL_WIDTH)
+                        // Insets, then the margin, then the card: the rail is
+                        // centred vertically but a tall one still has to clear
+                        // the status and gesture bars at its ends.
                         .systemBarsPadding()
-                        .padding(Vessel.metrics.s8)
+                        .padding(Vessel.metrics.s6)
                         // The one place this design permits translucency: the
                         // rail sits over the guest's own output, and an opaque
                         // slab would hide the thing it is a control for.
@@ -407,16 +485,27 @@ private fun RunningSurface(
                             fill = Vessel.colors.surface.copy(alpha = 0.92f),
                             elevation = VElev.md,
                         )
-                        .padding(Vessel.metrics.s6),
-                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+                        .padding(Vessel.metrics.s8),
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
                 ) {
-                    VIconAction(Icons.AutoMirrored.Filled.List, "Session log", onOpenLogs)
-                    VIconAction(Icons.Filled.Close, "Stop the session", onStop, style = VButtonStyle.Danger)
-                    // Metrics, keyboard and input mode belong here per DESIGN.md
-                    // and are deliberately absent: each needs the display server
-                    // to have something to act on, and a metric strip with no
-                    // sampler behind it would be a made-up number on the one
-                    // screen where numbers are the product.
+                    // Composed only while the rail is open, which is the whole
+                    // contract: the sampler watches its own subscriber count and
+                    // drops back to a tenth of the rate when nothing is looking.
+                    // Collecting this at screen level instead would sample at
+                    // 1 Hz for the entire session to draw a panel nobody opened.
+                    if (metrics != null) {
+                        val sample by metrics.collectAsStateWithLifecycle(initialValue = null)
+                        SessionMetricsRail(sample)
+                        VRule(verticalMargin = 0.dp)
+                    }
+                    RailActions(
+                        pointerMode = pointerMode,
+                        onTogglePointerMode = onTogglePointerMode,
+                        onShowKeyboard = onShowKeyboard,
+                        onOpenFiles = onOpenFiles,
+                        onOpenLogs = onOpenLogs,
+                        onStop = onStop,
+                    )
                 }
             }
 
@@ -439,17 +528,84 @@ private fun RunningSurface(
                 }
             }
         }
+    }
+}
 
-        if (railOpen) {
-            // Anywhere else closes it, and the scrim is invisible: the guest's
-            // output stays fully readable while the rail is open.
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) { railOpen = false },
+/**
+ * The rail's four controls, as a 2×2 block.
+ *
+ * A vertical stack of four is 4 × 44 dp plus its gaps — 200 dp of column for
+ * four glyphs, which is what made the rail a full-height slab in the first
+ * place. Two rows of two is 94 dp and reads as one control group rather than as
+ * a list of unrelated boxes.
+ *
+ * Stop keeps the bottom-right corner, diagonally opposite the pointer toggle
+ * that gets used most: the destructive action should not be the neighbour of the
+ * one a thumb reaches for by habit.
+ */
+@Composable
+private fun RailActions(
+    pointerMode: PointerMode,
+    onTogglePointerMode: () -> Unit,
+    onShowKeyboard: () -> Unit,
+    onOpenFiles: () -> Unit,
+    onOpenLogs: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val gap = Arrangement.spacedBy(Vessel.metrics.s6)
+    Column(verticalArrangement = gap) {
+        Row(horizontalArrangement = gap) {
+            // The pointer mode's icon is the mode it will switch *to*, and the
+            // description says which that is — an icon alone on a two-state
+            // control is a coin toss, and getting it wrong here means the cursor
+            // stops behaving mid-game.
+            VIconAction(
+                icon = if (pointerMode == PointerMode.TRACKPAD) {
+                    VIcons.TouchApp
+                } else {
+                    VIcons.Mouse
+                },
+                contentDescription = if (pointerMode == PointerMode.TRACKPAD) {
+                    "Switch to direct touch — the cursor goes where you touch"
+                } else {
+                    "Switch to trackpad — drag to push the cursor"
+                },
+                onClick = onTogglePointerMode,
+                size = Vessel.metrics.touchTarget,
+            )
+            VIconAction(
+                VIcons.Keyboard,
+                "Keyboard",
+                onShowKeyboard,
+                size = Vessel.metrics.touchTarget,
+            )
+        }
+        Row(horizontalArrangement = gap) {
+            VIconAction(
+                VIcons.Folder,
+                "Open the file manager on C:",
+                onOpenFiles,
+                size = Vessel.metrics.touchTarget,
+            )
+            VIconAction(
+                Icons.AutoMirrored.Filled.List,
+                "Session log",
+                onOpenLogs,
+                size = Vessel.metrics.touchTarget,
+            )
+        }
+        // Stop on a row of its own, still bottom-right. A fifth control made the
+        // 2×2 an odd number, and of the two ways to break the grid — crowding
+        // Stop next to a new neighbour, or giving it its own line — separating
+        // the destructive action is the one worth having.
+        Row(horizontalArrangement = gap) {
+            Spacer(Modifier.size(Vessel.metrics.touchTarget))
+            VIconAction(
+                Icons.Filled.Close,
+                "Stop the session",
+                onStop,
+                style = VButtonStyle.Danger,
+                size = Vessel.metrics.touchTarget,
             )
         }
     }
@@ -493,7 +649,7 @@ private fun SessionSurface(state: SessionState, surface: View?) {
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(
-            Modifier.padding(Vessel.metrics.s22),
+            Modifier.padding(Vessel.metrics.s22).widthIn(max = Vessel.metrics.dialogMaxWidth),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         ) {
@@ -513,6 +669,21 @@ private fun SessionSurface(state: SessionState, surface: View?) {
 
 private val HANDLE = 4.dp
 private val HANDLE_TOUCH = 20.dp
+
+/**
+ * The rail's outer width, margins included.
+ *
+ * Fixed rather than intrinsic, because the content is live: sized to the widest
+ * thing in it, the rail would breathe in and out by a few pixels every second as
+ * the digits changed, over a desktop somebody is trying to read.
+ *
+ * The number is the metrics grid — two [app.vessel.ui.components.VMetricGrid]
+ * cells at 62 dp with an 8 dp gutter — plus the card's padding and the 6 dp
+ * margin. The action block is 94 dp and fits inside it with room. It replaces a
+ * 208 dp *inner* width, which came out at 230 dp on screen: the rail was over
+ * half the width of a portrait phone to show four numbers.
+ */
+private val RAIL_WIDTH = 162.dp
 
 private fun phaseLabel(phase: SessionPhase): String = when (phase) {
     SessionPhase.IDLE -> "idle"

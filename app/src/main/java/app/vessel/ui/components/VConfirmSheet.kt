@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -51,7 +52,14 @@ fun VConfirmSheet(
         // than this product's gutter and wraps a two-line message to four.
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Box(Modifier.padding(horizontal = Vessel.metrics.screenGutter)) {
+        // Capped as well as gutter-padded. `usePlatformDefaultWidth = false`
+        // hands the dialog the whole window, which in landscape on this phone
+        // is 927 dp — a two-line message set across a metre of card.
+        Box(
+            Modifier
+                .padding(horizontal = Vessel.metrics.screenGutter)
+                .widthIn(max = Vessel.metrics.dialogMaxWidth),
+        ) {
             val shape = Vessel.metrics.shapeLg
             Column(
                 Modifier
@@ -59,7 +67,7 @@ fun VConfirmSheet(
                     .vElevation(VElev.lg, shape)
                     .background(Vessel.colors.surface, shape)
                     .vRing(VElev.lg.ring, shape)
-                    .padding(Vessel.metrics.s22),
+                    .padding(Vessel.metrics.s17),
                 verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
             ) {
                 Text(title, style = Vessel.type.subtitle)

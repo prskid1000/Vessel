@@ -42,18 +42,29 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
+import app.vessel.ui.theme.vContentColumn
 import app.vessel.ui.theme.vElevation
 import app.vessel.ui.theme.vRing
 import app.vessel.ui.theme.vRuleAbove
 import app.vessel.ui.theme.vRuleBelow
 
-/** The frame every screen sits in. */
+/**
+ * The frame every screen sits in.
+ *
+ * The three slots share one centred column: `horizontalAlignment` here plus
+ * [vContentColumn] on the toolbar and the content is what keeps a landscape
+ * window from stretching a list row across 927 dp. The bars are still handed the
+ * full width so their ground and their hairline reach both edges — only what is
+ * *in* them is capped, which is why each toolbar applies the modifier itself
+ * rather than being wrapped in it here.
+ */
 @Composable
 fun VScaffold(
     modifier: Modifier = Modifier,
@@ -70,10 +81,11 @@ fun VScaffold(
             // The activity is edge-to-edge, so the window is not resized when
             // the keyboard opens and `adjustResize` counts for nothing.
             .imePadding(),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         toolbar?.invoke()
         Column(
-            Modifier.weight(1f).fillMaxWidth().padding(contentPadding),
+            Modifier.weight(1f).vContentColumn().padding(contentPadding),
             content = content,
         )
         bottomBar?.invoke()
@@ -90,12 +102,12 @@ fun VRootToolbar(
 ) {
     Row(
         modifier
-            .fillMaxWidth()
+            .vContentColumn()
             .padding(
                 start = Vessel.metrics.screenGutter,
-                end = Vessel.metrics.screenGutter,
-                top = Vessel.metrics.s11,
-                bottom = Vessel.metrics.s11,
+                end = Vessel.metrics.s6,
+                top = Vessel.metrics.s8,
+                bottom = Vessel.metrics.s8,
             ),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
         verticalAlignment = Alignment.CenterVertically,
@@ -121,19 +133,23 @@ fun VPushToolbar(
 ) {
     Row(
         modifier
-            .fillMaxWidth()
+            .vContentColumn()
             .vRuleBelow(Vessel.colors.divider)
             .padding(
-                start = Vessel.metrics.s8,
-                end = Vessel.metrics.screenGutter,
-                top = Vessel.metrics.s11,
-                bottom = Vessel.metrics.s11,
+                // No start padding, and it is not an oversight: the back glyph
+                // is centred in a 44 dp touch box, so 13 dp of that box is
+                // already inside the button. Adding the 11 dp gutter on top puts
+                // the arrow 13 dp right of the content column it heads.
+                start = 0.dp,
+                end = Vessel.metrics.s6,
+                top = Vessel.metrics.s6,
+                bottom = Vessel.metrics.s6,
             ),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         VIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", onBack)
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).padding(start = Vessel.metrics.s3)) {
             Text(title, style = Vessel.type.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle != null) {
                 Text(
@@ -165,7 +181,7 @@ fun VBottomNav(
     modifier: Modifier = Modifier,
     onSelect: (VNavDestination) -> Unit,
 ) {
-    Row(
+    Box(
         modifier
             .fillMaxWidth()
             // Fill first, rule second: `drawBehind` paints before it delegates,
@@ -173,24 +189,30 @@ fun VBottomNav(
             .background(Vessel.colors.bg)
             .vRuleAbove(Vessel.colors.divider)
             .padding(
-                top = Vessel.metrics.s8,
-                bottom = Vessel.metrics.s11 +
+                top = Vessel.metrics.s6,
+                bottom = Vessel.metrics.s6 +
                     WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
             ),
+        contentAlignment = Alignment.Center,
     ) {
-        destinations.forEach { destination ->
-            val selected = currentRoute == destination.route
-            val tint = if (selected) Vessel.colors.accent else Vessel.colors.textMuted
-            Column(
-                Modifier
-                    .weight(1f)
-                    .clickable { onSelect(destination) }
-                    .padding(vertical = Vessel.metrics.s3),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                Icon(destination.icon, null, Modifier.size(20.dp), tint = tint)
-                Text(destination.label, style = Vessel.type.label, color = tint)
+        // The ground spans the window; the destinations do not. Two tabs spread
+        // across a 927 dp landscape window put "Containers" and "Apps" a hand's
+        // width apart with nothing between them.
+        Row(Modifier.vContentColumn()) {
+            destinations.forEach { destination ->
+                val selected = currentRoute == destination.route
+                val tint = if (selected) Vessel.colors.accent else Vessel.colors.textMuted
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clickable { onSelect(destination) }
+                        .padding(vertical = Vessel.metrics.s6),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+                ) {
+                    Icon(destination.icon, null, Modifier.size(Vessel.metrics.iconMd), tint = tint)
+                    Text(destination.label, style = Vessel.type.label, color = tint)
+                }
             }
         }
     }
@@ -237,7 +259,7 @@ fun VButton(
 
     Row(
         modifier
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minHeight = Vessel.metrics.controlHeight)
             .background(fill, shape)
             .border(Vessel.metrics.hairline, stroke.copy(alpha = stroke.alpha * alpha), shape)
             .clickable(
@@ -252,11 +274,14 @@ fun VButton(
                 horizontal = if (style == VButtonStyle.Ghost) Vessel.metrics.s8 else Vessel.metrics.s11,
                 vertical = Vessel.metrics.s6,
             ),
-        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+        horizontalArrangement = Arrangement.spacedBy(
+            Vessel.metrics.s6,
+            Alignment.CenterHorizontally,
+        ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val tinted = content.copy(alpha = alpha)
-        if (icon != null) Icon(icon, null, Modifier.size(16.dp), tint = tinted)
+        if (icon != null) Icon(icon, null, Modifier.size(Vessel.metrics.iconSm), tint = tinted)
         Text(label, style = Vessel.type.control, color = tinted, maxLines = 1)
     }
 }
@@ -326,6 +351,13 @@ fun VIconAction(
     modifier: Modifier = Modifier,
     style: VButtonStyle = VButtonStyle.Secondary,
     enabled: Boolean = true,
+    /**
+     * The box, which is also the touch target — so it never goes below
+     * `touchTarget`. The session rail passes the floor; a card passes the
+     * smaller [VMetrics.iconButton], which is the size that lets a container
+     * tile be a list row rather than a slab.
+     */
+    size: Dp = Vessel.metrics.iconButton,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -336,7 +368,7 @@ fun VIconAction(
 
     Box(
         modifier
-            .size(Vessel.metrics.touchTarget)
+            .size(size)
             .background(buttonFill(style, enabled, pressed, hovered), shape)
             .border(
                 Vessel.metrics.hairline,
@@ -355,13 +387,19 @@ fun VIconAction(
         Icon(
             icon,
             contentDescription,
-            Modifier.size(20.dp),
+            Modifier.size(Vessel.metrics.iconMd),
             tint = buttonContent(style).copy(alpha = alpha),
         )
     }
 }
 
-/** A square icon action, at the touch-target floor. */
+/**
+ * A bare icon action — no ring, no ground.
+ *
+ * The glyph is [VMetrics.iconMd] and the box stays at the touch floor around it.
+ * Shrinking the *target* with the glyph is the usual way a compact toolbar
+ * becomes unusable, and it is not a trade this pass makes anywhere.
+ */
 @Composable
 fun VIconButton(
     icon: ImageVector,
@@ -374,7 +412,7 @@ fun VIconButton(
         modifier.size(Vessel.metrics.touchTarget).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription, Modifier.size(20.dp), tint = tint)
+        Icon(icon, contentDescription, Modifier.size(Vessel.metrics.iconMd), tint = tint)
     }
 }
 
@@ -483,6 +521,6 @@ fun VSectionHeader(text: String, modifier: Modifier = Modifier) {
         text.uppercase(),
         style = Vessel.type.overline,
         color = Vessel.colors.textMuted,
-        modifier = modifier.padding(top = Vessel.metrics.s17, bottom = Vessel.metrics.s8),
+        modifier = modifier.padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s6),
     )
 }

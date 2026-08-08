@@ -88,34 +88,64 @@ Telemetry graphs run `accent` → `accent2` for load ramps and switch to
 ## Typography
 
 Inter, per Nocturne. Note the heading weight is **500** — not 600 or 700.
-Headings carry `-0.015em` tracking and a 1.12 line height.
+Headings carry `-0.015em` tracking.
 
-| Role | Family | Size / line |
-|---|---|---|
-| `display` | Inter 500, tracking −0.015em | 32 / 36 |
-| `title` | Inter 500, tracking −0.015em | 25 / 28 |
-| `subtitle` | Inter 500 | 20 / 24 |
-| `cardTitle` | Inter 500 | 17 / 20 |
-| `body` | Inter 400 | 15 / 23 |
-| `bodySmall` | Inter 400 | 13 / 19 |
-| `label` | Inter 400 | 12 / 16 |
-| `overline` | Inter 400, uppercase, tracking 0.08em | 11 / 14 |
-| `mono` | JetBrains Mono 400, tabular | 13 / 18 |
-| `monoSmall` | JetBrains Mono 400, tabular | 11 / 15 |
-| `metric` | JetBrains Mono 500, tabular | 22 / 26 |
+**The scale is the reference app's, not the stylesheet's.** `styles.css` is a
+desktop sheet; the sizes below are the ones `On Device AI` ships on a phone
+(`ui/theme/NocturneType.kt`), one step down from the CSS throughout. Transcribing
+the CSS directly — 25 sp screen titles, a 17 sp card title, a 22 sp metric — put
+this product on a 480 dpi phone looking like a consumer app with the
+accessibility text size turned up: a container tile 78 dp tall to hold one word,
+and four readings that could not fit across a rail. Two products in one family
+should not disagree about how big a card title is.
+
+| Role | Family | Size / line | Where |
+|---|---|---|---|
+| `display` | Inter 500, tracking −0.015em | 26 / 30 | unused on phone |
+| `title` | Inter 500, tracking −0.015em | 21 / 25 | root destination header |
+| `subtitle` | Inter 500 | 17 / 21 | pushed toolbar, dialog title |
+| `cardTitle` | Inter 500 | 14 / 18 | card and tile titles |
+| `body` | Inter 400 | 13.5 / 19 | param titles, list rows, fields |
+| `bodySmall` | Inter 400 | 12 / 17 | the help sentence under a control |
+| `label` | Inter 400 | 11 / 14 | field labels, bottom-nav labels |
+| `overline` | Inter 400, uppercase, tracking 0.08em | 10 / 13 | section kickers |
+| `control` | Inter 500 | 12.5 / 16 | buttons and inputs, so they align |
+| `mono` | JetBrains Mono 400, tabular | 11.5 / 16 | versions, flags, hashes, paths |
+| `monoSmall` | JetBrains Mono 400, tabular | 10 / 14 | log lines, captions, legends |
+| `metric` | JetBrains Mono 500, tabular | 17 / 20 | a live number with room around it |
+| `metricSmall` | JetBrains Mono 500, tabular | 13 / 16 | a live number in the rail |
 
 Both ship as bundled variable fonts so the product is identical across devices.
-`metric` is for live numbers — FPS, frame time, memory — where tabular figures
-stop digits jittering as values change.
+The two `metric` steps are for live numbers — FPS, frame time, memory — where
+tabular figures stop digits jittering as values change. **A readout never
+wraps**: every one of these is a single token, and `573 MB` broken over three
+lines does not read as a shortened number, it reads as `57`.
 
 ## Metrics and motion
 
 - Radius: `sm` 4, `md` 8, `lg` 14 (Nocturne's scale — tighter than Material's)
 - Spacing, from Nocturne's 2.8 dp base: 3, 6, 8, 11, 17, 22
+- Controls: every field, dropdown, stepper and text button is **36 dp** tall, so
+  a button beside an input is exactly as tall as it. A bare icon action keeps the
+  44 dp touch floor: compact never shrinks a target, only the box around a glyph.
 - **Elevation is a hairline ring, not a shadow.** `elevSm` = 1 dp
   `neutral-800`; `elevMd` = 1 dp `neutral-700` plus ambient darkness
 - Cards: `surface` ground, `md` radius, ring only when raised
 - Motion: 150 ms standard easing; 250 ms for sheets; no springs
+
+### Landscape, and the one rule that handles it
+
+This phone is 421 dp across in portrait and **927 dp in landscape**. Every layout
+here is designed at phone width and is correct there; left to fill, the same
+layouts stretch a session row until its status tag is 800 dp from its timestamp,
+and set a centred empty-state sentence on one unreadable 900 dp line.
+
+So: **content lives in a column capped at 560 dp and centred**, and that is the
+whole adaptation — no landscape-only layouts, no breakpoint tree. Dialogs cap
+tighter, at 420 dp. Bars are the exception in one direction only: a bottom nav's
+ground and hairline run edge to edge while its destinations sit inside the same
+capped column, so the bar reads as structure and its contents line up with the
+list above them.
 
 Two Nocturne signatures that are easy to get wrong:
 
@@ -135,10 +165,11 @@ solid.
 | `VScaffold` | Root/push toolbars, bottom nav, sheet host |
 | `VArchBadge` | Mono pill: `ARM64` / `x64` / `x86`, architecture palette |
 | `VEngineChip` | `FEX 2608` — mono; the build actually loaded |
-| `VContainerCard` | Container tile: name, Wine, driver, D3D layer, last run, launch |
+| `VContainerCard` | Container tile: name, last run, launch — two lines, not a slab |
 | `VAppTile` | Windows app: icon, name, arch badge, container |
 | `VParamRow` | One setting from the manifest: label, description, control |
-| `VMetricStrip` | Live FPS / frametime / CPU / GPU / thermal, `metric` type |
+| `VMetricStrip` | The wide readout: a row of live values on a raised card |
+| `VMetricGrid` | The narrow readout: the same values in fixed columns, for the rail |
 | `VSparkline` | Compact frametime history |
 | `VProgressCard` | Download/build/install progress with speed and ETA |
 | `VEmptyState` | Icon, one sentence, one action |
@@ -167,6 +198,15 @@ engine, GPU driver, resolution, frame-rate limit; everything else sits behind a
 single "Show advanced" disclosure. The whole surface is rendered by `VParamRow`
 from `assets/params-manifest.json`, so adding a knob is a data change and never
 a UI one.
+
+`VParamRow`'s right-hand value column exists so the whole configuration can be
+read down one edge without touching a control — and it prints **only what the
+control cannot show itself**. An enum's own field already carries its label, so
+printing it again gave every dropdown on the screen `Resolution  1280 x 720
+(720p)` with `1280 x 720 (720p)` in the box directly beneath it. What is left is
+an integer (whose control is a slider with no number on it) and a component
+(whose field shows the resolved build while the column shows the selector that
+resolved it).
 
 ### Session, in detail
 
@@ -213,8 +253,28 @@ only. Nothing is drawn over the desktop except on request.
 from the left edge, collapsed to a 4 dp handle. A bottom sheet is the obvious
 choice and the wrong one: this screen is usually landscape, where vertical space
 is scarce and horizontal space is not. The rail carries icon buttons only —
-keyboard, input mode, metrics, logs, stop — on a translucent `surface`, the sole
-place the design permits translucency.
+keyboard, input mode, logs, stop — on a translucent `surface`, the sole place the
+design permits translucency.
+
+**The rail hugs, and it is one card.** 162 dp wide, sized by its content, and
+centred against the screen's vertical middle. Three rules, each of which the
+first build broke:
+
+- *Nothing is `fillMaxHeight`.* A rail pinned to the full height with its content
+  at the top is two thirds empty translucent slab over the guest's own window —
+  which is not a control, it is an obstruction.
+- *The readings are a fixed two-column grid, never weighted cells.* Four
+  `weight(1f)` columns inside the rail give each reading 37 dp, and no memory
+  figure fits in 37 dp at any size worth reading. See the wrapping rule under
+  Typography: this is the layout that has to make it true.
+- *The buttons are a 2×2 block, not a stack.* Four stacked 44 dp actions are
+  200 dp of column for four glyphs, and they were what made the rail
+  full-height in the first place. Stop takes the corner diagonally opposite the
+  pointer toggle, so the destructive action is not the neighbour of the one a
+  thumb reaches for by habit.
+
+One card holds all of it. Nesting a readout card inside the rail card draws a
+ringed box inside a ringed box, 8 dp apart, over a running desktop.
 
 **The auxiliary key bar.** Android's IME has no `Esc`, `Tab`, `Ctrl`, function
 keys or arrows, and a Windows application is unusable without them. A compact

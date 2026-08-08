@@ -110,12 +110,19 @@ private fun ContainersContent(
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = Vessel.metrics.s22),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+                contentPadding = PaddingValues(
+                    top = Vessel.metrics.s3,
+                    bottom = Vessel.metrics.s22,
+                ),
+                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
             ) {
                 items(state.rows, key = { it.profile.id }) { row ->
                     VContainerCard(
                         container = row.profile,
+                        // The view model has computed this since the row type
+                        // existed and nothing drew it, which is why the tile had
+                        // one word on it and 60 dp of nothing under the word.
+                        meta = row.lastRunLabel,
                         onOpen = { onOpenContainer(row.profile.id) },
                         onLaunch = { onLaunch(row.profile.id) },
                         onLongPress = { pendingDelete = row },
