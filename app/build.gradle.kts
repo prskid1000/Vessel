@@ -32,11 +32,29 @@ android {
         // else — no strings.xml to keep in step.
         resValue("string", "app_name", productName)
 
-        // libwinlator: the JNI half of the vendored X server (epoll connector,
-        // wire-format streams, software blitter, AHardwareBuffer import). See
-        // app/src/main/java/com/winlator/README.md.
+        // Three native libraries ship in the APK:
+        //   libwinlator   the JNI half of the vendored X server (epoll connector,
+        //                 wire-format streams, software blitter, AHardwareBuffer
+        //                 import) — app/src/main/java/com/winlator/README.md
+        //   libadrenotools + its hook objects, which is what lets a Vulkan driver
+        //                 in app storage be loaded at all —
+        //                 app/src/main/cpp/adrenotools/README.md
+        //   libvesselgpu  the Vulkan driver probe behind GpuProbe
+        //
+        // ANDROID_STL was `none` while libwinlator was the only one and was pure
+        // C. c++_shared now, and specifically *shared* rather than static, for
+        // two reasons that are both runtime correctness rather than size:
+        //
+        //  - libadrenotools hands libhook_impl a struct containing std::strings
+        //    across an .so boundary, so the two have to share one libc++.
+        //  - libadrenotools makes nativeLibraryDir the default library path of
+        //    the linker namespace it loads the GPU driver into, and Turnip's
+        //    NEEDED list contains libc++_shared.so. With c++_static there is no
+        //    such file in that directory, the driver dlopen fails, and the stock
+        //    Qualcomm driver answers instead — silently, which is the exact
+        //    failure this whole path exists to end.
         externalNativeBuild {
-            cmake { arguments += "-DANDROID_STL=none" }
+            cmake { arguments += "-DANDROID_STL=c++_shared" }
         }
     }
 
@@ -136,6 +154,21 @@ android {
     }
     packaging {
         resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}")
+
+        // REQUIRED by libadrenotools, and it is not a preference.
+        //
+        // With `false` (AGP's default for release since 4.2) the .so files stay
+        // compressed inside the APK and are mapped from it directly, so
+        // `applicationInfo.nativeLibraryDir` names a directory that does not
+        // exist on disk. libadrenotools loads libmain_hook.so and libhook_impl.so
+        // from that path by name, and makes it the default library path of the
+        // namespace it loads the GPU driver into. Both fail, and the failure mode
+        // is the stock Vulkan driver quietly answering — upstream's own header
+        // calls this out in capitals.
+        //
+        // Cost: a larger install footprint, and no page-sharing with the APK for
+        // these libraries. Against a 912 MB Wine tree it does not register.
+        jniLibs.useLegacyPackaging = true
     }
 }
 

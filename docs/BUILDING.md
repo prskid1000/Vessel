@@ -124,13 +124,27 @@ JAVA_HOME=/c/'Program Files'/Android/'Android Studio'/jbr ./gradlew :app:assembl
 create it (or open the project once in Android Studio). Requires platform
 android-36 and build-tools 36.
 
-The app also builds native code now — `libwinlator`, the JNI half of the
-vendored X server, from `app/src/main/cpp/`. That means the Gradle build needs
-the NDK pinned in `app/build.gradle.kts` (**27.0.12077973**) and CMake 3.22.1;
-Gradle downloads both if the SDK does not have them, which costs a few minutes
-once. Unlike the component scripts, this NDK is not the same knob as
-`TARGET_NDK_API` above — that one governs the `.wcp` payloads, this one only
-the ~2.9k lines of C inside the APK.
+The app also builds native code, from `app/src/main/cpp/`:
+
+| Library | What | Source |
+|---|---|---|
+| `libwinlator` | the JNI half of the vendored X server | `cpp/winlator/` |
+| `libadrenotools` + `libmain_hook` / `libhook_impl` / `libfile_redirect_hook` / `libgsl_alloc_hook` | loading a Vulkan driver out of app storage | `cpp/adrenotools/`, vendored |
+| `libvesselgpu` | the Vulkan driver probe behind `GpuProbe` | `cpp/vessel/` |
+
+That means the Gradle build needs the NDK pinned in `app/build.gradle.kts`
+(**27.0.12077973**) and CMake 3.22.1; Gradle downloads both if the SDK does not
+have them, which costs a few minutes once. Unlike the component scripts, this NDK
+is not the same knob as `TARGET_NDK_API` above — that one governs the `.wcp`
+payloads, this one only the C inside the APK.
+
+**Two packaging settings in `app/build.gradle.kts` are load-bearing rather than
+preferences**, and both fail silently if changed: `ANDROID_STL=c++_shared` and
+`packaging { jniLibs.useLegacyPackaging = true }`. The reasoning is in
+`app/src/main/cpp/adrenotools/README.md`; the short version is that
+libadrenotools finds its hook objects by name in `applicationInfo.nativeLibraryDir`,
+which only names a real directory under legacy packaging, and the GPU driver's
+own `libc++_shared.so` is resolved out of that same directory.
 
 ## Verifying on device
 
@@ -143,6 +157,21 @@ Then install the package from the Components screen (Settings ▸ Components). A
 component built for the wrong architecture fails silently at load time in most
 Winlator-family apps — Vessel's driver and component screens read back what
 actually loaded, so check there rather than assuming.
+
+### Which Vulkan driver actually answered
+
+The one check worth running after any change to the graphics stack:
+
+```bash
+./tools/device-vulkan.sh
+```
+
+It builds the probe and libadrenotools in the container, pushes them into the
+app's sandbox, and runs them **as a plain process through the system linker** —
+the same shape the Wine unix side runs in, which an in-app probe is not. It
+prints the driver string before and after, and exits non-zero unless
+`VK_DRIVER_ID_MESA_TURNIP` is what replied. "The package installed" is not
+evidence of anything; this is.
 
 ### Checking a component without the app
 

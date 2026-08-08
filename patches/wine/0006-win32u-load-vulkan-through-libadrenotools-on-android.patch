@@ -1,0 +1,166 @@
+win32u: load the Vulkan loader through libadrenotools on Android.
+
+win32u opens the host Vulkan implementation with dlopen(SONAME_LIBVULKAN) and
+uses whatever answers. On Android that is always the vendor driver, and nothing
+can change it afterwards: the platform loader resolves its driver from a
+hardware module (ro.hardware.vulkan -> /vendor/lib64/hw/vulkan.*.so) through
+android_dlopen_ext, in a linker namespace an application cannot reach.
+
+A Mesa/Turnip build for the same GPU is therefore inert wherever it is
+installed. It is not an ICD: libvulkan_freedreno.so exports exactly one symbol,
+HMI, which is the Android Vulkan HAL module structure, so nothing but the
+platform loader can load it at all. Measured on an Adreno 829 with the driver
+present and installed, Vulkan still answered
+
+    driverID 8  "Qualcomm Technologies Inc. Adreno Vulkan Driver"  api 1.4.295
+
+libadrenotools (BSD-2-Clause, https://github.com/bylaws/libadrenotools) is the
+mechanism the Android community uses for this. It loads a private, soname-
+patched copy of the platform loader into a linker namespace with an
+android_dlopen_ext interposer preloaded in front of it, so the HAL that loader
+picks up is a driver in application storage. It is dlopen'ed by name rather than
+linked, because it ships inside the host APK and Wine has no build-time
+relationship with it.
+
+Three environment variables drive it, all three or none; with none of them set
+this is a no-op and the ordinary dlopen path runs unchanged:
+
+    ADRENOTOOLS_HOOKS_PATH   the APK's nativeLibraryDir, holding
+                             libadrenotools.so and the hook objects
+    ADRENOTOOLS_DRIVER_PATH  directory holding the driver .so, which must be
+                             app-private storage or dlopen will refuse it
+    ADRENOTOOLS_DRIVER_NAME  e.g. libvulkan_freedreno.so
+
+Every outcome goes to the winediag channel, success included. That is deliberate
+rather than noisy: each failure along this path otherwise ends with the stock
+driver answering, which is indistinguishable from working, and has already cost
+this project one whole driver bring-up.
+
+The load has to happen before the plain dlopen rather than as a fallback after
+it. Once the platform loader is in the process it has already bound its driver,
+and a second attempt cannot change which one answered.
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 1bb4735587f..fca77abb721 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -25,6 +25,9 @@
+ #include "config.h"
+ 
+ #include <dlfcn.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <pthread.h>
+ #include <unistd.h>
+ 
+@@ -33,6 +36,7 @@
+ #include "ntuser_private.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
++WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
+ static PFN_vkGetDeviceProcAddr p_vkGetDeviceProcAddr;
+ static PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr;
+@@ -3054,6 +3058,85 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
+     .p_map_device_extensions = lazydrv_map_device_extensions,
+ };
+ 
++#ifdef __ANDROID__
++
++/* adrenotools/priv.h: ADRENOTOOLS_DRIVER_CUSTOM. Spelled out rather than
++ * included, because libadrenotools is a runtime dependency of the host
++ * application and not a build dependency of Wine. */
++#define ADRENOTOOLS_DRIVER_CUSTOM 0x1
++
++typedef void *(*pfn_adrenotools_open_libvulkan)( int, int, const char *, const char *,
++                                                 const char *, const char *, const char *,
++                                                 void ** );
++
++/***********************************************************************
++ *           load_libvulkan_adrenotools
++ *
++ * Load the platform Vulkan loader with an application-supplied driver behind
++ * it. NULL means "use the ordinary dlopen", and the reason has already been
++ * reported by the time it is returned.
++ */
++static void *load_libvulkan_adrenotools(void)
++{
++    const char *hooks = getenv( "ADRENOTOOLS_HOOKS_PATH" );
++    const char *driver_dir = getenv( "ADRENOTOOLS_DRIVER_PATH" );
++    const char *driver_name = getenv( "ADRENOTOOLS_DRIVER_NAME" );
++    pfn_adrenotools_open_libvulkan open_libvulkan;
++    void *libadrenotools, *handle;
++    char path[1024];
++
++    /* All three or none. A partial set is a host-application bug and is worth
++     * saying so, because the symptom is otherwise "the driver you installed did
++     * nothing at all". */
++    if (!hooks && !driver_dir && !driver_name) return NULL;
++    if (!hooks || !driver_dir || !driver_name)
++    {
++        ERR_(winediag)( "Incomplete ADRENOTOOLS_* environment (hooks=%s driver=%s name=%s); "
++                        "using the system Vulkan driver.\n", debugstr_a(hooks),
++                        debugstr_a(driver_dir), debugstr_a(driver_name) );
++        return NULL;
++    }
++
++    /* The trailing separator on the driver directory is the caller's job --
++     * libadrenotools concatenates directory and name without one -- but the hook
++     * path is ours to complete. */
++    snprintf( path, sizeof(path), "%s%slibadrenotools.so", hooks,
++              hooks[0] && hooks[strlen( hooks ) - 1] == '/' ? "" : "/" );
++
++    if (!(libadrenotools = dlopen( path, RTLD_NOW )))
++    {
++        ERR_(winediag)( "Cannot load %s (%s); using the system Vulkan driver.\n",
++                        path, dlerror() );
++        return NULL;
++    }
++
++    if (!(open_libvulkan = dlsym( libadrenotools, "adrenotools_open_libvulkan" )))
++    {
++        ERR_(winediag)( "%s exports no adrenotools_open_libvulkan; using the system "
++                        "Vulkan driver.\n", path );
++        return NULL;
++    }
++
++    /* tmpLibDir NULL: memfd is used on API 29 and above, which every device this
++     * runs on is. fileRedirectDir and userMappingHandle belong to features not
++     * requested here, and libadrenotools rejects the call outright if either is
++     * passed without its feature flag. */
++    if (!(handle = open_libvulkan( RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, NULL, hooks,
++                                   driver_dir, driver_name, NULL, NULL )))
++    {
++        ERR_(winediag)( "libadrenotools could not load %s%s; using the system Vulkan "
++                        "driver. Either the driver is not there, or the linker namespace "
++                        "bypass does not work on this Android build.\n",
++                        driver_dir, driver_name );
++        return NULL;
++    }
++
++    ERR_(winediag)( "Vulkan: loaded %s%s through libadrenotools.\n", driver_dir, driver_name );
++    return handle;
++}
++
++#endif /* __ANDROID__ */
++
+ static void vulkan_init_once(void)
+ {
+     struct vulkan_instance_extensions extensions = {0};
+@@ -3061,8 +3144,14 @@ static void vulkan_init_once(void)
+     uint32_t count = 0;
+     VkResult res;
+ 
++#ifdef __ANDROID__
++    /* Ahead of the plain dlopen, not after it: once the platform loader is in
++     * the process it has already bound its driver, and a second attempt cannot
++     * change which one answered. */
++    vulkan_handle = load_libvulkan_adrenotools();
++#endif
+ #ifdef SONAME_LIBVULKAN
+-    vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW );
++    if (!vulkan_handle) vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW );
+     if (!vulkan_handle) ERR( "Failed to load %s\n", SONAME_LIBVULKAN );
+ #else
+     ERR( "Wine was built without Vulkan support.\n" );

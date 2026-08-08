@@ -13,10 +13,20 @@ It was a forced move rather than a preference. The Winlator X server is vendored
 into the APK (below), so the app itself contains LGPL-2.1 code and its own terms
 have to be LGPL-compatible.
 
-**"or later" is load-bearing.** `libadrenotools` is LGPL-3.0, and LGPL-2.1
-*only* cannot be combined with it — the "or any later version" clause is what
-permits that. Picking bare LGPL-2.1 would have quietly excluded a component this
-project expects to link.
+**"or later" was chosen partly on a wrong premise, and the choice still stands.**
+This paragraph used to say that `libadrenotools` is LGPL-3.0 and that "or later"
+was what permitted combining with it. **libadrenotools is BSD-2-Clause** —
+checked at the vendored commit on 2026-08-08, both the top-level `LICENSE` and
+`lib/linkernsbypass/LICENSE`, and every source file carries
+`SPDX-License-Identifier: BSD-2-Clause`. It is permissive and imposes no
+constraint on Vessel's licence at all. The claim appears to have been copied from
+somewhere without being read.
+
+The decision does not change: LGPL-2.1-**or-later** is still right, because the
+vendored Winlator X server forces LGPL compatibility and "or later" keeps the
+door open to future GPL-3-family components. But it was not forced by this one,
+and a load-bearing reason that turns out to be false is worth recording rather
+than quietly deleting.
 
 GPL-3.0 was the other compatible option and was rejected as stricter than the
 obligation requires: it would impose full copyleft on the whole application,
@@ -47,8 +57,17 @@ Unlike the components below, this code ships **inside** the APK.
 | What | Upstream | Commit | Licence |
 |---|---|---|---|
 | X server, GL compositor, socket connector, sysvshm server, `libwinlator` JNI | [`brunodev85/winlator-app`](https://github.com/brunodev85/winlator-app) | `ca3d735a60d653a787daf16d14fafef28d9c2c23` | LGPL-2.1 |
+| `libadrenotools` + its `android_dlopen_ext` hooks | [`bylaws/libadrenotools`](https://github.com/bylaws/libadrenotools) | `8fae8ce` | **BSD-2-Clause** |
+| `linkernsbypass` (submodule of the above) | [`bylaws/liblinkernsbypass`](https://github.com/bylaws/liblinkernsbypass) | `aa39758` | **BSD-2-Clause** |
 
-Located at `app/src/main/java/com/winlator/` and `app/src/main/cpp/winlator/`,
+libadrenotools is at `app/src/main/cpp/adrenotools/`, with upstream's layout,
+file names and SPDX headers intact and no modification to any upstream source
+file; what was taken and what was left is in that directory's `README.md`.
+BSD-2-Clause asks only that the copyright notice and the two-clause text travel
+with the binary, which `LICENSE` and `lib/linkernsbypass/LICENSE` in that
+directory satisfy. It imposes nothing on the rest of the APK.
+
+The Winlator code is at `app/src/main/java/com/winlator/` and `app/src/main/cpp/winlator/`,
 under upstream's package names. The full licence text is at
 `LICENSE-LGPL-2.1` in the repo root; what was taken, what was left and every
 local modification is recorded in `app/src/main/java/com/winlator/README.md`.
@@ -74,16 +93,18 @@ and distributed as a `.wcp` package. Obligations still apply to distribution.
 | Mesa / Turnip | MIT (plus other permissive licenses in-tree) | Preserve notices. |
 | DXVK | zlib | Preserve notices. |
 | vkd3d-proton | LGPL-2.1-or-later | As Wine. |
-| libadrenotools | LGPL-3.0 (verify at the commit used) | Copyleft — verify before linking into the app. |
 
-Two consequences worth being explicit about:
+`libadrenotools` used to be listed here as an LGPL-3.0 component "to verify
+before linking". It has been verified, it is BSD-2-Clause, and it is no longer a
+component — it ships inside the APK and is recorded above.
+
+One consequence worth being explicit about:
 
 - **Because Wine and vkd3d-proton are LGPL, our patches must stay public.**
   Keeping every patch in `patches/` and every version in `native/pins.env` is
-  not just good process, it is how the obligation is met.
-- **`libadrenotools` is LGPL-3.0 and would be linked into the APK**, unlike the
-  components above. Verify its exact terms at the commit used and confirm the
-  app's chosen license is compatible before shipping a binary.
+  not just good process, it is how the obligation is met. That now includes
+  `patches/wine/0006-win32u-load-vulkan-through-libadrenotools-on-android.patch`,
+  which is a modification to an LGPL work.
 
 ## Trademarks
 

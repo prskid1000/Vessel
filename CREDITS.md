@@ -33,6 +33,18 @@ chain of work it builds on:
 
 ### Code shipped inside the app
 
+Two pieces of other people's work are compiled into the APK itself.
+
+**libadrenotools**, by Billy Laws (bylaws), BSD-2-Clause, vendored at commit
+`8fae8ce` into `app/src/main/cpp/adrenotools/` with its `linkernsbypass`
+submodule. It is the reason a custom Vulkan driver can be loaded on Android
+without root, and there is no alternative to it that does not involve rooting the
+phone: Turnip builds as an Android Vulkan HAL, so only the platform loader can
+load it, and only libadrenotools' `android_dlopen_ext` interposer can make that
+loader pick a driver out of app storage. Without it Vessel's chip-tuned Mesa
+build is a file on disk that nothing ever calls. `app/src/main/cpp/adrenotools/README.md`
+records what was taken and what was left.
+
 Vessel's display backend **is** Winlator's X server, vendored rather than
 reimplemented: the X11 server, the GL compositor, the socket connector and the
 `libwinlator` JNI, from

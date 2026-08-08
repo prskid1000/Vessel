@@ -125,11 +125,16 @@ for opt in platforms platform-sdk-version android-stub android-libbacktrace \
        grep -n \"^option(\" $MESON_OPTS"
 done
 
-# VERIFY: two things on the first successful run —
-#   1. freedreno-kmds is an array option; TARGET_KMD is 'kgsl' alone here. If
-#      the driver fails to open /dev/kgsl-3d0 on device, try 'kgsl,msm'.
-#   2. that the .so really lands at src/freedreno/vulkan/ in the build tree
-#      (checked below, so a move fails loudly rather than shipping nothing).
+# Both of the VERIFY questions that used to be here are answered, on device,
+# 2026-08-08 (tools/device-vulkan.sh):
+#
+#   1. freedreno-kmds='kgsl' alone is correct for this device. The driver built
+#      this way opens the GPU and enumerates a physical device — vkGetPhysical-
+#      DeviceProperties2 reports driverID 18 (VK_DRIVER_ID_MESA_TURNIP),
+#      "Adreno (TM) 829 (unknown)", Vulkan 1.4.358. Adding 'msm' would only add
+#      the DRM path, which this kernel does not expose for the GPU.
+#   2. the .so does land at src/freedreno/vulkan/, and the check below keeps it
+#      honest if a future rebase moves it.
 log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $NDK_API)"
 
 # Only the Vulkan driver is wanted: no GL, no EGL, no gallium, no window system
@@ -186,6 +191,42 @@ install -m 0644 "$SO" "$STAGE/libvulkan_freedreno.so"
 # build tree, so the strip is done explicitly.
 "$NDK_BIN/llvm-strip" --strip-unneeded "$STAGE/libvulkan_freedreno.so" \
   || warn "strip failed; shipping unstripped"
+
+# --- the C++ runtime the driver links against ---------------------------------
+# libvulkan_freedreno.so has libc++_shared.so in its NEEDED list, and that is not
+# a system library — nothing on the device provides it.
+#
+# libadrenotools loads the driver into a linker namespace whose ld_library_path
+# is this package's directory and whose default_library_path is the APK's
+# nativeLibraryDir. Either could satisfy it, and the APK's does, but the APK's
+# copy comes from Gradle's NDK while the driver was compiled against this one.
+# Shipping the matching copy here makes the package self-contained and puts it
+# first in the search order, so the answer does not depend on which NDK the app
+# module happens to be pinned to.
+#
+# Without it the driver dlopen fails with "library libc++_shared.so not found",
+# libadrenotools falls back, and the stock Qualcomm driver answers with no error
+# anywhere — the failure shape this whole component exists to stop.
+NDK_STL="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+[ -f "$NDK_STL" ] || die "no libc++_shared.so at $NDK_STL; the driver could not load without it"
+install -m 0644 "$NDK_STL" "$STAGE/libc++_shared.so"
+"$NDK_BIN/llvm-strip" --strip-unneeded "$STAGE/libc++_shared.so" || true
+
+# Every NEEDED entry must be either in this package or provided by Android. Same
+# check as build/wine.sh does for its tree, and for the same reason: a missing
+# one is invisible until a dlopen fails on the phone.
+TURNIP_BIONIC_PROVIDED="libc.so libm.so libdl.so libz.so liblog.so libandroid.so
+libnativewindow.so libsync.so libhardware.so libvulkan.so ld-android.so"
+turnip_missing=""
+for need in $("$NDK_BIN/llvm-readelf" -d "$STAGE/libvulkan_freedreno.so" \
+              | grep NEEDED | sed 's/.*\[//;s/\]//'); do
+  case " $TURNIP_BIONIC_PROVIDED " in *" $need "*) continue ;; esac
+  [ -f "$STAGE/$need" ] && continue
+  turnip_missing="$turnip_missing $need"
+done
+[ -z "$turnip_missing" ] \
+  || die "the driver needs libraries neither the package nor Android provides:$turnip_missing"
+ok "every NEEDED entry of the driver resolves"
 
 # --- adrenotools metadata ----------------------------------------------------
 # libadrenotools reads this to decide whether the driver can be loaded at all;
