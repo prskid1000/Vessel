@@ -156,9 +156,50 @@ no padding" is not a bare `0.dp`) and `hairGap` (2 dp, the one gap below the
 scale, for the inside of a graph where 3 dp reads as a step rather than as
 attachment).
 
+### Orientation is pinned, not adapted to
+
+Two destinations, two orientations, and nothing else in the app touches
+`requestedOrientation`.
+
+| Surface | Orientation |
+|---|---|
+| Home, Files, the run history, the log viewer | **portrait** |
+| The session desktop | **sensorLandscape** |
+| Taskbar, launcher | inherit from the desktop |
+| Every sheet and dialog | set nothing |
+
+The desktop is landscape because the guest desktop is 1280×720 and cannot be
+resized after it is created — a portrait session was always a letterboxed
+compromise. `sensor` rather than plain landscape, so somebody holding the phone
+the other way round gets a desktop the right way up. Everything else is a
+vertical list of rows, cards or log lines: 927 dp of width buys none of them
+anything, and 422 dp of height has already produced one clipped form.
+
+**Exactly one composable owns `requestedOrientation`, and it is not a screen.**
+The obvious shape — each destination setting its own on enter and restoring on
+dispose — races: `NavHost` composes the incoming destination before disposing the
+outgoing one, so the old screen's `onDispose` runs last and puts the *old* value
+back over the new screen's. `VesselApp` owns it, keyed on the current route
+(`ui/OrientationLock.kt`). That also makes the session's release free: a clean
+exit, a failure, Stop from the rail and backing out all pop the route, so nothing
+has to remember to unlock.
+
+Sheets and dialogs set nothing, because each appears over a destination that has
+already decided — an overlay that sets an orientation beats its own host and then
+restores the wrong value on the way out.
+
+This is independent of `android:configChanges`, which stays in the manifest:
+that is what stops an Activity recreation taking the EGL surface with it and
+leaving a black rectangle over a running Wine session. Both are needed.
+
 ### Landscape, and the one rule that handles it
 
-This phone is 421 dp across in portrait and **927 dp in landscape**. Every layout
+Pinning orientation does not retire this rule, and it is worth saying why: the
+session desktop is landscape, a sheet or a dialog can be raised over it, and a
+foldable or a split-screen window can hand any destination a width the phone's
+own portrait never would. A capped column costs nothing when it never fires.
+
+This phone is 422 dp across in portrait and **927 dp in landscape**. Every layout
 here is designed at phone width and is correct there; left to fill, the same
 layouts stretch a session row until its status tag is 800 dp from its timestamp,
 and set a centred empty-state sentence on one unreadable 900 dp line.
