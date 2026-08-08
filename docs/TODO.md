@@ -194,10 +194,18 @@ Four things the interface said that were not true, and one that still is.
   `executable` paths in `shortcuts.json` whose labels collided because the
   extension was always stripped. Fixed in `5c71ce2`; the tiles now read
   `vessel-hello.bat`, `.msi` and `.vbs`.
-- [ ] **A non-PE program wears an `unknown` architecture badge.** Truthful —
-  there is no machine field in a batch file — and the wrong word. The badge
-  wants `Launchable.Runs.via` ("cmd.exe /c", "msiexec.exe /i", "wscript.exe")
-  carried into the shortcut beside the arch.
+- [~] **A non-PE program wears an `unknown` architecture badge.** Truthful —
+  there is no machine field in a batch file — and the wrong word. Three tiles in
+  a row all reading `unknown` said Vessel had failed to understand three files
+  it understood perfectly.
+
+  **Fixed in code, not yet seen on the device.** `AppShortcut.badge` says `cmd`,
+  `msiexec`, `wscript` or `shortcut`, from `interpreterFor(executable)`. Derived
+  from the extension rather than stored beside the arch as first planned: an
+  architecture has to be persisted because reading it means opening the file,
+  and the extension is already in the path, so there is no schema change, no
+  migration and nothing that can go stale. Colour stays `UNKNOWN`'s neutral grey
+  — a script does not run natively and must not wear the green that says so.
 - [~] **Returning to the desktop leaves a black surface.** Reproduced twice: the
   route is right, the orientation lock is right, the pixels are gone. Not the
   old Turnip wedge — see §1.
@@ -395,13 +403,19 @@ fixed in code and unverified on the device: the bar listed nothing because it
 looked one level down instead of walking the tree, the bottom edge's reveal
 handle was clipped off-screen by an inset applied to the mark rather than its
 touch box, and a desktop you left and came back to sampled black because every
-texture id belonged to a destroyed EGL context. Above those sits the one piece
-of real feature work nobody has started: **more than one resizable window,
-themed to match the product**, which is what the user asked for with a Windows
-screenshot for reference. The guest is a bare `explorer /desktop=` background
-today, with no decoration story at all. Wine's caption height, border width,
-scrollbar width and DPI are registry-driven, so *themed and finger-sized* is
-mostly configuration; *several real windows on the desktop* is not.
+texture id belonged to a destroyed EGL context. Above those sat **multiple resizable
+windows, themed to match the product** — asked for with a Windows screenshot for
+reference — and the shape of that job turned out to be different from the one
+written here. It said the guest was "a bare `explorer /desktop=` background with
+no decoration story at all". That was wrong: Wine's virtual desktop has been
+drawing a caption, a sizing border and a full non-client frame on every
+top-level window the whole time, and `desktopTheme` has been colouring them
+since seed 3. The missing half was **size**, not decoration or colour — a 22 px
+caption and a **1 px** sizing border are Windows' defaults and a 1 px grab
+region cannot be touched. Seed 8 sets 40 px captions, an 8 px grab region, 24 px
+scrollbars. Unverified on the device, and the thing to check there is not
+whether a window is themed but whether two of them can be dragged, resized and
+raised past each other with a finger.
 
 The prose has also come out of the interface, on the same instruction that
 emptied the Metrics tab: the taskbar's tray-helper paragraph, the launcher's
