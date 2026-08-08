@@ -473,10 +473,22 @@ class SessionRuntime @Inject constructor(
             )
         }
 
+        // Here rather than in provisioning, because provisioning skips the whole
+        // layout step for a container whose directories already exist — so every
+        // container made before the caches were part of the layout would keep
+        // running with three environment variables pointing at nothing. Cheap,
+        // idempotent, and the alternative is recompiling every pipeline on every
+        // launch.
+        layout.cacheDirectories.forEach { if (!it.isDirectory) it.mkdirs() }
+
         val turnip = turnipDriver(containerId)
         val environment = wineLauncherEnvironment(
             tree = tree,
             scratch = SessionScratch(home = layout.base, tmp = layout.tmp),
+            // Only when there is a driver to load. See wineLauncherEnvironment:
+            // without this the adrenotools dlopen fails on libc++_shared.so and
+            // the stock Qualcomm driver answers, silently.
+            hooksDir = turnip?.hooksDir,
         ) + sessionEnvironment(
             profile = profile,
             manifest = manifest,

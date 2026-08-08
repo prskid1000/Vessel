@@ -123,17 +123,47 @@ data class ContainerLayout(
      */
     val legacyComponents: File get() = File(base, LEGACY_COMPONENTS)
 
+    /**
+     * The three shader caches, one directory per layer.
+     *
+     * [SessionEnvironment] names `caches/mesa`, `caches/dxvk` and `caches/vkd3d`
+     * in `MESA_SHADER_CACHE_DIR`, `DXVK_STATE_CACHE_PATH` and
+     * `VKD3D_SHADER_CACHE_PATH`. It is a pure function with no disk, so it can
+     * name them but cannot make them, and until this existed nothing did: the
+     * variables pointed at paths that were not there. Mesa creates its own tree
+     * and survived; DXVK opens its state cache as a file and does not.
+     *
+     * This is the difference between compiling every pipeline on every launch
+     * and compiling it once, which on a phone is the largest avoidable cost in
+     * the stack — so the directories are part of the layout rather than
+     * something a session hopes to find.
+     */
+    val caches: File get() = File(base, CACHES)
+
+    /** Where each layer's cache goes, in the order [SessionEnvironment] names them. */
+    val cacheDirectories: List<File>
+        get() = listOf("mesa", "dxvk", "vkd3d").map { File(caches, it) }
+
     /** Every directory the layout promises, created if absent. */
     fun createDirectories(): Boolean =
-        listOf(base, prefix, tmp, logs).all { it.isDirectory || it.mkdirs() }
+        (listOf(base, prefix, tmp, logs, caches) + cacheDirectories)
+            .all { it.isDirectory || it.mkdirs() }
 
-    /** True when every directory the layout promises is already there. */
+    /**
+     * True when every directory the layout promises is already there.
+     *
+     * The cache directories are deliberately *not* checked. They are a
+     * performance aid, and a container whose caches were cleared is still a
+     * valid container — reporting it as unprovisioned would send it back through
+     * a full rebuild to recreate three empty directories.
+     */
     fun directoriesExist(): Boolean =
         listOf(base, prefix, tmp, logs).all { it.isDirectory }
 
     private companion object {
         const val PREFIX = "prefix"
         const val TMP = "tmp"
+        const val CACHES = "caches"
         const val PROVISION_STATE = "provisioned.json"
         const val REGISTRY_SEED = "prefix-seed.reg"
         const val LEGACY_COMPONENTS = "components"
