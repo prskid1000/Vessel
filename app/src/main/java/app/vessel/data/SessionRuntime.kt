@@ -678,16 +678,98 @@ class SessionRuntime @Inject constructor(
      * `--init` rather than `-u`: this runs once on a prefix that does not exist
      * yet, and it is the call that creates `drive_c`, `system.reg` and the rest.
      */
+    /**
+     * Pass one: `wineboot --init`.
+     *
+     * **A non-zero exit here is expected and is not a failure.** Every PE program
+     * in this build is ARM64EC, and an ARM64EC process cannot resolve a single
+     * import until `HKLM\Software\Microsoft\Wow64\amd64` names an emulator — which
+     * is in the registry seed, which cannot be applied until a prefix exists. So
+     * the first boot lays down `system32` and the hives, gets as far as
+     * `services.exe`, and then dies on `start.exe` with
+     *
+     * ```
+     * err:module:import_dll Library shell32.dll … not found
+     * err:module:loader_init Importing dlls for … start.exe failed, status c0000135
+     * wineboot exited with 53
+     * ```
+     *
+     * Treating that as fatal is what left every container unlaunchable: the seed
+     * was written to `prefix-seed.reg`, recorded as applied in `provisioned.json`,
+     * and never reached `system.reg`, because provisioning returned before
+     * [applyRegistry] ran. Measured on the device — the Wow64 keys were in the
+     * seed file and absent from the hive.
+     *
+     * The exit code that actually means something is pass two's, in
+     * [applyRegistry]. This is the sequence `tools/device-session.sh` has used
+     * successfully all along; the app was doing one pass of a two-pass procedure.
+     */
     override suspend fun createPrefix(layout: ContainerLayout): BootstrapOutcome {
         val current = plan ?: return BootstrapOutcome.NotAvailable(NO_PLAN)
         startWineserver(current)?.let { return it }
-        return runTool(current, WINE_BOOT, listOf("--init"), "wineboot")
+
+        val first = runTool(current, WINE_BOOT, listOf("--init"), "wineboot")
+        if (first is BootstrapOutcome.Failed) {
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "first-pass wineboot did not finish cleanly (${first.reason}); this is expected " +
+                    "before the emulator is registered — continuing to the registry seed",
+            )
+        }
+        // Without this the hive is still in the server's memory and regedit's
+        // keys land on top of a file that is about to be rewritten from under
+        // them. `wineboot` returns before `wineserver` has flushed.
+        flushRegistry(current)
+        return BootstrapOutcome.Applied
     }
 
+    /**
+     * Pass two: apply the seed, then boot again so the prefix finishes.
+     *
+     * The second `wineboot` is the one whose exit code is believed. `--update`
+     * rather than `--init` so it does not start from nothing, and
+     * `.update-timestamp` is removed first because `wineboot` compares that stamp
+     * against `wine.inf` and skips the entire run when they match — which, right
+     * after pass one, they do.
+     */
     override suspend fun applyRegistry(layout: ContainerLayout, regFile: File): BootstrapOutcome {
         val current = plan ?: return BootstrapOutcome.NotAvailable(NO_PLAN)
         if (!regFile.isFile) return BootstrapOutcome.Failed("no ${regFile.name} to apply")
-        return runTool(current, WINE_REGEDIT, listOf(regFile.absolutePath), "regedit")
+
+        val applied = runTool(current, WINE_REGEDIT, listOf(regFile.absolutePath), "regedit")
+        if (applied is BootstrapOutcome.Failed) return applied
+        flushRegistry(current)
+
+        runCatching { File(layout.prefix, UPDATE_TIMESTAMP).delete() }
+        val second = runTool(current, WINE_BOOT, listOf("--update"), "wineboot (second pass)")
+        flushRegistry(current)
+        return second
+    }
+
+    /**
+     * `wineserver -w` — wait for the registry to reach disk.
+     *
+     * Not optional and not a delay in disguise. `wineboot` and `regedit` both
+     * return while the server still holds the hive in memory, so the next step
+     * reads a `system.reg` that does not yet contain what the last one wrote.
+     * Failure is logged and swallowed: a flush that did not happen is a slower
+     * boot, not a broken one.
+     */
+    private suspend fun flushRegistry(current: LaunchPlan) {
+        val spec = ProcessSpec(
+            argv = current.tree.serverArgv(listOf("-w")),
+            environment = current.environment,
+            workingDirectory = current.layout.base,
+        )
+        val result = runner.run(spec) { line -> record(current.log, line) }
+        if (result is ProcessResult.NotStarted) {
+            current.log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "wineserver -w could not run: ${result.reason}",
+            )
+        }
     }
 
     private suspend fun runTool(
@@ -1128,6 +1210,13 @@ class SessionRuntime @Inject constructor(
         const val STEP_D3D = "session:d3d"
 
         const val NO_PLAN = "the session was torn down before the prefix could be booted"
+
+        /**
+         * `wineboot` skips its whole run when this file matches `wine.inf`'s
+         * stamp, so the second pass deletes it first. Named here because the
+         * name is Wine's, not ours.
+         */
+        const val UPDATE_TIMESTAMP = ".update-timestamp"
         const val NO_D3D = "No D3D or OpenGL layer is installed"
 
         const val DRIVE_C_WINDOWS = "drive_c/windows"
