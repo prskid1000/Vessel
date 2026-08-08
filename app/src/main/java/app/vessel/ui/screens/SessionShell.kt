@@ -196,38 +196,42 @@ private fun StartButton(open: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** One open guest window: its icon letter and its `WM_NAME`. */
+/**
+ * One open guest window, as a square button and nothing else.
+ *
+ * **The title is gone from the face of it.** A window's `_NET_WM_NAME` is
+ * whatever the program felt like putting in its caption, and Wine's answer for a
+ * console is the full path — `C:\windows\system32\cmd.exe`, which took a third
+ * of the bar for one window and would take all of it for three. Every desktop
+ * that has ever run out of taskbar collapses to icons, and this one starts with
+ * no width to spare.
+ *
+ * The title is still the click label and the content description, so the button
+ * is not anonymous to a screen reader or to a long press — it is anonymous only
+ * to the eye, which has the window itself to look at.
+ *
+ * The letter is [GuestWindow.initial] until a PE icon is drawn here. `PeIconReader`
+ * exists and nothing calls it yet; when it does, this is where it goes.
+ */
 @Composable
 private fun TaskbarWindow(window: GuestWindow, onClick: () -> Unit) {
     val shape = Vessel.metrics.shapeMd
-    Row(
+    Box(
         Modifier
-            .heightIn(min = Vessel.metrics.touchTarget)
+            .size(Vessel.metrics.touchTarget)
             .background(
                 if (window.focused) Vessel.colors.accentHover else Vessel.colors.bg.copy(alpha = 0f),
                 shape,
             )
             .vRing(if (window.focused) Vessel.colors.accent else Vessel.colors.divider, shape)
             .clickable(onClickLabel = window.title, onClick = onClick)
-            .padding(start = Vessel.metrics.s6, end = Vessel.metrics.s11),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-        verticalAlignment = Alignment.CenterVertically,
+            .semantics { contentDescription = window.title },
+        contentAlignment = Alignment.Center,
     ) {
-        Box(
-            Modifier
-                .size(Vessel.metrics.taskbarIcon)
-                .vRing(Vessel.colors.neutral800, Vessel.metrics.shapeSm),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(window.initial, style = Vessel.type.mono, color = Vessel.colors.textLabel)
-        }
         Text(
-            window.title,
-            style = Vessel.type.control,
+            window.initial,
+            style = Vessel.type.mono,
             color = if (window.focused) Vessel.colors.textPrimary else Vessel.colors.textLabel,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
         )
     }
 }
