@@ -216,12 +216,38 @@ private fun TaskbarWindow(window: GuestWindow, onClick: () -> Unit) {
             .semantics { contentDescription = window.title },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            window.initial,
-            style = Vessel.type.mono,
-            color = if (window.focused) Vessel.colors.textPrimary else Vessel.colors.textLabel,
-        )
+        val tint = if (window.focused) Vessel.colors.textPrimary else Vessel.colors.textLabel
+        val glyph = windowGlyph(window.program)
+        if (glyph != null) {
+            Icon(glyph, contentDescription = null, Modifier.size(Vessel.metrics.iconMd), tint = tint)
+        } else {
+            Text(window.initial, style = Vessel.type.mono, color = tint)
+        }
     }
+}
+
+/**
+ * The mark for a window, chosen by the program that owns it.
+ *
+ * **From `WM_CLASS`, not from the file.** The obvious answer is the program's
+ * real icon, and `PeIconReader` can extract one — but a window knows its
+ * executable's *name*, not its path, so drawing the real icon means resolving
+ * that name back to a file on the guest's `C:` for every window that appears.
+ * These four cover everything Vessel itself launches, at no cost and with no
+ * lookup, and they are the same glyphs the launcher uses for the same programs —
+ * so the button in the bar matches the button that opened it.
+ *
+ * Null for anything else, and the caller falls back to the window's initial. A
+ * letter is a poor icon and an honest one; a generic application glyph would
+ * make four unrelated programs look like the same program.
+ */
+@Composable
+private fun windowGlyph(program: String): ImageVector? = when (program) {
+    "conhost.exe", "cmd.exe" -> VIcons.Terminal
+    "pwsh.exe", "powershell.exe" -> VIcons.Prompt
+    "wscript.exe", "cscript.exe", "busybox.exe" -> VIcons.Code
+    "explorer.exe" -> VIcons.Folder
+    else -> null
 }
 
 /**

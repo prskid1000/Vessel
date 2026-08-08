@@ -35,7 +35,14 @@ class SessionShellHost @Inject constructor(
 
     override val windows: Flow<List<GuestWindow>> =
         display.windows.map { list ->
-            list.map { GuestWindow(id = it.id, title = it.title, focused = it.focused) }
+            list.map {
+                GuestWindow(
+                    id = it.id,
+                    title = it.title,
+                    focused = it.focused,
+                    program = it.program,
+                )
+            }
         }
 
     override val available: Boolean = true

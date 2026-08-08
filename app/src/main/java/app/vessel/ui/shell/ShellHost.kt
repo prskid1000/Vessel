@@ -18,6 +18,8 @@ data class GuestWindow(
     val id: Int,
     val title: String,
     val focused: Boolean = false,
+    /** The owning executable, lowercased and without a path. May be empty. */
+    val program: String = "",
 ) {
     /** The tile letter, on the same reasoning as [AppShortcut.initial]. */
     val initial: String get() = title.trim().firstOrNull()?.uppercase() ?: "?"

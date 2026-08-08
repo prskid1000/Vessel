@@ -269,7 +269,12 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         val list = root.children.mapNotNull { window ->
             if (!window.isRealWindow()) return@mapNotNull null
             if (window.isVirtualDesktop(root)) return@mapNotNull null
-            TopLevelWindow(window.id, window.taskbarTitle(), focused = window.id == focused)
+            TopLevelWindow(
+                window.id,
+                window.taskbarTitle(),
+                focused = window.id == focused,
+                program = window.programName(),
+            )
         } + root.children
             // **And the windows inside the desktop, which is where they move to
             // the moment the prefix has a virtual desktop configured.**
@@ -293,6 +298,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                         window.id,
                         window.taskbarTitle(),
                         focused = window.id == focused,
+                        program = window.programName(),
                     )
                 }
             }
@@ -418,6 +424,10 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      */
     private fun Window.isVirtualDesktop(root: Window): Boolean =
         width >= root.width && height >= root.height
+
+    /** `WM_CLASS`, trimmed to a bare lowercase filename. */
+    private fun Window.programName(): String =
+        className.orEmpty().trim().substringAfterLast(GUEST_PATH_SEPARATOR, className.orEmpty()).lowercase()
 
     /**
      * What the taskbar button says, from whichever source has an answer.
@@ -609,6 +619,9 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 
         /** Off unless `setprop log.tag.VesselWindows DEBUG`. See [publishWindows]. */
         const val TREE_TAG = "VesselWindows"
+
+        /** A Windows path separator, as a char. */
+        const val GUEST_PATH_SEPARATOR: Char = 92.toChar()
 
         /** Interned at runtime; the vendored `Atom` table has no constant for it. */
         const val NET_WM_NAME = "_NET_WM_NAME"

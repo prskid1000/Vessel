@@ -45,6 +45,15 @@ data class TopLevelWindow(
     val id: Int,
     val title: String,
     val focused: Boolean,
+    /**
+     * The executable that owns the window, lowercased, no path — `conhost.exe`.
+     *
+     * Read from `WM_CLASS`, which Wine sets on every window it creates. It is
+     * what lets the taskbar draw a terminal glyph for a console instead of the
+     * letter C, without anything having to resolve the window back to a file on
+     * the guest's disk. Empty when the window will not say.
+     */
+    val program: String = "",
 )
 
 /** How [SessionDisplayServer.start] went. Modelled on `BootstrapOutcome`. */
