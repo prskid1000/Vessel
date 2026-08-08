@@ -149,12 +149,30 @@ class PointerGestures(
         downY = finger.y
         lastX = finger.x
         lastY = finger.y
-        timeoutAt = timeMs + config.longPressMs
-        // DIRECT puts the cursor under the finger before anything else can
-        // happen, so a tap clicks where it landed rather than where the cursor
-        // was left by the previous gesture. TRACKPAD deliberately emits nothing.
+        // **DIRECT presses on contact; TRACKPAD waits.** In direct touch the
+        // finger *is* the pointer, so putting the button down the moment it
+        // lands is what makes a drag a drag — dragging a title bar, pulling a
+        // window's edge, sweeping a text selection. It was measured not
+        // working: a finger drag across a caption moved the cursor and left the
+        // window where it was, because the button only went down after a 380 ms
+        // hold and any movement before that cancelled the hold. A window you can
+        // only move by pressing still first, then moving, is one nobody
+        // discovers they can move.
+        //
+        // The cost is real and worth naming: in DIRECT there is no longer any
+        // way to move the cursor without pressing. That is what direct touch
+        // means everywhere else, and TRACKPAD is the mode for moving a pointer
+        // without clicking — which is why there are two.
+        //
+        // Release is [onUp]'s existing job, and a down-then-up with no movement
+        // is still a click, so tapping is unchanged.
+        state = if (mode == PointerMode.DIRECT) State.DRAGGING else State.ONE_FINGER
+        timeoutAt = if (mode == PointerMode.DIRECT) null else timeMs + config.longPressMs
         return if (mode == PointerMode.DIRECT) {
-            listOf(GuestInput.MoveTo(finger.x, finger.y))
+            listOf(
+                GuestInput.MoveTo(finger.x, finger.y),
+                GuestInput.Button(PointerButton.LEFT, pressed = true),
+            )
         } else {
             emptyList()
         }
@@ -165,8 +183,26 @@ class PointerGestures(
         // A second finger cancels a pending long press but not a drag already in
         // progress: lifting a finger mid-drag must not drop the button.
         timeoutAt = null
-        if (state == State.DRAGGING) return emptyList()
+
+        // **A second finger that arrives before the first has moved takes the
+        // press back.** DIRECT presses on contact, so by the time a two-finger
+        // right click has both fingers down the left button is already held —
+        // and without this it would stay held, the multi-touch branch would
+        // never be reached, and right click, scroll and pinch would all be gone
+        // from the mode that needs them most. The undo is bounded by the tap
+        // slop: once the first finger has actually dragged something, a second
+        // finger landing is a stray touch and must not drop the button.
+        val undoContactPress = mode == PointerMode.DIRECT &&
+            state == State.DRAGGING &&
+            travel <= config.tapSlop &&
+            pointers.size >= 2
+        if (!undoContactPress && state == State.DRAGGING) return emptyList()
         if (pointers.size < 2) return emptyList()
+        val release = if (undoContactPress) {
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = false))
+        } else {
+            emptyList()
+        }
 
         state = State.MULTI
         multi = Multi.UNDECIDED
@@ -176,7 +212,7 @@ class PointerGestures(
         pinchBaseline = spread(pointers)
         lastCentroidX = centroidX(pointers)
         lastCentroidY = centroidY(pointers)
-        return emptyList()
+        return release
     }
 
     private fun onMove(pointers: List<Touch>): List<GuestInput> = when (state) {

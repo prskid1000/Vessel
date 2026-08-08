@@ -150,10 +150,17 @@ class PointerGesturesTest {
     // — the two modes ------------------------------------------------------------------
 
     @Test
-    fun `direct mode puts the cursor under the finger, from the first frame`() {
+    fun `direct mode puts the cursor under the finger and presses, from the first frame`() {
+        // The press on contact is what makes a finger drag a *drag*. Measured on
+        // the device before this changed: dragging a window's title bar moved the
+        // cursor across it and left the window where it was, because the button
+        // only went down after a 380 ms hold and the movement cancelled the hold.
         val g = gestures(PointerMode.DIRECT)
         assertEquals(
-            listOf(GuestInput.MoveTo(100f, 100f)),
+            listOf(
+                GuestInput.MoveTo(100f, 100f),
+                GuestInput.Button(PointerButton.LEFT, pressed = true),
+            ),
             g.onTouch(TouchPhase.DOWN, one(100f, 100f), 0),
         )
         assertEquals(
@@ -173,15 +180,38 @@ class PointerGesturesTest {
     }
 
     @Test
-    fun `the modes differ in exactly one thing`() {
-        // The claim in PointerMode's doc comment, made falsifiable: the tap is
-        // identical in both, which is what makes switching mid-session safe.
-        fun tap(mode: PointerMode): List<GuestInput> {
-            val g = gestures(mode)
-            g.onTouch(TouchPhase.DOWN, one(100f, 100f), 0)
-            return g.onTouch(TouchPhase.UP, one(100f, 100f), 80)
-        }
-        assertEquals(tap(PointerMode.TRACKPAD), tap(PointerMode.DIRECT))
+    fun `a tap is a left click in both modes, by different routes`() {
+        // The modes no longer differ in exactly one thing — DIRECT also presses
+        // on contact — but the thing a user relies on still holds: a tap is a
+        // left click either way, so switching mid-session does not change what
+        // tapping does.
+        //
+        // The routes differ and that is the point of asserting both. TRACKPAD
+        // emits nothing on contact and synthesises the click on release;
+        // DIRECT has already pressed, so its release is the second half of a
+        // click that started when the finger landed.
+        val trackpad = gestures(PointerMode.TRACKPAD)
+        trackpad.onTouch(TouchPhase.DOWN, one(100f, 100f), 0)
+        assertEquals(
+            listOf(
+                GuestInput.Button(PointerButton.LEFT, pressed = true),
+                GuestInput.Button(PointerButton.LEFT, pressed = false),
+            ),
+            trackpad.onTouch(TouchPhase.UP, one(100f, 100f), 80),
+        )
+
+        val direct = gestures(PointerMode.DIRECT)
+        assertEquals(
+            listOf(
+                GuestInput.MoveTo(100f, 100f),
+                GuestInput.Button(PointerButton.LEFT, pressed = true),
+            ),
+            direct.onTouch(TouchPhase.DOWN, one(100f, 100f), 0),
+        )
+        assertEquals(
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = false)),
+            direct.onTouch(TouchPhase.UP, one(100f, 100f), 80),
+        )
         assertEquals(PointerMode.DIRECT, PointerMode.TRACKPAD.toggled())
         assertEquals(PointerMode.TRACKPAD, PointerMode.DIRECT.toggled())
     }
