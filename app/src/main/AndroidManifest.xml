@@ -20,12 +20,28 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Vessel">
 
+        <!--
+          `configChanges` is why rotating no longer blanks the desktop.
+
+          The display server is a singleton and owns the GLSurfaceView the guest
+          draws into, so that view outlives any one Activity by design. A
+          rotation destroyed the Activity underneath it, taking the window and
+          the EGL surface with it, and the view was then re-parented into a new
+          Activity while still holding the dead one's Context. What came back
+          was a black rectangle with a running Wine session behind it.
+
+          Compose recomposes correctly on a configuration change without the
+          Activity being rebuilt, so handling them costs nothing. `density` and
+          `fontScale` are listed because Android 12+ can deliver those without a
+          rotation, and they would recreate the Activity just the same.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Vessel">
+            android:theme="@style/Theme.Vessel"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|layoutDirection">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
