@@ -6,6 +6,9 @@ import androidx.datastore.core.DataStoreFactory
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.dataStoreFile
 import app.vessel.data.CONTAINERS_FILE
+import app.vessel.data.SHORTCUTS_FILE
+import app.vessel.data.AppShortcutDocument
+import app.vessel.data.AppShortcutDocumentSerializer
 import app.vessel.data.ContainerDocument
 import app.vessel.data.ContainerDocumentSerializer
 import app.vessel.core.SessionDisplayServer
@@ -108,4 +111,25 @@ object DataModule {
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
         produceFile = { context.dataStoreFile(CONTAINERS_FILE) },
     )
+
+    /**
+     * The app-shortcut document.
+     *
+     * Its own file rather than a field on the container document, because the
+     * two have different failure modes: losing the tiles should not cost anyone
+     * their containers, and the reverse would be much worse. A shortcut is a
+     * pointer — every program it named is still in the prefix.
+     */
+    @Provides
+    @Singleton
+    fun appShortcutStore(
+        @ApplicationContext context: Context,
+        json: Json,
+    ): DataStore<AppShortcutDocument> = DataStoreFactory.create(
+        serializer = AppShortcutDocumentSerializer(json),
+        corruptionHandler = ReplaceFileCorruptionHandler { AppShortcutDocument() },
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+        produceFile = { context.dataStoreFile(SHORTCUTS_FILE) },
+    )
+
 }
