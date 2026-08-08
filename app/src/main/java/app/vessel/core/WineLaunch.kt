@@ -183,8 +183,16 @@ data class SessionScratch(
  * app data: run as the adb `shell` user against `/data/local/tmp` instead and
  * `wineserver` dies with `bind: Permission denied`, because SELinux denies that
  * domain the `sock_file` create. From the app's own uid it binds.
+ *
+ * @param hooksDir `applicationInfo.nativeLibraryDir`, when a Turnip driver is
+ *   installed. Null leaves the search path exactly as it was, which is the right
+ *   answer when there is no custom driver to load.
  */
-fun wineLauncherEnvironment(tree: WineTree, scratch: SessionScratch): Map<String, String> =
+fun wineLauncherEnvironment(
+    tree: WineTree,
+    scratch: SessionScratch,
+    hooksDir: File? = null,
+): Map<String, String> =
     linkedMapOf(
         "WINEDLLPATH" to tree.dllPath.absolutePath,
         "WINENLSDIR" to tree.nlsPath.absolutePath,
@@ -192,7 +200,20 @@ fun wineLauncherEnvironment(tree: WineTree, scratch: SessionScratch): Map<String
         // and libXext as NEEDED entries, and the package ships those (plus
         // FreeType, which win32u dlopens) at the top of `lib/`. Drop this entry
         // and Wine loses its display driver and all TrueType text at once.
-        "LD_LIBRARY_PATH" to listOf(tree.lib, tree.unixLib).joinToString(":") { it.absolutePath },
+        //
+        // `hooksDir` is last, and it is what makes the custom Vulkan driver
+        // reachable at all. win32u dlopens libadrenotools.so by absolute path,
+        // but that library has libc++_shared.so in its NEEDED list, and the Wine
+        // unix side is a plain exec'd process rather than an ART one — so the
+        // APK's nativeLibraryDir is not on the default namespace's search path
+        // the way it is inside the app. Without this entry the dlopen fails on
+        // the dependency, win32u logs to winediag and falls back, and the stock
+        // Qualcomm driver answers every Vulkan call. Measured: driver_id=8
+        // rather than 18, with a fully installed and working Turnip package.
+        //
+        // Appended rather than prepended so Wine's own libraries keep winning.
+        "LD_LIBRARY_PATH" to listOfNotNull(tree.lib, tree.unixLib, hooksDir)
+            .joinToString(":") { it.absolutePath },
         // `/system/bin` stays on PATH: Wine shells out to it, and dropping it
         // would break the linker lookup this whole scheme rests on.
         "PATH" to listOf(tree.bin.absolutePath, SYSTEM_BIN).joinToString(":"),

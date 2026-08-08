@@ -371,7 +371,15 @@ say "5/6  checking whether Turnip can be loaded"
 APK_DIR="$(adb shell "pm path $PKG" 2>/dev/null | tr -d '\r' | head -1 | sed 's|^package:||;s|/[^/]*$||' || true)"
 HOOKS="$APK_DIR/lib/arm64"
 if [ -n "$APK_DIR" ] && in_app_test "test -f $HOOKS/libmain_hook.so"; then
-  ENV_GFX="$ENV_GFX ADRENOTOOLS_DRIVER_PATH=\$PWD/turnip/ ADRENOTOOLS_HOOKS_PATH=$HOOKS/ ADRENOTOOLS_DRIVER_NAME=libvulkan_freedreno.so"
+  # The hooks directory goes on LD_LIBRARY_PATH too, and that is not optional.
+  # libadrenotools.so has libc++_shared.so in its NEEDED list, and Wine's unix
+  # side is a plain exec'd process rather than an ART one, so the APK's
+  # nativeLibraryDir is not on the default namespace's search path the way it
+  # would be inside the app. Without this the dlopen fails on the dependency,
+  # win32u falls back, and the stock Qualcomm driver answers every call.
+  # Appended, never prepended: Wine's own lib directory must keep winning.
+  ENV_GFX="$ENV_GFX LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:$HOOKS \
+ADRENOTOOLS_DRIVER_PATH=\$PWD/turnip/ ADRENOTOOLS_HOOKS_PATH=$HOOKS/ ADRENOTOOLS_DRIVER_NAME=libvulkan_freedreno.so"
   ok "libadrenotools hooks found — Turnip will be loaded from $APP_DIR/turnip"
 else
   warn "no libadrenotools hooks in $HOOKS — Turnip cannot be loaded and the"

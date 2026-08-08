@@ -166,6 +166,34 @@ class WineLaunchTest {
     }
 
     @Test
+    fun `the hooks directory joins LD_LIBRARY_PATH, last, so the custom driver can load`() {
+        // win32u dlopens libadrenotools.so by absolute path, but that library
+        // needs libc++_shared.so, and the Wine unix side is a plain exec'd
+        // process — the APK's nativeLibraryDir is not on its namespace search
+        // path. Measured on the device without this: driver_id=8, the stock
+        // Qualcomm blob, with a fully working Turnip package installed.
+        val hooks = File("/data/app/app.vessel-1/lib/arm64")
+        val path = wineLauncherEnvironment(tree, scratch, hooks)["LD_LIBRARY_PATH"]!!
+
+        assertEquals(
+            listOf(
+                File(tree.root, "lib").absolutePath,
+                File(tree.root, "lib/wine/aarch64-unix").absolutePath,
+                hooks.absolutePath,
+            ).joinToString(":"),
+            path,
+        )
+    }
+
+    @Test
+    fun `no driver installed leaves the search path exactly as it was`() {
+        assertEquals(
+            wineLauncherEnvironment(tree, scratch)["LD_LIBRARY_PATH"],
+            wineLauncherEnvironment(tree, scratch, hooksDir = null)["LD_LIBRARY_PATH"],
+        )
+    }
+
+    @Test
     fun `the runtime and temp directories are inside app data`() {
         // Outside it — /data/local/tmp, as an adb shell test would use — SELinux
         // denies the sock_file create and wineserver dies on bind.
