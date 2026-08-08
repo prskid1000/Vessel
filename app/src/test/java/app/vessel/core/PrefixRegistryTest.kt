@@ -155,11 +155,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(13, PrefixRegistry.SEED_VERSION)
+        assertEquals(14, PrefixRegistry.SEED_VERSION)
         // The two being equal is a coincidence — a version bump does not have to
         // add a key — but while it holds it is a cheap way to catch a key added
         // without the bump that makes existing containers pick it up.
-        assertEquals(13, PrefixRegistry.seed.size)
+        assertEquals(14, PrefixRegistry.seed.size)
     }
 
     @Test

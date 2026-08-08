@@ -81,6 +81,8 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 14 declared the drive types, without which Wine may guess a mapped drive
+     * is removable and a shell view then treats it as absent;
      * 13 moved the whole sizing border into BorderWidth, PaddedBorderWidth
      * being sized but seemingly not painted;
      * 12 set the console's own palette, which is where the white rim around a
@@ -92,7 +94,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 13
+    const val SEED_VERSION: Int = 14
 
     /**
      * A value written into the hive that names the seed version that wrote it.
@@ -463,6 +465,36 @@ object PrefixRegistry {
     )
 
     /**
+     * What kind of disk each drive is, which is what makes Wine list it.
+     *
+     * **A symlink in `dosdevices` is enough for Wine to *resolve* a path and
+     * not always enough for it to *show* the drive.** `GetDriveType` falls back
+     * to guessing from the target when there is no entry here, and a guess of
+     * `DRIVE_UNKNOWN` or `DRIVE_REMOVABLE` is what makes a shell view treat a
+     * perfectly good drive as an empty or absent one. This is the key winecfg
+     * writes for exactly the same reason, and its absence is the most likely
+     * explanation for a drive that our own browser lists and Wine's does not.
+     *
+     * `hd` for all of them, including the phone's storage: `floppy` and `cdrom`
+     * make Wine poll for media that will never change, and `network` makes it
+     * treat the drive as slow and unreliable in ways that show up as dialogs.
+     * Internal storage is not removable in any sense the guest can act on.
+     *
+     * Only the drives the seed knows about. A folder the user maps later gets
+     * no entry, which is the remaining half of this and needs the mapper to
+     * write one — recorded in docs/DRIVE-MAPPING.md rather than guessed at
+     * here.
+     */
+    val driveTypes: RegistryKey = RegistryKey(
+        path = """HKEY_LOCAL_MACHINE\Software\Wine\Drives""",
+        values = listOf(
+            RegistryValue("c:", "hd"),
+            RegistryValue("d:", "hd"),
+            RegistryValue("z:", "hd"),
+        ),
+    )
+
+    /**
      * The Unix tools on `PATH`, for every program in the container.
      *
      * **This is what makes one shell's tools available in all of them.** The
@@ -561,6 +593,7 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
+        driveTypes,
         consoleColours,
         seedStamp,
     ) + virtualDesktop
