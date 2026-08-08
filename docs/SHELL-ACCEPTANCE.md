@@ -27,7 +27,7 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 1.3 | A third opens; all three stay visible | `[ ]` | |
 | 1.4 | Windows do **not** all stack at the top-left | `[x]` | `XServerDisplay.cascade` steps a colliding window and sends ConfigureNotify; Wine accepted it — chrome drawn at the new rectangle |
 | 1.5 | Title bar is drawn | `[x]` | `C:\windows\system32\cmd.exe` with all three buttons, once `launchProgram` went through `explorer /desktop=` |
-| 1.6 | Caption is finger-height (~40 px, not 22) | `[ ]` | Seed 8 |
+| 1.6 | Caption is finger-height (~40 px, not 22) | `[x]` | **Only on a container created after seed 8.** Older prefixes keep mouse-sized chrome, which is why every earlier screenshot showed a thin caption |
 | 1.7 | **Minimise** button present and works | `[ ]` | |
 | 1.8 | **Maximise** button present and works | `[ ]` | |
 | 1.9 | **Close** button present and works | `[ ]` | |
@@ -78,7 +78,8 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 4.2 | Typed characters reach the guest | `[!]` | Reported not reaching Wine |
 | 4.3 | Enter / Backspace / arrows reach the guest | `[ ]` | |
 | 4.4 | Keys go to the **focused** window after a switch | `[ ]` | Depends on 2.7 |
-| 4.5 | Trackpad mode moves the cursor | `[~]` | Cursor motion seen. Drag in trackpad still needs the 380 ms hold and is **un-run** |
+| 4.5 | Trackpad mode moves the cursor | `[x]` | |
+| 4.5b | Trackpad mode drags a window | `[!]` | Failed under test, cause unresolved. `input draganddrop` may start moving before the 380 ms hold elapses, which is exactly the condition the gesture needs — so this is failed-under-test, not proven broken. Needs a human finger |
 | 4.5a | A window edge shows a resize cursor on hover | `[ ]` | Wine hit-tests the frame on `WM_SETCURSOR`, which needs a *hover*; trackpad mode only moves the cursor while a finger is down, so there may be no hover to report against. Input-mode question, not a Wine one |
 | 4.6 | Direct-touch mode points, presses and drags | `[x]` | Press on contact; a finger drag is a mouse drag |
 | 4.7 | Tap = left click, two-finger = right click | `[ ]` | |
