@@ -31,8 +31,8 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 1.7 | **Minimise** button present and works | `[ ]` | |
 | 1.8 | **Maximise** button present and works | `[ ]` | |
 | 1.9 | **Close** button present and works | `[ ]` | |
-| 1.10 | Window can be **dragged** by its caption | `[ ]` | |
-| 1.11 | Window can be **resized** by its border | `[ ]` | Seed 8 gives an 8 px grab region |
+| 1.10 | Window can be **dragged** by its caption | `[x]` | Direct touch. Needed the press-on-contact change — the 380 ms hold was the gate |
+| 1.11 | Window can be **resized** by its border | `[x]` | Right edge dragged in; seed 8's 8 px grab region is hittable |
 | 1.12 | Resize works on a **second** window too | `[ ]` | |
 | 1.13 | Window chrome matches the Vessel theme | `[ ]` | Seed 3 colours; classic drawing via seed 4 |
 | 1.14 | A closed window leaves no ghost on the desktop | `[ ]` | |
@@ -78,9 +78,9 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 4.2 | Typed characters reach the guest | `[!]` | Reported not reaching Wine |
 | 4.3 | Enter / Backspace / arrows reach the guest | `[ ]` | |
 | 4.4 | Keys go to the **focused** window after a switch | `[ ]` | Depends on 2.7 |
-| 4.5 | Trackpad mode moves the cursor | `[ ]` | |
+| 4.5 | Trackpad mode moves the cursor | `[~]` | Cursor motion seen. Drag in trackpad still needs the 380 ms hold and is **un-run** |
 | 4.5a | A window edge shows a resize cursor on hover | `[ ]` | Wine hit-tests the frame on `WM_SETCURSOR`, which needs a *hover*; trackpad mode only moves the cursor while a finger is down, so there may be no hover to report against. Input-mode question, not a Wine one |
-| 4.6 | Direct-touch mode points | `[ ]` | |
+| 4.6 | Direct-touch mode points, presses and drags | `[x]` | Press on contact; a finger drag is a mouse drag |
 | 4.7 | Tap = left click, two-finger = right click | `[ ]` | |
 | 4.8 | Scroll gesture scrolls the guest | `[ ]` | |
 | 4.9 | Bluetooth **keyboard** reaches the guest | `[ ]` | Same path as 4.2 |
