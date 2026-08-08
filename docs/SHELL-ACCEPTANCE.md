@@ -23,10 +23,10 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | # | Action | State | Notes |
 |---|---|---|---|
 | 1.1 | One window opens and is visible | `[x]` | Command Prompt: real console, `C:\>`, scrollbar |
-| 1.2 | A **second** window opens beside the first | `[ ]` | Tried; only one console appeared and one button. Second tap may have missed the moved row — inconclusive, not a failure |
+| 1.2 | A **second** window opens beside the first | `[x]` | Two consoles, cascaded 48 px apart, both captions reachable |
 | 1.3 | A third opens; all three stay visible | `[ ]` | |
-| 1.4 | Windows do **not** all stack at the top-left | `[ ]` | Wine cascades from `CW_USEDEFAULT`; centring is not a registry switch |
-| 1.5 | Title bar is drawn | `[!]` | Seed 10 **written and still no caption** — see blocker 2 |
+| 1.4 | Windows do **not** all stack at the top-left | `[x]` | `XServerDisplay.cascade` steps a colliding window and sends ConfigureNotify; Wine accepted it — chrome drawn at the new rectangle |
+| 1.5 | Title bar is drawn | `[x]` | `C:\windows\system32\cmd.exe` with all three buttons, once `launchProgram` went through `explorer /desktop=` |
 | 1.6 | Caption is finger-height (~40 px, not 22) | `[ ]` | Seed 8 |
 | 1.7 | **Minimise** button present and works | `[ ]` | |
 | 1.8 | **Maximise** button present and works | `[ ]` | |
@@ -45,14 +45,14 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 2.2 | Tapping the handle reveals the bar | `[x]` | |
 | 2.3 | Bar carries no prose when nothing is open | `[x]` | |
 | 2.4 | One open window ⇒ exactly one button | `[x]` | `C:\windows\system32\cmd.exe` |
-| 2.5 | Two open windows ⇒ exactly two buttons | `[ ]` | |
-| 2.6 | Tapping a button **raises** that window | `[!]` | Reported not working |
+| 2.5 | Two open windows ⇒ exactly two buttons | `[x]` | |
+| 2.6 | Tapping a button **raises** that window | `[x]` | Tree dump proves the tapped window goes topmost; looked broken only because the buttons reshuffled and the windows overlapped exactly |
 | 2.7 | Tapping a button **focuses** it (keys follow) | `[ ]` | |
 | 2.8 | The focused window's button is marked | `[ ]` | |
 | 2.9 | Closing a window removes its button | `[ ]` | |
-| 2.10 | Pause button suspends the guest | `[ ]` | |
-| 2.11 | Resume restores it | `[ ]` | |
-| 2.12 | Stop asks for confirmation, then ends the session | `[ ]` | |
+| 2.10 | ~~Pause button in the taskbar~~ | — | Removed; the rail owns it |
+| 2.11 | ~~Resume in the taskbar~~ | — | Removed; the rail owns it |
+| 2.12 | ~~Stop in the taskbar~~ | — | Removed; the rail owns it |
 | 2.13 | Start button opens and closes the launcher | `[x]` | |
 
 ## 3. Launcher
@@ -79,6 +79,7 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 4.3 | Enter / Backspace / arrows reach the guest | `[ ]` | |
 | 4.4 | Keys go to the **focused** window after a switch | `[ ]` | Depends on 2.7 |
 | 4.5 | Trackpad mode moves the cursor | `[ ]` | |
+| 4.5a | A window edge shows a resize cursor on hover | `[ ]` | Wine hit-tests the frame on `WM_SETCURSOR`, which needs a *hover*; trackpad mode only moves the cursor while a finger is down, so there may be no hover to report against. Input-mode question, not a Wine one |
 | 4.6 | Direct-touch mode points | `[ ]` | |
 | 4.7 | Tap = left click, two-finger = right click | `[ ]` | |
 | 4.8 | Scroll gesture scrolls the guest | `[ ]` | |
@@ -100,10 +101,13 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 
 ## Known blockers, in the order they gate other rows
 
-1. **X input focus is never set when a window maps.** `setFocus` is called only
-   from a taskbar press. Prime suspect for 4.2 and possibly 2.6.
-2. **The virtual desktop registry does not reach a launched program, and now I
-   know why.** `prefix-seed.reg` on the device does carry the two `Explorer`
+1. ~~X input focus is never set when a window maps.~~ Fixed — `onMapWindow`
+   focuses a real window now. 4.2 still un-retested.
+2. ~~The virtual desktop registry does not reach a launched program.~~ Fixed by
+   routing `launchProgram` through `explorer /desktop=`. Kept below because the
+   reasoning is the useful part.
+
+   **The original finding.** `prefix-seed.reg` on the device does carry the two `Explorer`
    keys, and the console still comes up with no caption. The keys are read by
    **`explorer.exe`**, which decides the desktop for the programs *it* starts —
    a plain `wine prog.exe` never launches explorer and so never consults them.
