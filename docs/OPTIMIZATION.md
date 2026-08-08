@@ -200,20 +200,78 @@ app, and pinning risks *losing* to it by fighting EAS.
 
 ---
 
+## Measured baseline
+
+Motorola Signature, SM8845, `tools/device-bench.sh --scale 1`, best of three,
+2026-08-08. Kept in `out/bench/before.txt`. Two consecutive runs agreed to
+within 1%, and the `branch` figures were bit-identical, so this is a stable
+baseline rather than a snapshot of one thermal state.
+
+| section | ARM64 (ms) | x86-64 | x86-32 |
+|---|---|---|---|
+| int | 244.1 | 270.0 — **1.09×** | 560.6 — **2.28×** |
+| branch | 233.6 | 191.3 — 0.82× | 154.4 — 0.66× |
+| mem | 139.3 | 140.1 — **0.99×** | 107.8 — 0.79× |
+| float | 328.2 | 403.2 — **1.23×** | 403.2 — 1.23× |
+
+Wine process start (`cmd /c exit`, best of five): **197 ms**.
+
+**What this says.** ARM64EC plus FEX costs about **9% on integer throughput** and
+nothing at all on memory — the `mem` row landing on 0.99× is the benchmark
+validating itself, since a memory-bound loop should be almost
+translation-independent and it is. Float costs 23%. x86-32 through WoW64 is a
+different story: **2.28× on integer**, so the 32-bit path is roughly twice as
+expensive as the 64-bit one and that gap, not the 64-bit one, is where
+translation work would pay off.
+
+**The `branch` row does not mean x86 is faster than native, and must not be
+quoted that way.** It is reproducible to the millisecond, so it is not noise —
+which makes it a codegen difference rather than a translation result. The same
+source compiled for three targets is not the same machine code, and for an
+unpredictable data-dependent branch the choice between a real branch and a
+conditional select is worth more than everything translation does. That section
+measures compiler choice plus translation, and the two cannot be separated from
+outside. `i686 mem` at 0.79× is the same kind of artefact.
+
+Left in rather than deleted, because a benchmark that only reports the rows
+that flatter the system is not a benchmark. `int`, `mem` and `float` are the
+rows to read.
+
 ## How to measure
 
 ```
-./tools/device-bench.sh                 # everything, both cold and warm
-./tools/device-bench.sh --only cpu      # translation throughput only
-./tools/device-bench.sh --baseline out/bench-before.json   # compare two runs
+./tools/device-bench.sh                                 # everything
+./tools/device-bench.sh --only cpu                      # cpu | startup | graphics
+./tools/device-bench.sh --scale 2                       # longer runs, less noise
+./tools/device-bench.sh --baseline out/bench/before.txt # print deltas
 ```
+
+It needs a prefix from `tools/device-session.sh`. Results go to
+`out/bench/results.txt`; keep a copy as `before.txt` and pass it back with
+`--baseline` after a change.
 
 Rules that make the numbers mean something, all enforced by the script:
 
-1. **A control group.** Every x86 measurement is paired with the same work built
-   for ARM64. If the native number moves between runs, the measurement is
-   thermals or scheduling and the x86 delta cannot be read.
-2. **Repeat and report spread**, not one run. A phone thermally throttles; a
-   single sample of a hot device is a story about the case temperature.
-3. **Cold and warm separately.** With shader caches now working, mixing the two
-   hides the thing §1 was about.
+1. **A control group.** Every x86 measurement is paired with the same source
+   built for ARM64, which runs natively. If the native number moves between two
+   runs, the device was thermally different and the x86 delta cannot be read.
+   This is why the headline output is a *ratio*, not a millisecond count — an
+   absolute time on a phone is a statement about the case temperature.
+2. **Best of N**, not one sample. The fastest run is the one least disturbed by
+   whatever else the device was doing.
+3. **Checksums.** Every CPU section prints one, and they must match across all
+   three architectures. A translator that is fast because it skipped work would
+   otherwise read as a win; a mismatch voids the row it is on.
+
+`WINEDEBUG=-all` here and nowhere else in the repo. Everywhere else the
+diagnostic channels are the point; in a benchmark `+loaddll` writes a line per
+module load and is the measurement's largest confound.
+
+### What it cannot measure yet
+
+The shader-cache question from §1 — cold versus warm — needs a D3D probe that
+reaches instance creation, and every one of them is currently BLOCKED because
+Vulkan does not advertise `VK_KHR_win32_surface` without a display driver
+loaded. The graphics harness is headless. Timing a path that refuses to start
+would give a stable, reproducible, meaningless number, so the script says so
+instead. This unblocks when the probes run under the app's own X server.
