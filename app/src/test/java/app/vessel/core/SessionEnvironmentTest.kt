@@ -215,22 +215,38 @@ class SessionEnvironmentTest {
     }
 
     @Test
-    fun `the adrenotools variables are withheld while TURNIP_ENABLED is false`() {
-        // Not "Turnip is broken" — it loads, and the driverID proves it. Setting
-        // these three is what makes win32u open the adrenotools handle from
-        // inside winex11.drv's process_attach, under Android's loader lock, and
-        // explorer.exe then hangs with one thread in futex_wait_queue and never
-        // paints. Measured both ways on the device: #000000 with them, the
-        // seeded #161826 without. See the note at the call site.
+    fun `an installed Turnip names all three adrenotools variables`() {
+        // The inverse of this test stood here for one cycle, asserting that the
+        // three variables were withheld, because setting them wedged the desktop.
+        // The cause turned out to be libadrenotools exporting three data symbols
+        // that shadow dynamic-linker functions — see the note at the call site —
+        // and it is fixed in the APK's own CMake, not in Wine.
         //
-        // This test inverts the moment patches/wine/0006 is fixed, which is the
-        // point of writing it as an assertion rather than deleting the old one.
-        assertFalse("flip this test when the patch is fixed", TURNIP_ENABLED)
+        // Kept as an assertion on TURNIP_ENABLED rather than only on the map, so
+        // that switching the driver off again cannot be done quietly.
+        assertTrue(TURNIP_ENABLED)
 
         val environment = env(driver = turnip)
-        assertNull(environment["ADRENOTOOLS_DRIVER_PATH"])
-        assertNull(environment["ADRENOTOOLS_HOOKS_PATH"])
-        assertNull(environment["ADRENOTOOLS_DRIVER_NAME"])
+        assertEquals(
+            turnip.driverDir.absolutePath + File.separator,
+            environment["ADRENOTOOLS_DRIVER_PATH"],
+        )
+        assertEquals(
+            turnip.hooksDir.absolutePath + File.separator,
+            environment["ADRENOTOOLS_HOOKS_PATH"],
+        )
+        assertEquals(turnip.libraryName, environment["ADRENOTOOLS_DRIVER_NAME"])
+    }
+
+    @Test
+    fun `the driver path ends in a separator, because libadrenotools concatenates`() {
+        // libadrenotools joins ADRENOTOOLS_DRIVER_PATH and ADRENOTOOLS_DRIVER_NAME
+        // with nothing between them, so a missing trailing separator makes it look
+        // for `…/260300libvulkan_freedreno.so` and fall back to the stock driver
+        // with only a winediag line to say so.
+        val environment = env(driver = turnip)
+        assertTrue(environment["ADRENOTOOLS_DRIVER_PATH"]!!.endsWith(File.separator))
+        assertTrue(environment["ADRENOTOOLS_HOOKS_PATH"]!!.endsWith(File.separator))
     }
 
     // — the fixed variables ---------------------------------------------------
@@ -484,6 +500,9 @@ class SessionEnvironmentTest {
                 "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
                 "VKD3D_SHADER_CACHE_PATH" to File(caches, "vkd3d").absolutePath,
                 "TU_DEBUG" to "startup",
+                "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
+                "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
+                "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,
                 "FEX_SILENTLOG" to "0",
                 "FEX_OUTPUTLOG" to "stderr",
                 "FEX_TSOENABLED" to "1",
