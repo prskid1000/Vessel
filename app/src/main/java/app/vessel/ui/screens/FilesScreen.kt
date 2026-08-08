@@ -6,7 +6,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +42,7 @@ import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VIconButton
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VPushToolbar
 import app.vessel.ui.components.VScaffold
@@ -83,6 +87,8 @@ fun FilesScreen(
     // directory — so the picker can be used for what it is good at, which is
     // letting the user go anywhere rather than choosing from a top level we
     // decided on.
+    var unmapping by remember { mutableStateOf<GuestDrive?>(null) }
+
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { tree -> if (tree != null) viewModel.mapPickedFolder(tree) }
@@ -118,7 +124,28 @@ fun FilesScreen(
             if (picking) onPicked(row.guestPath) else viewModel.addAsApp(row)
         },
         onDismissNotice = viewModel::dismissNotice,
+        onUnmapDrive = { unmapping = it },
     )
+
+    // **Confirmed, and the confirmation says the one thing a user needs to
+    // hear.** A drive is a pointer, so removing it removes the pointer — but
+    // "remove drive E:" reads exactly like "delete the folder", and the folder
+    // is the user's, may be their only copy, and is not ours to be ambiguous
+    // about. Wine's own drives are never offered for removal, so this only ever
+    // asks about a mapping somebody made.
+    unmapping?.let { drive ->
+        VConfirmSheet(
+            title = "Remove ${drive.display}?",
+            message = "${drive.label} stays exactly where it is on the phone. " +
+                "Only the drive letter goes, and you can map it again.",
+            confirmLabel = "Remove drive",
+            onConfirm = {
+                viewModel.unmapDrive(drive.letter)
+                unmapping = null
+            },
+            onDismiss = { unmapping = null },
+        )
+    }
 
 }
 
@@ -134,6 +161,7 @@ private fun FilesContent(
     onCrumb: (Int) -> Unit,
     onDrive: (Char) -> Unit,
     onAddDrive: () -> Unit,
+    onUnmapDrive: (GuestDrive) -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onAddAsApp: () -> Unit,
@@ -186,6 +214,7 @@ private fun FilesContent(
             canMap = state.canMapDrives,
             onDrive = onDrive,
             onAdd = onAddDrive,
+            onUnmap = onUnmapDrive,
         )
         Breadcrumb(state.guestPath, onCrumb)
 
@@ -282,6 +311,7 @@ private fun FilesContent(
  * more drives than a phone has width, and a row that silently dropped the last
  * of them would hide exactly the one that was just added.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DriveTabs(
     drives: List<GuestDrive>,
@@ -289,6 +319,7 @@ private fun DriveTabs(
     canMap: Boolean,
     onDrive: (Char) -> Unit,
     onAdd: () -> Unit,
+    onUnmap: (GuestDrive) -> Unit,
 ) {
     Row(
         Modifier
@@ -310,7 +341,14 @@ private fun DriveTabs(
                         if (active) Vessel.colors.accent else Vessel.colors.divider,
                         Vessel.metrics.shapeMd,
                     )
-                    .clickable(onClickLabel = drive.label) { onDrive(drive.letter) }
+                    .combinedClickable(
+                        onClickLabel = drive.label,
+                        onClick = { onDrive(drive.letter) },
+                        // Only a mapping can be removed. Wine's own C: and Z:
+                        // are the prefix and the filesystem; there is no sense
+                        // in which a user could give either of them up.
+                        onLongClick = { if (!drive.builtIn) onUnmap(drive) },
+                    )
                     .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s6),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -500,6 +538,7 @@ private fun FilesPreview() {
             onCrumb = {},
             onDrive = {},
             onAddDrive = {},
+            onUnmapDrive = {},
             onImport = {},
             onExport = {},
             onAddAsApp = {},
