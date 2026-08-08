@@ -269,7 +269,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
             window.parent?.moveChildAbove(window, null)
             manager.triggerOnChangeWindowZOrder(window)
             manager.setFocus(window, WindowManager.FocusRevertTo.PARENT)
-        }.onFailure { Log.w("VesselDisplay", "could not focus window ${'$'}id", it) }
+        }.onFailure { Log.w("VesselDisplay", "could not focus window $id", it) }
         publishWindows()
     }
 

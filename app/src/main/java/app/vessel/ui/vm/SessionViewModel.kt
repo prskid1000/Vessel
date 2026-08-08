@@ -89,6 +89,18 @@ class SessionViewModel @Inject constructor(
     val state: StateFlow<SessionState> = runtime.state
 
     /**
+     * A counter that goes up every time something asks to *see* the running
+     * desktop rather than to start one.
+     *
+     * A counter and not a boolean or a one-shot event: the host has to be able to
+     * distinguish "asked again" from "still asking", and a `SharedFlow` would be
+     * lost across the configuration change that a rotation into the desktop's own
+     * orientation lock immediately causes. Nothing consumes or resets it; the
+     * value itself is meaningless and only the change matters.
+     */
+    val showRequests: MutableStateFlow<Int> = MutableStateFlow(0)
+
+    /**
      * The compositor's view, or null while nothing is running.
      *
      * Passed straight through from the display server rather than created here.
@@ -175,7 +187,19 @@ class SessionViewModel @Inject constructor(
         // Any non-idle state, not just this container's. There is room for one
         // session on this device, so asking for a second while one runs shows the
         // first rather than silently queueing behind it.
-        if (containerId.isBlank() || state.value.phase != SessionPhase.IDLE) return
+        //
+        // "Shows the first" used to be a claim rather than a behaviour, and the
+        // gap was reachable in three taps: back out of the desktop, and neither
+        // the container card's Launch button nor the `openSession` extra could
+        // return to it. Both funnel into here, this line refused because the
+        // phase was RUNNING, and SessionHost only navigates on the *transition*
+        // into RUNNING — which had already happened. A container that was very
+        // much alive read "never launched", and stopping it was the only way out.
+        if (containerId.isBlank()) return
+        if (state.value.phase != SessionPhase.IDLE) {
+            showRequests.value++
+            return
+        }
         viewModelScope.launch {
             val name = containers.get(containerId)?.name.orEmpty()
             SessionService.launch(appContext, containerId, name, native)

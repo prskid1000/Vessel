@@ -122,6 +122,13 @@ fun VesselApp(
      * which is what the device scripts under `tools/` need.
      */
     openSession: String? = null,
+    /**
+     * Goes up once per intent carrying [openSession], including a repeat of one
+     * already seen. See `MainActivity.takeOpenSession`: without it, the second
+     * tap on the running-session notification is indistinguishable from a
+     * recomposition and is dropped.
+     */
+    openSessionTicket: Int = 0,
 ) {
     // One session view model for the whole app, above the NavHost. There is one
     // session on this device; hoisting it here is what lets the checklist and the
@@ -148,9 +155,10 @@ fun VesselApp(
             ?.let { DisplayGeometry(it.width(), it.height()) }
     }
 
-    // Keyed on the id, so a second intent for a different container launches and
-    // a recomposition does not ask twice. `launch` is idempotent anyway.
-    LaunchedEffect(openSession) {
+    // Keyed on the ticket rather than on the id, so that the same container asked
+    // for twice runs this twice. `launch` is idempotent about *starting* — the
+    // second call turns into a request to show the desktop already running.
+    LaunchedEffect(openSessionTicket, openSession) {
         if (!openSession.isNullOrBlank()) session.launch(openSession, native)
     }
 
@@ -302,8 +310,14 @@ private fun SessionHost(
     // container, so relaunching the same one after a failure shows it again.
     LaunchedEffect(state.startedAt) { showChecklist = true }
 
+    // Keyed on the show counter as well as on the phase, so that "show me the
+    // desktop I already have" is a thing the user can ask for. Without it the
+    // only navigation to the desktop is the edge into RUNNING, and a user who
+    // backs out of a running session can never get back to it — see
+    // SessionViewModel.launch.
+    val showRequest by session.showRequests.collectAsStateWithLifecycle()
     val running = state.phase == SessionPhase.RUNNING
-    LaunchedEffect(running) {
+    LaunchedEffect(running, showRequest) {
         if (running) {
             // launchSingleTop, because the phase can be observed as RUNNING again
             // after a configuration change or a re-collection, and a second copy

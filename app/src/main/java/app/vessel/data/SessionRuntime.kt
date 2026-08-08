@@ -406,14 +406,14 @@ class SessionRuntime @Inject constructor(
             environment = current.environment,
             workingDirectory = workingDirectory?.takeIf { it.isDirectory } ?: current.layout.base,
         )
-        current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${'$'}{spec.commandLine}")
+        current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
 
         val process = runner.start(spec).getOrElse {
             val reason = it.message ?: it.javaClass.simpleName
             current.log.line(
                 LogSource.VESSEL,
                 LogLevel.WARN,
-                "${'$'}program could not start: ${'$'}reason",
+                "$program could not start: $reason",
             )
             return@withLock ProgramLaunch.Unavailable(reason)
         }

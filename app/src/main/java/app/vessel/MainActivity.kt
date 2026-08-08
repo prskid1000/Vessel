@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -38,7 +39,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        openSession = intent?.getStringExtra(EXTRA_OPEN_SESSION)
+        takeOpenSession(intent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -52,6 +53,7 @@ class MainActivity : ComponentActivity() {
                 VesselApp(
                     modifier = Modifier.fillMaxSize().background(Vessel.colors.bg),
                     openSession = openSession,
+                    openSessionTicket = openSessionTicket,
                 )
             }
         }
@@ -68,10 +70,27 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        openSession = intent.getStringExtra(EXTRA_OPEN_SESSION)
+        takeOpenSession(intent)
+    }
+
+    /**
+     * Record the extra, and record *that it arrived again*.
+     *
+     * The id alone is not enough. Tapping the running-session notification twice
+     * delivers the same string, `mutableStateOf` sees no change, and the
+     * `LaunchedEffect` keyed on it in `VesselApp` never re-runs — so the second
+     * tap, which is exactly the one a user makes after backing out of the
+     * desktop, does nothing at all. The ticket is what makes "the same request,
+     * again" distinguishable from "still the same request".
+     */
+    private fun takeOpenSession(intent: Intent?) {
+        val id = intent?.getStringExtra(EXTRA_OPEN_SESSION) ?: return
+        openSession = id
+        openSessionTicket++
     }
 
     private var openSession by mutableStateOf<String?>(null)
+    private var openSessionTicket by mutableIntStateOf(0)
 
     companion object {
         /** A container id; opens the Session screen on it. See `VesselApp`. */
