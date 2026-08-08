@@ -123,31 +123,16 @@ fun SessionTaskbar(
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            when {
-                // The honest case, and today the only one. Said in the bar rather
-                // than left as an empty strip, because an empty strip beside a
-                // running desktop reads as a taskbar that has lost its windows.
-                unavailableReason != null -> Text(
-                    unavailableReason,
-                    style = Vessel.type.bodySmall,
-                    color = Vessel.colors.textMuted,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                windows.isEmpty() -> Text(
-                    "Nothing has opened a window yet. A program that minimises to the system " +
-                        "tray disappears from here rather than docking — Vessel cannot see the " +
-                        "guest's tray without a helper process inside it, and does not ship one.",
-                    style = Vessel.type.bodySmall,
-                    color = Vessel.colors.textMuted,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                else -> windows.forEach { window ->
-                    TaskbarWindow(window) { onFocusWindow(window.id) }
-                }
+            // **An empty bar when nothing is open, and no sentence explaining it.**
+            // There were two paragraphs here — one about the system tray needing a
+            // helper process, one carrying the shell's unavailable reason — and
+            // together they filled the whole strip with 13 sp prose that ellipsised
+            // mid-word on a phone. A taskbar with no buttons on it is a taskbar with
+            // nothing open, which every user of a desktop already knows how to read.
+            // The unavailable reason still has a home: the launcher panel prints it
+            // above Browse C:, where there is room for a sentence.
+            windows.forEach { window ->
+                TaskbarWindow(window) { onFocusWindow(window.id) }
             }
         }
 
@@ -295,8 +280,7 @@ fun SessionLauncher(
 
         if (shortcuts.isEmpty()) {
             Text(
-                "No programs have been added to this container. Add one from its card on the " +
-                    "home screen, or from Browse C: below.",
+                "No programs yet.",
                 style = Vessel.type.bodySmall,
                 color = Vessel.colors.textMuted,
             )
@@ -322,7 +306,7 @@ fun SessionLauncher(
         VSheetRow(
             icon = VIcons.Folder,
             title = "Browse C:",
-            help = "The escape hatch for an executable that has no shortcut yet.",
+            help = null,
             onClick = onBrowse,
         )
     }
@@ -341,6 +325,15 @@ fun BoxScope.TaskbarHandle(onReveal: () -> Unit) {
         Modifier
             .align(Alignment.BottomCenter)
             .fillMaxWidth()
+            // **The inset goes on the touch box, not on the mark inside it.**
+            // It used to sit on the mark, which asked a 4 dp bar to also reserve
+            // the navigation bar's height inside a 20 dp parent. The child wanted
+            // more room than the parent had, so it was pushed past the bottom of
+            // its own box and clipped away entirely — which is why this edge had
+            // no handle at all while the rail's left edge had a plainly visible
+            // one. The bar was never missing from the code; it was laid out
+            // off-screen.
+            .navigationBarsPadding()
             .height(Vessel.metrics.railHandleTouch)
             .pointerInput(Unit) {
                 detectVerticalDragGestures { _, delta -> if (delta < 0f) onReveal() }
@@ -355,10 +348,16 @@ fun BoxScope.TaskbarHandle(onReveal: () -> Unit) {
     ) {
         Box(
             Modifier
-                .navigationBarsPadding()
+                // Square, like the rail's handle, and deliberately not a pill.
+                // Android draws its own gesture pill on this edge, centred, at
+                // very nearly this width — a rounded bar here is read as the
+                // system's and not as ours. Same colour, same thickness, same
+                // proportion of its edge as the left handle; the corners are the
+                // one thing that has to differ, because the system took that
+                // shape first.
                 .width(Vessel.metrics.edgeHandleLength)
                 .height(Vessel.metrics.railHandle)
-                .background(Vessel.colors.edgeHandle, Vessel.metrics.shapePill),
+                .background(Vessel.colors.edgeHandle),
         )
     }
 }

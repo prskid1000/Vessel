@@ -8,6 +8,28 @@ import com.winlator.xserver.Drawable;
 import java.nio.ByteBuffer;
 
 public class Texture {
+    /**
+     * VESSEL: which EGL context the ids in this process belong to.
+     *
+     * Leaving the desktop and coming back destroys the SurfaceView, and with it
+     * the EGL context and every texture object in it. What survives is this
+     * object, still holding a non-zero {@link #textureId} — so {@link
+     * #isAllocated()} said yes, {@link #updateFromDrawable()} skipped both the
+     * allocate and the upload, and the renderer bound a texture name that no
+     * longer refers to anything. Every window sampled black, and stayed black
+     * until the guest happened to repaint it, which an idle desktop never does.
+     *
+     * A generation counter rather than a walk over every drawable: the renderer
+     * has no enumeration of them (DrawableManager's map is private), and a
+     * texture is the only thing that knows whether its own id is stale.
+     * {@link #onContextCreated()} is called from the one place that knows the
+     * context is new, and every texture answers for itself from then on.
+     */
+    private static volatile int contextGeneration = 0;
+
+    /** VESSEL: the generation {@link #textureId} was generated in. */
+    private int generation = 0;
+
     protected int textureId = 0;
     protected int wrapS = GLES20.GL_CLAMP_TO_EDGE;
     protected int wrapT = GLES20.GL_CLAMP_TO_EDGE;
@@ -22,10 +44,22 @@ public class Texture {
         this.owner = owner;
     }
 
+    /**
+     * VESSEL: a new EGL context exists, so every id handed out before it is dead.
+     *
+     * Called from GLRenderer.onSurfaceCreated, which is the callback that fires
+     * on context creation and re-creation alike.
+     */
+    public static void onContextCreated() {
+        contextGeneration++;
+    }
+
     protected void generateTextureId() {
         int[] textureIds = new int[1];
         GLES20.glGenTextures(1, textureIds, 0);
         textureId = textureIds[0];
+        // VESSEL: stamp the id with the context it came from.
+        generation = contextGeneration;
     }
 
     protected void setTextureParameters() {
@@ -129,8 +163,15 @@ public class Texture {
         }
     }
 
+    /**
+     * VESSEL: allocated means allocated <em>in the context we are drawing in</em>.
+     *
+     * An id from a destroyed context is not a texture; returning false for it is
+     * what sends {@link #updateFromDrawable()} back down the allocate path so the
+     * window is re-uploaded from its ByteBuffer.
+     */
     public boolean isAllocated() {
-        return textureId > 0;
+        return textureId > 0 && generation == contextGeneration;
     }
 
     public int getTextureId() {
@@ -147,8 +188,15 @@ public class Texture {
 
     public void destroy() {
         if (textureId > 0) {
-            int[] textureIds = new int[]{textureId};
-            GLES20.glDeleteTextures(textureIds.length, textureIds, 0);
+            // VESSEL: only delete an id the current context actually issued.
+            // glGenTextures starts from 1 again in a fresh context, so a stale
+            // id is not merely dead — it is very likely to have been reissued to
+            // somebody else's live texture, and deleting it would blank an
+            // unrelated window.
+            if (generation == contextGeneration) {
+                int[] textureIds = new int[]{textureId};
+                GLES20.glDeleteTextures(textureIds.length, textureIds, 0);
+            }
             textureId = 0;
         }
     }

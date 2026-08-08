@@ -223,30 +223,89 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * the collector is a Compose recomposition on the main thread, and a list
      * being appended to underneath it is a crash waiting for the right timing.
      *
-     * "Top level" means a direct child of the root window. Wine's X11 driver
-     * gives every Windows top-level window exactly one of these; the children
-     * below them are its own decorations and client areas, and a taskbar showing
-     * those would list four entries for one Notepad.
+     * **"Top level" is not "child of the root", and assuming it was is why the
+     * taskbar listed nothing.** It read `rootWindow.children` directly, which is
+     * correct for a rootless X session and wrong for the only kind this product
+     * runs. Under `explorer /desktop=`, Wine creates one X window for the whole
+     * virtual desktop and every program's window is a child of *that*. So the
+     * root had exactly one child — the desktop — the desktop was filtered out for
+     * having no interesting title or kept as a single entry, and a `wscript`
+     * dialog plainly visible on screen never appeared in the bar.
+     *
+     * This walks down instead, and the walk needs exactly two rules:
+     *
+     * A **named, mapped window is an entry**, and the walk does not descend into
+     * it. Wine gives each Windows top-level window one named X window; below it
+     * are its own client areas, and listing those would put four buttons in the
+     * bar for one Notepad.
+     *
+     * A window is a **container** — descended into, never listed — when it has no
+     * name of its own, or when something named and mapped is underneath it. The
+     * second half is what identifies the virtual desktop without hard-coding
+     * [app.vessel.core.WINE_DESKTOP] or guessing at geometry: the desktop is the
+     * window that has the programs inside it. It also means that on an empty
+     * desktop, where that test cannot fire because there is nothing underneath,
+     * the desktop is caught by [isVirtualDesktop] instead — a full-screen direct
+     * child of the root, which is what a virtual desktop is and what no guest
+     * window can be while one exists.
      *
      * Windows with no `WM_NAME` yet are dropped rather than listed blank. A
      * program sets its title a moment after mapping, and a nameless button that
      * turns into "Notepad" a frame later reads as a glitch.
+     *
+     * The depth bound is a backstop, not a tuning knob. Wine's tree is root →
+     * desktop → window → client, and a client that nested a thousand deep would
+     * otherwise walk the taskbar into a stack overflow on the X server's thread.
      */
     private fun publishWindows() {
         val listener = onWindowsChanged ?: return
         val manager = xServer.windowManager
         val focused = manager.focusedWindow?.id
-        val list = manager.rootWindow.children
-            .filter { it.attributes.isMapped }
-            .mapNotNull { window ->
-                val title = window.name.orEmpty().trim()
-                if (title.isEmpty()) {
-                    null
-                } else {
-                    TopLevelWindow(window.id, title, focused = window.id == focused)
-                }
-            }
+        val list = mutableListOf<TopLevelWindow>()
+        collectTopLevels(manager.rootWindow, manager.rootWindow, focused, MAX_WINDOW_DEPTH, list)
         listener(list)
+    }
+
+    private fun collectTopLevels(
+        parent: Window,
+        root: Window,
+        focused: Int?,
+        remaining: Int,
+        into: MutableList<TopLevelWindow>,
+    ) {
+        if (remaining == 0) return
+        for (child in parent.children) {
+            if (!child.attributes.isMapped) continue
+            val title = child.name.orEmpty().trim()
+            val container = title.isEmpty() ||
+                child.isVirtualDesktop(parent, root) ||
+                child.hasNamedDescendant(MAX_WINDOW_DEPTH)
+            if (container) {
+                collectTopLevels(child, root, focused, remaining - 1, into)
+            } else {
+                into += TopLevelWindow(child.id, title, focused = child.id == focused)
+            }
+        }
+    }
+
+    /**
+     * The `explorer /desktop=` window: a direct child of the root that covers it.
+     *
+     * Only ever true of one window, and only in the mode this product runs in.
+     * A guest window that is genuinely full-screen is a child of *the desktop*
+     * rather than of the root, so it does not match — which is the whole reason
+     * the parent is part of the test rather than the size alone.
+     */
+    private fun Window.isVirtualDesktop(parent: Window, root: Window): Boolean =
+        parent === root && width >= root.width && height >= root.height
+
+    /** Whether anything mapped and named sits below this window. */
+    private fun Window.hasNamedDescendant(remaining: Int): Boolean {
+        if (remaining == 0) return false
+        return children.any { child ->
+            child.attributes.isMapped &&
+                (child.name.orEmpty().isNotBlank() || child.hasNamedDescendant(remaining - 1))
+        }
     }
 
     /**
@@ -380,6 +439,16 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 
         /** `sizeof(sockaddr_un.sun_path)` on Linux, and what patch 0005 checks. */
         const val SUN_PATH_MAX = 108
+
+        /**
+         * How far down the window tree the taskbar walk goes.
+         *
+         * Wine needs three — root, desktop, window — and a fourth for the client
+         * area some versions still create. Eight is that with room to spare, and
+         * it exists so a client that nests windows without bound cannot recurse
+         * this off the X server's thread.
+         */
+        const val MAX_WINDOW_DEPTH = 8
     }
 }
 
@@ -879,6 +948,16 @@ private class PacedXServerView(
         pending = false
         lastFrameNanos = System.nanoTime()
         renderNow()
+    }
+
+    init {
+        // Keep the EGL context across a pause, so leaving the desktop and coming
+        // back does not throw away every window texture in the first place.
+        //
+        // A hint, not a guarantee — the driver is free to drop the context
+        // anyway, and some do under memory pressure. `Texture`'s generation
+        // counter is what makes that survivable; this is what makes it rare.
+        preserveEGLContextOnPause = true
     }
 
     override fun requestRender() {

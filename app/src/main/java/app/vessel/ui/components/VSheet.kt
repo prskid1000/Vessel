@@ -292,12 +292,17 @@ fun VSheetHeader(
  * Used where a sheet offers routes rather than fields — *Browse this container's
  * C:*, *Import from Android storage*. Flat, because the sheet is already a
  * surface and a card inside it would be a box in a box.
+ *
+ * [help] is nullable because a route whose title says the whole thing does not
+ * need a second line saying it again, and the launcher's *Browse C:* is one:
+ * the sentence under it was explaining what browsing a C: drive is to someone
+ * who had already found the button.
  */
 @Composable
 fun VSheetRow(
     icon: ImageVector,
     title: String,
-    help: String,
+    help: String?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
@@ -323,11 +328,13 @@ fun VSheetRow(
             verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
         ) {
             Text(title, style = Vessel.type.body, color = Vessel.colors.textPrimary.copy(alpha = alpha))
-            Text(
-                help,
-                style = Vessel.type.bodySmall,
-                color = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
-            )
+            if (help != null) {
+                Text(
+                    help,
+                    style = Vessel.type.bodySmall,
+                    color = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
+                )
+            }
         }
     }
 }

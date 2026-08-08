@@ -86,6 +86,13 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         // VESSEL: upstream calls GPUHelper.setGlobalEGLContext() here, which
         // stashes the EGLContext for libgladiorenderer to share against. No
         // GLX extension, no gladio, nothing to share with.
+        //
+        // VESSEL: this fires again every time the SurfaceView is recreated —
+        // leaving the desktop and coming back does it — and the context that
+        // comes back is a new one with none of the old texture objects in it.
+        // Telling Texture so is what makes each window re-upload itself on the
+        // next frame instead of binding a dead id and sampling black.
+        Texture.onContextCreated();
         GLES20.glFrontFace(GLES20.GL_CCW);
         GLES20.glDisable(GLES20.GL_CULL_FACE);
 
