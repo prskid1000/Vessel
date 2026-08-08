@@ -28,6 +28,10 @@ APP_DIR=files/vkprobe
 STAGE="$REPO/out/vulkan"
 
 REPO_MOUNT="$(cd "$REPO" && { pwd -W 2>/dev/null || pwd; })"
+# The local side of `adb push` has to be a Windows path, because the wrapper
+# below turns Git Bash's path rewriting off wholesale and adb.exe cannot stat a
+# /c/... path. Same pair as every other tool here.
+STAGE_MOUNT="$(cd "$STAGE" && { pwd -W 2>/dev/null || pwd; })"
 
 # See tools/device-smoke.sh: Git Bash rewrites Unix-looking absolute paths before
 # adb.exe sees them, which silently misdirects a push.
@@ -76,13 +80,18 @@ if [ "$REUSE" -eq 0 ]; then
   ok "built"
 fi
 
-[ -x "$STAGE/vkdriverprobe" ] || die "no $STAGE/vkdriverprobe — run without --reuse once"
+# `-f`, not `-x`. The build runs in a container writing through an NTFS bind
+# mount, which has no execute bit to set, so the staged probe always comes back
+# 0644 on Windows and `-x` reported a missing file that was sitting right there.
+# The mode that matters is the one applied on the device, below.
+[ -f "$STAGE/vkdriverprobe" ] || die "no $STAGE/vkdriverprobe — run without --reuse once"
 
 say "staging into the app sandbox"
 adb shell "rm -rf /data/local/tmp/vkprobe && mkdir -p /data/local/tmp/vkprobe"
 for f in "$STAGE"/*.so "$STAGE"/vkdriverprobe "$STAGE"/turnip.tar; do
   [ -f "$f" ] || continue
-  adb push "$f" "/data/local/tmp/vkprobe/$(basename "$f")" >/dev/null
+  n="$(basename "$f")"
+  adb push "$STAGE_MOUNT/$n" "/data/local/tmp/vkprobe/$n" >/dev/null
 done
 
 # Copied with `cat` rather than `cp`: the shell user can write /data/local/tmp
