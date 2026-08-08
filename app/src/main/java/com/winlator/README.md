@@ -57,10 +57,10 @@ reproduce.
 `brunodev85/winlator-app` at the pinned commit and diffs it file by file against
 this tree; `LicensingTest` then asserts, offline, that the set of files carrying
 a `// VESSEL:` marker is exactly the set named in the table. Run on 2026-08-08
-the diff was **13 modified, 142 byte-identical, 0 files without an upstream
-counterpart**, and all 13 were marked. `app/src/main/res/drawable-nodpi/cursor.png`
-was checked separately and is byte-identical to upstream's
-`res/drawable-hdpi/cursor.png`.
+the diff was **13 modified, 143 byte-identical, 0 files without an upstream
+counterpart**, and all 13 were marked. The 143 includes
+`app/src/main/res/drawable-nodpi/cursor.png`, which lives outside both trees and
+is byte-identical to upstream's `res/drawable-hdpi/cursor.png`.
 
 The modifications, in the order they were made:
 

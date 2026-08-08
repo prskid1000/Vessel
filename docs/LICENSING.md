@@ -133,7 +133,7 @@ for it, and each is now checked rather than assumed:
 
 - *The vendored source must be complete and its changes recorded.*
   `build/verify_vendored.py` diffs every vendored file against upstream at the
-  pinned commit. Run 2026-08-08: **13 modified, 142 byte-identical, 0 with no
+  pinned commit. Run 2026-08-08: **13 modified, 143 byte-identical, 0 with no
   upstream counterpart**, all 13 carrying a `// VESSEL:` marker and all 13 listed
   in that tree's README. The README's list had been missing
   `cpp/winlator/CMakeLists.txt`, and its `project(Winlator C)` change was
