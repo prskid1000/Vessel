@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,10 +37,16 @@ import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VIconButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import app.vessel.ui.components.VSheet
+import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VPushToolbar
 import app.vessel.ui.components.VScaffold
 import app.vessel.ui.components.archColor
+import app.vessel.core.GuestDrive
 import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.Launchable
 import app.vessel.ui.theme.Vessel
@@ -73,6 +81,7 @@ fun FilesScreen(
     viewModel: FilesViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    var mapping by remember { mutableStateOf(false) }
 
     val importer = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -96,6 +105,8 @@ fun FilesScreen(
         onBack = { if (!viewModel.up()) onBack() },
         onOpen = viewModel::open,
         onCrumb = viewModel::goTo,
+        onDrive = viewModel::openDrive,
+        onAddDrive = { mapping = true },
         onImport = { importer.launch(IMPORT_MIME) },
         onExport = { selected?.let { exporter.launch(it.name) } },
         onAddAsApp = {
@@ -104,6 +115,43 @@ fun FilesScreen(
         },
         onDismissNotice = viewModel::dismissNotice,
     )
+
+    // **A sheet, not a screen.** Mapping a folder is one choice from a short
+    // list and the browser behind it is the context for that choice — pushing a
+    // destination would hide the drive tabs the new one is about to join.
+    if (mapping) {
+        val folders = remember { viewModel.mappableFolders() }
+        VSheet(
+            onDismiss = { mapping = false },
+            header = {
+                Text(
+                    "Map a folder as a drive",
+                    style = Vessel.type.subtitle,
+                    color = Vessel.colors.textPrimary,
+                )
+            },
+        ) {
+            if (folders.isEmpty()) {
+                Text(
+                    "No folders to map.",
+                    style = Vessel.type.bodySmall,
+                    color = Vessel.colors.textMuted,
+                )
+            } else {
+                folders.forEach { folder ->
+                    VSheetRow(
+                        icon = VIcons.Folder,
+                        title = folder.name,
+                        help = null,
+                        onClick = {
+                            mapping = false
+                            viewModel.mapFolder(folder)
+                        },
+                    )
+                }
+            }
+        }
+    }
 }
 
 private const val EXPORT_MIME = "application/octet-stream"
@@ -116,6 +164,8 @@ private fun FilesContent(
     onBack: () -> Unit,
     onOpen: (FileRow) -> Unit,
     onCrumb: (Int) -> Unit,
+    onDrive: (Char) -> Unit,
+    onAddDrive: () -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onAddAsApp: () -> Unit,
@@ -162,6 +212,13 @@ private fun FilesContent(
             }
         },
     ) {
+        DriveTabs(
+            drives = state.drives,
+            current = GuestPath.driveOf(state.guestPath),
+            canMap = state.canMapDrives,
+            onDrive = onDrive,
+            onAdd = onAddDrive,
+        )
         Breadcrumb(state.guestPath, onCrumb)
 
         // Why "Add as app" is greyed out for a file that plainly runs. Without
@@ -240,6 +297,87 @@ private fun FilesContent(
  * is the only cue needed: a breadcrumb where every crumb looks tappable does not
  * say where you are.
  */
+/**
+ * One tab per drive, and a `+`.
+ *
+ * **This is *This PC*, flattened into a row.** A drive is the first thing a
+ * Windows user looks for and the browser used to show a static `C:` label — the
+ * container could carry the phone's storage on `D:` and there was no way to
+ * reach it from here. A tab is a drive, permanent and always visible, so
+ * switching is one tap and nothing is hidden behind a menu.
+ *
+ * The letter is the tab and the label sits under it: `D:` is what a user types
+ * into a program's Open box, and the folder's name is what tells them which
+ * `D:` it is. Both matter and neither is enough alone.
+ *
+ * Scrolls horizontally, because a container with several pinned folders has
+ * more drives than a phone has width, and a row that silently dropped the last
+ * of them would hide exactly the one that was just added.
+ */
+@Composable
+private fun DriveTabs(
+    drives: List<GuestDrive>,
+    current: String?,
+    canMap: Boolean,
+    onDrive: (Char) -> Unit,
+    onAdd: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(bottom = Vessel.metrics.s6),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        drives.forEach { drive ->
+            val active = drive.display.equals(current, ignoreCase = true)
+            Column(
+                Modifier
+                    .background(
+                        if (active) Vessel.colors.accentSoft else Color.Transparent,
+                        Vessel.metrics.shapeMd,
+                    )
+                    .vRing(
+                        if (active) Vessel.colors.accent else Vessel.colors.divider,
+                        Vessel.metrics.shapeMd,
+                    )
+                    .clickable(onClickLabel = drive.label) { onDrive(drive.letter) }
+                    .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s6),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    drive.display,
+                    style = Vessel.type.control,
+                    color = if (active) Vessel.colors.accent else Vessel.colors.textLabel,
+                )
+                Text(drive.label, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
+            }
+        }
+
+        // Drawn even when it cannot be used, and disabled rather than absent:
+        // "can Vessel map a folder" is answered by the button being there, and
+        // the reason it is grey belongs on the sheet it would have opened.
+        Box(
+            Modifier
+                .size(Vessel.metrics.touchTarget)
+                .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
+                .clickable(enabled = canMap, onClickLabel = "Map a folder as a drive", onClick = onAdd),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                VIcons.Plus,
+                contentDescription = null,
+                Modifier.size(Vessel.metrics.iconMd),
+                tint = Vessel.colors.textMuted.copy(
+                    alpha = Vessel.colors.textMuted.alpha *
+                        if (canMap) 1f else Vessel.colors.disabledAlpha,
+                ),
+            )
+        }
+    }
+}
+
 @Composable
 private fun Breadcrumb(guestPath: String, onCrumb: (Int) -> Unit) {
     val parts = GuestPath.segments(guestPath)
@@ -392,6 +530,8 @@ private fun FilesPreview() {
             onBack = {},
             onOpen = {},
             onCrumb = {},
+            onDrive = {},
+            onAddDrive = {},
             onImport = {},
             onExport = {},
             onAddAsApp = {},

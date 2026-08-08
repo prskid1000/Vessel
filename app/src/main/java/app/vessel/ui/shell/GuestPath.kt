@@ -33,13 +33,13 @@ object GuestPath {
      * asked about a file outside the container, and the honest answer is that it
      * has no guest name — not a plausible one assembled from the tail.
      */
-    fun of(root: File, file: File): String? {
+    fun of(root: File, file: File, drive: String = DRIVE): String? {
         val base = root.canonicalPathOrAbsolute()
         val target = file.canonicalPathOrAbsolute()
-        if (target == base) return DRIVE + SEPARATOR
+        if (target == base) return drive + SEPARATOR
         val prefix = base + File.separator
         if (!target.startsWith(prefix)) return null
-        return DRIVE + SEPARATOR + target.removePrefix(prefix).replace(File.separatorChar, SEPARATOR)
+        return drive + SEPARATOR + target.removePrefix(prefix).replace(File.separatorChar, SEPARATOR)
     }
 
     /**
@@ -49,10 +49,29 @@ object GuestPath {
      * `C:\..\..\etc` is refused rather than followed. Nothing in this app builds
      * such a string, but this function's inputs include a text field.
      */
+    /**
+     * The drive a path names, or null when it does not name one.
+     *
+     * Any letter, not only C:. The browser is no longer rooted at a single
+     * drive — a container can carry the phone's storage on D: and a pinned
+     * folder on E: — and a path's own letter is the only thing that says which
+     * root it should be resolved against.
+     */
+    fun driveOf(guestPath: String): String? {
+        val trimmed = guestPath.trimStart()
+        if (trimmed.length < 2 || trimmed[1] != ':') return null
+        val letter = trimmed[0]
+        return if (letter.isLetter()) "" + letter.uppercaseChar() + ":" else null
+    }
+
     fun resolve(root: File, guestPath: String): File? {
         val trimmed = guestPath.trim()
-        if (!trimmed.startsWith(DRIVE, ignoreCase = true)) return null
-        val tail = trimmed.drop(DRIVE.length).trimStart(SEPARATOR, '/')
+        // Any drive, and the caller is trusted to have passed the matching root.
+        // Checking the letter here too would be a second source of truth for
+        // which drive is open, and the two would disagree the first time one of
+        // them was updated.
+        val drive = driveOf(trimmed) ?: return null
+        val tail = trimmed.drop(drive.length).trimStart(SEPARATOR, '/')
         val candidate = if (tail.isEmpty()) root else File(root, tail.replace(SEPARATOR, '/'))
         val base = root.canonicalPathOrAbsolute()
         val resolved = candidate.canonicalPathOrAbsolute()

@@ -104,8 +104,17 @@ object DriveMap {
     fun labelFor(letter: Char, target: String): String = when {
         letter == SYSTEM_DRIVE -> "Windows"
         letter == ROOT_DRIVE -> "Android"
-        else -> target.trimEnd('/').substringAfterLast('/').ifEmpty { target }
+        else -> {
+            val tail = target.trimEnd('/').substringAfterLast('/')
+            // `/storage/emulated/0` ends in the Android user id, so the folder
+            // name is "0" — a true last segment and a useless drive label. An
+            // all-digit tail is one of those rather than a folder somebody named.
+            if (tail.isEmpty() || tail.all { it.isDigit() }) PHONE_STORAGE else tail
+        }
     }
+
+    /** What `/storage/emulated/<user>` is called, its own name being a number. */
+    const val PHONE_STORAGE = "Phone"
 
     /**
      * Point [letter] at [target], replacing any existing mapping.

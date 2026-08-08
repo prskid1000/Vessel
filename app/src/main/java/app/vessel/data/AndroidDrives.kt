@@ -74,6 +74,23 @@ class AndroidDrives @Inject constructor(
         return if (DriveMap.map(prefix, letter, folder)) letter else null
     }
 
+    /**
+     * Folders the `+` sheet offers: the top level of shared storage.
+     *
+     * A list rather than Android's folder picker, and that is not a shortcut.
+     * `ACTION_OPEN_DOCUMENT_TREE` hands back a `content://` tree, which is not
+     * a path — there is nothing to symlink and Wine cannot open it. With
+     * `MANAGE_EXTERNAL_STORAGE` this build has real paths, so offering the real
+     * folders is both simpler and the only form that can work.
+     */
+    fun mappableFolders(): List<File> {
+        if (!canMap) return emptyList()
+        val shared = Environment.getExternalStorageDirectory() ?: return emptyList()
+        return shared.listFiles().orEmpty()
+            .filter { it.isDirectory && !it.name.startsWith('.') }
+            .sortedBy { it.name.lowercase() }
+    }
+
     /** Remove a mapping. Never touches what it pointed at — see [DriveMap.unmap]. */
     fun unmap(prefix: File, letter: Char): Boolean = DriveMap.unmap(prefix, letter)
 

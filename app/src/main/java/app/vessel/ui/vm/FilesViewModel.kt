@@ -12,6 +12,9 @@ import app.vessel.data.ContainerRepository
 import app.vessel.ui.Routes
 import app.vessel.ui.shell.AppRegistry
 import app.vessel.ui.shell.AppShortcut
+import app.vessel.core.DriveMap
+import app.vessel.core.GuestDrive
+import app.vessel.data.AndroidDrives
 import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.Launchable
 import app.vessel.ui.shell.launchabilityOf
@@ -62,6 +65,10 @@ data class FilesUiState(
     val storage: String = "",
     /** Set when the drive is not there at all. Stated, never an empty list. */
     val error: String? = null,
+    /** Every drive the container has, in letter order. One tab each. */
+    val drives: List<GuestDrive> = emptyList(),
+    /** Whether this build may map a folder at all. See [AndroidDrives.canMap]. */
+    val canMapDrives: Boolean = false,
     /** The row a long-press or a tap is asking about; drives the action bar. */
     val selected: FileRow? = null,
     /** One-shot prose: an import that failed, a refusal, a completed export. */
@@ -113,12 +120,31 @@ class FilesViewModel @Inject constructor(
     private val paths: ContainerPaths,
     private val containers: ContainerRepository,
     private val registry: AppRegistry,
+    private val drives: AndroidDrives,
 ) : ViewModel() {
 
     private val containerId: String = savedState.get<String>(Routes.ARG_CONTAINER_ID).orEmpty()
 
-    /** `…/containers/<id>/prefix/drive_c` — the Android side of `C:`. */
-    private val driveC: File = File(paths.of(containerId).prefix, GuestPath.DRIVE_C)
+    private val prefix: File = paths.of(containerId).prefix
+
+    /**
+     * The drive the browser is showing, and the folder behind it.
+     *
+     * **Rooted through `dosdevices`, which is what makes every drive the same
+     * thing.** `dosdevices/c:` is a symlink to `drive_c` and `dosdevices/d:` is
+     * a symlink to the phone's storage, so opening either is opening a
+     * directory — there is no special case for the prefix's own drive and no
+     * second code path for a mapped one. The browser was rooted at `drive_c`
+     * directly, which is why `D:` existed in the container and could not be
+     * reached from here.
+     */
+    private var driveLetter: Char = DriveMap.SYSTEM_DRIVE
+
+    private val driveRoot: File
+        get() = File(File(prefix, DriveMap.DOSDEVICES), "$driveLetter:")
+
+    /** Kept for the callers that still mean the prefix's own C:. */
+    private val driveC: File = File(prefix, GuestPath.DRIVE_C)
 
     private val _state = MutableStateFlow(FilesUiState(containerId = containerId))
     val state: StateFlow<FilesUiState> = _state.asStateFlow()
@@ -139,7 +165,54 @@ class FilesViewModel @Inject constructor(
                 _state.update { it.copy(addedExecutables = added) }
             }
         }
+        refreshDrives()
         navigateTo(GuestPath.DRIVE + SEPARATOR)
+    }
+
+    /**
+     * Re-read the drive list from `dosdevices`.
+     *
+     * From the directory rather than from anything remembered, on the same rule
+     * the rest of this feature follows: a note saying a mapping exists is not
+     * the mapping.
+     */
+    private fun refreshDrives() {
+        val list = drives.drives(prefix)
+        _state.update { it.copy(drives = list, canMapDrives = drives.canMap) }
+    }
+
+    /** The folders the map sheet offers. Read on open, not held. */
+    fun mappableFolders(): List<File> = drives.mappableFolders()
+
+    /** Show [letter], from its own root. Silent for a drive that is not mapped. */
+    fun openDrive(letter: Char) {
+        if (letter == driveLetter) return
+        if (state.value.drives.none { it.letter == letter }) return
+        driveLetter = letter
+        navigateTo("${letter.uppercaseChar()}:" + SEPARATOR)
+    }
+
+    /**
+     * Map [folder] to the next free letter and show it.
+     *
+     * Returns the letter, or null with the reason already in state — every
+     * letter taken, no permission, or the link could not be made.
+     */
+    fun mapFolder(folder: File) {
+        val letter = drives.mapFolder(prefix, folder)
+        if (letter == null) {
+            _state.update { it.copy(error = "That folder could not be mapped to a drive.") }
+            return
+        }
+        refreshDrives()
+        openDrive(letter)
+    }
+
+    /** Remove a mapping. The folder it pointed at is untouched. */
+    fun unmapDrive(letter: Char) {
+        if (!drives.unmap(prefix, letter)) return
+        refreshDrives()
+        if (driveLetter == letter) openDrive(DriveMap.SYSTEM_DRIVE)
     }
 
     // — navigation -----------------------------------------------------------
@@ -184,7 +257,7 @@ class FilesViewModel @Inject constructor(
     }
 
     private fun read(guestPath: String): Listing {
-        val directory = GuestPath.resolve(driveC, guestPath)
+        val directory = GuestPath.resolve(driveRoot, guestPath)
         if (directory == null || !directory.isDirectory) {
             return Listing(
                 error = if (!driveC.isDirectory) {
@@ -235,7 +308,7 @@ class FilesViewModel @Inject constructor(
      */
     fun import(source: Uri) {
         viewModelScope.launch {
-            val target = GuestPath.resolve(driveC, state.value.guestPath)
+            val target = GuestPath.resolve(driveRoot, state.value.guestPath)
             if (target == null || !target.isDirectory) {
                 _state.update { it.copy(notice = "That folder is not on this drive any more.") }
                 return@launch
@@ -295,7 +368,7 @@ class FilesViewModel @Inject constructor(
     /** Copy the selected file out to wherever Android's picker chose. */
     fun export(row: FileRow, destination: Uri) {
         viewModelScope.launch {
-            val source = GuestPath.resolve(driveC, row.guestPath)
+            val source = GuestPath.resolve(driveRoot, row.guestPath)
             if (source == null || !source.isFile) {
                 _state.update { it.copy(notice = "${row.name} is not on this drive any more.") }
                 return@launch
