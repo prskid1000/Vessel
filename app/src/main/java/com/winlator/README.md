@@ -46,8 +46,23 @@ MIT; that cannot apply to code descended from this repository. See
 
 ## Local modifications
 
-Every deviation from upstream is marked with a `// VESSEL:` comment. Grep for it.
-At time of vendoring there are these:
+Every deviation from upstream is marked with a `// VESSEL:` comment, and the
+table at the end of this section lists every file that carries one. Both halves
+matter: LGPL-2.1 section 6(a) asks for "the complete corresponding
+machine-readable source code for the Library **including whatever changes were
+used in the work**", and a change nobody wrote down is a change nobody can
+reproduce.
+
+**The list is checked, not asserted.** `build/verify_vendored.py` fetches
+`brunodev85/winlator-app` at the pinned commit and diffs it file by file against
+this tree; `LicensingTest` then asserts, offline, that the set of files carrying
+a `// VESSEL:` marker is exactly the set named in the table. Run on 2026-08-08
+the diff was **13 modified, 142 byte-identical, 0 files without an upstream
+counterpart**, and all 13 were marked. `app/src/main/res/drawable-nodpi/cursor.png`
+was checked separately and is byte-identical to upstream's
+`res/drawable-hdpi/cursor.png`.
+
+The modifications, in the order they were made:
 
 1. **`XServer`** — `public final XServerDisplayActivity activity` is gone,
    replaced by a settable `Callback<String> debugSink` that `debugPrint()`
@@ -87,6 +102,34 @@ At time of vendoring there are these:
    and `inputcontrols/ExternalController` are subsets, each with a header
    comment listing what survived. Diffs to those files will not apply cleanly;
    diffs to everything else should.
+12. **`cpp/winlator/CMakeLists.txt`** — `project(Winlator C)` rather than
+   `Project(Winlator)`, so CMake does not enable CXX and go looking for a C++
+   compiler this pure-C sub-project has no source for; and `gpu_helper.c` and
+   `wine_registry_editor.c` dropped from the source list, matching *What was
+   deliberately not taken* above.
+
+### Every file that differs from upstream
+
+This table is the machine-checkable form of the list above — `LicensingTest`
+compares it against a grep for `VESSEL:`, so adding a marked file without adding
+a row here, or removing the last marker from a file without removing its row,
+fails the build.
+
+| File | Items |
+|---|---|
+| `app/src/main/java/com/winlator/core/AppUtils.java` | 11 |
+| `app/src/main/java/com/winlator/core/ArrayUtils.java` | 11 |
+| `app/src/main/java/com/winlator/core/FileUtils.java` | 7, 11 |
+| `app/src/main/java/com/winlator/core/ImageUtils.java` | 11 |
+| `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
+| `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
+| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5 |
+| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6 |
+| `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
+| `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
+| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
+| `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |
+| `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 
 ## Integration points
 

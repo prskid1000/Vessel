@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.22.1)
 
+# VESSEL: `project(Winlator C)`, where upstream writes `Project(Winlator)`.
+# Naming the language stops CMake enabling CXX as well and looking for a C++
+# compiler this sub-project has no source for; `libwinlator` is pure C. The
+# capital P is CMake-insensitive and only changed to match the rest of the file.
 project(Winlator C)
 
 # VESSEL: -Wimplicit-function-declaration is upstream's, and it is load-bearing

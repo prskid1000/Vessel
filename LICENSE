@@ -26,10 +26,13 @@ It is not a preference; it is the only choice that fits what the app already
 contains. Vessel vendors the Winlator X server (LGPL-2.1) directly into the APK,
 so the app's own terms have to be LGPL-compatible.
 
-"or later" is the load-bearing part. libadrenotools is LGPL-3.0, and LGPL-2.1
-*only* cannot be combined with it; the "or any later version" clause is what
-permits that combination. Choosing bare LGPL-2.1 would quietly rule out a
-component this project expects to link.
+"or later" is kept because it costs nothing and leaves the door open to a future
+GPL-3-family component. This paragraph used to give a different and load-bearing
+reason: that libadrenotools is under version 3 of the LGPL and that only the "or
+any later version" clause permits combining with it. That was wrong.
+libadrenotools is BSD-2-Clause, checked at the vendored commit, and constrains
+nothing here. The correction is recorded in docs/LICENSING.md rather than quietly
+deleted, because a reason that turns out to be false is worth a note.
 
 GPL-3.0 would also have been compatible and was rejected as stricter than the
 obligation requires: it would impose full copyleft on the whole application
@@ -39,15 +42,24 @@ where the LGPL only asks that the LGPL parts stay free and relinkable.
 What this means in practice
 ---------------------------
 
-The obligation created by section 6 is that a user must be able to relink the
-app against their own modified build of the LGPL parts. Two things satisfy it,
-and both are already true:
+Section 6 asks for three things when a work containing the Library is
+distributed, and all three are about the APK rather than about this repository:
 
-  - The vendored source is in this public repository, unobfuscated and
-    buildable, with its upstream commit recorded.
-  - R8 does not rename or strip the com.winlator packages. Keep rules in
-    app/proguard-rules.pro enforce that. If minification ever starts touching
-    them, it is a licensing regression, not a build one.
+  1. Prominent notice, with each copy of the work, that the Library is used in
+     it and is covered by this License.
+  2. A copy of this License, supplied with the work. The full text ships inside
+     the APK, at res/raw/license_lgpl_2_1.txt.
+  3. One of subsections 6(a) to 6(e). Vessel relies on 6(a): the complete
+     corresponding source of both the Library and the work that uses it is in
+     this repository, unobfuscated and buildable, with the upstream commit and
+     every local change recorded in app/src/main/java/com/winlator/README.md, so
+     a user can modify the Library and rebuild an APK containing their version.
+     R8 keep rules in app/proguard-rules.pro stop minification renaming those
+     packages; if it ever starts touching them, that is a licensing regression
+     rather than a build one.
+
+6(a) holds only while this repository is actually public, and item 1 needs a
+place in the interface that says so. docs/LICENSING.md tracks both.
 
 Third-party components are not covered by this file. Each keeps its own licence
 and its own copyright headers; see docs/LICENSING.md for the full picture,
