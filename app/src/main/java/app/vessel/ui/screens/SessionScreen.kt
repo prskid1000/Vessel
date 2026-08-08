@@ -1,5 +1,6 @@
 package app.vessel.ui.screens
 
+import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -31,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,12 +40,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionDiagnosis
@@ -74,6 +80,46 @@ import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+
+/**
+ * Hide Android's bars for as long as the desktop is on screen.
+ *
+ * **Not for the extra pixels — because the status bar was eating the title
+ * bar.** A guest window opens at the desktop's top-left, Wine's caption is
+ * therefore in the top few dozen pixels of the panel, and that strip belongs to
+ * Android's status bar: a drag that starts there pulls down the notification
+ * shade instead of moving the window. Measured, not assumed — the first attempt
+ * to drag a console by its caption produced a screenshot of the shade. Move was
+ * not broken; it was unreachable.
+ *
+ * `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` rather than hiding them outright, so
+ * the bars are still one deliberate edge swipe away. A desktop session is the
+ * one screen in this app that should own the whole panel, and it is also the one
+ * where the user still needs the clock and the battery on demand.
+ *
+ * Restored on dispose, which is what stops the rest of the app inheriting an
+ * immersive window after backing out of a session.
+ */
+@Composable
+private fun ImmersiveWhileRunning() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (view.context as? Activity)?.window
+        if (window == null) {
+            onDispose { }
+        } else {
+            val controller = WindowCompat.getInsetsController(window, view)
+            val restore = controller.systemBarsBehavior
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            onDispose {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior = restore
+            }
+        }
+    }
+}
 
 /**
  * The session: a desktop, a shell over it, and two dialogs — and not a screen for
@@ -344,6 +390,8 @@ fun SessionDesktop(
         }
     }
 
+    ImmersiveWhileRunning()
+
     Box(Modifier.fillMaxSize().background(Vessel.colors.bg)) {
         SessionSurface(state, surface)
 
@@ -474,13 +522,9 @@ fun SessionDesktop(
             TaskbarTransition(visible = taskbarOpen) {
                 SessionTaskbar(
                     windows = windows,
-                    paused = state.paused,
-                    unavailableReason = shellUnavailableReason,
                     launcherOpen = launcherOpen,
                     onStart = { launcherOpen = !launcherOpen },
                     onFocusWindow = onFocusWindow,
-                    onTogglePause = onTogglePause,
-                    onStop = { confirmingStop = true },
                 )
             }
         }

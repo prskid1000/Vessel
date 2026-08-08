@@ -92,12 +92,8 @@ import app.vessel.ui.theme.vRuleAbove
 @Composable
 fun SessionTaskbar(
     windows: List<GuestWindow>,
-    paused: Boolean,
-    unavailableReason: String?,
     onStart: () -> Unit,
     onFocusWindow: (Int) -> Unit,
-    onTogglePause: () -> Unit,
-    onStop: () -> Unit,
     modifier: Modifier = Modifier,
     launcherOpen: Boolean = false,
 ) {
@@ -145,22 +141,14 @@ fun SessionTaskbar(
             }
         }
 
-        // Repeated from the rail on purpose: the taskbar is the surface that is
-        // already open when a session needs ending.
-        VIconAction(
-            icon = if (paused) VIcons.Play else VIcons.Pause,
-            contentDescription = if (paused) "Resume the session" else "Pause the session",
-            onClick = onTogglePause,
-            style = if (paused) VButtonStyle.Primary else VButtonStyle.Secondary,
-            size = Vessel.metrics.touchTarget,
-        )
-        VIconAction(
-            icon = VIcons.X,
-            contentDescription = "Stop the session",
-            onClick = onStop,
-            style = VButtonStyle.Danger,
-            size = Vessel.metrics.touchTarget,
-        )
+        // **Pause and Stop are not here.** They were, on the argument that the
+        // taskbar is the surface already open when a session needs ending — but
+        // the session rail has both, beside the graphs and the rest of the
+        // session's own controls, and that is where a control that acts on the
+        // *session* belongs. Two buttons in two places is two places to keep in
+        // step and one more chance to tap Stop while reaching for a window.
+        //
+        // What is left is what a taskbar is: a start button, and the windows.
     }
 }
 
@@ -484,12 +472,8 @@ private fun SessionTaskbarPreview() {
                 GuestWindow(1, "Notepad++", focused = true),
                 GuestWindow(2, "Stalker"),
             ),
-            paused = false,
-            unavailableReason = null,
             onStart = {},
             onFocusWindow = {},
-            onTogglePause = {},
-            onStop = {},
         )
     }
 }
