@@ -190,14 +190,32 @@ the setting that turned "the GPU is slow" into "the driver never loaded", twice.
 startup time ever becomes the complaint, the honest fix is a per-container
 "quiet" switch, not a silent default.
 
-### Candidate E — big-core affinity
+### Candidate E — big-core affinity — **measured, do not do it**
 
-The SM8845 has six Oryon cores at 3.32 GHz and two at 3.80 GHz. Nothing pins
-anything. Android's scheduler will usually do the right thing for a foreground
-app, and pinning risks *losing* to it by fighting EAS.
+The SM8845 has six Oryon cores at 3.32 GHz and two "prime" cores at 3.80 GHz.
+The obvious optimization is to pin the guest to the fast pair. Measured, x86-64
+integer, three runs each back to back:
 
-- **Status:** not applied, and lower confidence than it looks. Worth measuring
-  before believing; a wrong affinity mask is slower than none.
+| affinity | time | vs default |
+|---|---|---|
+| none (scheduler decides) | 232.0 ms | — |
+| `taskset c0` — cpu6-7, the 3.80 GHz pair | 275.4 ms | **19% slower** |
+| `taskset 3f` — cpu0-5, the 3.32 GHz six | 220.2 ms | 5% faster |
+
+**Pinning to the fast cores is the worst of the three**, by a wide margin.
+A Wine session is not one thread — there is `wineserver`, the guest's own
+threads, and FEX's — and squeezing all of them onto two cores costs more in
+contention than the extra 480 MHz returns. The clock speed on the box is not the
+throughput of the workload.
+
+The 3.32 GHz cluster being 5% ahead of the scheduler is suggestive, not a
+result: it is small, it has no control group in this measurement, and beating
+EAS by fighting it tends not to survive contact with a real workload that has a
+different thread count.
+
+- **Status:** not applied. The interesting half of this is the 19% — it is a
+  concrete reason not to add the "pin to big cores" setting that every phone
+  emulator eventually grows.
 
 ---
 
@@ -277,6 +295,19 @@ Rules that make the numbers mean something, all enforced by the script:
 `WINEDEBUG=-all` here and nowhere else in the repo. Everywhere else the
 diagnostic channels are the point; in a benchmark `+loaddll` writes a line per
 module load and is the measurement's largest confound.
+
+### Absolute times do not survive between sessions
+
+Back to back, two runs agree to within 1% and the `branch` figures come out
+bit-identical. Hours apart, the same x86-64 integer measurement moved from
+270 ms to 232 ms — 15%, with no code change, purely the device's thermal and
+scheduling state.
+
+So: **compare within a run, never across sessions.** That is why the headline
+output is a ratio against the ARM64 control measured in the same invocation, and
+why `--baseline` is for a before/after taken close together rather than a number
+kept from last week. A 5% improvement quoted across two sessions is noise
+wearing a result's clothes.
 
 ### What it cannot measure yet
 
