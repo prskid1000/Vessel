@@ -444,12 +444,14 @@ fun SessionLauncher(
 }
 
 /**
- * Five across for the built-in row.
+ * Six across for the built-in row.
  *
  * The tile grid above is four, and these are deliberately narrower: no
- * architecture badge, no program name to fit, just a mark and a command.
+ * architecture badge, no program name to fit, just a mark and a command. Six in
+ * a 420 dp panel is a 59 dp cell, which holds a 30 dp icon and the longest
+ * caption in the list — `iexplore` — at the panel's widened size.
  */
-private const val BUILT_IN_COLUMNS = 5
+private const val BUILT_IN_COLUMNS = 6
 
 /**
  * A square action in the launcher's bottom row: a glyph over three characters.
@@ -512,6 +514,11 @@ private fun LauncherAction(
             caption,
             style = Vessel.type.monoSmall,
             color = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
+            // Six to a row leaves no slack: a caption that wrapped would make
+            // one cell taller than its neighbours and step the whole row.
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

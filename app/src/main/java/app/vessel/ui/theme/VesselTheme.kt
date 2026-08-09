@@ -360,8 +360,21 @@ data class VMetrics(
      */
     val edgeHandleLength: Dp = 108.dp,
 
-    /** How wide the launcher panel is when it opens above the start button. */
-    val launcherWidth: Dp = 420.dp,
+    /**
+     * How wide the launcher panel is when it opens above the start button.
+     *
+     * 420 was sized for four actions in a row and a handful of program tiles.
+     * The built-in row is eleven programs six across now, and at 420 the cells
+     * were narrower than their own captions. Widened rather than shrinking the
+     * icons: these are real program icons extracted from the PEs, and the panel
+     * has the room — the session is landscape-locked, so this is about 60% of a
+     * 933 dp screen.
+     *
+     * Still a maximum and still not the whole width. The panel anchors to the
+     * start button rather than filling the screen, because launching a second
+     * program is not a reason to hide the first.
+     */
+    val launcherWidth: Dp = 560.dp,
 
     /** A taskbar entry's icon — smaller than a home tile's, because the bar is 44 dp tall. */
     val taskbarIcon: Dp = 32.dp,

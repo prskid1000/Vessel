@@ -214,28 +214,6 @@ enum class TerminalProfile(
     ),
 
     /**
-     * Windows 3.1's shell, still built and still starts.
-     */
-    PROGRAM_MANAGER(
-        label = "Program Manager",
-        program = "progman.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
-     * It draws, and on this project that is not nothing.
-     */
-    CLOCK(
-        label = "Clock",
-        program = "clock.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
      * Not a joke.
      *
      * A real Win32 program with a menu, a dialog, a bitmap blit and a mouse,
@@ -273,8 +251,6 @@ enum class TerminalProfile(
             WRITE -> "write"
             INTERNET_EXPLORER -> "iexplore"
             OLE_VIEW -> "oleview"
-            PROGRAM_MANAGER -> "progman"
-            CLOCK -> "clock"
             MINESWEEPER -> "winemine"
         }
 }
