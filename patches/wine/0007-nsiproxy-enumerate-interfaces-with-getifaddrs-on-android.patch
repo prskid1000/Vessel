@@ -1,5 +1,5 @@
 diff --git a/dlls/nsiproxy.sys/ndis.c b/dlls/nsiproxy.sys/ndis.c
-index 5dde17244d9..f13cca2ad00 100644
+index 5dde17244d9..5ada5f03641 100644
 --- a/dlls/nsiproxy.sys/ndis.c
 +++ b/dlls/nsiproxy.sys/ndis.c
 @@ -31,6 +31,10 @@
@@ -67,27 +67,24 @@ index 5dde17244d9..f13cca2ad00 100644
  static unsigned int update_if_table( void )
  {
      struct if_nameindex *indices, *entry;
-@@ -315,8 +366,17 @@ static unsigned int update_if_table( void )
+@@ -315,8 +366,15 @@ static unsigned int update_if_table( void )
      indices = if_nameindex();
      if (!indices)
      {
--        ERR( "if_nameindex failed, errno %d.\n", errno );
 +#ifdef HAVE_IFADDRS_H
 +        static int warned;
 +
-+        if (!warned++) WARN( "if_nameindex failed, errno %d; using getifaddrs.
-+", errno );
++        if (!warned++) WARN( "if_nameindex failed, errno %d; using getifaddrs.\n", errno );
 +        return update_if_table_from_ifaddrs();
 +#else
-+        ERR( "if_nameindex failed, errno %d.
-+", errno );
+         ERR( "if_nameindex failed, errno %d.\n", errno );
          return 0;
 +#endif
      }
  
      for (entry = indices; entry->if_index; entry++)
 diff --git a/dlls/nsiproxy.sys/nsi.c b/dlls/nsiproxy.sys/nsi.c
-index 09ced8f814e..32ac1a69c12 100644
+index 09ced8f814e..407c58dbd21 100644
 --- a/dlls/nsiproxy.sys/nsi.c
 +++ b/dlls/nsiproxy.sys/nsi.c
 @@ -189,11 +189,23 @@ static NTSTATUS add_notification( const NPI_MODULEID *module, UINT32 table )
@@ -114,14 +111,13 @@ index 09ced8f814e..32ac1a69c12 100644
      if (netlink_fd == -1)
      {
          struct sockaddr_nl addr;
-@@ -211,7 +223,9 @@ static NTSTATUS poll_events(void)
+@@ -211,7 +223,8 @@ static NTSTATUS poll_events(void)
          {
              close( netlink_fd );
              netlink_fd = -1;
 -            ERR( "bind failed, errno %d.\n", errno );
 +            unavailable = 1;
-+            ERR( "bind failed, errno %d; address-change notifications are off.
-+", errno );
++            ERR( "bind failed, errno %d; address-change notifications are off.\n", errno );
              return STATUS_NOT_IMPLEMENTED;
          }
      }

@@ -95,6 +95,9 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 19 put Git's three directories on PATH, so git and the POSIX tools
+     * work from cmd the moment the component is installed - clangarm64 and
+     * not mingw64, which is what the ARM64 build calls its prefix;
      * 18 named the graphics driver, so Wine stops probing for `winemac.drv` it
      * cannot have and logging the failure twenty-two times a session;
      * 17 took the unix root off the desktop — see [unixNamespace] — which with
@@ -119,7 +122,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 18
+    const val SEED_VERSION: Int = 19
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -657,26 +660,55 @@ object PrefixRegistry {
     /**
      * The machine `PATH`, written whole.
      *
-     * Wine seeds exactly the three entries below and nothing has ever wanted a
-     * fourth. `C:\Program Files\Vessel Tools` was here for a bundled BusyBox
-     * that was never built, so the value named a directory that has never
-     * existed — harmless, and a promise the build did not keep. A toolchain a
-     * user installs brings its own entry; this seed has no business claiming
-     * one in advance.
+     * Wine's own three entries, plus Git's three.
+     *
+     * **`Vessel Tools` used to be here and was a promise the build did not
+     * keep**: it named a directory for a BusyBox nobody ever built, so the value
+     * pointed at nothing. The rule that replaced it stands — this seed does not
+     * claim a directory in advance. Git's entries are different in the way that
+     * matters: the component really does put those directories there, and the
+     * entire point of installing it is that `git`, `ls`, `grep` and `sed` work
+     * from `cmd` without anyone typing a path.
+     *
+     * **`clangarm64`, not `mingw64`.** The ARM64 build of Git for Windows uses a
+     * `clangarm64` prefix where the x86-64 build uses `mingw64`. Copying the
+     * usual x64 instructions gives a PATH that finds `git.exe` through `cmd\`
+     * and misses every helper behind it — which looks like a working install
+     * until the first command that needs one.
+     *
+     * Written whole rather than appended, because a `.reg` merge replaces a
+     * value and there is no append form: this seed is the definition of the
+     * machine PATH, so it has to name everything that belongs on it. Naming
+     * Git's directories before Git is installed is harmless — a PATH entry for a
+     * directory that does not exist is something every Windows machine has
+     * several of, and it means installing the component needs no second write.
      *
      * Kept as a key rather than deleted so an existing prefix is *corrected*.
-     * Removing it would leave the old value, tools directory and all, in every
-     * hive that already has one.
      */
     val toolsPath: RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment""",
         values = listOf(
             RegistryValue(
                 "PATH",
-                """C:\windows\system32;C:\windows;C:\windows\system32\wbem""",
+                listOf(
+                    """C:\windows\system32""",
+                    """C:\windows""",
+                    """C:\windows\system32\wbem""",
+                    """$GIT_DIR\cmd""",
+                    """$GIT_DIR\usr\bin""",
+                    """$GIT_DIR\clangarm64\bin""",
+                ).joinToString(";"),
             ),
         ),
     )
+
+    /**
+     * Where the Git component installs.
+     *
+     * Named once because three things have to agree about it: the installer that
+     * unpacks the payload, the PATH above, and the launcher's `git-bash` entry.
+     */
+    const val GIT_DIR: String = """C:\Program Files\Git"""
 
     /**
      * Tell dark-aware Windows programs that this is a dark system.
