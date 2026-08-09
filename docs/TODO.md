@@ -62,6 +62,32 @@ input; what it does not do is draw through D3D.
   contents are never affected.
   *Not diagnosed further; recorded rather than guessed at.*
 
+- [ ] **The guest has working sockets and no network adapters.** Measured, not
+  inferred, on 2026-08-09.
+  *What works:* a WinHTTP `GET http://example.com/` from `wscript` inside the
+  session returned **`VESSEL-NET-OK status=200 bytes=559`** — DNS, TCP and HTTP
+  all fine. `INTERNET` is granted and Wine uses the host's sockets, so anything
+  that just opens a connection works.
+  *What does not:* `ipconfig` prints **nothing at all** — not "no adapters",
+  zero output. Wine cannot enumerate an interface, which is what
+  `nsi:poll_events bind failed, errno 13` and `nsi:update_if_table
+  if_nameindex failed, errno 13` have been saying all along. Android denies an
+  untrusted app `bind()` on a `NETLINK_ROUTE` socket, and Wine's
+  `nsiproxy.sys` binds one.
+  *Why it matters, and it is not cosmetic:* every program that asks "is there a
+  network" through `GetAdaptersAddresses`, `IsNetworkAlive`, .NET's
+  `NetworkInterface`, or WMI will be told there is none — while a plain socket
+  to the same host succeeds. Installers and launchers that gate on connectivity
+  will refuse to run on a device that is online.
+  *The shape of the fix:* enumerate through `getifaddrs()` rather than binding
+  netlink. Wine already uses `getifaddrs()` on some paths and the FreeBSD port
+  carries a `patch-nsiproxy.sys` for exactly this class of platform difference,
+  so this is a Wine patch in `patches/wine/`, not app code. Known across the
+  ecosystem — Hangover, Winlator and Termux's wine all report the same two
+  lines.
+  *Done when:* `ipconfig` names an adapter with the phone's address, and the
+  WinHTTP probe still passes.
+
 - [ ] **The taskbar draws a letter where a program has an icon.** `PeIconReader`
   feeds the app tiles now; a taskbar button still shows the first letter of the
   window title. The button knows `GuestWindow.program`, so the mapping to a
