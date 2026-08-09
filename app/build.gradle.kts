@@ -33,6 +33,12 @@ val bundledPackages = listOf(
     "vkd3d-3.0.1-canoe.wcp",
     "zink-26.3.0-devel-9c475fc3-canoe.wcp",
     "turnip-26.3.0-devel-9c475fc3-canoe.wcp",
+    // Both Turnip builds, and the ICD wins: `build/turnip.sh` gives it the next
+    // versionCode up (260301 against 260300) precisely so the two can sit side
+    // by side, and `adoptLatest` takes the highest. It is the only one of the
+    // two that can present to a window — see docs/GRAPHICS.md — while the HAL
+    // build stays installed as the fallback that patches/wine/0006 drives.
+    "turnip-26.3.0-devel-9c475fc3-icd-canoe.wcp",
 )
 
 /** Copies the bill of materials into a generated assets root. */

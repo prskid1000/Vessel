@@ -145,6 +145,28 @@ class WineLaunchTest {
     }
 
     @Test
+    fun `the driver directory joins LD_LIBRARY_PATH too, for the ICD's own libraries`() {
+        // An ICD is dlopen'ed by absolute path with no loader in front of it
+        // (patches/wine/0009), so nothing else puts its directory on the search
+        // path — and it needs libxcb, libX11-xcb, libxcb-randr, libxcb-xfixes
+        // and libc++_shared, which the package vendors beside it. Its own
+        // RUNPATH names the build container's sysroot and resolves nothing here.
+        val hooks = File("/data/app/app.vessel-1/lib/arm64")
+        val driver = File("/data/user/0/app.vessel/files/components/Turnip/260301")
+        val path = wineLauncherEnvironment(tree, scratch, hooks, driver)["LD_LIBRARY_PATH"]!!
+
+        assertEquals(
+            listOf(
+                File(tree.root, "lib").absolutePath,
+                File(tree.root, "lib/wine/aarch64-unix").absolutePath,
+                hooks.absolutePath,
+                driver.absolutePath,
+            ).joinToString(":"),
+            path,
+        )
+    }
+
+    @Test
     fun `the runtime and temp directories are inside app data`() {
         // Outside it — /data/local/tmp, as an adb shell test would use — SELinux
         // denies the sock_file create and wineserver dies on bind.

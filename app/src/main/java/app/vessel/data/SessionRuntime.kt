@@ -655,6 +655,7 @@ class SessionRuntime @Inject constructor(
             // without this the adrenotools dlopen fails on libc++_shared.so and
             // the stock Qualcomm driver answers, silently.
             hooksDir = turnip?.hooksDir,
+            driverDir = turnip?.driverDir,
         ) + sessionEnvironment(
             profile = profile,
             manifest = manifest,

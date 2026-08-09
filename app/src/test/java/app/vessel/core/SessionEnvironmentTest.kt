@@ -217,6 +217,21 @@ class SessionEnvironmentTest {
         assertFalse(environment.containsKey("ADRENOTOOLS_HOOKS_PATH"))
         assertFalse(environment.containsKey("ADRENOTOOLS_DRIVER_NAME"))
         assertTrue(environment.keys.none { it.startsWith("ADRENOTOOLS") })
+        assertFalse(environment.containsKey("VESSEL_VULKAN_ICD"))
+    }
+
+    @Test
+    fun `an installed Turnip is offered to win32u as an ICD as well`() {
+        // Both ways to the same file, deliberately. win32u decides between them
+        // by reading the file: patches/wine/0009 keeps the ICD path only if the
+        // library exports vk_icdGetInstanceProcAddr, and takes the adrenotools
+        // path otherwise. So this is set for a HAL package too, and that is the
+        // point — nothing here has to know which build is installed.
+        val environment = env(driver = turnip)
+        assertEquals(
+            File(turnip.driverDir, turnip.libraryName).absolutePath,
+            environment["VESSEL_VULKAN_ICD"],
+        )
     }
 
     @Test
@@ -516,6 +531,7 @@ class SessionEnvironmentTest {
                 // on the median — tools/gfx/x11present.c, 400 frames, three runs
                 // each. The reasoning at the assignment says why.
                 "MESA_VK_WSI_DEBUG" to "sw",
+                "VESSEL_VULKAN_ICD" to File(turnip.driverDir, turnip.libraryName).absolutePath,
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,
@@ -547,6 +563,7 @@ class SessionEnvironmentTest {
             "VKD3D_DEBUG", "VKD3D_SHADER_DEBUG", "VKD3D_CONFIG", "VKD3D_SHADER_CACHE_PATH",
             "MESA_SHADER_CACHE_DISABLE", "MESA_SHADER_CACHE_DIR",
             "ADRENOTOOLS_DRIVER_PATH", "ADRENOTOOLS_HOOKS_PATH", "ADRENOTOOLS_DRIVER_NAME",
+            "VESSEL_VULKAN_ICD",
         )
         forbidden.forEach { assertFalse("$it reached the prefix bootstrap", bootstrap.containsKey(it)) }
     }

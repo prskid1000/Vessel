@@ -206,6 +206,7 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // point winex11 at a socket nothing is listening on, and patch 0005 answers
     // that with a connect(2) failure per damaged region rather than an error.
     SYSVSHM_SOCKET_ENV,
+    "VESSEL_VULKAN_ICD",
     "ADRENOTOOLS_DRIVER_PATH",
     "ADRENOTOOLS_HOOKS_PATH",
     "ADRENOTOOLS_DRIVER_NAME",
@@ -530,6 +531,19 @@ fun sessionEnvironment(
     // `Found compatible device '/dev/kgsl-3d0'`, and §2 of docs/OPTIMIZATION.md
     // has the driverID.
     if (turnip != null && TURNIP_ENABLED) {
+        // Both paths to the same driver file, and win32u picks between them by
+        // asking the file itself: patches/wine/0009 dlopens VESSEL_VULKAN_ICD
+        // first and keeps it only if it exports `vk_icdGetInstanceProcAddr`,
+        // otherwise it closes it and takes the adrenotools path below. So an ICD
+        // package gets the ICD path and a HAL package gets the platform loader,
+        // with nothing here having to know which one is installed.
+        //
+        // Which matters because only the ICD can present to a window. The
+        // Android platform loader owns the WSI layer, understands only surfaces
+        // it made for an ANativeWindow, and faults on the Xlib surface the
+        // driver hands back — see docs/GRAPHICS.md.
+        environment["VESSEL_VULKAN_ICD"] = File(turnip.driverDir, turnip.libraryName).absolutePath
+
         // libadrenotools concatenates path and name, so without the trailing
         // separator it looks for `…/componentslibvulkan….so`.
         environment["ADRENOTOOLS_DRIVER_PATH"] = turnip.driverDir.absolutePath + File.separator

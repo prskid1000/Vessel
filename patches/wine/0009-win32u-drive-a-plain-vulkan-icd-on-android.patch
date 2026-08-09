@@ -1,0 +1,208 @@
+win32u: drive a plain Vulkan ICD directly on Android.
+
+Patch 0006 reaches Turnip by loading a private copy of the Android platform
+loader with the driver's HAL build behind it. That gets the right driver
+answering, and everything offscreen works. Anything with a window does not:
+
+    err:vulkan:vkGetPhysicalDeviceSurfaceCapabilitiesKHR Exception 0xc0000005 in Unix call.
+    err:vulkan:vkDestroySurfaceKHR                       Exception 0xc0000005 in Unix call.
+
+The Android platform loader is not the Khronos loader. It implements the WSI
+surface and swapchain layer itself, in swapchain.cpp, and that implementation
+only knows surfaces it created for an ANativeWindow. It has no Xlib WSI at all,
+so vkCreateXlibSurfaceKHR is not its and falls through to the driver -- while
+every function that *consumes* the resulting surface stays with the loader.
+Wine hands it a Mesa VkIcdSurfaceXlib, whose first qword is the ICD platform tag
+VK_ICD_WSI_PLATFORM_XLIB (4); the loader reads that as a pointer to its own
+dispatch object and calls through [4 + 0x90], faulting on address 0x94.
+
+That is not fixable one entry point at a time. The surface has two owners that
+disagree about its type, so capabilities, formats, present modes, swapchain
+creation and destruction are all equally broken -- vkDestroySurfaceKHR faulting
+above is the same bug as the capabilities call above it.
+
+An ICD build of the same driver has no such split. Mesa implements
+VK_KHR_xlib_surface and VK_KHR_swapchain in the driver itself (wsi_x11), so
+surface creation and every surface consumer are one body of code and the Android
+loader is not involved. Dropping `android` from Mesa's -Dplatforms emits exactly
+that -- build/turnip.sh has carried a VESSEL_TURNIP_ICD mode for it -- and the
+result is a normal Linux ICD that happens to be linked against bionic. It is the
+same shape every other Windows-on-Android runtime uses, and the reason they get
+a working swapchain where the platform loader cannot.
+
+VESSEL_VULKAN_ICD names the ICD, absolute path. Unset, this is a no-op and the
+adrenotools path runs unchanged: a HAL-only driver still has to go that way, and
+so does anything that only ever renders offscreen.
+
+One wrinkle. vkGetDeviceProcAddr cannot be resolved when the library is opened.
+An ICD exports the three vk_icd* entry points and no other Vulkan symbol, so
+there is nothing to dlsym, and vk_icdGetInstanceProcAddr( NULL, ... ) answers
+for the four global commands only (Mesa: vk_instance_get_proc_addr). So the
+instance is caught on its way through a vkGetInstanceProcAddr wrapper and the
+device entry point is resolved from it on first use. A device cannot exist
+before the instance that created it, so it is always there in time.
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 7c20315605a..c009d76085a 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -3060,6 +3060,120 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
+ 
+ #ifdef __ANDROID__
+ 
++/* The ICD loader interface, as an ICD exports it. Declared here rather than
++ * included, because these live in vk_icd.h, which belongs to the Vulkan loader
++ * and is not a build dependency of Wine. */
++typedef PFN_vkVoidFunction (VKAPI_PTR *pfn_vk_icdGetInstanceProcAddr)( VkInstance, const char * );
++typedef VkResult (VKAPI_PTR *pfn_vk_icdNegotiateLoaderICDInterfaceVersion)( uint32_t * );
++
++static pfn_vk_icdGetInstanceProcAddr p_vk_icdGetInstanceProcAddr;
++
++/* The most recent non-NULL instance to pass through icd_get_instance_proc_addr.
++ * Written from whatever thread resolves a function and read by the device thunk;
++ * both are pointer-sized and the value only ever goes from NULL to an instance
++ * that stays valid, so no lock buys anything here. */
++static VkInstance icd_instance;
++
++/***********************************************************************
++ *           icd_get_instance_proc_addr
++ *
++ * vkGetInstanceProcAddr, on top of the ICD's vk_icdGetInstanceProcAddr. The two
++ * differ only in what a NULL instance may return, which does not matter to any
++ * caller here -- the wrapper exists to catch the instance on its way past, for
++ * icd_get_device_proc_addr below.
++ */
++static PFN_vkVoidFunction VKAPI_CALL icd_get_instance_proc_addr( VkInstance instance, const char *name )
++{
++    if (instance) icd_instance = instance;
++    return p_vk_icdGetInstanceProcAddr( instance, name );
++}
++
++/***********************************************************************
++ *           icd_get_device_proc_addr
++ *
++ * vkGetDeviceProcAddr cannot be resolved when the library is opened: an ICD
++ * answers vk_icdGetInstanceProcAddr( NULL, ... ) for the four global commands
++ * and nothing else, and it exports no other Vulkan symbol to dlsym. So it is
++ * resolved on first use instead, through the instance the wrapper above saw. A
++ * device cannot exist before the instance that created it, so by the time
++ * anything asks for a device function the instance is always there.
++ */
++static PFN_vkVoidFunction VKAPI_CALL icd_get_device_proc_addr( VkDevice device, const char *name )
++{
++    static PFN_vkGetDeviceProcAddr real_get_device_proc_addr;
++
++    if (!real_get_device_proc_addr && icd_instance)
++        real_get_device_proc_addr = (PFN_vkGetDeviceProcAddr)p_vk_icdGetInstanceProcAddr(
++            icd_instance, "vkGetDeviceProcAddr" );
++
++    if (!real_get_device_proc_addr)
++    {
++        ERR( "No instance has been created yet, cannot resolve %s\n", debugstr_a(name) );
++        return NULL;
++    }
++    return real_get_device_proc_addr( device, name );
++}
++
++/***********************************************************************
++ *           load_libvulkan_icd
++ *
++ * Open an ordinary Vulkan ICD and drive it directly, with no loader in front.
++ *
++ * This is the path that makes window-system integration work at all on Android.
++ * The platform loader implements the WSI surface and swapchain layer itself, and
++ * that implementation only understands surfaces it created for an ANativeWindow.
++ * It has no Xlib WSI, so vkCreateXlibSurfaceKHR falls through to the driver,
++ * while every function that consumes the resulting surface -- capabilities,
++ * formats, present modes, swapchain creation, even vkDestroySurfaceKHR -- stays
++ * with the loader, which then reads the driver's VkIcdSurfaceXlib as one of its
++ * own objects and dereferences the platform tag as a pointer. The result is a
++ * segfault at the first swapchain, and it is not fixable one entry point at a
++ * time: the two owners disagree about what a VkSurfaceKHR is.
++ *
++ * An ICD build of the same driver has no such split. Mesa implements
++ * VK_KHR_xlib_surface and VK_KHR_swapchain inside the driver (wsi_x11), so
++ * surface creation and every surface consumer are the same code, and the
++ * Android loader is out of the picture entirely.
++ *
++ * VESSEL_VULKAN_ICD is the absolute path of the ICD. Unset, this is a no-op and
++ * the adrenotools path below runs unchanged.
++ */
++static void *load_libvulkan_icd(void)
++{
++    pfn_vk_icdNegotiateLoaderICDInterfaceVersion negotiate;
++    const char *path = getenv( "VESSEL_VULKAN_ICD" );
++    uint32_t version = 5;
++    void *handle;
++
++    if (!path || !path[0]) return NULL;
++
++    if (!(handle = dlopen( path, RTLD_NOW )))
++    {
++        ERR_(winediag)( "Cannot load the Vulkan ICD %s (%s); falling back.\n", path, dlerror() );
++        return NULL;
++    }
++
++    if (!(p_vk_icdGetInstanceProcAddr = dlsym( handle, "vk_icdGetInstanceProcAddr" )))
++    {
++        ERR_(winediag)( "%s exports no vk_icdGetInstanceProcAddr, so it is not an ICD -- a HAL "
++                        "build of the driver has to go through libadrenotools instead. "
++                        "Falling back.\n", path );
++        dlclose( handle );
++        return NULL;
++    }
++
++    /* Advisory. The interface version only gates features none of this uses, and
++     * an ICD that does not export the call is a version 1 ICD, which is fine. */
++    if ((negotiate = dlsym( handle, "vk_icdNegotiateLoaderICDInterfaceVersion" )))
++        negotiate( &version );
++    else
++        version = 1;
++
++    ERR_(winediag)( "Vulkan: driving the ICD %s directly, loader interface version %u.\n",
++                    path, version );
++    return handle;
++}
++
+ /* adrenotools/priv.h: ADRENOTOOLS_DRIVER_CUSTOM. Spelled out rather than
+  * included, because libadrenotools is a runtime dependency of the host
+  * application and not a build dependency of Wine. */
+@@ -3147,8 +3261,13 @@ static void vulkan_init_once(void)
+ #ifdef __ANDROID__
+     /* Ahead of the plain dlopen, not after it: once the platform loader is in
+      * the process it has already bound its driver, and a second attempt cannot
+-     * change which one answered. */
+-    vulkan_handle = load_libvulkan_adrenotools();
++     * change which one answered.
++     *
++     * An ICD first, because it is the only one of the three whose window-system
++     * integration works; the platform loader behind adrenotools still answers
++     * for everything offscreen, and is what a HAL-only driver has to use. */
++    if (!(vulkan_handle = load_libvulkan_icd()))
++        vulkan_handle = load_libvulkan_adrenotools();
+ #endif
+ #ifdef SONAME_LIBVULKAN
+     if (!vulkan_handle) vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW );
+@@ -3167,8 +3286,20 @@ static void vulkan_init_once(void)
+         return;                                                                                    \
+     }
+ 
+-    LOAD_FUNCPTR( vkGetDeviceProcAddr );
+-    LOAD_FUNCPTR( vkGetInstanceProcAddr );
++#ifdef __ANDROID__
++    /* An ICD exports the loader interface and nothing else, so there is no
++     * vkGetInstanceProcAddr to find here -- see icd_get_device_proc_addr. */
++    if (p_vk_icdGetInstanceProcAddr)
++    {
++        p_vkGetInstanceProcAddr = icd_get_instance_proc_addr;
++        p_vkGetDeviceProcAddr = icd_get_device_proc_addr;
++    }
++    else
++#endif
++    {
++        LOAD_FUNCPTR( vkGetDeviceProcAddr );
++        LOAD_FUNCPTR( vkGetInstanceProcAddr );
++    }
+ #undef LOAD_FUNCPTR
+ 
+     driver_funcs = &lazydrv_funcs;

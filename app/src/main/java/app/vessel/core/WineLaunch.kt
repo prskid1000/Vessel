@@ -192,6 +192,7 @@ fun wineLauncherEnvironment(
     tree: WineTree,
     scratch: SessionScratch,
     hooksDir: File? = null,
+    driverDir: File? = null,
 ): Map<String, String> =
     linkedMapOf(
         "WINEDLLPATH" to tree.dllPath.absolutePath,
@@ -211,8 +212,16 @@ fun wineLauncherEnvironment(
         // Qualcomm driver answers every Vulkan call. Measured: driver_id=8
         // rather than 18, with a fully installed and working Turnip package.
         //
+        // `driverDir` is the installed Turnip package, and it is there for the
+        // ICD build rather than the HAL one. An ICD is dlopen'ed by absolute
+        // path with no loader in front of it (patches/wine/0009), so nothing
+        // else puts its directory on the search path — and it has libxcb,
+        // libX11-xcb, libxcb-randr, libxcb-xfixes and libc++_shared in its
+        // NEEDED list, all of which the package vendors beside it. Its RUNPATH
+        // points at the build container's sysroot and is worthless here.
+        //
         // Appended rather than prepended so Wine's own libraries keep winning.
-        "LD_LIBRARY_PATH" to listOfNotNull(tree.lib, tree.unixLib, hooksDir)
+        "LD_LIBRARY_PATH" to listOfNotNull(tree.lib, tree.unixLib, hooksDir, driverDir)
             .joinToString(":") { it.absolutePath },
         // `/system/bin` stays on PATH: Wine shells out to it, and dropping it
         // would break the linker lookup this whole scheme rests on.

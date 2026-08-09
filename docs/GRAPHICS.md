@@ -31,9 +31,9 @@ and both are Android-specific:
 2. **The Android platform loader is not the desktop Khronos loader.** It owns the
    WSI surface/swapchain layer itself (`swapchain.cpp`), and that layer only
    understands surfaces it created for an `ANativeWindow`. It has no Xlib WSI —
-   so it *forwards* `vkCreateXlibSurfaceKHR` to the driver, but keeps functions
-   like `vkGetPhysicalDeviceSurfaceCapabilities2KHR` for itself. That split is a
-   trap; see below.
+   so it *forwards* `vkCreateXlibSurfaceKHR` to the driver, but keeps every
+   function that consumes the result. Anything with a window is unusable through
+   it, and that is why the driver is loaded as a plain ICD instead; see below.
 
 `win32u/vulkan.c` is where Wine meets all of this. It creates the host surface
 from the X11 window (`X11DRV_vulkan_surface_create` → `vkCreateXlibSurfaceKHR`),
@@ -103,26 +103,74 @@ label is just which call was in flight. Do not trust it as the location.
 `4` is `VK_ICD_WSI_PLATFORM_XLIB` — the first field of a Mesa `VkIcdSurfaceXlib`.
 The surface was created by **Turnip** (the loader forwarded
 `vkCreateXlibSurfaceKHR` to it), so it is a raw ICD Xlib surface whose first word
-is that platform tag. But the capabilities-2 query is serviced by **Android's own
+is that platform tag. But the capabilities query is serviced by **Android's own
 loader**, which expects a surface *it* wrapped, whose first word is a pointer to a
 dispatch object with a method at `+0x90`. It reads the tag `4` as that pointer and
 jumps through `4 + 0x90`. Two owners, one surface, incompatible layouts.
 
-DXVK reaches the *2* form (not the base one) only because it enables
-`VK_KHR_get_surface_capabilities2`. The **base**
-`vkGetPhysicalDeviceSurfaceCapabilitiesKHR` is a plain physical-device
-dispatch-table entry (`ldr x8,[x0]; ldr x16,[x8,#0x78]; br x16`) that the loader
-forwards straight to Turnip — so it is safe.
+### The wrong fix, and how the log said so
+
+The first attempt read that as a bug in one entry point. The disassembly landed
+inside Android's `GetPhysicalDeviceSurfaceCapabilities2KHR`, so the conclusion
+was that the *2* form was the broken one and the base form — reached by a plain
+dispatch-table jump, `ldr x8,[x0]; ldr x16,[x8,#0x78]; br x16` — was forwarded to
+Turnip and safe. The patch emulated the 2 form on top of the base one.
+
+It changed nothing, and the next run said why in two lines:
+
+```
+ER vulkan:vkGetPhysicalDeviceSurfaceCapabilitiesKHR Exception 0xc0000005 in Unix call.
+ER vulkan:vkDestroySurfaceKHR                       Exception 0xc0000005 in Unix call.
+```
+
+With the emulation in place the 2 form is never called, and the **base** form
+faults identically — so the loader owns that one too; the dispatch entry at
+`+0x78` goes to the loader's own `swapchain.cpp`, not to the driver. And
+`vkDestroySurfaceKHR` faults as well, which no capabilities-shaped theory
+explains.
+
+The lesson is the general one, and it is why this section is kept: *the fault
+address identified the mechanism correctly and the scope wrongly.* When two
+components disagree about what an object is, every function that touches the
+object is broken, not the one that happened to touch it first. Enumerate the
+whole surface of the disagreement before patching any of it.
 
 ### The fix
 
-`patches/wine/0009-win32u-emulate-surface-capabilities2-on-android.patch`.
-On Android, never call the host's `…Capabilities2KHR`; emulate it on top of the
-base query, which works, and fill any chained `VK_EXT_surface_maintenance1`
-output structs conservatively (no scaling; each present mode compatible only with
-itself — the client just recreates the swapchain to change mode). A compile-time
-`host_surface_capabilities2_faults` keeps the direct host call on every other
-platform, where the 2 form is correct.
+`patches/wine/0009-win32u-drive-a-plain-vulkan-icd-on-android.patch`: stop using
+the Android loader for this at all.
+
+An ICD build of the same driver has no split to fall into. Mesa implements
+`VK_KHR_xlib_surface` and `VK_KHR_swapchain` **inside the driver** (`wsi_x11`),
+so surface creation and every surface consumer are one body of code. Dropping
+`android` from Mesa's `-Dplatforms` emits an ordinary ICD — `build/turnip.sh` has
+carried a `VESSEL_TURNIP_ICD` mode for exactly this — and win32u dlopens it
+directly, using `vk_icdGetInstanceProcAddr` as its `vkGetInstanceProcAddr`. No
+loader in front of it, because with a single ICD a loader adds nothing.
+
+This is the shape every other Windows-on-Android runtime uses, and it is why
+they get a working swapchain where the platform loader cannot.
+
+Two things about it are worth knowing:
+
+- **`vkGetDeviceProcAddr` cannot be resolved at dlopen time.** An ICD exports the
+  three `vk_icd*` entry points and no other Vulkan symbol, and
+  `vk_icdGetInstanceProcAddr( NULL, … )` answers for the four global commands
+  only (Mesa: `vk_instance_get_proc_addr`). The patch catches the instance on its
+  way through a `vkGetInstanceProcAddr` wrapper and resolves the device entry
+  point from it on first use, which is always in time — a device cannot exist
+  before the instance that made it.
+- **`MESA_VK_WSI_DEBUG=sw` is not optional.** This Turnip has only the software
+  half of Mesa's X11 WSI compiled in; without `sw` every swapchain reaches an
+  `__builtin_unreachable()`. It was already set for the same reason before any
+  of this.
+
+`VESSEL_VULKAN_ICD` names the driver, and the host application sets it alongside
+the `ADRENOTOOLS_*` variables — both pointing at the same file. win32u decides
+between them by reading the file: it keeps the ICD path only if the library
+exports `vk_icdGetInstanceProcAddr`, and falls back to the platform loader
+otherwise. So a HAL package still works, offscreen, and nothing on the Kotlin
+side has to know which build is installed.
 
 ## The method, in general
 
