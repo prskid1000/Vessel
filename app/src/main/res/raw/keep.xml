@@ -13,9 +13,10 @@
       resource shrinking would be a licensing regression that no test of the
       debug build could see, because shrinking only runs on release.
 
-    - The two variable fonts are kept until `VesselTheme` references them (see
-      out/needs-from-install-agent.md). Once it does this is redundant for them,
-      and harmless.
+    - The two variable fonts are now referenced by `VesselTheme`, so naming them
+      here is redundant. Left in place: a theme that stopped referencing a font
+      would be a silent fall back to the system family on the release build
+      only, and this is the line that stops that being possible.
 
   Removing a name from this list is a deliberate act. See docs/LICENSING.md.
 -->

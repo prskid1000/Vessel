@@ -27,8 +27,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
+import app.vessel.R
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -504,12 +508,52 @@ data class VMetrics(
     val shapeSheet: Shape = RoundedCornerShape(topStart = radiusLg, topEnd = radiusLg)
 }
 
-// TODO: DESIGN.md specifies Inter and JetBrains Mono, bundled as variable fonts
-//  so the product is identical on every device. Until the .ttf files are in
-//  res/font these are the system families, which keeps the scale and the
-//  sans/mono split honest but not the letterforms.
-private val VSans = FontFamily.SansSerif
-private val VMono = FontFamily.Monospace
+/**
+ * Inter and JetBrains Mono, bundled, so the product is identical on every device.
+ *
+ * **The variation settings are not optional and their absence is silent.** Both
+ * files are variable fonts, and a variable font loaded without an axis value
+ * renders at its *default instance* — `wght` 400 for both of these. So
+ * `Font(R.font.inter_variable, FontWeight.Medium)` matches `Medium` for family
+ * selection and then draws 400: every title, subtitle, card title and control in
+ * the product quietly stops being medium, and because Android will not synthesise
+ * a weight that close, nothing looks broken. Supplying `FontVariation.weight`
+ * per entry is what makes the declared weight the drawn one.
+ *
+ * Two weights each, because the scale uses two: 400 and 500. Adding a third means
+ * adding its axis value here as well as using it. *
+ * The opt-in is on the `Font(resId, weight, style, variationSettings)` overload,
+ * which is still `ExperimentalTextApi` in the pinned Compose BOM. Taking it
+ * knowingly: the alternative is shipping the wrong weights, and the signature
+ * has been stable across the releases this project has used.
+ */
+@OptIn(ExperimentalTextApi::class)
+private val VSans = FontFamily(
+    Font(
+        R.font.inter_variable,
+        weight = FontWeight.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(400)),
+    ),
+    Font(
+        R.font.inter_variable,
+        weight = FontWeight.Medium,
+        variationSettings = FontVariation.Settings(FontVariation.weight(500)),
+    ),
+)
+
+@OptIn(ExperimentalTextApi::class)
+private val VMono = FontFamily(
+    Font(
+        R.font.jetbrains_mono_variable,
+        weight = FontWeight.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(400)),
+    ),
+    Font(
+        R.font.jetbrains_mono_variable,
+        weight = FontWeight.Medium,
+        variationSettings = FontVariation.Settings(FontVariation.weight(500)),
+    ),
+)
 
 /** Tabular figures, so a live metric's digits do not shift as the value changes. */
 private const val TABULAR_FIGURES = "tnum"
