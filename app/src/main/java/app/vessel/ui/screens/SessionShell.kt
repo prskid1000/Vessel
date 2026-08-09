@@ -463,7 +463,11 @@ fun WindowActionsPanel(
     val shape = Vessel.metrics.shapeLg
     Column(
         modifier
-            .widthIn(max = Vessel.metrics.launcherWidth)
+            // **No width of its own.** Three buttons and a title are the whole
+            // panel, so it is as wide as they are. It used to carry a sentence
+            // explaining Close against Force close, and that sentence — not the
+            // controls — was setting the width: a paragraph-wide slab over the
+            // guest for three 44 dp targets.
             .vElevation(VElev.lg, shape)
             .background(Vessel.colors.surface, shape)
             .vRing(VElev.lg.ring, shape)
@@ -508,15 +512,6 @@ fun WindowActionsPanel(
                 onClick = onKill,
             )
         }
-
-        // One line, for the only two that are not self-evident. Close asks;
-        // Force close does not.
-        Text(
-            "Close asks the program first, so it can offer to save. " +
-                "Force close ends it immediately.",
-            style = Vessel.type.label,
-            color = Vessel.colors.textLabel,
-        )
     }
 }
 

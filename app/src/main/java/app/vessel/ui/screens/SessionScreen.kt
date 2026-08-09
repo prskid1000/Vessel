@@ -593,6 +593,23 @@ fun SessionDesktop(
         // placement, because it is the same kind of thing: a panel over the
         // guest that the bar opened and the bar does not own.
         windowMenu?.let { target ->
+            // **Declared before the panel, which is what makes it a scrim and
+            // not a lid.** A Box hit-tests its children last-to-first, so a
+            // full-size layer declared *after* the panel would swallow every
+            // press meant for the buttons — the same trap the rail's scrim
+            // documents above. Invisible: the panel already separates itself
+            // with elevation and a ring, and a wash over a running game to
+            // explain a three-button menu is not a trade worth making.
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClickLabel = "Dismiss",
+                    ) { windowMenu = null },
+            )
+
             Box(
                 Modifier
                     .align(Alignment.BottomStart)
