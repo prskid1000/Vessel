@@ -230,6 +230,16 @@ CONFIGURE_ARGS=(
   --without-krb5
   --without-netapi
   --without-opencl
+  # OSS itself stays off — Android has no /dev/dsp and the probe must not
+  # find the build machine's headers — but wineoss.drv is force-enabled
+  # anyway: patches/wine/0008 rebuilds its unix half on AAudio (the NDK's
+  # libaaudio.so), which is the one audio API an Android process has.
+  # WINE_NOTICE_WITH only defaults enable_wineoss_drv, so an explicit yes
+  # here survives the failed OSS probe. Without a driver, mmdevapi logs
+  # "No driver from pulse,alsa,oss,coreaudio could be initialized" and
+  # every program runs mute; mmdevapi probes "oss" by default, so keeping
+  # the wineoss.drv name means nothing else needs to learn a new one.
+  enable_wineoss_drv=yes
   --without-oss
   --without-pcap
   --without-pcsclite
@@ -330,7 +340,7 @@ ok "$(( ${#runtime_libs[@]} )) runtime libraries"
 # anything else is a library that exists only on the build machine.
 BIONIC_PROVIDED="libc.so libm.so libdl.so libz.so liblog.so libandroid.so
 libEGL.so libGLESv2.so libGLESv3.so libvulkan.so libnativewindow.so
-libsync.so libcamera2ndk.so ld-android.so"
+libsync.so libcamera2ndk.so libaaudio.so ld-android.so"
 missing=""
 for elf in "$PAYLOAD"/bin/* "$PAYLOAD"/lib/*.so "$PAYLOAD"/lib/wine/aarch64-unix/*.so; do
   [ -f "$elf" ] || continue
@@ -364,7 +374,8 @@ ok "every NEEDED entry resolves inside the package"
 # dlls/winex11.drv/Makefile.in. Checking for the .drv.so spelling passes over a
 # genuinely missing driver every time.
 for elf in bin/wineserver bin/wine lib/wine/aarch64-unix/ntdll.so \
-           lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/winex11.so; do
+           lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/winex11.so \
+           lib/wine/aarch64-unix/wineoss.so; do
   path="$PAYLOAD/$elf"
   [ -f "$path" ] || die "missing unix binary $elf (expected $path).
      Without winex11.drv.so in particular, Wine has no way to put a window on

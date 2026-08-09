@@ -1,0 +1,1388 @@
+diff --git a/dlls/wineoss.drv/Makefile.in b/dlls/wineoss.drv/Makefile.in
+index 8923911bba3..49600beca5e 100644
+--- a/dlls/wineoss.drv/Makefile.in
++++ b/dlls/wineoss.drv/Makefile.in
+@@ -1,8 +1,5 @@
+ UNIXLIB   = wineoss.so
+-UNIX_LIBS    = $(OSS4_LIBS) $(PTHREAD_LIBS)
+-UNIX_CFLAGS  = $(OSS4_CFLAGS)
++UNIX_LIBS    = -laaudio $(PTHREAD_LIBS)
+ 
+ SOURCES = \
+-	midipatch.c \
+-	oss.c \
+-	ossmidi.c
++	oss.c
+diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
+index 431264faf31..9eb7b9a127d 100644
+--- a/dlls/wineoss.drv/oss.c
++++ b/dlls/wineoss.drv/oss.c
+@@ -1,5 +1,5 @@
+ /*
+- * OSS driver (unixlib)
++ * AAudio driver (unixlib), in wineoss.drv's clothes
+  *
+  * Copyright 2011 Andrew Eikum for CodeWeavers
+  *           2022 Huw Davies
+@@ -17,6 +17,22 @@
+  * You should have received a copy of the GNU Lesser General Public
+  * License along with this library; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ *
++ * Android has no OSS device nodes, no ALSA userspace and no PulseAudio
++ * daemon; the one native audio API an NDK process can use is AAudio
++ * (libaaudio.so, API 26+). Rather than wire a brand-new driver directory
++ * through configure, this file keeps wineoss.drv's name and its entire
++ * mmdevapi unixlib scaffolding - the local ring buffer, the period timer
++ * thread, the wow64 thunks - and swaps the device layer underneath from
++ * /dev/dsp ioctls to an AAudioStream. mmdevapi already probes "oss" in its
++ * default driver list, so nothing else has to learn a new name.
++ *
++ * The accounting maps one-to-one: where OSS asked SNDCTL_DSP_GETOSPACE how
++ * much of its buffer is filled, AAudio answers with the difference between
++ * AAudioStream_getFramesWritten() and AAudioStream_getFramesRead(); where
++ * OSS write()s into /dev/dsp, AAudioStream_write() with a zero timeout is
++ * the same non-blocking contract. MIDI and the OSS mixer-based aux devices
++ * have no Android equivalent and are stubbed to "no devices".
+  */
+ 
+ #if 0
+@@ -26,13 +42,13 @@
+ #include <stdarg.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+-#include <sys/ioctl.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <errno.h>
+-#include <sys/soundcard.h>
+ #include <pthread.h>
+ 
++#include <aaudio/AAudio.h>
++
+ #include "ntstatus.h"
+ #include "winternl.h"
+ #include "initguid.h"
+@@ -53,12 +69,12 @@ struct oss_stream
+     HANDLE event;
+     HANDLE timer_thread;
+ 
+-    int fd;
++    AAudioStream *aas;
+ 
+     BOOL playing, mute, please_quit;
+     UINT64 written_frames, last_pos_frames;
+     UINT32 period_frames, bufsize_frames, held_frames, tmp_buffer_frames, in_oss_frames;
+-    UINT32 oss_bufsize_bytes, lcl_offs_frames; /* offs into local_buffer where valid data starts */
++    UINT32 lcl_offs_frames; /* offs into local_buffer where valid data starts */
+     REFERENCE_TIME period;
+ 
+     BYTE *local_buffer, *tmp_buffer;
+@@ -126,244 +142,178 @@ static struct oss_stream *handle_get_stream(stream_handle h)
+     return (struct oss_stream *)(UINT_PTR)h;
+ }
+ 
+-static NTSTATUS oss_test_connect(void *args)
++static aaudio_format_t get_aaudio_format(const WAVEFORMATEX *fmt)
+ {
+-    struct test_connect_params *params = args;
+-    int mixer_fd;
+-    oss_sysinfo sysinfo;
++    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
+ 
+-    /* Attempt to determine if we are running on OSS or ALSA's OSS
+-     * compatibility layer. There is no official way to do that, so just check
+-     * for validity as best as possible, without rejecting valid OSS
+-     * implementations. */
++    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->wBitsPerSample != fmtex->Samples.wValidBitsPerSample)
++        return AAUDIO_FORMAT_INVALID;
+ 
+-    mixer_fd = open("/dev/mixer", O_RDONLY, 0);
+-    if(mixer_fd < 0){
+-        TRACE("Priority_Unavailable: open failed\n");
+-        params->priority = Priority_Unavailable;
+-        return STATUS_SUCCESS;
++    if(fmt->wFormatTag == WAVE_FORMAT_PCM ||
++            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))){
++        if(fmt->wBitsPerSample == 16)
++            return AAUDIO_FORMAT_PCM_I16;
++        return AAUDIO_FORMAT_INVALID;
+     }
+ 
+-    sysinfo.version[0] = 0xFF;
+-    sysinfo.versionnum = ~0;
+-    if(ioctl(mixer_fd, SNDCTL_SYSINFO, &sysinfo) < 0){
+-        TRACE("Priority_Unavailable: ioctl failed\n");
+-        close(mixer_fd);
+-        params->priority = Priority_Unavailable;
+-        return STATUS_SUCCESS;
++    if(fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
++            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))){
++        if(fmt->wBitsPerSample == 32)
++            return AAUDIO_FORMAT_PCM_FLOAT;
++        return AAUDIO_FORMAT_INVALID;
+     }
+ 
+-    close(mixer_fd);
++    return AAUDIO_FORMAT_INVALID;
++}
+ 
+-    if(sysinfo.version[0] < '4' || sysinfo.version[0] > '9'){
+-        TRACE("Priority_Low: sysinfo.version[0]: %x\n", sysinfo.version[0]);
+-        params->priority = Priority_Low;
+-        return STATUS_SUCCESS;
+-    }
+-    if(sysinfo.versionnum & 0x80000000){
+-        TRACE("Priority_Low: sysinfo.versionnum: %x\n", sysinfo.versionnum);
+-        params->priority = Priority_Low;
+-        return STATUS_SUCCESS;
+-    }
++/* The format checks setup_oss_device used to make, minus the device probes:
++ * AAudio's shared streams go through AudioFlinger, which mixes and resamples
++ * anything sane, so validity is a property of the format alone. */
++static HRESULT check_format(AUDCLNT_SHAREMODE share, const WAVEFORMATEX *fmt)
++{
++    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
+ 
+-    TRACE("Priority_Preferred: Seems like valid OSS!\n");
++    if(get_aaudio_format(fmt) == AAUDIO_FORMAT_INVALID)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+ 
+-    params->priority = Priority_Preferred;
+-    return STATUS_SUCCESS;
+-}
++    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++            (fmtex->Format.nAvgBytesPerSec == 0 ||
++             fmtex->Format.nBlockAlign == 0 ||
++             fmtex->Samples.wValidBitsPerSample > fmtex->Format.wBitsPerSample))
++        return E_INVALIDARG;
+ 
+-/* dst must be large enough to hold devnode */
+-static void oss_clean_devnode(char *dest, const char *devnode)
+-{
+-    const char *dot, *slash;
+-    size_t len;
++    if(fmt->nChannels == 0 || fmt->nChannels > 8)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+ 
+-    strcpy(dest, devnode);
+-    dot = strrchr(dest, '.');
+-    if(!dot)
+-        return;
++    if(fmt->nSamplesPerSec < 8000 || fmt->nSamplesPerSec > 192000)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+ 
+-    slash = strrchr(dest, '/');
+-    if(slash && dot < slash)
+-        return;
++    if(fmt->nBlockAlign != fmt->nChannels * fmt->wBitsPerSample / 8 ||
++            fmt->nAvgBytesPerSec != fmt->nBlockAlign * fmt->nSamplesPerSec ||
++            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++             fmtex->Samples.wValidBitsPerSample < fmtex->Format.wBitsPerSample))
++        return S_FALSE;
+ 
+-    len = dot - dest;
+-    dest[len] = '\0';
++    if(share == AUDCLNT_SHAREMODE_EXCLUSIVE &&
++            fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE){
++        if(fmtex->dwChannelMask == 0 || fmtex->dwChannelMask & SPEAKER_RESERVED)
++            return S_FALSE;
++    }
++
++    return S_OK;
+ }
+ 
+-static int open_device(const char *device, EDataFlow flow)
++static HRESULT open_aaudio_stream(EDataFlow flow, const WAVEFORMATEX *fmt, AAudioStream **out)
+ {
+-    int flags = ((flow == eRender) ? O_WRONLY : O_RDONLY) | O_NONBLOCK;
++    AAudioStreamBuilder *builder;
++    aaudio_format_t format = get_aaudio_format(fmt);
++    aaudio_result_t res;
+ 
+-    return open(device, flags, 0);
+-}
++    *out = NULL;
+ 
+-static void get_default_device(EDataFlow flow, char device[OSS_DEVNODE_SIZE])
+-{
+-    int fd, err;
+-    oss_audioinfo ai;
++    if(format == AAUDIO_FORMAT_INVALID)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+ 
+-    device[0] = '\0';
+-    fd = open_device("/dev/dsp", flow);
+-    if(fd < 0){
+-        WARN("Couldn't open default device!\n");
+-        return;
++    if((res = AAudio_createStreamBuilder(&builder)) != AAUDIO_OK){
++        WARN("AAudio_createStreamBuilder failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++        return AUDCLNT_E_SERVICE_NOT_RUNNING;
+     }
+ 
+-    ai.dev = -1;
+-    if((err = ioctl(fd, SNDCTL_ENGINEINFO, &ai)) < 0){
+-        WARN("SNDCTL_ENGINEINFO failed: %d (%s)\n", err, strerror(errno));
+-        close(fd);
+-        return;
++    AAudioStreamBuilder_setDirection(builder, flow == eRender ? AAUDIO_DIRECTION_OUTPUT
++                                                              : AAUDIO_DIRECTION_INPUT);
++    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
++    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
++    AAudioStreamBuilder_setFormat(builder, format);
++    AAudioStreamBuilder_setSampleRate(builder, fmt->nSamplesPerSec);
++    AAudioStreamBuilder_setChannelCount(builder, fmt->nChannels);
++
++    res = AAudioStreamBuilder_openStream(builder, out);
++    AAudioStreamBuilder_delete(builder);
++
++    if(res != AAUDIO_OK){
++        WARN("AAudioStreamBuilder_openStream failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++        *out = NULL;
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    }
++
++    /* The legacy (AudioFlinger) path honours the requested rate by
++     * resampling, so this only trips if something is deeply wrong - but a
++     * stream running at a different rate than the frames we feed it would
++     * be a pitch shift, which is worse than no audio. */
++    if(AAudioStream_getSampleRate(*out) != (int32_t)fmt->nSamplesPerSec ||
++            AAudioStream_getChannelCount(*out) != fmt->nChannels){
++        WARN("stream opened at %d Hz x%d, wanted %u Hz x%u\n",
++                AAudioStream_getSampleRate(*out), AAudioStream_getChannelCount(*out),
++                (unsigned)fmt->nSamplesPerSec, fmt->nChannels);
++        AAudioStream_close(*out);
++        *out = NULL;
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+     }
+-    close(fd);
+ 
+-    TRACE("Default devnode: %s\n", ai.devnode);
+-    oss_clean_devnode(device, ai.devnode);
+-    return;
++    return S_OK;
+ }
+ 
+-static NTSTATUS oss_get_endpoint_ids(void *args)
++static NTSTATUS oss_test_connect(void *args)
+ {
+-    struct get_endpoint_ids_params *params = args;
+-    oss_sysinfo sysinfo;
+-    oss_audioinfo ai;
+-    static int print_once = 0;
+-    static const WCHAR outW[] = {'O','u','t',':',' ',0};
+-    static const WCHAR inW[] = {'I','n',':',' ',0};
+-    struct endpoint_info
++    struct test_connect_params *params = args;
++    WAVEFORMATEX fmt =
+     {
+-        WCHAR name[ARRAY_SIZE(ai.name) + ARRAY_SIZE(outW)];
+-        char device[OSS_DEVNODE_SIZE];
+-    } *info;
+-    unsigned int i, j, num, needed, name_len, device_len, offset, default_idx = 0;
+-    char default_device[OSS_DEVNODE_SIZE];
+-    struct endpoint *endpoint;
+-    int mixer_fd;
+-
+-    mixer_fd = open("/dev/mixer", O_RDONLY, 0);
+-    if(mixer_fd < 0){
+-        ERR("OSS /dev/mixer doesn't seem to exist\n");
+-        params->result = AUDCLNT_E_SERVICE_NOT_RUNNING;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    if(ioctl(mixer_fd, SNDCTL_SYSINFO, &sysinfo) < 0){
+-        close(mixer_fd);
+-        if(errno == EINVAL){
+-            ERR("OSS version too old, need at least OSSv4\n");
+-            params->result = AUDCLNT_E_SERVICE_NOT_RUNNING;
+-            return STATUS_SUCCESS;
+-        }
++        .wFormatTag = WAVE_FORMAT_PCM,
++        .nChannels = 2,
++        .nSamplesPerSec = 48000,
++        .nAvgBytesPerSec = 48000 * 4,
++        .nBlockAlign = 4,
++        .wBitsPerSample = 16,
++    };
++    AAudioStream *probe;
+ 
+-        ERR("Error getting SNDCTL_SYSINFO: %d (%s)\n", errno, strerror(errno));
+-        params->result = E_FAIL;
++    if(FAILED(open_aaudio_stream(eRender, &fmt, &probe))){
++        TRACE("Priority_Unavailable: could not open an AAudio output stream\n");
++        params->priority = Priority_Unavailable;
+         return STATUS_SUCCESS;
+     }
++    AAudioStream_close(probe);
+ 
+-    if(!print_once){
+-        TRACE("OSS sysinfo:\n");
+-        TRACE("product: %s\n", sysinfo.product);
+-        TRACE("version: %s\n", sysinfo.version);
+-        TRACE("versionnum: %x\n", sysinfo.versionnum);
+-        TRACE("numaudios: %d\n", sysinfo.numaudios);
+-        TRACE("nummixers: %d\n", sysinfo.nummixers);
+-        TRACE("numcards: %d\n", sysinfo.numcards);
+-        TRACE("numaudioengines: %d\n", sysinfo.numaudioengines);
+-        print_once = 1;
+-    }
+-
+-    if(sysinfo.numaudios <= 0){
+-        WARN("No audio devices!\n");
+-        close(mixer_fd);
+-        params->result = AUDCLNT_E_SERVICE_NOT_RUNNING;
+-        return STATUS_SUCCESS;
+-    }
++    TRACE("Priority_Preferred: AAudio output stream opened\n");
++    params->priority = Priority_Preferred;
++    return STATUS_SUCCESS;
++}
+ 
+-    info = malloc(sysinfo.numaudios * sizeof(*info));
+-    if(!info){
+-        close(mixer_fd);
+-        params->result = E_OUTOFMEMORY;
++static NTSTATUS oss_get_endpoint_ids(void *args)
++{
++    struct get_endpoint_ids_params *params = args;
++    static const WCHAR nameW[] = {'A','n','d','r','o','i','d',' ','A','u','d','i','o',0};
++    static const char device[] = "aaudio";
++    struct endpoint *endpoint = params->endpoints;
++    unsigned int name_len = ARRAY_SIZE(nameW), device_len = sizeof(device);
++    unsigned int needed, offset;
++
++    /* One fixed render endpoint. Capture is deliberately not enumerated:
++     * the app has no RECORD_AUDIO permission, so an input stream could
++     * never open, and a microphone that is listed but always fails is
++     * worse for programs than no microphone at all. */
++    if(params->flow != eRender){
++        params->num = 0;
++        params->default_idx = 0;
++        params->result = S_OK;
+         return STATUS_SUCCESS;
+     }
+ 
+-    get_default_device(params->flow, default_device);
+-
+-    num = 0;
+-    for(i = 0; i < sysinfo.numaudios; ++i){
+-        char devnode[OSS_DEVNODE_SIZE];
+-        int fd, prefix_len;
+-        const WCHAR *prefix;
+-
+-        memset(&ai, 0, sizeof(ai));
+-        ai.dev = i;
+-        if(ioctl(mixer_fd, SNDCTL_AUDIOINFO, &ai) < 0){
+-            WARN("Error getting AUDIOINFO for dev %d: %d (%s)\n", i, errno,
+-                    strerror(errno));
+-            continue;
+-        }
+-
+-        oss_clean_devnode(devnode, ai.devnode);
++    offset = sizeof(*endpoint);
++    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
+ 
+-        /* check for duplicates */
+-        for(j = 0; j < num; j++)
+-            if(!strcmp(devnode, info[j].device))
+-                break;
+-        if(j < num)
+-            continue;
+-
+-        fd = open_device(devnode, params->flow);
+-        if(fd < 0){
+-            WARN("Opening device \"%s\" failed, pretending it doesn't exist: %d (%s)\n",
+-                    devnode, errno, strerror(errno));
+-            continue;
+-        }
+-        close(fd);
+-
+-        if((params->flow == eCapture && !(ai.caps & PCM_CAP_INPUT)) ||
+-           (params->flow == eRender && !(ai.caps & PCM_CAP_OUTPUT)))
+-            continue;
+-
+-        strcpy(info[num].device, devnode);
+-
+-        if(params->flow == eRender){
+-            prefix = outW;
+-            prefix_len = ARRAY_SIZE(outW) - 1;
+-        }else{
+-            prefix = inW;
+-            prefix_len = ARRAY_SIZE(inW) - 1;
+-        }
+-        memcpy(info[num].name, prefix, prefix_len * sizeof(WCHAR));
+-        ntdll_umbstowcs(ai.name, strlen(ai.name) + 1, info[num].name + prefix_len,
+-                        ARRAY_SIZE(info[num].name) - prefix_len);
+-        if(!strcmp(default_device, info[num].device))
+-            default_idx = num;
+-        num++;
++    if(needed <= params->size){
++        endpoint->name = offset;
++        memcpy((char *)params->endpoints + offset, nameW, name_len * sizeof(WCHAR));
++        offset += name_len * sizeof(WCHAR);
++        endpoint->device = offset;
++        memcpy((char *)params->endpoints + offset, device, device_len);
+     }
+-    close(mixer_fd);
+-
+-    offset = needed = num * sizeof(*params->endpoints);
+-    endpoint = params->endpoints;
+-
+-    for(i = 0; i < num; i++){
+-        name_len = wcslen(info[i].name) + 1;
+-        device_len = strlen(info[i].device) + 1;
+-        needed += name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
+-
+-        if(needed <= params->size){
+-            endpoint->name = offset;
+-            memcpy((char *)params->endpoints + offset, info[i].name, name_len * sizeof(WCHAR));
+-            offset += name_len * sizeof(WCHAR);
+-            endpoint->device = offset;
+-            memcpy((char *)params->endpoints + offset, info[i].device, device_len);
+-            offset += (device_len + 1) & ~1;
+-            endpoint++;
+-        }
+-    }
+-    free(info);
+ 
+-    params->num = num;
+-    params->default_idx = default_idx;
++    params->num = 1;
++    params->default_idx = 0;
+ 
+     if(needed > params->size){
+         params->size = needed;
+@@ -400,51 +350,6 @@ static UINT get_channel_mask(unsigned int channels)
+     return 0;
+ }
+ 
+-static int get_oss_format(const WAVEFORMATEX *fmt)
+-{
+-    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE*)fmt;
+-
+-    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->wBitsPerSample != fmtex->Samples.wValidBitsPerSample)
+-        return -1;
+-
+-    if(fmt->wFormatTag == WAVE_FORMAT_PCM ||
+-            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+-             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))){
+-        switch(fmt->wBitsPerSample){
+-        case 8:
+-            return AFMT_U8;
+-        case 16:
+-            return AFMT_S16_LE;
+-        case 24:
+-            /* According to the docs AFMT_S24_LE means a 24 bit sample in the
+-             * LSB of a 32-bit container; AFMT_S24_PACKED means instead a packed
+-             * 24-bit sample. In FreeBSD instead AFMT_S24_LE means a packed
+-             * sample and AFMT_S24_PACKED does not exist. */
+-#ifdef AFMT_S24_PACKED
+-            return AFMT_S24_PACKED;
+-#else
+-            return AFMT_S24_LE;
+-#endif
+-        case 32:
+-            return AFMT_S32_LE;
+-        }
+-        return -1;
+-    }
+-
+-#ifdef AFMT_FLOAT
+-    if(fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
+-            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+-             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))){
+-        if(fmt->wBitsPerSample != 32)
+-            return -1;
+-
+-        return AFMT_FLOAT;
+-    }
+-#endif
+-
+-    return -1;
+-}
+-
+ static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
+ {
+     WAVEFORMATEXTENSIBLE *ret;
+@@ -466,75 +371,13 @@ static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
+     return ret;
+ }
+ 
+-static HRESULT setup_oss_device(AUDCLNT_SHAREMODE share, int fd, const WAVEFORMATEX *fmt)
+-{
+-    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
+-    int tmp, oss_format;
+-    double tenth;
+-    HRESULT ret = S_OK;
+-
+-    tmp = oss_format = get_oss_format(fmt);
+-    if(oss_format < 0)
+-        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+-    if(ioctl(fd, SNDCTL_DSP_SETFMT, &tmp) < 0){
+-        WARN("SETFMT failed: %d (%s)\n", errno, strerror(errno));
+-        return E_FAIL;
+-    }
+-    if(tmp != oss_format){
+-        TRACE("Format unsupported by this OSS version: %x\n", oss_format);
+-        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+-    }
+-
+-    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+-            (fmtex->Format.nAvgBytesPerSec == 0 ||
+-             fmtex->Format.nBlockAlign == 0 ||
+-             fmtex->Samples.wValidBitsPerSample > fmtex->Format.wBitsPerSample))
+-        return E_INVALIDARG;
+-
+-    if(fmt->nChannels == 0)
+-        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+-
+-    tmp = fmt->nSamplesPerSec;
+-    if(ioctl(fd, SNDCTL_DSP_SPEED, &tmp) < 0){
+-        WARN("SPEED failed: %d (%s)\n", errno, strerror(errno));
+-        return E_FAIL;
+-    }
+-    tenth = fmt->nSamplesPerSec * 0.1;
+-    if(tmp > fmt->nSamplesPerSec + tenth || tmp < fmt->nSamplesPerSec - tenth){
+-        ret = S_FALSE;
+-    }
+-
+-    tmp = fmt->nChannels;
+-    if(ioctl(fd, SNDCTL_DSP_CHANNELS, &tmp) < 0){
+-        WARN("CHANNELS failed: %d (%s)\n", errno, strerror(errno));
+-        return E_FAIL;
+-    }
+-    if(tmp != fmt->nChannels){
+-        ret = S_FALSE;
+-    }
+-
+-    if(fmt->nBlockAlign != fmt->nChannels * fmt->wBitsPerSample / 8 ||
+-            fmt->nAvgBytesPerSec != fmt->nBlockAlign * fmt->nSamplesPerSec ||
+-            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+-             fmtex->Samples.wValidBitsPerSample < fmtex->Format.wBitsPerSample))
+-        ret = S_FALSE;
+-
+-    if(share == AUDCLNT_SHAREMODE_EXCLUSIVE &&
+-            fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE){
+-        if(fmtex->dwChannelMask == 0 || fmtex->dwChannelMask & SPEAKER_RESERVED)
+-            ret = S_FALSE;
+-    }
+-
+-    TRACE("returning: %08x\n", (unsigned)ret);
+-    return ret;
+-}
+-
+ static NTSTATUS oss_create_stream(void *args)
+ {
+     struct create_stream_params *params = args;
+-    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE *)params->fmt;
++    WAVEFORMATEXTENSIBLE *fmtex;
+     struct oss_stream *stream;
+-    oss_audioinfo ai;
++    UINT32 want_frames;
++    int32_t capacity, burst;
+     SIZE_T size;
+ 
+     params->result = S_OK;
+@@ -548,34 +391,11 @@ static NTSTATUS oss_create_stream(void *args)
+     stream->flow = params->flow;
+     pthread_mutex_init(&stream->lock, NULL);
+ 
+-    stream->fd = open_device(params->device, params->flow);
+-    if(stream->fd < 0){
+-        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
+-        goto exit;
+-    }
+-
+-    ai.dev = -1;
+-    if(ioctl(stream->fd, SNDCTL_ENGINEINFO, &ai) < 0){
+-        WARN("Unable to get audio info for device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        params->result = E_FAIL;
++    params->result = check_format(params->share, params->fmt);
++    if(FAILED(params->result))
+         goto exit;
+-    }
+ 
+-    TRACE("OSS audioinfo:\n");
+-    TRACE("devnode: %s\n", ai.devnode);
+-    TRACE("name: %s\n", ai.name);
+-    TRACE("busy: %x\n", ai.busy);
+-    TRACE("caps: %x\n", ai.caps);
+-    TRACE("iformats: %x\n", ai.iformats);
+-    TRACE("oformats: %x\n", ai.oformats);
+-    TRACE("enabled: %d\n", ai.enabled);
+-    TRACE("min_rate: %d\n", ai.min_rate);
+-    TRACE("max_rate: %d\n", ai.max_rate);
+-    TRACE("min_channels: %d\n", ai.min_channels);
+-    TRACE("max_channels: %d\n", ai.max_channels);
+-
+-    params->result = setup_oss_device(params->share, stream->fd, params->fmt);
++    params->result = open_aaudio_stream(params->flow, params->fmt, &stream->aas);
+     if(FAILED(params->result))
+         goto exit;
+ 
+@@ -595,6 +415,18 @@ static NTSTATUS oss_create_stream(void *args)
+         goto exit;
+     }
+ 
++    /* The timer thread tops the device up once per period, so the device
++     * buffer must hold several periods or the low-latency default (a couple
++     * of bursts, single-digit milliseconds) underruns between ticks. */
++    burst = AAudioStream_getFramesPerBurst(stream->aas);
++    capacity = AAudioStream_getBufferCapacityInFrames(stream->aas);
++    want_frames = 4 * stream->period_frames + (burst > 0 ? burst : 0);
++    if(capacity > 0 && want_frames > (UINT32)capacity)
++        want_frames = capacity;
++    AAudioStream_setBufferSizeInFrames(stream->aas, want_frames);
++    TRACE("burst %d, capacity %d, buffer size set to %d\n", burst, capacity,
++            AAudioStream_getBufferSizeInFrames(stream->aas));
++
+     stream->bufsize_frames = muldiv(params->duration, params->fmt->nSamplesPerSec, 10000000);
+     if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
+         stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
+@@ -607,11 +439,10 @@ static NTSTATUS oss_create_stream(void *args)
+ 
+     stream->share = params->share;
+     stream->flags = params->flags;
+-    stream->oss_bufsize_bytes = 0;
+ 
+ exit:
+     if(FAILED(params->result)){
+-        if(stream->fd >= 0) close(stream->fd);
++        if(stream->aas) AAudioStream_close(stream->aas);
+         if(stream->local_buffer){
+             size = 0;
+             NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
+@@ -639,7 +470,10 @@ static NTSTATUS oss_release_stream(void *args)
+         NtClose(stream->timer_thread);
+     }
+ 
+-    close(stream->fd);
++    if(stream->aas){
++        AAudioStream_requestStop(stream->aas);
++        AAudioStream_close(stream->aas);
++    }
+     if(stream->local_buffer){
+         size = 0;
+         NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
+@@ -658,38 +492,29 @@ static NTSTATUS oss_release_stream(void *args)
+ 
+ static void silence_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 frames)
+ {
+-    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE*)stream->fmt;
+-    if((stream->fmt->wFormatTag == WAVE_FORMAT_PCM ||
+-            (stream->fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+-             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))) &&
+-            stream->fmt->wBitsPerSample == 8)
+-        memset(buffer, 128, frames * stream->fmt->nBlockAlign);
+-    else
+-        memset(buffer, 0, frames * stream->fmt->nBlockAlign);
++    memset(buffer, 0, frames * stream->fmt->nBlockAlign);
++}
++
++/* Frames handed to AAudio and not yet played. The difference of the two
++ * monotonic counters is what SNDCTL_DSP_GETOSPACE used to report as the
++ * filled part of the device buffer. */
++static UINT32 aaudio_queued_frames(struct oss_stream *stream)
++{
++    int64_t queued = AAudioStream_getFramesWritten(stream->aas)
++                   - AAudioStream_getFramesRead(stream->aas);
++    if(queued < 0)
++        queued = 0;
++    return queued;
+ }
+ 
+ static void oss_write_data(struct oss_stream *stream)
+ {
+-    ssize_t written_bytes;
+     UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
+-    SIZE_T to_write_frames, to_write_bytes, advanced;
+-    audio_buf_info bi;
++    SIZE_T to_write_frames, advanced;
++    aaudio_result_t written;
+     BYTE *buf;
+ 
+-    if(ioctl(stream->fd, SNDCTL_DSP_GETOSPACE, &bi) < 0){
+-        WARN("GETOSPACE failed: %d (%s)\n", errno, strerror(errno));
+-        return;
+-    }
+-
+-    max_period = max(bi.fragsize / stream->fmt->nBlockAlign, stream->period_frames);
+-
+-    if(bi.bytes > stream->oss_bufsize_bytes){
+-        TRACE("New buffer size (%u) is larger than old buffer size (%u)\n",
+-                bi.bytes, stream->oss_bufsize_bytes);
+-        stream->oss_bufsize_bytes = bi.bytes;
+-        in_oss_frames = 0;
+-    }else
+-        in_oss_frames = (stream->oss_bufsize_bytes - bi.bytes) / stream->fmt->nBlockAlign;
++    in_oss_frames = aaudio_queued_frames(stream);
+ 
+     if(in_oss_frames > stream->in_oss_frames){
+         TRACE("Capping reported frames from %u to %u\n",
+@@ -697,6 +522,8 @@ static void oss_write_data(struct oss_stream *stream)
+         in_oss_frames = stream->in_oss_frames;
+     }
+ 
++    max_period = stream->period_frames;
++
+     write_limit = 0;
+     while(write_limit + in_oss_frames < max_period * 3)
+         write_limit += max_period;
+@@ -732,7 +559,6 @@ static void oss_write_data(struct oss_stream *stream)
+         to_write_frames = new_frames;
+ 
+     to_write_frames = min(to_write_frames, write_limit);
+-    to_write_bytes = to_write_frames * stream->fmt->nBlockAlign;
+     TRACE("going to write %lu frames from %u (%lu of %u)\n", to_write_frames,
+             write_offs_frames, to_write_frames + write_offs_frames,
+             stream->bufsize_frames);
+@@ -742,18 +568,17 @@ static void oss_write_data(struct oss_stream *stream)
+     if(stream->mute)
+         silence_buffer(stream, buf, to_write_frames);
+ 
+-    written_bytes = write(stream->fd, buf, to_write_bytes);
+-    if(written_bytes < 0){
+-        /* EAGAIN is OSS buffer full, log that too */
+-        WARN("write failed: %d (%s)\n", errno, strerror(errno));
++    written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
++    if(written < 0){
++        WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
+         return;
+     }
+-    written_frames = written_bytes / stream->fmt->nBlockAlign;
++    written_frames = written;
+ 
+     stream->in_oss_frames += written_frames;
+ 
+     if(written_frames < to_write_frames){
+-        /* OSS buffer probably full */
++        /* AAudio buffer probably full */
+         return;
+     }
+ 
+@@ -761,39 +586,37 @@ static void oss_write_data(struct oss_stream *stream)
+         /* wrapped and have some data back at the start to write */
+ 
+         to_write_frames = min(write_limit - written_frames, new_frames - written_frames);
+-        to_write_bytes = to_write_frames * stream->fmt->nBlockAlign;
+ 
+         if(stream->mute)
+             silence_buffer(stream, stream->local_buffer, to_write_frames);
+ 
+         TRACE("wrapping to write %lu frames from beginning\n", to_write_frames);
+ 
+-        written_bytes = write(stream->fd, stream->local_buffer, to_write_bytes);
+-        if(written_bytes < 0){
+-            WARN("write failed: %d (%s)\n", errno, strerror(errno));
++        written = AAudioStream_write(stream->aas, stream->local_buffer, to_write_frames, 0);
++        if(written < 0){
++            WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
+             return;
+         }
+-        written_frames = written_bytes / stream->fmt->nBlockAlign;
+-        stream->in_oss_frames += written_frames;
++        stream->in_oss_frames += written;
+     }
+ }
+ 
+ static void oss_read_data(struct oss_stream *stream)
+ {
+-    UINT64 pos, readable;
+-    ssize_t nread;
++    UINT64 pos, readable_frames;
++    aaudio_result_t nread;
+ 
+     pos = (stream->held_frames + stream->lcl_offs_frames) % stream->bufsize_frames;
+-    readable = (stream->bufsize_frames - pos) * stream->fmt->nBlockAlign;
++    readable_frames = stream->bufsize_frames - pos;
+ 
+-    nread = read(stream->fd, stream->local_buffer + pos * stream->fmt->nBlockAlign,
+-            readable);
++    nread = AAudioStream_read(stream->aas,
++            stream->local_buffer + pos * stream->fmt->nBlockAlign, readable_frames, 0);
+     if(nread < 0){
+-        WARN("read failed: %d (%s)\n", errno, strerror(errno));
++        WARN("read failed: %d (%s)\n", nread, AAudio_convertResultToText(nread));
+         return;
+     }
+ 
+-    stream->held_frames += nread / stream->fmt->nBlockAlign;
++    stream->held_frames += nread;
+ 
+     if(stream->held_frames > stream->bufsize_frames){
+         WARN("Overflow of unread data\n");
+@@ -847,6 +670,7 @@ static NTSTATUS oss_start(void *args)
+     struct start_params *params = args;
+     struct oss_stream *stream = handle_get_stream(params->stream);
+     static const WCHAR name[] = {'a','u','d','i','o','_','c','l','i','e','n','t','_','t','i','m','e','r',0};
++    aaudio_result_t res;
+ 
+     oss_lock(stream);
+ 
+@@ -856,6 +680,9 @@ static NTSTATUS oss_start(void *args)
+     if(stream->playing)
+         return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
+ 
++    if((res = AAudioStream_requestStart(stream->aas)) != AAUDIO_OK)
++        WARN("requestStart failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++
+     stream->playing = TRUE;
+     if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
+ 
+@@ -866,12 +693,22 @@ static NTSTATUS oss_stop(void *args)
+ {
+     struct stop_params *params = args;
+     struct oss_stream *stream = handle_get_stream(params->stream);
++    aaudio_result_t res;
+ 
+     oss_lock(stream);
+ 
+     if(!stream->playing)
+         return oss_unlock_result(stream, &params->result, S_FALSE);
+ 
++    /* Pause rather than stop: Stop() on an audio client freezes the clock,
++     * it does not flush. For capture there is no pause, stop is it. */
++    if(stream->flow == eRender)
++        res = AAudioStream_requestPause(stream->aas);
++    else
++        res = AAudioStream_requestStop(stream->aas);
++    if(res != AAUDIO_OK)
++        WARN("pause/stop failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++
+     stream->playing = FALSE;
+     stream->in_oss_frames = 0;
+ 
+@@ -882,6 +719,7 @@ static NTSTATUS oss_reset(void *args)
+ {
+     struct reset_params *params = args;
+     struct oss_stream *stream = handle_get_stream(params->stream);
++    aaudio_result_t res;
+ 
+     oss_lock(stream);
+ 
+@@ -892,6 +730,10 @@ static NTSTATUS oss_reset(void *args)
+         return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
+ 
+     if(stream->flow == eRender){
++        /* Drop what the device still holds; the paused stream would
++         * otherwise play stale audio when restarted. */
++        if((res = AAudioStream_requestFlush(stream->aas)) != AAUDIO_OK)
++            TRACE("requestFlush failed: %d (%s)\n", res, AAudio_convertResultToText(res));
+         stream->written_frames = 0;
+         stream->last_pos_frames = 0;
+     }else{
+@@ -1107,16 +949,8 @@ static NTSTATUS oss_release_capture_buffer(void *args)
+ static NTSTATUS oss_is_format_supported(void *args)
+ {
+     struct is_format_supported_params *params = args;
+-    int fd;
+ 
+-    fd = open_device(params->device, params->flow);
+-    if(fd < 0){
+-        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
+-        return STATUS_SUCCESS;
+-    }
+-    params->result = setup_oss_device(params->share, fd, params->fmt_in);
+-    close(fd);
++    params->result = check_format(params->share, params->fmt_in);
+ 
+     return STATUS_SUCCESS;
+ }
+@@ -1125,95 +959,24 @@ static NTSTATUS oss_get_mix_format(void *args)
+ {
+     struct get_mix_format_params *params = args;
+     WAVEFORMATEXTENSIBLE *fmt = params->fmt;
+-    oss_audioinfo ai;
+-    int formats, fd;
+ 
+     if(params->flow != eRender && params->flow != eCapture){
+         params->result = E_UNEXPECTED;
+         return STATUS_SUCCESS;
+     }
+ 
+-    fd = open_device(params->device, params->flow);
+-    if(fd < 0){
+-        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    ai.dev = -1;
+-    if(ioctl(fd, SNDCTL_ENGINEINFO, &ai) < 0){
+-        WARN("Unable to get audio info for device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        close(fd);
+-        params->result = E_FAIL;
+-        return STATUS_SUCCESS;
+-    }
+-    close(fd);
+-
+-    if(params->flow == eRender)
+-        formats = ai.oformats;
+-    else
+-        formats = ai.iformats;
+-
++    /* 48 kHz stereo signed 16-bit: the native rate of effectively every
++     * Android device, and AAUDIO_FORMAT_PCM_I16 needs no conversion. */
+     fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+-    if(formats & AFMT_S16_LE){
+-        fmt->Format.wBitsPerSample = 16;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-#ifdef AFMT_FLOAT
+-    }else if(formats & AFMT_FLOAT){
+-        fmt->Format.wBitsPerSample = 32;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+-#endif
+-    }else if(formats & AFMT_U8){
+-        fmt->Format.wBitsPerSample = 8;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-    }else if(formats & AFMT_S32_LE){
+-        fmt->Format.wBitsPerSample = 32;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-    }else if(formats & AFMT_S24_LE){
+-        fmt->Format.wBitsPerSample = 24;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-    }else{
+-        WARN("Didn't recognize any available OSS formats: %x\n", formats);
+-        params->result = E_FAIL;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    /* some OSS drivers are buggy, so set reasonable defaults if
+-     * the reported values seem wacky */
+-    fmt->Format.nChannels = max(ai.max_channels, ai.min_channels);
+-    if(fmt->Format.nChannels == 0 || fmt->Format.nChannels > 8)
+-        fmt->Format.nChannels = 2;
+-
+-    /* For most hardware on Windows, users must choose a configuration with an even
+-     * number of channels (stereo, quad, 5.1, 7.1). Users can then disable
+-     * channels, but those channels are still reported to applications from
+-     * GetMixFormat! Some applications behave badly if given an odd number of
+-     * channels (e.g. 2.1). */
+-    if(fmt->Format.nChannels > 1 && (fmt->Format.nChannels & 0x1))
+-    {
+-        if(fmt->Format.nChannels < ai.max_channels)
+-            fmt->Format.nChannels += 1;
+-        else
+-            /* We could "fake" more channels and downmix the emulated channels,
+-             * but at that point you really ought to tweak your OSS setup or
+-             * just use PulseAudio. */
+-            WARN("Some Windows applications behave badly with an odd number of channels (%u)!\n", fmt->Format.nChannels);
+-    }
+-
+-    if(ai.max_rate == 0)
+-        fmt->Format.nSamplesPerSec = 44100;
+-    else
+-        fmt->Format.nSamplesPerSec = min(ai.max_rate, 44100);
+-    if(fmt->Format.nSamplesPerSec < ai.min_rate)
+-        fmt->Format.nSamplesPerSec = ai.min_rate;
+-
++    fmt->Format.wBitsPerSample = 16;
++    fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
++    fmt->Format.nChannels = 2;
++    fmt->Format.nSamplesPerSec = 48000;
+     fmt->dwChannelMask = get_channel_mask(fmt->Format.nChannels);
+-
+     fmt->Format.nBlockAlign = (fmt->Format.wBitsPerSample *
+             fmt->Format.nChannels) / 8;
+     fmt->Format.nAvgBytesPerSec = fmt->Format.nSamplesPerSec *
+         fmt->Format.nBlockAlign;
+-
+     fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
+     fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+ 
+@@ -1321,20 +1084,7 @@ static NTSTATUS oss_get_position(void *args)
+         if(*pos < stream->last_pos_frames)
+             *pos = stream->last_pos_frames;
+     }else if(stream->flow == eCapture){
+-        audio_buf_info bi;
+-        UINT32 held;
+-
+-        if(ioctl(stream->fd, SNDCTL_DSP_GETISPACE, &bi) < 0){
+-            TRACE("GETISPACE failed: %d (%s)\n", errno, strerror(errno));
+-            held = 0;
+-        }else{
+-            if(bi.bytes <= bi.fragsize)
+-                held = 0;
+-            else
+-                held = bi.bytes / stream->fmt->nBlockAlign;
+-        }
+-
+-        *pos = stream->written_frames + held;
++        *pos = stream->written_frames + aaudio_queued_frames(stream);
+     }
+ 
+     stream->last_pos_frames = *pos;
+@@ -1413,220 +1163,94 @@ static NTSTATUS oss_get_prop_value(void *args)
+     return STATUS_SUCCESS;
+ }
+ 
+-/* Aux driver */
+-
+-static unsigned int num_aux;
++/* Aux driver: OSS exposed the /dev/mixer channels here. Android has no
++ * mixer device, so there are no aux devices. */
+ 
+-#define MIXER_DEV "/dev/mixer"
+-
+-static UINT aux_init(void)
++static NTSTATUS oss_aux_message(void *args)
+ {
+-    int mixer;
+-
+-    TRACE("()\n");
++    struct aux_message_params *params = args;
+ 
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        num_aux = 0;
+-    }
+-    else
++    switch (params->msg)
+     {
+-        close(mixer);
+-        num_aux = 6;
++    case DRVM_INIT:
++    case DRVM_EXIT:
++    case DRVM_ENABLE:
++    case DRVM_DISABLE:
++        *params->err = 0;
++        break;
++    case AUXDM_GETNUMDEVS:
++        *params->err = 0;
++        break;
++    default:
++        *params->err = MMSYSERR_NOTENABLED;
++        break;
+     }
+-    return 0;
+-}
+ 
+-static UINT aux_exit(void)
+-{
+-    TRACE("()\n");
+-    return 0;
++    return STATUS_SUCCESS;
+ }
+ 
+-static UINT aux_get_devcaps(WORD dev_id, AUXCAPSW *caps, UINT size)
+-{
+-    int mixer, volume;
+-    static const WCHAR ini[] = {'O','S','S',' ','A','u','x',' ','#','0',0};
++/* MIDI: the OSS sequencer devices do not exist on Android. Report zero
++ * devices and keep every entry point well-behaved so winmm sees an empty
++ * but healthy MIDI world. */
+ 
+-    TRACE("(%04X, %p, %u);\n", dev_id, caps, size);
+-    if (caps == NULL) return MMSYSERR_NOTENABLED;
+-    if (dev_id >= num_aux) return MMSYSERR_BADDEVICEID;
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    if (ioctl(mixer, SOUND_MIXER_READ_LINE, &volume) == -1)
+-    {
+-        close(mixer);
+-        WARN("unable to read mixer !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    close(mixer);
+-    caps->wMid = 0xAA;
+-    caps->wPid = 0x55 + dev_id;
+-    caps->vDriverVersion = 0x0100;
+-    memcpy(caps->szPname, ini, sizeof(ini));
+-    caps->szPname[9] = '0' + dev_id; /* 6  at max */
+-    caps->wTechnology = (dev_id == 2) ? AUXCAPS_CDAUDIO : AUXCAPS_AUXIN;
+-    caps->wReserved1 = 0;
+-    caps->dwSupport = AUXCAPS_VOLUME | AUXCAPS_LRVOLUME;
+-
+-    return MMSYSERR_NOERROR;
+-}
+-
+-static UINT aux_get_volume(WORD dev_id, UINT *vol)
++NTSTATUS oss_midi_release(void *args)
+ {
+-    int mixer, volume, left, right, cmd;
+-
+-    TRACE("(%04X, %p);\n", dev_id, vol);
+-    if (vol == NULL) return MMSYSERR_NOTENABLED;
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    switch(dev_id)
+-    {
+-    case 0:
+-        TRACE("SOUND_MIXER_READ_PCM !\n");
+-        cmd = SOUND_MIXER_READ_PCM;
+-        break;
+-    case 1:
+-        TRACE("SOUND_MIXER_READ_SYNTH !\n");
+-        cmd = SOUND_MIXER_READ_SYNTH;
+-        break;
+-    case 2:
+-        TRACE("SOUND_MIXER_READ_CD !\n");
+-        cmd = SOUND_MIXER_READ_CD;
+-        break;
+-    case 3:
+-        TRACE("SOUND_MIXER_READ_LINE !\n");
+-        cmd = SOUND_MIXER_READ_LINE;
+-        break;
+-    case 4:
+-        TRACE("SOUND_MIXER_READ_MIC !\n");
+-        cmd = SOUND_MIXER_READ_MIC;
+-        break;
+-    case 5:
+-        TRACE("SOUND_MIXER_READ_VOLUME !\n");
+-        cmd = SOUND_MIXER_READ_VOLUME;
+-        break;
+-    default:
+-        WARN("invalid device id=%04X !\n", dev_id);
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    if (ioctl(mixer, cmd, &volume) == -1)
+-    {
+-        WARN("unable to read mixer !\n");
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    close(mixer);
+-    left = LOBYTE(LOWORD(volume));
+-    right = HIBYTE(LOWORD(volume));
+-    TRACE("left=%d right=%d !\n", left, right);
+-    *vol = MAKELONG((left * 0xFFFFL) / 100, (right * 0xFFFFL) / 100);
+-    return MMSYSERR_NOERROR;
++    return STATUS_SUCCESS;
+ }
+ 
+-static UINT aux_set_volume(WORD dev_id, UINT vol)
++NTSTATUS oss_midi_out_message(void *args)
+ {
+-    int mixer;
+-    int volume, left, right;
+-    int cmd;
+-
+-    TRACE("(%04X, %08X);\n", dev_id, vol);
+-
+-    left   = (LOWORD(vol) * 100) >> 16;
+-    right  = (HIWORD(vol) * 100) >> 16;
+-    volume = (right << 8) | left;
++    struct midi_out_message_params *params = args;
+ 
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-
+-    switch(dev_id)
++    params->notify->send_notify = FALSE;
++    switch (params->msg)
+     {
+-    case 0:
+-        TRACE("SOUND_MIXER_WRITE_PCM !\n");
+-        cmd = SOUND_MIXER_WRITE_PCM;
+-        break;
+-    case 1:
+-        TRACE("SOUND_MIXER_WRITE_SYNTH !\n");
+-        cmd = SOUND_MIXER_WRITE_SYNTH;
+-        break;
+-    case 2:
+-        TRACE("SOUND_MIXER_WRITE_CD !\n");
+-        cmd = SOUND_MIXER_WRITE_CD;
+-        break;
+-    case 3:
+-        TRACE("SOUND_MIXER_WRITE_LINE !\n");
+-        cmd = SOUND_MIXER_WRITE_LINE;
+-        break;
+-    case 4:
+-        TRACE("SOUND_MIXER_WRITE_MIC !\n");
+-        cmd = SOUND_MIXER_WRITE_MIC;
++    case DRVM_INIT:
++    case DRVM_EXIT:
++    case DRVM_ENABLE:
++    case DRVM_DISABLE:
++        *params->err = MMSYSERR_NOERROR;
+         break;
+-    case 5:
+-        TRACE("SOUND_MIXER_WRITE_VOLUME !\n");
+-        cmd = SOUND_MIXER_WRITE_VOLUME;
++    case MODM_GETNUMDEVS:
++        *params->err = 0;
+         break;
+     default:
+-        WARN("invalid device id=%04X !\n", dev_id);
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    if (ioctl(mixer, cmd, &volume) == -1)
+-    {
+-        WARN("unable to set mixer !\n");
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
++        *params->err = MMSYSERR_NOTENABLED;
++        break;
+     }
+-    close(mixer);
+-    return MMSYSERR_NOERROR;
++    return STATUS_SUCCESS;
+ }
+ 
+-static NTSTATUS oss_aux_message(void *args)
++NTSTATUS oss_midi_in_message(void *args)
+ {
+-    struct aux_message_params *params = args;
++    struct midi_in_message_params *params = args;
+ 
++    params->notify->send_notify = FALSE;
+     switch (params->msg)
+     {
+     case DRVM_INIT:
+-        *params->err = aux_init();
+-        break;
+     case DRVM_EXIT:
+-        *params->err = aux_exit();
+-        break;
+     case DRVM_ENABLE:
+     case DRVM_DISABLE:
+-        /* FIXME: Pretend this is supported */
+-        *params->err = 0;
+-        break;
+-    case AUXDM_GETDEVCAPS:
+-        *params->err = aux_get_devcaps(params->dev_id, (AUXCAPSW *)params->param_1, params->param_2);
+-        break;
+-    case AUXDM_GETNUMDEVS:
+-        TRACE("return %d;\n", num_aux);
+-        *params->err = num_aux;
+-        break;
+-    case AUXDM_GETVOLUME:
+-        *params->err = aux_get_volume(params->dev_id, (UINT *)params->param_1);
++        *params->err = MMSYSERR_NOERROR;
+         break;
+-    case AUXDM_SETVOLUME:
+-        *params->err = aux_set_volume(params->dev_id, params->param_1);
++    case MIDM_GETNUMDEVS:
++        *params->err = 0;
+         break;
+     default:
+-        WARN("unknown message !\n");
+-        *params->err = MMSYSERR_NOTSUPPORTED;
++        *params->err = MMSYSERR_NOTENABLED;
+         break;
+     }
++    return STATUS_SUCCESS;
++}
++
++NTSTATUS oss_midi_notify_wait(void *args)
++{
++    struct midi_notify_wait_params *params = args;
+ 
++    /* No devices ever notify; end the notify thread immediately. */
++    params->notify->send_notify = FALSE;
++    *params->quit = TRUE;
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -2120,6 +1744,93 @@ static NTSTATUS oss_wow64_aux_message(void *args)
+     return oss_aux_message(&params);
+ }
+ 
++struct notify_context32
++{
++    BOOL send_notify;
++    WORD dev_id;
++    WORD msg;
++    UINT param_1;
++    UINT param_2;
++    UINT callback;
++    UINT flags;
++    PTR32 device;
++    UINT instance;
++};
++
++NTSTATUS oss_wow64_midi_out_message(void *args)
++{
++    struct
++    {
++        UINT dev_id;
++        UINT msg;
++        UINT user;
++        UINT param_1;
++        UINT param_2;
++        PTR32 err;
++        PTR32 notify;
++    } *params32 = args;
++    struct notify_context32 *notify32 = ULongToPtr(params32->notify);
++    struct notify_context notify;
++    struct midi_out_message_params params =
++    {
++        .dev_id = params32->dev_id,
++        .msg = params32->msg,
++        .user = params32->user,
++        .param_1 = params32->param_1,
++        .param_2 = params32->param_2,
++        .err = ULongToPtr(params32->err),
++        .notify = &notify
++    };
++    notify32->send_notify = FALSE;
++    return oss_midi_out_message(&params);
++}
++
++NTSTATUS oss_wow64_midi_in_message(void *args)
++{
++    struct
++    {
++        UINT dev_id;
++        UINT msg;
++        UINT user;
++        UINT param_1;
++        UINT param_2;
++        PTR32 err;
++        PTR32 notify;
++    } *params32 = args;
++    struct notify_context32 *notify32 = ULongToPtr(params32->notify);
++    struct notify_context notify;
++    struct midi_in_message_params params =
++    {
++        .dev_id = params32->dev_id,
++        .msg = params32->msg,
++        .user = params32->user,
++        .param_1 = params32->param_1,
++        .param_2 = params32->param_2,
++        .err = ULongToPtr(params32->err),
++        .notify = &notify
++    };
++    notify32->send_notify = FALSE;
++    return oss_midi_in_message(&params);
++}
++
++NTSTATUS oss_wow64_midi_notify_wait(void *args)
++{
++    struct
++    {
++        PTR32 quit;
++        PTR32 notify;
++    } *params32 = args;
++    struct notify_context32 *notify32 = ULongToPtr(params32->notify);
++    struct notify_context notify;
++    struct midi_notify_wait_params params =
++    {
++        .quit = ULongToPtr(params32->quit),
++        .notify = &notify
++    };
++    notify32->send_notify = FALSE;
++    return oss_midi_notify_wait(&params);
++}
++
+ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+ {
+     oss_wow64_process_attach,
