@@ -502,8 +502,13 @@ class SessionEnvironmentTest {
                 "TU_DEBUG" to "startup",
                 // Not optional and not diagnostic: the Turnip this project
                 // builds has only the software half of Mesa's X11 WSI compiled
-                // in, and without this every swapchain reaches an UNREACHABLE.
-                "MESA_VK_WSI_DEBUG" to "sw",
+                // in, and without `sw` every swapchain reaches an UNREACHABLE.
+                // `linear` is the measured half — it drops the per-frame GPU
+                // blit, and tools/gfx/wsiprobe.c proved on the device that a
+                // LINEAR colour attachment binds host-cached coherent memory
+                // here. Both are needed; the order is Mesa's parse order and
+                // does not matter.
+                "MESA_VK_WSI_DEBUG" to "sw,linear",
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,

@@ -395,11 +395,43 @@ fun sessionEnvironment(
     // between a present path and no present path. `MESA_VK_WSI_DEBUG` is in
     // [RESERVED_SESSION_ENV] for exactly that reason.
     //
-    // The cost is a full-frame CPU copy per present, and how bad that is
-    // depends on whether Turnip's IOCOHERENT probe passes on this chip — if it
-    // does the copy is cached, if not it is an uncached read. That is a
-    // measurement, and it is the next one to take.
-    environment["MESA_VK_WSI_DEBUG"] = "sw"
+    // **`linear` is the second half, and it is worth a copy per frame.**
+    //
+    // `sw` alone leaves `wsi_cpu_image_needs_buffer_blit` returning true, so a
+    // swapchain image is an OPTIMAL-tiled VkImage *plus* a separate host buffer,
+    // and every present does a GPU `vkCmdCopyImageToBuffer` of the whole frame
+    // before `xcb_put_image` reads it. `linear` makes that function return
+    // false, which forces `VK_IMAGE_TILING_LINEAR` on the image and maps the
+    // image's own memory — the render target and the buffer put_image reads
+    // become one allocation, and the blit disappears.
+    //
+    // Measured on this device with `tools/gfx/wsiprobe.c` (2026-08-09, Turnip
+    // 26.3.0-devel, `Adreno (TM) 829`, run as the app's uid through the system
+    // linker), which is why this is a change and not a guess:
+    //
+    //   - a 1280x720 B8G8R8A8 LINEAR colour attachment is created, needs
+    //     3 686 400 bytes and reports rowPitch 5120 — tight, no padding.
+    //   - its `memoryTypeBits` includes type 1, which is
+    //     `DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED`. That is
+    //     precisely what `wsi_select_host_memory_type` asks for when
+    //     `wsi->sw` is set, so the WSI's own selection succeeds rather than
+    //     falling back — IOCOHERENT is on, and the CPU read is a cached read.
+    //   - the blit this removes costs **0.60 ms of GPU time per frame** on its
+    //     own, measured as a timed `vkCmdCopyImageToBuffer` + `vkQueueWaitIdle`
+    //     loop, and it also removes a second 3.6 MB allocation per image.
+    //   - the CPU read that remains costs **0.25 ms** for the frame
+    //     (14.8 GB/s, cold), which is the floor for any path that goes through
+    //     `xcb_put_image` at all.
+    //
+    // So the remaining cost of a present here is one full-frame CPU read plus
+    // the socket write and whatever the X server does with it — not the two
+    // full-frame copies it was. It is still not zero-copy, and zero-copy on
+    // this stack means DRI3 `BufferFromPixmap`, which needs a Mesa patch: the
+    // X server already hands out the window's AHardwareBuffer dma-buf fd, and
+    // the same probe proved Turnip imports that fd and binds a LINEAR image to
+    // it. That is the next change here, and when it lands this value changes
+    // again.
+    environment["MESA_VK_WSI_DEBUG"] = "sw,linear"
 
     // Setting these three is what makes win32u open the adrenotools handle
     // instead of `dlopen`ing the platform loader, and for one cycle they were
