@@ -1,5 +1,7 @@
 package app.vessel.core
 
+import java.io.File
+
 /**
  * The two value types this seed writes.
  *
@@ -81,6 +83,10 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 16 made the drive list come from `dosdevices` instead of a hardcoded
+     * three, so a folder the user maps is declared like the seeded drives are,
+     * and made the applied-marker a hash of the rendered text rather than this
+     * number — see [stampFor];
      * 15 took `Vessel Tools` back off `PATH`, no component ever having put
      * anything there — a toolchain a user installs brings its own entry;
      * 14 declared the drive types, without which Wine may guess a mapped drive
@@ -96,23 +102,61 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 15
+    const val SEED_VERSION: Int = 16
 
     /**
-     * A value written into the hive that names the seed version that wrote it.
+     * A value written into the hive naming the exact seed that wrote it.
      *
-     * The prefix's own record of which seed it carries, and the thing
-     * `SessionRuntime` looks for before deciding it can skip `regedit`. It has
-     * to live in the hive rather than in `provisioned.json` because that file
-     * records what the app *believes* it did — and believing a step happened
-     * when it had not is the whole defect this exists to stop.
+     * The prefix's own record of what it carries, and the thing `SessionRuntime`
+     * looks for before deciding it can skip `regedit`. It has to live in the hive
+     * rather than in `provisioned.json` because that file records what the app
+     * *believes* it did — and believing a step happened when it had not is the
+     * whole defect this exists to stop.
+     *
+     * **The version alone is not enough any more, so this is a fingerprint of
+     * the rendered text.** Seed 16 made the drive list depend on the prefix: a
+     * folder the user maps is a new value in [driveTypes], and two containers on
+     * the same seed version now legitimately want different registry text. An
+     * integer cannot express that — it would say "seed 16 is applied" for a
+     * prefix whose newest drive has never been declared, which is the same class
+     * of lie the marker was introduced to stop. Hashing what is about to be
+     * written makes the question exact: this hive either carries *these* keys or
+     * it does not, whatever the reason.
      */
-    val SEED_MARKER: String get() = "VesselSeed$SEED_VERSION"
+    fun stampFor(regText: String): String = "VesselSeed$SEED_VERSION-${fingerprint(regText)}"
 
-    private val seedStamp: RegistryKey = RegistryKey(
+    /**
+     * The stamp a rendered seed will write, read back out of it.
+     *
+     * How the applier learns what to look for without re-deriving it: the `.reg`
+     * file on disk is the thing that will be applied, so the stamp it carries is
+     * by definition the right one to expect in the hive afterwards. Null for a
+     * file written before stamps existed, which the caller treats as "apply it".
+     */
+    fun stampOf(regText: String): String? =
+        STAMP_PATTERN.find(regText)?.groupValues?.get(1)
+
+    private val STAMP_PATTERN = Regex(""""Seed"="([^"]+)"""")
+
+    private fun stampKey(stamp: String) = RegistryKey(
         path = """HKEY_CURRENT_USER\Software\Vessel""",
-        values = listOf(RegistryValue("Seed", SEED_MARKER)),
+        values = listOf(RegistryValue("Seed", stamp)),
     )
+
+    /**
+     * Eight hex characters of SHA-256 — enough, and this is not a security claim.
+     *
+     * The failure this must avoid is two *different* seeds hashing the same, and
+     * the population is one string per container per app version. At 32 bits a
+     * collision needs on the order of 2^16 distinct seeds before it is even
+     * likely, and the consequence of one would be a skipped `regedit` rather
+     * than anything unsafe.
+     */
+    private fun fingerprint(text: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+            .take(4)
+            .joinToString("") { "%02x".format(it) }
 
     /** Only used when a process somehow creates the desktop. See [virtualDesktop]. */
     private const val DEFAULT_DESKTOP_SIZE = "1280x720"
@@ -482,19 +526,35 @@ object PrefixRegistry {
      * treat the drive as slow and unreliable in ways that show up as dialogs.
      * Internal storage is not removable in any sense the guest can act on.
      *
-     * Only the drives the seed knows about. A folder the user maps later gets
-     * no entry, which is the remaining half of this and needs the mapper to
-     * write one — recorded in docs/DRIVE-MAPPING.md rather than guessed at
-     * here.
+     * **Derived from the prefix, not listed here.** The first version of this
+     * named `c:`, `d:` and `z:` and left a note that a folder the user maps
+     * later would need the mapper to write its own entry. That was the wrong
+     * shape: it puts the same fact in two places and makes every future way of
+     * gaining a drive a new place to remember. `dosdevices` is already the only
+     * record of what drives exist — [DriveMap.drives] reads it for the UI — so
+     * the seed reads the same directory and declares whatever is actually
+     * there. A drive gains its type by existing, whoever made it.
+     *
+     * `c:` and `z:` are added whether or not they are on disk, because the seed
+     * is rendered before `wineboot` has created them on a first provision and
+     * they are never absent afterwards.
      */
-    val driveTypes: RegistryKey = RegistryKey(
+    fun driveTypes(letters: Collection<Char> = DEFAULT_DRIVES): RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Wine\Drives""",
-        values = listOf(
-            RegistryValue("c:", "hd"),
-            RegistryValue("d:", "hd"),
-            RegistryValue("z:", "hd"),
-        ),
+        values = (letters.map { it.lowercaseChar() } + DriveMap.SYSTEM_DRIVE + DriveMap.ROOT_DRIVE)
+            .distinct()
+            .sorted()
+            .map { RegistryValue("$it:", "hd") },
     )
+
+    /**
+     * What [driveTypes] declares when nothing has read a prefix.
+     *
+     * `d:` is in it because shared storage is mapped on every provision, so a
+     * caller with no prefix to read is still describing a container that will
+     * have one.
+     */
+    val DEFAULT_DRIVES: List<Char> = listOf('c', 'd', 'z')
 
     /**
      * The machine `PATH`, written whole.
@@ -575,8 +635,13 @@ object PrefixRegistry {
     fun missingFromHive(hive: String): List<String> =
         requiredHiveValues.filterNot { hive.contains(it) }
 
-    /** Everything a new prefix gets, in the order it is written. */
-    val seed: List<RegistryKey> = listOf(
+    /**
+     * Everything a prefix with these drives gets, in the order it is written.
+     *
+     * Without the stamp: [renderSeed] appends that, because its value is a hash
+     * of everything above it and cannot be known until the rest is rendered.
+     */
+    fun seedFor(letters: Collection<Char> = DEFAULT_DRIVES): List<RegistryKey> = listOf(
         direct3D,
         dllOverrides,
         arm64ecEmulator,
@@ -586,10 +651,12 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
-        driveTypes,
+        driveTypes(letters),
         consoleColours,
-        seedStamp,
     ) + virtualDesktop
+
+    /** The seed for a container whose drives nobody has looked at. */
+    val seed: List<RegistryKey> get() = seedFor()
 
     private fun color(name: String, argb: Int) = RegistryValue(name, rgbTriplet(argb))
 
@@ -651,8 +718,23 @@ object PrefixRegistry {
      * CRLF throughout, UTF-8 on disk. Wine's `regedit` accepts LF too, but a
      * `.reg` file is a Windows format.
      */
-    fun render(keys: List<RegistryKey> = seed): String = buildString {
-        append(HEADER).append(CRLF)
+    fun render(keys: List<RegistryKey> = seed): String = HEADER + CRLF + block(keys)
+
+    /**
+     * The whole seed for a prefix with [letters], stamped with its own hash.
+     *
+     * The one every caller wants. [render] stays public for the tests, which
+     * render one key at a time to assert on its text.
+     */
+    fun renderSeed(letters: Collection<Char> = DEFAULT_DRIVES): String {
+        val body = render(seedFor(letters))
+        return body + block(listOf(stampKey(stampFor(body))))
+    }
+
+    /** The drives a prefix has, as [renderSeed] wants them. */
+    fun drivesOf(prefix: File): List<Char> = DriveMap.drives(prefix).map { it.letter }
+
+    private fun block(keys: List<RegistryKey>): String = buildString {
         for (key in keys) {
             append(CRLF)
             append('[').append(key.path).append(']').append(CRLF)

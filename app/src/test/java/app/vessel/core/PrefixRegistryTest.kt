@@ -155,11 +155,44 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(15, PrefixRegistry.SEED_VERSION)
-        // The two being equal is a coincidence — a version bump does not have to
-        // add a key — but while it holds it is a cheap way to catch a key added
-        // without the bump that makes existing containers pick it up.
-        assertEquals(14, PrefixRegistry.seed.size)
+        assertEquals(16, PrefixRegistry.SEED_VERSION)
+        // Thirteen keys plus the stamp `renderSeed` appends, which is not in the
+        // list because its value is a hash of the rest.
+        assertEquals(13, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `the stamp changes when the seed does, so an old prefix re-applies it`() {
+        val withoutE = PrefixRegistry.renderSeed(listOf('c', 'd', 'z'))
+        val withE = PrefixRegistry.renderSeed(listOf('c', 'd', 'e', 'z'))
+        // The defect this replaces: both of these are seed 16, so an integer
+        // marker would call the second one already applied and the mapped drive
+        // would never be declared.
+        assertTrue(PrefixRegistry.stampOf(withoutE) != PrefixRegistry.stampOf(withE))
+        assertTrue(withE.contains(""""e:"="hd""""))
+        assertTrue(!withoutE.contains(""""e:"="hd""""))
+    }
+
+    @Test
+    fun `the stamp a rendered seed carries is the one it will write`() {
+        val text = PrefixRegistry.renderSeed()
+        val stamp = PrefixRegistry.stampOf(text)
+        assertEquals("VesselSeed${PrefixRegistry.SEED_VERSION}", stamp?.substringBefore('-'))
+        // Rendering twice is the same text — no timestamp, no iteration order
+        // that a map could reshuffle — or every launch would re-run `regedit`.
+        assertEquals(text, PrefixRegistry.renderSeed())
+    }
+
+    @Test
+    fun `every drive a prefix has is declared, whoever mapped it`() {
+        val drives = PrefixRegistry.driveTypes(listOf('d', 'g'))
+        assertEquals(
+            listOf("c:", "d:", "g:", "z:"),
+            drives.values.map { it.name },
+        )
+        // `c:` and `z:` are added whether or not they were passed: the seed is
+        // rendered before `wineboot` creates them on a first provision.
+        assertTrue(drives.values.all { it.data == "hd" })
     }
 
     @Test

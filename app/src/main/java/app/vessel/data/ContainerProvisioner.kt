@@ -235,10 +235,27 @@ class ContainerProvisioner @Inject constructor(
         val layout = paths.of(containerId)
         val state = readState(layout)
         layout.directoriesExist() &&
-            state.registrySeedVersion == PrefixRegistry.SEED_VERSION &&
-            layout.registrySeed.isFile &&
+            seedCurrent(layout) &&
             components.all { upToDate(state, it) }
     }
+
+    /**
+     * Whether `prefix-seed.reg` already says what the seed would say now.
+     *
+     * Content rather than [PrefixRegistry.SEED_VERSION], because since seed 16
+     * the version no longer determines the text — the prefix's drives do. A
+     * container that gains a drive is a container whose seed is out of date at
+     * an unchanged version, and comparing the rendered strings is the only
+     * check that notices. It also removes a class of bug the version had: a
+     * seed edited without bumping the number silently never shipped.
+     */
+    private fun seedCurrent(layout: ContainerLayout): Boolean =
+        layout.registrySeed.isFile &&
+            runCatching { layout.registrySeed.readText() }.getOrNull() == renderSeed(layout)
+
+    /** The seed text this prefix should carry, drives and all. */
+    private fun renderSeed(layout: ContainerLayout): String =
+        PrefixRegistry.renderSeed(PrefixRegistry.drivesOf(layout.prefix))
 
     /** Forget everything, so the next [provision] redoes all of it. */
     suspend fun invalidate(containerId: String) = withContext(Dispatchers.IO) {
@@ -338,15 +355,24 @@ class ContainerProvisioner @Inject constructor(
             }
         }
 
+        // Shared storage as a drive. **Before the registry step, not after.**
+        // Since seed 16 the seed declares whatever drives `dosdevices` holds, so
+        // rendering it first would describe the container as it was a moment ago
+        // and leave `D:` undeclared for a whole launch. Mapping is idempotent and
+        // creates `dosdevices` itself if `wineboot` has not yet, so it is safe
+        // this early — and running it on every provision rather than once is what
+        // lets a container that gains the permission later pick the drive up on
+        // its next launch instead of having to be recreated.
+        drives.mapSharedStorage(layout.prefix)
+
         // — registry seed -----------------------------------------------------
-        val seedCurrent = state.registrySeedVersion == PrefixRegistry.SEED_VERSION &&
-            layout.registrySeed.isFile
-        if (seedCurrent) {
+        val seedText = renderSeed(layout)
+        if (seedCurrent(layout)) {
             mark(STEP_REGISTRY, ProvisionStatus.SKIPPED, "Seed v${PrefixRegistry.SEED_VERSION} already written")
         } else {
             mark(STEP_REGISTRY, ProvisionStatus.RUNNING)
             val written = runCatching {
-                layout.registrySeed.writeText(PrefixRegistry.render(), Charsets.UTF_8)
+                layout.registrySeed.writeText(seedText, Charsets.UTF_8)
             }.isSuccess
             if (!written) {
                 mark(STEP_REGISTRY, ProvisionStatus.FAILED, "Could not write ${layout.registrySeed.name}")
@@ -357,15 +383,10 @@ class ContainerProvisioner @Inject constructor(
             mark(
                 STEP_REGISTRY,
                 ProvisionStatus.DONE,
-                "${PrefixRegistry.seed.size} keys written to ${layout.registrySeed.name}",
+                "${PrefixRegistry.seedFor(PrefixRegistry.drivesOf(layout.prefix)).size + 1} keys " +
+                    "written to ${layout.registrySeed.name}",
             )
         }
-
-        // Shared storage as a drive, once the prefix exists to put it in. After
-        // the registry and before the boot report, so a container that gains
-        // the permission later picks the drive up on its next launch rather
-        // than needing to be recreated.
-        drives.mapSharedStorage(layout.prefix)
 
         // — hand over ---------------------------------------------------------
         mark(STEP_BOOT, ProvisionStatus.RUNNING)

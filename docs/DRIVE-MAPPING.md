@@ -1,8 +1,8 @@
 # Drive mapping
 
-**Not built. This is the design.** Written because the gap was found by
-inspection on 2026-08-08 and the shape of the answer is clear enough to record
-before anyone starts.
+**Built.** Designed 2026-08-08, shipped 2026-08-09; the five steps at the bottom
+are all done. What follows is the design as written, plus a closing section on
+the two things it got wrong.
 
 ## What a container has today
 
@@ -93,3 +93,43 @@ answered by a list of drives, not by being dropped inside one of them.
 Steps 1 and 2 are worth doing first on their own: with `D:` mapped by hand, the
 launcher can already add a program from Android storage, and that is the whole
 point of the feature. The tabs are how it stops being a hidden trick.
+
+## What the design got wrong
+
+### A symlink is enough for Wine to *resolve* a drive, not to *show* one
+
+"A drive is a symlink in `dosdevices`, and that is the whole mechanism" is true
+of path resolution and false of the shell. Wine also reads
+`HKLM\Software\Wine\Drives`, whose values are `"d:"="hd"`, and without an entry
+`GetDriveType` guesses from the target — a guess of `DRIVE_UNKNOWN` or
+`DRIVE_REMOVABLE` is what makes Wine's own File Explorer list a perfectly good
+drive as empty. This is the key `winecfg` writes for the same reason. Vessel's
+browser never noticed because it reads the symlink directly.
+
+**The entry is derived, not written by the mapper.** `PrefixRegistry.driveTypes`
+reads `dosdevices` and declares whatever is there, so a drive gains its type by
+existing rather than by every code path that can create one remembering to say
+so. Two consequences worth knowing:
+
+- The seed text now depends on the container, so the "already applied" marker
+  had to stop being an integer version and become a hash of the rendered text
+  (`PrefixRegistry.stampFor`). Two prefixes on the same seed version legitimately
+  want different registry text, and an integer cannot say that.
+- Shared storage is mapped **before** the seed is rendered in
+  `ContainerProvisioner`, not after. Rendering first would describe the container
+  as it was a moment earlier and leave `D:` undeclared for a whole launch.
+
+A drive mapped during a running session still does not appear until relaunch.
+That is Wine's, not ours — the drive table is built when a process starts.
+
+### `/mnt/media_rw/<uuid>` is the same volume and unreadable
+
+For an SD card or a USB drive, a SAF tree document id names a volume uuid, and
+there are two paths to it. `/mnt/media_rw/<uuid>` is owned by the `media_rw`
+group and an app cannot read it *even holding* `MANAGE_EXTERNAL_STORAGE`;
+`/storage/<uuid>` is the one apps get. Resolve to the wrong one and the drive
+maps, appears in the tab row, and is empty everywhere —
+[Winlator-Ludashi#534](https://github.com/StevenMXZ/Winlator-Ludashi/pull/534)
+is the same bug found independently. Vessel resolves `/storage` only; where that
+PR falls back to `/mnt/media_rw` we return null and refuse the mapping, because
+a fallback to an unreadable path *is* the empty drive rather than a fix for it.

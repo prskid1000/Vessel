@@ -157,7 +157,10 @@ class ContainerProvisionerTest {
         run(listOf(component(ComponentType.DXVK, "dxvk-2.7.1-canoe")))
         val layout = paths.of(containerId)
         assertTrue(layout.registrySeed.isFile)
-        assertEquals(PrefixRegistry.render(), layout.registrySeed.readText())
+        assertEquals(
+            PrefixRegistry.renderSeed(PrefixRegistry.drivesOf(layout.prefix)),
+            layout.registrySeed.readText(),
+        )
     }
 
     @Test

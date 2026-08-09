@@ -868,7 +868,16 @@ class SessionRuntime @Inject constructor(
         // than from `provisioned.json` for the reason the comment below already
         // gives — a recorded claim is exactly what was wrong before — so the
         // marker is a value inside the hive, written by the seed itself.
-        val seedApplied = hiveText(layout).contains(PrefixRegistry.SEED_MARKER)
+        //
+        // What to look for comes out of `regFile` rather than out of
+        // `PrefixRegistry`, and that is the whole point of seed 16's stamp: the
+        // file about to be applied is the only thing that knows what applying it
+        // would write. A prefix that gained a drive renders a different seed at
+        // the same version, and asking the registry object would answer for a
+        // container other than this one. Null means a `.reg` from before stamps
+        // existed, which is a reason to apply rather than a reason to skip.
+        val expected = runCatching { PrefixRegistry.stampOf(regFile.readText()) }.getOrNull()
+        val seedApplied = expected != null && hiveText(layout).contains(expected)
         if (bootstrapped(layout) && seedApplied) {
             bootProgress("emulator keys applied · syswow64 ${wow64Entries(layout)} entries")
         } else {

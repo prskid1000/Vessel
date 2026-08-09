@@ -82,29 +82,21 @@ class AndroidDrives @Inject constructor(
      * Null when every assignable letter is taken or the link could not be
      * created. The caller reports it; there is no retry that would help, since
      * both causes are facts about the device rather than transient.
+     *
+     * **This writes a symlink and nothing else, deliberately.** Wine also wants
+     * the drive declared in `HKLM\Software\Wine\Drives`, and an earlier note
+     * here said this function would have to write that too. It does not:
+     * `PrefixRegistry.driveTypes` reads `dosdevices` and declares whatever it
+     * finds, so the entry appears on the container's next launch without this
+     * code knowing the registry exists. The cost is that a drive mapped during
+     * a running session is not visible to Wine until relaunch — which is true
+     * regardless, since Wine builds its drive table when a process starts.
      */
     fun mapFolder(prefix: File, folder: File): Char? {
         if (!canMap || !folder.isDirectory) return null
         val taken = DriveMap.drives(prefix).map { it.letter }
         val letter = DriveMap.nextFreeLetter(taken) ?: return null
         return if (DriveMap.map(prefix, letter, folder)) letter else null
-    }
-
-    /**
-     * Folders the `+` sheet offers: the top level of shared storage.
-     *
-     * A list rather than Android's folder picker, and that is not a shortcut.
-     * `ACTION_OPEN_DOCUMENT_TREE` hands back a `content://` tree, which is not
-     * a path — there is nothing to symlink and Wine cannot open it. With
-     * `MANAGE_EXTERNAL_STORAGE` this build has real paths, so offering the real
-     * folders is both simpler and the only form that can work.
-     */
-    fun mappableFolders(): List<File> {
-        if (!canMap) return emptyList()
-        val shared = Environment.getExternalStorageDirectory() ?: return emptyList()
-        return shared.listFiles().orEmpty()
-            .filter { it.isDirectory && !it.name.startsWith('.') }
-            .sortedBy { it.name.lowercase() }
     }
 
     /**
@@ -131,6 +123,15 @@ class AndroidDrives @Inject constructor(
                 Environment.getExternalStorageDirectory()
             // A removable card or a USB drive: /storage/<uuid>, which is where
             // Android mounts them and what the volume half of the id names.
+            //
+            // **Not `/mnt/media_rw/<uuid>`, and this is the one worth knowing.**
+            // That path is the same volume, owned by the `media_rw` group, and
+            // an app cannot read it even holding `MANAGE_EXTERNAL_STORAGE` —
+            // which produces a drive that maps, lists in the UI, and is empty
+            // everywhere. Winlator-Ludashi#534 is the same bug and the same
+            // conclusion: prefer `/storage`. Where that PR falls back to
+            // `/mnt/media_rw` this returns null, because a fallback to an
+            // unreadable path is the empty drive rather than a fix for it.
             volume.isNotEmpty() -> File(EXTERNAL_MOUNTS, volume)
             else -> null
         } ?: return null
