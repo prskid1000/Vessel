@@ -47,6 +47,21 @@ class ContainerPaths(private val filesDir: File) {
 
     val logsRoot: File get() = File(filesDir, LOGS_DIRECTORY)
 
+    /**
+     * Where a downloaded `.wcp` lands before it is unpacked.
+     *
+     * Named here rather than assembled by whoever downloads, which is this
+     * class's whole argument: a path built outside it is a directory nothing
+     * can later find, sweep or account for. It was
+     * `ComponentDownloadService.DOWNLOADS_DIRECTORY` and reachable only from
+     * the service — recorded as misplaced in `out/needs-from-install-agent.md`
+     * long before setup needed it too.
+     *
+     * Part-files are deliberately left behind on a cancel so a retry resumes.
+     * Nothing sweeps one that is never resumed; that is still open.
+     */
+    val downloadsRoot: File get() = File(filesDir, DOWNLOADS_DIRECTORY)
+
     /** The shared component store — `filesDir/components/`. */
     val components: ComponentStoreLayout get() = ComponentStoreLayout(File(filesDir, COMPONENTS_DIRECTORY))
 
@@ -74,6 +89,7 @@ class ContainerPaths(private val filesDir: File) {
 
     companion object {
         const val CONTAINERS_DIRECTORY = "containers"
+        const val DOWNLOADS_DIRECTORY = "downloads"
         const val LOGS_DIRECTORY = "logs"
         const val COMPONENTS_DIRECTORY = "components"
 

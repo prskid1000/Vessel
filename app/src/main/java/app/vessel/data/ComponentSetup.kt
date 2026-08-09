@@ -1,5 +1,12 @@
 package app.vessel.data
 
+import app.vessel.core.ComponentPackage
+import app.vessel.service.CatalogResult
+import app.vessel.service.ComponentCatalog
+import app.vessel.service.ComponentDownloader
+import app.vessel.service.DownloadRequest
+import app.vessel.service.DownloadResult
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -129,6 +136,9 @@ data class SetupState(
 class ComponentSetup @Inject constructor(
     private val bundled: BundledComponents,
     private val store: ComponentStore,
+    private val catalog: ComponentCatalog,
+    private val downloader: ComponentDownloader,
+    private val paths: ContainerPaths,
 ) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -166,9 +176,10 @@ class ComponentSetup @Inject constructor(
         val catalogue = bundled.catalogue()
         val pending = catalogue.filterNot { bundled.isInstalled(it) }
         if (pending.isEmpty()) {
-            // Includes the `play` flavour, which bundles nothing at all, and every
-            // launch after the first. Neither draws anything.
-            _state.value = SetupState(phase = SetupPhase.READY)
+            // Nothing bundled to unpack — the `play` flavour always, and the
+            // `sideload` one until assets are added. Not the end of setup any
+            // more: what a phone actually needs may be downloadable instead.
+            downloadMissing()
             return
         }
 
@@ -223,6 +234,145 @@ class ComponentSetup @Inject constructor(
             }
         }
 
+        _state.update { it.copy(currentBytes = 0) }
+        downloadMissing()
+    }
+
+    /**
+     * Fetch whatever this device still needs, on first run, in the same dialog.
+     *
+     * **This is the whole install story for a fresh phone, and until now there
+     * was none.** The APK bundles no `.wcp` — Wine alone is 84 MB — so a clean
+     * install had a component store with nothing in it, no screen that could
+     * fill it, and a container that therefore could not be provisioned. The
+     * downloader, its resume logic and its digest checks have existed and been
+     * tested against a real socket for weeks with nothing calling them.
+     *
+     * Here rather than on a Components screen because a screen is the wrong
+     * shape for it: on first run this is not a choice a user makes, it is what
+     * has to happen before anything works, and the setup dialog is already the
+     * thing that says so. Later runs skip it — [ComponentStore.isInstalled] is
+     * the test, so a phone that has everything sees nothing.
+     *
+     * Failures are per-package and do not stop the rest: a device that fetched
+     * Wine and lost Turnip should end up with Wine. The phase becomes
+     * [SetupPhase.INCOMPLETE] and each row keeps the sentence that explains it.
+     */
+    private suspend fun downloadMissing() {
+        val listing = catalog.refresh()
+        if (listing !is CatalogResult.Loaded) {
+            // No catalogue is not a failure to report on a device that already
+            // has its components — which is every launch after the first, and
+            // every launch with no network. It is only worth saying when there
+            // is nothing installed to fall back on.
+            val detail = (listing as? CatalogResult.Unavailable)?.detail
+            val anyInstalled = store.installed().isNotEmpty()
+            _state.update {
+                it.copy(
+                    phase = if (it.failures.isEmpty() && (detail == null || anyInstalled)) {
+                        SetupPhase.READY
+                    } else {
+                        SetupPhase.INCOMPLETE
+                    },
+                    steps = it.steps + if (detail != null && !anyInstalled) {
+                        listOf(
+                            ProvisionStep(
+                                CATALOGUE_STEP,
+                                "Find components",
+                                ProvisionStatus.FAILED,
+                                detail,
+                            ),
+                        )
+                    } else {
+                        emptyList()
+                    },
+                )
+            }
+            return
+        }
+
+        val wanted = listing.packages.filter { it.isDownloadable && !store.layout.isInstalled(it.type, it.versionCode) }
+        if (wanted.isEmpty()) {
+            _state.update {
+                it.copy(
+                    phase = if (it.failures.isEmpty()) SetupPhase.READY else SetupPhase.INCOMPLETE,
+                    currentBytes = 0,
+                )
+            }
+            return
+        }
+
+        val downloads = paths.downloadsRoot
+        val total = wanted.sumOf { it.sizeBytes.coerceAtLeast(0) }
+        _state.update {
+            it.copy(
+                phase = SetupPhase.INSTALLING,
+                steps = it.steps + wanted.map { pkg -> ProvisionStep(pkg.id, "Download ${pkg.name}") },
+                totalBytes = it.totalBytes + total,
+            )
+        }
+
+        var completed = _state.value.completedBytes
+        for (pkg in wanted) {
+            mark(pkg.id, ProvisionStatus.RUNNING, "starting…")
+
+            // Throttled to whole percent. The downloader calls back per 64 KB
+            // buffer, which for 84 MB is 1400 state updates and 1400
+            // recompositions of a dialog nobody can read that fast.
+            var lastPercent = -1
+            val request = DownloadRequest.of(pkg)
+            if (request == null) {
+                mark(pkg.id, ProvisionStatus.FAILED, "the registry entry has no URL or no digest")
+                continue
+            }
+            val fetched = downloader.download(request, downloads) { progress ->
+                val percent = progress.fraction?.let { (it * 100).toInt() } ?: return@download
+                if (percent == lastPercent) return@download
+                lastPercent = percent
+                _state.update { state ->
+                    state.copy(
+                        currentBytes = progress.bytesDownloaded,
+                        steps = state.steps.map { step ->
+                            if (step.id == pkg.id) step.copy(detail = "$percent%") else step
+                        },
+                    )
+                }
+            }
+
+            if (fetched !is DownloadResult.Complete) {
+                mark(pkg.id, ProvisionStatus.FAILED, fetched.summary)
+                completed += pkg.sizeBytes.coerceAtLeast(0)
+                _state.update { it.copy(completedBytes = completed, currentBytes = 0) }
+                continue
+            }
+
+            mark(pkg.id, ProvisionStatus.RUNNING, "unpacking…")
+            val installed = store.install(
+                archive = fetched.file,
+                packageId = pkg.id,
+                expectedSha256 = pkg.sha256,
+            )
+            completed += pkg.sizeBytes.coerceAtLeast(0)
+            _state.update { it.copy(completedBytes = completed, currentBytes = 0) }
+
+            when (installed) {
+                is WcpInstallResult.Installed -> {
+                    // The archive has served its purpose and is the largest
+                    // thing in the app's storage. Keeping it would double the
+                    // cost of every component on a phone.
+                    runCatching { fetched.file.delete() }
+                    mark(
+                        pkg.id,
+                        ProvisionStatus.DONE,
+                        "${installed.fileCount} files installed",
+                    )
+                }
+
+                is WcpInstallResult.Failure ->
+                    mark(pkg.id, ProvisionStatus.FAILED, installed.summary)
+            }
+        }
+
         _state.update {
             it.copy(
                 phase = if (it.failures.isEmpty()) SetupPhase.READY else SetupPhase.INCOMPLETE,
@@ -230,6 +380,9 @@ class ComponentSetup @Inject constructor(
             )
         }
     }
+
+    /** The row that says the catalogue itself could not be read. */
+    private val CATALOGUE_STEP = "catalogue"
 
     private fun mark(id: String, status: ProvisionStatus, detail: String?) {
         _state.update { state ->
