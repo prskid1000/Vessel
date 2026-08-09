@@ -5,12 +5,13 @@
   `isShrinkResources = true` on the release build deletes any resource nothing
   references from code, and everything named here is referenced by nothing:
 
-    - The three licence texts exist to satisfy an obligation, not to be read by
-      the app. LGPL-2.1 section 6 says "You must supply a copy of this License"
-      with each copy of the work, and the work is the APK — so the copy has to be
-      inside it whether or not a screen has been written to show it yet. Losing
-      them to resource shrinking would be a licensing regression that no test of
-      the debug build could see, because shrinking only runs on release.
+    - The four licence texts exist to satisfy an obligation. LGPL-2.1 section 6
+      says "You must supply a copy of this License" with each copy of the work,
+      and the work is the APK. `LicencesScreen` now reads all four through
+      `R.raw`, so the shrinker would keep them anyway — but the obligation does
+      not depend on a screen continuing to reference them, and losing one to
+      resource shrinking would be a licensing regression that no test of the
+      debug build could see, because shrinking only runs on release.
 
     - The two variable fonts are kept until `VesselTheme` references them (see
       out/needs-from-install-agent.md). Once it does this is redundant for them,
@@ -19,4 +20,4 @@
   Removing a name from this list is a deliberate act. See docs/LICENSING.md.
 -->
 <resources xmlns:tools="http://schemas.android.com/tools"
-    tools:keep="@raw/license_lgpl_2_1,@raw/license_ofl_inter,@raw/license_ofl_jetbrains_mono,@font/inter_variable,@font/jetbrains_mono_variable" />
+    tools:keep="@raw/license_lgpl_2_1,@raw/license_ofl_inter,@raw/license_ofl_jetbrains_mono,@raw/license_bsd_adrenotools,@font/inter_variable,@font/jetbrains_mono_variable" />

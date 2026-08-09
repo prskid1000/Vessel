@@ -29,6 +29,8 @@ import app.vessel.ui.components.VOutcomeDialog
 import app.vessel.ui.components.VOutcomeTone
 import app.vessel.ui.screens.FilesScreen
 import app.vessel.ui.screens.HomeScreen
+import app.vessel.ui.screens.LicenceTextScreen
+import app.vessel.ui.screens.LicencesScreen
 import app.vessel.ui.screens.SessionDesktop
 import app.vessel.ui.screens.SessionLaunchDialog
 import app.vessel.ui.screens.SessionLogScreen
@@ -86,6 +88,21 @@ object Routes {
      */
     const val SESSION_LOGS = "logs/{containerId}"
     const val SESSION_LOG = "logs/{containerId}/{startedAt}"
+
+    /**
+     * What Vessel is made of, and one licence in full.
+     *
+     * A push and not a sheet, unlike everything else short in this product,
+     * because a licence is a document you read rather than a decision you make
+     * over the screen behind it — and because the second route pushes a 500-line
+     * text on top of the first, which a sheet cannot do.
+     */
+    const val LICENCES = "licences"
+    const val LICENCE = "licences/{title}"
+
+    fun licence(title: String) = "licences/${Uri.encode(title)}"
+
+    const val ARG_LICENCE_TITLE = "title"
 
     fun files(containerId: String, pick: Boolean = false) =
         "files/${Uri.encode(containerId)}?pick=$pick"
@@ -190,6 +207,7 @@ fun VesselApp(
                 // list, and the desktop pushes itself once there is one.
                 onLaunch = { session.launch(it, native) },
                 onLaunchApp = session::launchApp,
+                onOpenLicences = { navController.navigate(Routes.LICENCES) },
                 pickedExecutable = picked,
                 onPickConsumed = {
                     entry.savedStateHandle[Routes.PICKED_EXECUTABLE] = null
@@ -232,6 +250,19 @@ fun VesselApp(
         }
         composable(Routes.SESSION_LOG) {
             SessionLogScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(Routes.LICENCES) {
+            LicencesScreen(
+                onBack = { navController.popBackStack() },
+                onOpen = { navController.navigate(Routes.licence(it)) },
+            )
+        }
+        composable(Routes.LICENCE) { entry ->
+            LicenceTextScreen(
+                title = entry.arguments?.getString(Routes.ARG_LICENCE_TITLE).orEmpty(),
+                onBack = { navController.popBackStack() },
+            )
         }
 
         // The desktop. A route rather than an overlay over the NavHost, because

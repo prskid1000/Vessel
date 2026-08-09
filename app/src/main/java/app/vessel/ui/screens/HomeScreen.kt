@@ -1,17 +1,26 @@
 package app.vessel.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -71,6 +80,7 @@ fun HomeScreen(
     onOpenLogs: (String) -> Unit,
     onLaunch: (String) -> Unit,
     onLaunchApp: (AppShortcut) -> Unit,
+    onOpenLicences: () -> Unit,
     pickedExecutable: String? = null,
     onPickConsumed: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel(),
@@ -103,6 +113,7 @@ fun HomeScreen(
         onOpenAppProfile = { sheet = HomeSheet.AppProfile(it) },
         onAddApp = { sheet = HomeSheet.AddApp(it) },
         onBrowseFiles = onOpenFiles,
+        onOpenLicences = onOpenLicences,
     )
 
     when (val open = sheet) {
@@ -153,6 +164,7 @@ private fun HomeContent(
     onOpenAppProfile: (AppShortcut) -> Unit,
     onAddApp: (String) -> Unit,
     onBrowseFiles: (String) -> Unit,
+    onOpenLicences: () -> Unit,
 ) {
     VScaffold(
         toolbar = {
@@ -162,6 +174,14 @@ private fun HomeContent(
                 trailing = { VIconButton(VIcons.Plus, "New container", onNewContainer) },
             )
         },
+        // **The licence notice, and it is at the foot of the root screen on
+        // purpose.** LGPL 2.1 section 6 wants prominent notice with each copy of
+        // the work; home is the only screen every user of every copy sees, and
+        // the bottom bar is the only slot on it that is there in both the
+        // empty-device state and the full one. A row inside the list would
+        // vanish on a fresh install, which is the copy most likely to be
+        // somebody's first.
+        bottomBar = { LicenceNoticeBar(onOpenLicences) },
     ) {
         if (state.containers.isEmpty()) {
             // Only once the store has answered. Showing this while the first read
@@ -210,6 +230,42 @@ private fun HomeContent(
     }
 }
 
+/**
+ * One line, always present: what Vessel contains and how to read the licences.
+ *
+ * Muted and small because it is a legal notice rather than an action, and the
+ * whole row is the target because "Licences" as a link inside a sentence is a
+ * 30 px tap on a phone.
+ */
+@Composable
+private fun LicenceNoticeBar(onOpenLicences: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenLicences)
+            .navigationBarsPadding()
+            .padding(
+                horizontal = Vessel.metrics.screenGutter,
+                vertical = Vessel.metrics.s6,
+            ),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Contains the Winlator X server, under the GNU LGPL 2.1. Licences",
+            style = Vessel.type.bodySmall,
+            color = Vessel.colors.textMuted,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            VIcons.Info,
+            contentDescription = "Licences",
+            tint = Vessel.colors.textMuted,
+            modifier = Modifier.size(Vessel.metrics.s6),
+        )
+    }
+}
+
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 927)
 @Composable
 private fun HomePreview() {
@@ -223,6 +279,7 @@ private fun HomePreview() {
             onOpenAppProfile = {},
             onAddApp = {},
             onBrowseFiles = {},
+            onOpenLicences = {},
         )
     }
 }
@@ -241,6 +298,7 @@ private fun HomeEmptyPreview() {
                 onOpenAppProfile = {},
                 onAddApp = {},
                 onBrowseFiles = {},
+            onOpenLicences = {},
             )
         }
     }
@@ -259,6 +317,7 @@ private fun HomeLandscapePreview() {
             onOpenAppProfile = {},
             onAddApp = {},
             onBrowseFiles = {},
+            onOpenLicences = {},
         )
     }
 }

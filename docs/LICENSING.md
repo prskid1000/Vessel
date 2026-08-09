@@ -113,14 +113,23 @@ ships `LICENSE-LGPL-2.1` verbatim as `res/raw/license_lgpl_2_1.txt`.
 `isShrinkResources` deleting it from the release build — which it otherwise
 would, silently, because nothing in the code references it.
 
-**2. Prominent notice, with each copy — NOT satisfied.** There is no About
-screen, no licence entry in any sheet, and nothing anywhere in the interface that
-tells a user the app contains the Winlator X server under the LGPL. Shipping the
-text without a route to it is not "prominent notice"; it is a file in a zip. This
-is the one section 6 blocker that cannot be closed from the core and service
-layers, because it is a screen — the precise ask is written up in
-`out/needs-from-install-agent.md`. Until it exists, **the APK should not be
-distributed**, independently of whether the repository is public.
+**2. Prominent notice, with each copy — satisfied.** A line at the foot of the
+container list, on every launch and in both the empty-device state and the full
+one, reads *"Contains the Winlator X server, under the GNU LGPL 2.1"* and opens
+`LicencesScreen`. That screen gives the notice in full — the Library, its
+authors, the licence covering it, and that Vessel itself is LGPL-2.1-or-later
+with its source at the named URL — and each of the five entries opens its own
+licence text out of `res/raw`. The bottom bar rather than a row in the list
+because a row would vanish on a device with no containers, which is the copy
+most likely to be somebody's first.
+
+`LicensingTest` asserts the words are in the screen's source, that home reaches
+it, and that every `R.raw` the list names is a real non-empty file — the failure
+that would otherwise ship is a row that opens onto "could not be read".
+
+Adding this closed the reason **the APK should not be distributed**; a release
+had already been published before it existed, which is recorded here rather than
+quietly fixed.
 
 **3. One of 6(a)–(e) — 6(a), satisfied on the day the repository is public.**
 6(a) wants the Library's complete source "including whatever changes were used in
@@ -252,7 +261,7 @@ open items below are done; the APK needs the third as well.**
 | 5 | Bundled fonts must be recorded with their licence | **Closed.** Inter 4.001 and JetBrains Mono 2.304, OFL-1.1, licences shipped in the APK, identity asserted from the font tables. |
 | 6 | Trademarks must not be in the product name or icon | **Closed.** Checked, and the name is asserted. |
 | 7 | Our Wine/vkd3d patches must be the only difference from upstream | **Closed.** `assert_pristine()` fails the build on a drifted checkout; the `winefile` drift that prompted it is gone. |
-| 8 | **Prominent notice, in the interface, that the app contains LGPL code** | **OPEN.** Needs a screen, which is `ui/`. The exact requirement is in `out/needs-from-install-agent.md`. Blocks *distributing the APK*; does not block making the repository public. |
+| 8 | Prominent notice, in the interface, that the app contains LGPL code | **Closed.** A permanent line at the foot of home naming the X server and its licence, opening `LicencesScreen`; five entries, each with its full text out of `res/raw`. libadrenotools' BSD-2-Clause notice is in the APK now too, which it had not been. Asserted three ways in `LicensingTest`. |
 | 9 | **A source offer on the component release page** | **OPEN.** Each `.wcp` embeds its upstream commit, but the GitHub release the packages are published from says nothing about where their source is. One line per component on that release — upstream repo, tag or commit, and a link to `patches/<name>/` — closes it. This is `.github/workflows/_component.yml` and the release body, not code. |
 | 10 | A `README` that is true on the day | Tracked in `docs/TODO.md` §6, not here. |
 

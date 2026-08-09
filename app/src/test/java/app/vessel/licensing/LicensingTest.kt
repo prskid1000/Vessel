@@ -73,6 +73,69 @@ class LicensingTest {
     }
 
     @Test
+    fun `the interface gives the notice section 6 asks for`() {
+        // The half that a file in a zip cannot satisfy. Section 6: "You must
+        // give prominent notice with each copy of the work that the Library is
+        // used in it and that the Library and its use are covered by this
+        // License." Asserted against the source of the screen rather than a
+        // screenshot, because the obligation is that the words ship — and this
+        // test is the thing that notices if somebody trims them for length.
+        val screen = RepoFiles
+            .file("app/src/main/java/app/vessel/ui/screens/LicencesScreen.kt")
+            .readText()
+        assertTrue(
+            "the licence screen does not name the Winlator X server",
+            screen.contains("Winlator X server"),
+        )
+        assertTrue(
+            "the licence screen does not name the licence covering it",
+            screen.contains("GNU Lesser General Public"),
+        )
+
+        // And it has to be reachable, or it is a screen nobody is given.
+        val home = RepoFiles
+            .file("app/src/main/java/app/vessel/ui/screens/HomeScreen.kt")
+            .readText()
+        assertTrue(
+            "home does not offer a way to the licences",
+            home.contains("LicenceNoticeBar") && home.contains("GNU LGPL 2.1"),
+        )
+    }
+
+    @Test
+    fun `every licence the notice lists is really in the APK`() {
+        // `Licences.entries` names an `R.raw` per component. A resource id
+        // cannot be resolved in a JVM test, so this reads the names out of the
+        // source and checks the files — which catches the case that matters: an
+        // entry added to the list whose text was never put in `res/raw`, so the
+        // row opens onto the "could not be read" state in a shipped build.
+        val source = RepoFiles
+            .file("app/src/main/java/app/vessel/ui/screens/Licences.kt")
+            .readText()
+        val named = Regex("""R\.raw\.(\w+)""").findAll(source).map { it.groupValues[1] }.toSet()
+        assertTrue("Licences.kt names no licence texts at all", named.isNotEmpty())
+        for (name in named) {
+            val file = RepoFiles.file("app/src/main/res/raw/$name.txt")
+            assertTrue("res/raw/$name.txt is named by Licences.kt and does not exist", file.isFile)
+            assertTrue("res/raw/$name.txt is empty", file.length() > 0)
+        }
+    }
+
+    @Test
+    fun `the adrenotools BSD notice ships, matching its own source tree`() {
+        // BSD-2-Clause's first condition: redistributions of source code must
+        // retain the copyright notice. It was in `cpp/adrenotools/LICENSE` and
+        // nowhere the APK could show it.
+        val upstream = RepoFiles.file("app/src/main/cpp/adrenotools/LICENSE").readBytes()
+        val shipped = RepoFiles.file("app/src/main/res/raw/license_bsd_adrenotools.txt").readBytes()
+        assertArrayEqualsNormalised(
+            "res/raw/license_bsd_adrenotools.txt has drifted from cpp/adrenotools/LICENSE",
+            upstream,
+            shipped,
+        )
+    }
+
+    @Test
     fun `the licence notice does not repeat the retracted libadrenotools claim`() {
         // LICENSE used to argue that "or later" was needed because
         // libadrenotools is LGPL-3.0. It is BSD-2-Clause; the retraction, and
@@ -212,6 +275,7 @@ class LicensingTest {
             "@raw/license_lgpl_2_1",
             "@raw/license_ofl_inter",
             "@raw/license_ofl_jetbrains_mono",
+            "@raw/license_bsd_adrenotools",
             "@font/inter_variable",
             "@font/jetbrains_mono_variable",
         )
