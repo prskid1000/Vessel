@@ -48,6 +48,9 @@ object DriveMap {
     /** Where the symlinks live, under a prefix. */
     const val DOSDEVICES = "dosdevices"
 
+    /** What [SYSTEM_DRIVE] points at, under a prefix. Wine's name, not ours. */
+    const val DRIVE_C = "drive_c"
+
     /**
      * Letters offered to a new mapping, in the order they are handed out.
      *
@@ -128,6 +131,7 @@ object DriveMap {
     fun map(prefix: File, letter: Char, target: File): Boolean = runCatching {
         val dir = File(prefix, DOSDEVICES)
         if (!dir.isDirectory && !dir.mkdirs()) return false
+        ensureSystemDrive(prefix)
         val link = File(dir, "${letter.lowercaseChar()}:")
         // Delete rather than overwrite: a symlink cannot be re-pointed in place,
         // and `createSymbolicLink` refuses an existing name.
@@ -135,6 +139,71 @@ object DriveMap {
         java.nio.file.Files.createSymbolicLink(link.toPath(), target.toPath())
         true
     }.getOrDefault(false)
+
+    /**
+     * `drive_c` and `dosdevices/c:`, if nothing has made them yet.
+     *
+     * **This is a job taken off Wine, and the job has two halves.**
+     * `server_init_process_done` in `ntdll/unix/server.c` reads:
+     *
+     * ```c
+     * if (!mkdir( "dosdevices", 0777 )) {
+     *     mkdir( "drive_c", 0777 );
+     *     symlink( "../drive_c", "dosdevices/c:" );
+     *     symlink( "/", "dosdevices/z:" );
+     * }
+     * ```
+     *
+     * — the C: drive is created *only* on the pass that creates the directory.
+     * Get there first and `mkdir` returns EEXIST, the whole block is skipped,
+     * and the prefix comes up with **no `drive_c` and no `dosdevices/c:` at
+     * all**, for ever.
+     *
+     * Measured on a fresh install, and it is not subtle: 773 lines of
+     * `setupapi:create_dest_file failed … (error=3)` as `wine.inf` copied every
+     * DLL into a directory that was not there, `wineboot: Cannot set the dir to
+     * L"C:\windows" (2)`, and `Couldn't start services.exe: error 267` — which
+     * is ERROR_DIRECTORY, and is why `RpcSs` has never started inside the app
+     * while starting perfectly under `run-as`. The `run-as` harness lets Wine
+     * build its own prefix; the app maps `D:` first.
+     *
+     * It needed the storage permission to already be granted when the container
+     * was created, which is why it survived this long and why it appeared now:
+     * `+` asks for the permission, so having it before the first launch is the
+     * normal path rather than the unusual one.
+     *
+     * Written as a repair rather than as an else-branch of the `mkdir` above,
+     * because there are prefixes in this state already and nothing else will
+     * ever fix one — Wine will not revisit that block for the life of the
+     * prefix. `z:` is deliberately not created; see [removeRootDrive].
+     *
+     * **The stamp goes with it, and a repair is worthless without that.** A
+     * broken prefix has already run `wineboot` once, so it has an
+     * `.update-timestamp` matching `wine.inf`, and the next `wineboot --update`
+     * would look at it, conclude there is nothing to do, and leave `drive_c`
+     * the empty directory this just made. Removing the stamp is how you say "no
+     * boot has really happened here" — one forced `wine.inf` pass, on a prefix
+     * that never got a successful one.
+     */
+    fun ensureSystemDrive(prefix: File): Boolean = runCatching {
+        val dir = File(prefix, DOSDEVICES)
+        // **Only when `dosdevices` is already there.** No directory means Wine
+        // has not been near this prefix and nothing has got in its way, so its
+        // own branch will run and do all four lines properly. Creating a
+        // `drive_c` here would be this function causing the situation it exists
+        // to repair — and it would put a directory in a prefix the provisioner
+        // is entitled to treat as untouched.
+        if (!dir.isDirectory) return false
+        val link = File(dir, "$SYSTEM_DRIVE:")
+        if (link.exists() || isSymlink(link)) return false
+        File(prefix, DRIVE_C).mkdirs()
+        java.nio.file.Files.createSymbolicLink(link.toPath(), File("../$DRIVE_C").toPath())
+        File(prefix, UPDATE_STAMP).delete()
+        true
+    }.getOrDefault(false)
+
+    /** Wine's record of which `wine.inf` this prefix was last updated against. */
+    private const val UPDATE_STAMP = ".update-timestamp"
 
     /**
      * Remove [letter]'s mapping.

@@ -359,12 +359,25 @@ class ContainerProvisioner @Inject constructor(
         // Shared storage as a drive. **Before the registry step, not after.**
         // Since seed 16 the seed declares whatever drives `dosdevices` holds, so
         // rendering it first would describe the container as it was a moment ago
-        // and leave `D:` undeclared for a whole launch. Mapping is idempotent and
-        // creates `dosdevices` itself if `wineboot` has not yet, so it is safe
-        // this early — and running it on every provision rather than once is what
-        // lets a container that gains the permission later pick the drive up on
-        // its next launch instead of having to be recreated.
+        // and leave `D:` undeclared for a whole launch. Running it on every
+        // provision rather than once is what lets a container that gains the
+        // permission later pick the drive up on its next launch instead of
+        // having to be recreated.
         drives.mapSharedStorage(layout.prefix)
+
+        // **And then C:, because mapping a drive before the first boot takes a
+        // job off Wine that Wine will not come back to.** Wine creates
+        // `drive_c` and `dosdevices/c:` only on the pass that creates
+        // `dosdevices` itself, so getting there first — which the line above
+        // does whenever the storage permission is already granted — leaves a
+        // prefix with no C: drive at all. The whole diagnosis is on
+        // [DriveMap.ensureSystemDrive]; it is a no-op on every healthy prefix,
+        // and on a broken one it also drops `.update-timestamp` so the boot
+        // below really re-runs `wine.inf` instead of skipping it.
+        //
+        // Here as well as inside `map`, so the invariant is stated where it is
+        // depended on: everything after this line assumes there is a C:.
+        val repairedSystemDrive = DriveMap.ensureSystemDrive(layout.prefix)
 
         // And Z: goes, for the reason in DriveMap.removeRootDrive: the unix root
         // is Android, and a drive nobody chose that reaches this app's own
@@ -397,7 +410,15 @@ class ContainerProvisioner @Inject constructor(
         }
 
         // — hand over ---------------------------------------------------------
-        mark(STEP_BOOT, ProvisionStatus.RUNNING)
+        // The repair is said out loud on the step it changes the meaning of: a
+        // boot that would otherwise have been a no-op is about to lay down the
+        // whole of `C:\windows`, and the row is going to sit there for a minute
+        // looking stuck.
+        mark(
+            STEP_BOOT,
+            ProvisionStatus.RUNNING,
+            if (repairedSystemDrive) "This prefix had no C: drive — rebuilding it" else null,
+        )
         val booted = bootstrap.createPrefix(layout)
         val applied = if (booted is BootstrapOutcome.Applied) {
             bootstrap.applyRegistry(layout, layout.registrySeed)

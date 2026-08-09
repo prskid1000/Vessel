@@ -185,6 +185,11 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // share it between two containers on different driver builds.
     "MESA_SHADER_CACHE_DISABLE",
     "MESA_SHADER_CACHE_DIR",
+
+    // Not a tuning knob on this build: the Turnip we ship has only the software
+    // half of Mesa's X11 WSI compiled in, and clearing this sends every
+    // swapchain into an `UNREACHABLE`. The whole argument is at the assignment.
+    "MESA_VK_WSI_DEBUG",
     "DXVK_STATE_CACHE_PATH",
     "VKD3D_SHADER_CACHE_PATH",
     "VKD3D_CONFIG",
@@ -355,6 +360,46 @@ fun sessionEnvironment(
     environment["VKD3D_SHADER_CACHE_PATH"] = File(paths.caches, "vkd3d").absolutePath
 
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
+
+    // **The only present path this driver has. Without it a swapchain is not an
+    // error, it is a crash.**
+    //
+    // Mesa's X11 WSI is one file with two halves, and the DRI3 half is entirely
+    // behind `#ifdef HAVE_X11_DRM`. `meson.build` defines that only when
+    // `with_dri_platform == 'drm'`, and `build/turnip.sh` builds for KGSL with
+    // no gallium driver, so it is never defined for us. Read out of the shipped
+    // `libvulkan_freedreno.so`: `xcb_put_image` is present, and there is not one
+    // `xcb_dri3_*`, `xcb_present_*` or `xcb_shm_*` reference in the whole
+    // binary. Half a WSI was compiled, and it is the software half.
+    //
+    // Mesa does not know that at runtime. `wsi_conn->has_dri3` is set from the
+    // *server's* extension list, outside the guard, and Vessel's X server does
+    // implement DRI3 — so the surface reports support, the swapchain takes the
+    // DRI3 branch, and lands on
+    //
+    //     UNREACHABLE("X11 DRM support missing!")     wsi_common_x11.c
+    //
+    // which in a release build is `__builtin_unreachable()`. That is the
+    // "crashes when it tries to open" that every D3D program has done, and why
+    // it was recorded as dying at swapchain creation with no error to read.
+    //
+    // `sw` flips `wsi_device->sw`, which is checked *before* DRI3 everywhere
+    // that matters, and routes presentation to `x11_present_to_x11_sw` —
+    // `xcb_put_image` of a mapped CPU buffer, no dma-buf, no fences, no
+    // XFixes. Every request it makes is one the vendored X server already
+    // implements. It is `|=` in Mesa, not a driver capability, so no Turnip
+    // patch is needed.
+    //
+    // **This is not a debug switch here, which is why it is not a setting.** On
+    // a Mesa built with DRI3 it would be one; on this one it is the difference
+    // between a present path and no present path. `MESA_VK_WSI_DEBUG` is in
+    // [RESERVED_SESSION_ENV] for exactly that reason.
+    //
+    // The cost is a full-frame CPU copy per present, and how bad that is
+    // depends on whether Turnip's IOCOHERENT probe passes on this chip — if it
+    // does the copy is cached, if not it is an uncached read. That is a
+    // measurement, and it is the next one to take.
+    environment["MESA_VK_WSI_DEBUG"] = "sw"
 
     // Setting these three is what makes win32u open the adrenotools handle
     // instead of `dlopen`ing the platform loader, and for one cycle they were

@@ -500,6 +500,10 @@ class SessionEnvironmentTest {
                 "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
                 "VKD3D_SHADER_CACHE_PATH" to File(caches, "vkd3d").absolutePath,
                 "TU_DEBUG" to "startup",
+                // Not optional and not diagnostic: the Turnip this project
+                // builds has only the software half of Mesa's X11 WSI compiled
+                // in, and without this every swapchain reaches an UNREACHABLE.
+                "MESA_VK_WSI_DEBUG" to "sw",
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,
