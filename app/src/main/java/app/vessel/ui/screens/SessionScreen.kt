@@ -162,6 +162,24 @@ fun SessionLaunchDialog(
     state: SessionState,
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * Open the log this launch is writing, while it is still writing it.
+     *
+     * **The one line under the checklist is not enough and reads worse than the
+     * truth.** Provisioning runs `wineboot` and `regedit` before any X server
+     * exists, so Wine loads no display driver and logs `Initialization of
+     * winex11.drv failed`, `no driver could be loaded` and `The explorer process
+     * failed to start` — three alarming lines about a boot that is going fine.
+     * Whichever happens to be last is what the dialog showed, with nothing
+     * around it to say so.
+     *
+     * The log has carried all of this from the first line — `wineboot.exe`,
+     * `regedit`, `services.exe` are the top of the file — and until now there
+     * was no way to reach it during a launch: the rail exists only over a
+     * running session, and the container's history is behind the dialog. A
+     * button here is the whole fix.
+     */
+    onOpenLogs: () -> Unit,
 ) {
     VDialogCard(onDismiss = onDismiss) {
         Text(
@@ -177,6 +195,11 @@ fun SessionLaunchDialog(
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8, Alignment.End),
         ) {
             VButton("Cancel", onCancel, style = VButtonStyle.Danger)
+            // Only once there is a file to open. `startedAt` is what names it,
+            // and it is null until the runtime has opened one.
+            if (state.startedAt != null) {
+                VButton("Log", onOpenLogs, style = VButtonStyle.Secondary)
+            }
             VButton("Hide", onDismiss, style = VButtonStyle.Secondary)
         }
     }
@@ -212,10 +235,21 @@ private fun ColumnScope.ProvisionChecklist(state: SessionState) {
     // the middle of its glyphs — text that is present, unreadable, and cannot be
     // scrolled to because the steps above had already used the height.
     //
-    // They are also the wrong things to hide. DESIGN.md: Starting shows the last
-    // log line as it goes, "because that is where a missing DLL surfaces". The
-    // checklist scrolls; the line that explains it stays put.
-    val line = state.lastLine
+    // DESIGN.md: Starting shows the last log line as it goes, "because that is
+    // where a missing DLL surfaces". The intent is right and the literal reading
+    // was wrong, because of what a *healthy* boot's tail looks like here:
+    // provisioning runs `wineboot` and `regedit` before any X server exists, so
+    // Wine loads no display driver and the last line is reliably one of
+    // `Initialization of winex11.drv failed`, `no driver could be loaded`, or
+    // `The explorer process failed to start`. Three sentences that read like a
+    // broken boot, on every successful boot, with nothing around them to say so.
+    //
+    // So the tail is shown when a step has actually failed — which is the case
+    // DESIGN.md was describing — and the checklist's own step details carry the
+    // narration the rest of the time. Nothing is hidden: `Log` opens the whole
+    // file, benign lines and all, while the launch is still running.
+    val failed = state.steps.any { it.status == ProvisionStatus.FAILED }
+    val line = state.lastLine?.takeIf { failed || state.finished }
     if (line != null) {
         Text(
             line,
@@ -887,6 +921,7 @@ private fun SessionLaunchDialogPreview() {
             ),
             onCancel = {},
             onDismiss = {},
+            onOpenLogs = {},
         )
     }
 }

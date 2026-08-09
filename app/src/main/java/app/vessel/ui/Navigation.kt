@@ -385,6 +385,13 @@ private fun SessionHost(
                 state = state,
                 onCancel = session::stop,
                 onDismiss = { showChecklist = false },
+                // Put the checklist down on the way, so the log is not opened
+                // underneath a dialog that covers it.
+                onOpenLogs = {
+                    val route = state.logRoute()
+                    showChecklist = false
+                    navController.navigate(route)
+                },
             )
 
         // A failed launch or a non-zero exit is the diagnosis, and it is the one
