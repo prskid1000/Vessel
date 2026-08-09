@@ -367,16 +367,41 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      */
     private fun cascade(window: Window) {
         val desktop = window.parent ?: return
-        val taken = desktop.children.any { other ->
-            other !== window && other.isRealWindow() &&
-                other.getX() == window.getX() && other.getY() == window.getY()
-        }
-        if (!taken) return
 
-        val occupied = desktop.children.count { it !== window && it.isRealWindow() }
-        val step = (occupied % CASCADE_WRAP) * CASCADE_STEP
-        val x = (window.getX() + step).coerceAtMost(desktop.width - window.width).toShort()
-        val y = (window.getY() + step).coerceAtMost(desktop.height - window.height).toShort()
+        // **Centred, then stepped off whatever is already there.**
+        //
+        // Cascading alone was not enough and the reason is easy to miss: it only
+        // moved a window whose position was *already taken*, so the first window
+        // of a session — the common case, and the one anybody looks at first —
+        // stayed exactly where Wine put it, hard against the top-left corner
+        // with the whole desktop empty to its right.
+        //
+        // Only a window that did not ask for a position. `CW_USEDEFAULT` comes
+        // through as the desktop origin, so a window at 0,0 is one nobody
+        // placed; a window anywhere else was positioned by the program — a game
+        // restoring its saved geometry, a dialog put beside its parent — and
+        // moving that is a window manager overruling a deliberate decision.
+        // (The proper X11 test is `WM_NORMAL_HINTS` `USPosition`/`PPosition`,
+        // which this server does not parse. The origin is the approximation, and
+        // it is wrong only for a program that genuinely wants 0,0.)
+        val unplaced = window.getX().toInt() <= 0 && window.getY().toInt() <= 0
+        val maxX = (desktop.width - window.width).coerceAtLeast(0)
+        val maxY = (desktop.height - window.height).coerceAtLeast(0)
+        var wantX = if (unplaced) maxX / 2 else window.getX().toInt()
+        var wantY = if (unplaced) maxY / 2 else window.getY().toInt()
+
+        // One step per attempt rather than one per existing window: counting
+        // windows put the third window two steps away from a slot that may have
+        // been freed by the second one closing, which cascades into empty space.
+        var steps = 0
+        while (steps < CASCADE_WRAP && occupied(desktop, window, wantX, wantY)) {
+            wantX += CASCADE_STEP
+            wantY += CASCADE_STEP
+            steps++
+        }
+
+        val x = wantX.coerceIn(0, maxX).toShort()
+        val y = wantY.coerceIn(0, maxY).toShort()
         if (x == window.getX() && y == window.getY()) return
 
         runCatching {
@@ -398,8 +423,15 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                     window.borderWidth.toInt(), window.attributes.isOverrideRedirect,
                 ),
             )
-        }.onFailure { Log.w("VesselDisplay", "could not cascade a new window", it) }
+        }.onFailure { Log.w("VesselDisplay", "could not place a new window", it) }
     }
+
+    /** Whether another real window already has this exact top-left corner. */
+    private fun occupied(desktop: Window, window: Window, x: Int, y: Int): Boolean =
+        desktop.children.any { other ->
+            other !== window && other.isRealWindow() &&
+                other.getX().toInt() == x && other.getY().toInt() == y
+        }
 
     /**
      * Mapped, and bigger than Wine's message-only plumbing.

@@ -62,6 +62,10 @@ class SessionViewModel @Inject constructor(
     recorder: SessionMetricsRecorder,
 ) : ViewModel() {
 
+    init {
+        awaitPendingProgram()
+    }
+
     /** The taskbar's list of guest windows. Empty while nothing is running. */
     val windows = shell.windows
 
@@ -155,23 +159,84 @@ class SessionViewModel @Inject constructor(
     }
 
     /**
-     * Start one program inside its container.
+     * Start one program, starting its container first if nothing is running.
      *
-     * **This currently always refuses, and it refuses out loud.**
-     * [SessionRuntime.start] takes a container and nothing else, so there is no
-     * way to ask a prefix — running or cold — to run a named executable. The
-     * mechanism exists and is proven: `SessionRuntime.launchFileManager` does
-     * exactly this for `winefile`. It is simply not generalised, and generalising
-     * it is `data/`'s to do — see `out/ui-needs-from-core.md`.
+     * **A tile on home could not start anything, and said something untrue about
+     * why.** This went straight to [SessionShellHost.launch], which compares the
+     * running session's container against the shortcut's — and with no session
+     * running there is no container to compare, so every tile on the home screen
+     * refused with "belongs to a different container". One container on the
+     * device, its own tile, and the product blaming a container that did not
+     * exist.
      *
-     * The alternative considered and rejected was to start the container's plain
-     * desktop instead and say nothing. That is a launcher that appears to work:
-     * the user taps Notepad++, a Windows desktop appears, and Notepad++ is not on
-     * it. A sentence naming the missing piece is worth more than a desktop nobody
-     * asked for.
+     * Three cases now, and they are genuinely different:
+     *
+     * - **Its container is already running.** Start the program in it, which is
+     *   what this always did and what worked from the desktop's launcher.
+     * - **Nothing is running.** Start the container and remember the program;
+     *   [awaitPendingProgram] starts it when the desktop is up. Not "start the
+     *   desktop and say nothing", which was considered and rejected long ago and
+     *   is still wrong — the user tapped a program and must get that program.
+     * - **A different container is running.** Refuse, out loud. There is room
+     *   for one session on this device, so this is a real answer rather than
+     *   something to silently reinterpret as "restart".
      */
-    fun launchApp(shortcut: AppShortcut) {
-        viewModelScope.launch { _shellRefusal.value = shell.launch(shortcut) }
+    fun launchApp(shortcut: AppShortcut, native: DisplayGeometry? = null) {
+        val session = state.value
+        when {
+            session.containerId == shortcut.containerId && session.phase == SessionPhase.RUNNING ->
+                viewModelScope.launch { _shellRefusal.value = shell.launch(shortcut) }
+
+            session.phase == SessionPhase.IDLE -> {
+                pendingProgram = shortcut
+                launch(shortcut.containerId, native)
+            }
+
+            // Preparing or starting *this* container: the program is queued and
+            // the checklist is already on screen, so there is nothing to say.
+            session.containerId == shortcut.containerId -> pendingProgram = shortcut
+
+            else -> _shellRefusal.value =
+                "${shortcut.name} belongs to a different container. Stop this session first, " +
+                    "then launch it from its own."
+        }
+    }
+
+    /**
+     * A program tapped before its container was up, waiting for it.
+     *
+     * Not in [SessionState]: the runtime is a singleton shared with the service
+     * and knows nothing about shortcuts, and a program the user asked for is a
+     * fact about this screen's intent rather than about the session.
+     */
+    private var pendingProgram: AppShortcut? = null
+
+    /**
+     * Start the queued program once its desktop exists.
+     *
+     * Cleared on any terminal phase as well as on success, so a launch that
+     * fails does not leave a program to be started by the *next* session the
+     * user opens — which would be a program appearing in a container nobody
+     * asked to run it in.
+     */
+    private fun awaitPendingProgram() {
+        viewModelScope.launch {
+            runtime.state.collect { session ->
+                val waiting = pendingProgram ?: return@collect
+                when {
+                    session.phase == SessionPhase.RUNNING &&
+                        session.containerId == waiting.containerId -> {
+                        pendingProgram = null
+                        _shellRefusal.value = shell.launch(waiting)
+                    }
+
+                    session.finished || session.phase == SessionPhase.IDLE ->
+                        pendingProgram = null
+
+                    else -> Unit
+                }
+            }
+        }
     }
 
     /**

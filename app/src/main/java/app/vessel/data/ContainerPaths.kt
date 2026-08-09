@@ -1,6 +1,8 @@
 package app.vessel.data
 
 import app.vessel.core.ComponentType
+import app.vessel.core.DriveMap
+import app.vessel.ui.shell.GuestPath
 import java.io.File
 
 /**
@@ -106,6 +108,36 @@ data class ContainerLayout(
 
     /** Scratch belonging to this container. Component staging is the store's, not this. */
     val tmp: File get() = File(base, TMP)
+
+    /**
+     * The Android directory a guest path lives in, whichever drive it names.
+     *
+     * **The reason this exists is a defect it fixes in two places.** Both
+     * callers resolved every guest path against `prefix/drive_c`, which is right
+     * for `C:` and wrong for every drive the user maps: a shortcut to a game on
+     * `F:` resolved to `drive_c/Games/…`, was not there, and was refused with
+     * "no longer on this container's C: drive" — a program that exists, on a
+     * drive that is mounted, reported missing by the one feature whose whole
+     * purpose is to reach it.
+     *
+     * The letter chooses the root, exactly as it does inside Wine:
+     * `dosdevices/f:` is a symlink and `F:\Games\x.exe` is `Games/x.exe` under
+     * it. [GuestPath.resolve] still refuses anything that climbs out.
+     *
+     * Null for a string with no drive letter, and for a path that escapes its
+     * drive. A drive that has been unmapped resolves to a link that is not
+     * there, which the caller sees as a file that does not exist — the right
+     * answer, and the same one it would get for a deleted file.
+     */
+    fun resolveGuestPath(guestPath: String): File? {
+        val letter = guestPath.firstOrNull()?.lowercaseChar() ?: return null
+        if (letter !in 'a'..'z') return null
+        return GuestPath.resolve(driveRoot(letter), guestPath)
+    }
+
+    /** `dosdevices/<letter>:` — Wine's own name for where a drive points. */
+    fun driveRoot(letter: Char): File =
+        File(File(prefix, DriveMap.DOSDEVICES), "${letter.lowercaseChar()}:")
 
     /** [ContainerProvisioner]'s record of what is already done. */
     val provisionState: File get() = File(base, PROVISION_STATE)

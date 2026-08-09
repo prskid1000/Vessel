@@ -206,7 +206,10 @@ fun VesselApp(
                 // Launch is not a navigation. The checklist appears over this
                 // list, and the desktop pushes itself once there is one.
                 onLaunch = { session.launch(it, native) },
-                onLaunchApp = session::launchApp,
+                // `native` matters here and not on the desktop: a tile tapped on
+                // home may be the thing that *starts* the container, and the
+                // panel size is what `display.resolution: native` becomes.
+                onLaunchApp = { session.launchApp(it, native) },
                 onOpenLicences = { navController.navigate(Routes.LICENCES) },
                 pickedExecutable = picked,
                 onPickConsumed = {

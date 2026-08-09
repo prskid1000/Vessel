@@ -113,13 +113,10 @@ class ProgramIcons @Inject constructor(
      * unmapped resolves to a path that does not exist, which reads as null and
      * leaves the letter drawn.
      */
-    private fun fileFor(shortcut: AppShortcut): File? {
-        val letter = shortcut.executable.firstOrNull()?.lowercaseChar() ?: return null
-        if (letter !in 'a'..'z') return null
-        val prefix = paths.of(shortcut.containerId).prefix
-        val root = File(File(prefix, DriveMap.DOSDEVICES), "$letter:")
-        return GuestPath.resolve(root, shortcut.executable)?.takeIf { it.isFile }
-    }
+    private fun fileFor(shortcut: AppShortcut): File? =
+        paths.of(shortcut.containerId)
+            .resolveGuestPath(shortcut.executable)
+            ?.takeIf { it.isFile }
 
     private companion object {
         /**

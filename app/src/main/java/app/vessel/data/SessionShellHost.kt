@@ -61,6 +61,16 @@ class SessionShellHost @Inject constructor(
      */
     override suspend fun launch(shortcut: AppShortcut): String? {
         val running = runtime.state.value
+        if (running.containerId == null) {
+            // Nothing is running at all, which is a different thing from the
+            // wrong thing running and used to be reported as it: a tile tapped
+            // on home said the program "belongs to a different container", which
+            // was untrue, unhelpful, and pointed at the wrong fix. Starting the
+            // session is the caller's job — see `SessionViewModel.launchApp` —
+            // so reaching here means the session ended between the tap and this
+            // line.
+            return "No session is running, so there is nowhere to start ${shortcut.name}."
+        }
         if (running.containerId != shortcut.containerId) {
             // A tile from a different container than the one on screen. Vessel
             // runs one session at a time by design, so this is a real answer
@@ -69,23 +79,28 @@ class SessionShellHost @Inject constructor(
                 "then launch it from its own."
         }
 
-        val driveC = File(paths.of(shortcut.containerId).prefix, GuestPath.DRIVE_C)
-        val file = GuestPath.resolve(driveC, shortcut.executable)
+        // Resolved against the drive the path names, not against `drive_c`.
+        // Hardcoding `drive_c` here meant a shortcut to a program on a mapped
+        // drive — the whole reason drive mapping exists — was refused as
+        // missing while sitting right there on the card.
+        val layout = paths.of(shortcut.containerId)
+        val file = layout.resolveGuestPath(shortcut.executable)
         if (file == null || !file.isFile) {
-            return "${shortcut.executable} is no longer on this container's C: drive."
+            return "${shortcut.executable} is not on this container's drives. " +
+                "If it is on removable storage, check that it is still connected."
         }
 
         val command = commandFor(shortcut) ?: return "Vessel cannot start ${file.name}."
 
         val workingDirectory = shortcut.workingDir
             .takeIf { it.isNotBlank() }
-            ?.let { GuestPath.resolve(driveC, it) }
+            ?.let { layout.resolveGuestPath(it) }
             ?.takeIf { it.isDirectory }
         // A working directory that was set and no longer exists is worth saying,
         // rather than quietly starting in the wrong place — a program that writes
         // its saves relative to the cwd would put them somewhere surprising.
         if (shortcut.workingDir.isNotBlank() && workingDirectory == null) {
-            return "${shortcut.workingDir} is not a folder on this container's C: drive."
+            return "${shortcut.workingDir} is not a folder on this container's drives."
         }
 
         return when (
