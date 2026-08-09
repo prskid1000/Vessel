@@ -1,0 +1,139 @@
+win32u: emulate vkGetPhysicalDeviceSurfaceCapabilities2KHR on Android.
+
+Patch 0006 makes win32u drive Turnip through the Android platform Vulkan loader,
+which is the only thing that can load it (libvulkan_freedreno.so is an Android
+Vulkan HAL, exporting only HMI -- no Khronos ICD entry point). The loader has no
+Xlib WSI of its own, so it forwards vkCreateXlibSurfaceKHR to the driver, and the
+surface we then hold is a Turnip VkIcdSurfaceXlib whose first word is the ICD
+platform tag VK_ICD_WSI_PLATFORM_XLIB -- the integer 4.
+
+But the loader keeps vkGetPhysicalDeviceSurfaceCapabilities2KHR for its own
+swapchain layer, which only understands surfaces it wrapped for an ANativeWindow.
+It reads that first word as a dispatch pointer and calls through 4 + 0x90,
+faulting. DXVK reaches this at the first swapchain creation because it enables
+VK_KHR_get_surface_capabilities2, so it queries capabilities through the 2 form
+rather than the base one. Measured with Metro 2033 Redux: the game builds its
+pipelines, then dies with
+
+    err:vulkan:vkGetPhysicalDeviceSurfaceCapabilitiesKHR Exception 0xc0000005 in Unix call.
+
+and the faulting pc maps into /system/lib64/libvulkan.so (the adrenotools-loaded
+platform loader), not the driver -- read c0000005 at address 0x94, i.e. 4 + 0x90.
+
+The base vkGetPhysicalDeviceSurfaceCapabilitiesKHR is a plain physical-device
+dispatch-table entry the loader forwards straight to the driver, so it is safe.
+Emulate the 2 form on top of it, filling any chained VK_EXT_surface_maintenance1
+output structs (present scaling, present-mode compatibility) with conservative
+answers -- no scaling, each present mode compatible only with itself -- which
+every client already copes with. A build flag keeps the direct host call on every
+other platform, where the loader's own 2 form is correct.
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 7c20315605a..1ed1dc4fad5 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1625,6 +1625,85 @@ static VkResult win32u_vkGetPhysicalDeviceSurfaceCapabilitiesKHR( VkPhysicalDevi
+     return res;
+ }
+ 
++/*
++ * On Android the platform Vulkan loader must not be asked for surface capabilities
++ * through the "2" query.
++ *
++ * The driver here is Turnip, loaded as an Android Vulkan HAL behind the platform
++ * loader (there is no Khronos ICD entry point to talk to directly). The loader
++ * forwards vkCreateXlibSurfaceKHR to the driver -- it has no Xlib WSI of its own --
++ * so the surface we hold is a Turnip VkIcdSurfaceXlib, whose first word is the ICD
++ * platform tag VK_ICD_WSI_PLATFORM_XLIB (the integer 4). But the loader keeps
++ * vkGetPhysicalDeviceSurfaceCapabilities2KHR for its own swapchain layer, which only
++ * understands surfaces it wrapped for an ANativeWindow: it reads that first word as a
++ * dispatch pointer and calls through 4 + 0x90, faulting with 0xc0000005 at the first
++ * swapchain creation. Measured with Metro 2033 Redux; the faulting pc landed inside
++ * /system/lib64/libvulkan.so, not the driver. See docs/GRAPHICS.md.
++ *
++ * The non-2 vkGetPhysicalDeviceSurfaceCapabilitiesKHR is a plain physical-device
++ * dispatch-table entry that the loader forwards straight to the driver, so it is safe.
++ * Emulate the 2 variant on top of it, filling the VK_EXT_surface_maintenance1 output
++ * structs a client may have chained with conservative answers.
++ */
++static VkResult emulate_surface_capabilities2( VkPhysicalDevice client_physical_device,
++                                               const VkPhysicalDeviceSurfaceInfo2KHR *surface_info,
++                                               VkSurfaceCapabilities2KHR *capabilities )
++{
++    const VkSurfacePresentModeKHR *mode_info = NULL;
++    VkBaseOutStructure *header;
++    VkResult res;
++
++    res = win32u_vkGetPhysicalDeviceSurfaceCapabilitiesKHR( client_physical_device, surface_info->surface,
++                                                            &capabilities->surfaceCapabilities );
++    if (res) return res;
++
++    for (const VkBaseInStructure *in = surface_info->pNext; in; in = in->pNext)
++        if (in->sType == VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR) mode_info = (const VkSurfacePresentModeKHR *)in;
++
++    for (header = capabilities->pNext; header; header = header->pNext)
++    {
++        switch (header->sType)
++        {
++        case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR:
++        {
++            /* No scaling and no gravity: the image is presented at the surface's own
++             * size, exactly what the non-2 query already reports. */
++            VkSurfacePresentScalingCapabilitiesKHR *scaling = (VkSurfacePresentScalingCapabilitiesKHR *)header;
++            scaling->supportedPresentScaling = 0;
++            scaling->supportedPresentGravityX = 0;
++            scaling->supportedPresentGravityY = 0;
++            scaling->minScaledImageExtent = capabilities->surfaceCapabilities.minImageExtent;
++            scaling->maxScaledImageExtent = capabilities->surfaceCapabilities.maxImageExtent;
++            break;
++        }
++        case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR:
++        {
++            /* Each present mode is compatible only with itself. That is the safe answer:
++             * the client recreates the swapchain to change present mode instead of
++             * switching it in place, which every client already handles. */
++            VkSurfacePresentModeCompatibilityKHR *compat = (VkSurfacePresentModeCompatibilityKHR *)header;
++            if (!compat->pPresentModes) compat->presentModeCount = 1;
++            else if (compat->presentModeCount)
++            {
++                compat->presentModeCount = 1;
++                compat->pPresentModes[0] = mode_info ? mode_info->presentMode : VK_PRESENT_MODE_FIFO_KHR;
++            }
++            break;
++        }
++        default:
++            break;
++        }
++    }
++
++    return VK_SUCCESS;
++}
++
++#ifdef __ANDROID__
++static const BOOL host_surface_capabilities2_faults = TRUE;
++#else
++static const BOOL host_surface_capabilities2_faults = FALSE;
++#endif
++
+ static VkResult win32u_vkGetPhysicalDeviceSurfaceCapabilities2KHR( VkPhysicalDevice client_physical_device, const VkPhysicalDeviceSurfaceInfo2KHR *surface_info,
+                                                                    VkSurfaceCapabilities2KHR *capabilities )
+ {
+@@ -1634,13 +1713,11 @@ static VkResult win32u_vkGetPhysicalDeviceSurfaceCapabilities2KHR( VkPhysicalDev
+     struct vulkan_instance *instance = physical_device->instance;
+     VkResult res;
+ 
+-    if (!instance->p_vkGetPhysicalDeviceSurfaceCapabilities2KHR)
+-    {
+-        /* Until the loader version exporting this function is common, emulate it using the older non-2 version. */
+-        if (surface_info->pNext || capabilities->pNext) FIXME( "Emulating vkGetPhysicalDeviceSurfaceCapabilities2KHR, ignoring pNext.\n" );
+-        return win32u_vkGetPhysicalDeviceSurfaceCapabilitiesKHR( client_physical_device, surface_info->surface,
+-                                                                 &capabilities->surfaceCapabilities );
+-    }
++    /* Emulate on top of the non-2 query when the loader does not provide the 2 variant,
++     * or -- on Android -- provides one that faults on our ICD-created surfaces. See
++     * emulate_surface_capabilities2. */
++    if (!instance->p_vkGetPhysicalDeviceSurfaceCapabilities2KHR || host_surface_capabilities2_faults)
++        return emulate_surface_capabilities2( client_physical_device, surface_info, capabilities );
+ 
+     surface_info_host.surface = surface->obj.host.surface;
+ 
