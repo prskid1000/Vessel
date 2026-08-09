@@ -514,9 +514,25 @@ EOF
 
 write_provenance "$STAGE/provenance.json" "$COMPONENT" "$VERSION"
 
+# Both variants come off the same Mesa commit, and package_wcp.py derives the
+# version code from the first three numbers in the version string — so
+# "26.3.0-devel-9c475fc3" and "26.3.0-devel-9c475fc3-icd" both yield 260300, and
+# installing one would overwrite the other in components/Turnip/<code>/ with
+# nothing said anywhere. The ICD takes the next code up so the two can sit side
+# by side in the store, which is what makes comparing them on one device possible.
+TURNIP_VERSION_CODE="$(VESSEL_V="$VERSION" VESSEL_COMMON="$COMMON_SH_DIR" python3 -c "
+import os, sys
+sys.path.insert(0, os.environ['VESSEL_COMMON'])
+from package_wcp import version_code
+v = os.environ['VESSEL_V']
+print(version_code(v) + (1 if v.endswith('-icd') else 0))
+")"
+[ -n "$TURNIP_VERSION_CODE" ] || die "could not derive a version code for $VERSION"
+
 log "packaging"
 python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Turnip \
+  --version-code "$TURNIP_VERSION_CODE" \
   --name "Turnip $VERSION ($TARGET_NAME, $TURNIP_VARIANT)" \
   --version "$VERSION" \
   --payload "$STAGE" \
