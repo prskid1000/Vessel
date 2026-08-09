@@ -488,6 +488,28 @@ class SessionRuntime @Inject constructor(
             ),
         )
 
+        // **Anything of the guest's still alive is an orphan, and this is the one
+        // moment that is certainly true.** Nothing of ours is running yet, so a
+        // Wine process found now belongs to a session that ended without
+        // teardown — `adb install -r`, a force-stop, a crash. Those are ordinary
+        // children of this app, and when the app dies without stopping them they
+        // are reparented to init and keep going. Watched on the device after a
+        // reinstall: `explorer.exe /desktop`, `wscript.exe` and `winemine` from a
+        // container that had since been **deleted**, still serving a prefix that
+        // no longer existed.
+        //
+        // They are not harmless. They hold the abstract X socket and the
+        // wineserver socket, so the session about to start either fails to bind
+        // or quietly attaches to the wrong server — and the second is far worse,
+        // because it looks like the new container behaving strangely.
+        //
+        // Said out loud rather than swept silently: a line here is evidence that
+        // teardown was skipped, and if it appears on every launch then something
+        // is wrong with stopping rather than with starting.
+        guest.killOrphans().forEach {
+            log.line(LogSource.VESSEL, LogLevel.WARN, "killed an orphan from an earlier session: $it")
+        }
+
         try {
             prepare(containerId, profile, manifest, log) ?: return
             runDesktop(log, geometry, fpsLimit)

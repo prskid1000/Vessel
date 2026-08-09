@@ -129,6 +129,41 @@ class GuestProcessTree @Inject constructor(
     }
 
     /**
+     * Kill anything of the guest's that is still alive, and say what it was.
+     *
+     * **For orphans, not for teardown.** A normal stop goes through
+     * `wineserver -k`, which lets the server write its registry hives and lets
+     * every client shut down; this is `SIGKILL` and does neither, so it is only
+     * ever right when there is nothing left worth saving.
+     *
+     * That case is real and was watched on the device. Wine's processes are
+     * ordinary children of this app, and when the app process goes away without
+     * running teardown — `adb install -r`, a force-stop, a crash — they are
+     * reparented to init and keep running. A `ps` after a reinstall found
+     * `explorer.exe /desktop`, `wscript.exe` and `winemine` from a container
+     * that had since been **deleted**: a whole Wine tree serving a prefix that
+     * no longer existed. They hold the X socket and the wineserver socket, so
+     * the next session either collides with them or quietly talks to the wrong
+     * server.
+     *
+     * Clients before the server, for the reason on [pause] — and with `SIGKILL`
+     * the window is smaller still, but a client killed after its server has a
+     * moment to notice the socket close and write something to a log that is
+     * about to be thrown away.
+     *
+     * Returns the command lines killed, so the caller can log what was found.
+     * Empty is the normal answer and means the last session shut down properly.
+     */
+    fun killOrphans(): List<String> {
+        val tree = scan()
+        if (tree.isEmpty()) return emptyList()
+        val server = tree.firstOrNull { it.isWineserver }?.pid
+        tree.forEach { if (it.pid != server) Process.killProcess(it.pid) }
+        if (server != null) Process.killProcess(server)
+        return tree.map { it.cmdline }
+    }
+
+    /**
      * Whether a command line is one of ours rather than one of the guest's.
      *
      * By name, because pid is not enough: this app is one process today and the
