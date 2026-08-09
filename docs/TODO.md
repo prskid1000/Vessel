@@ -16,148 +16,176 @@ as won't-do, with the reason.
 ## 1. Blocking a working product
 
 What stands between here and one sentence: *a Windows program drew on the screen
-through DXVK*. As of 2026-08-09 a Windows program draws on the screen and takes
-input; what it does not do is draw through D3D.
+through DXVK*. As of 2026-08-09 **half of that sentence is true** — a Windows
+program draws through D3D11 and the pixels read back correct — and what is left
+is putting those pixels in a window.
 
-- [x] **The registry seed never reaches `system.reg`.** It does now.
-  *Evidence:* on the provisioned container, `system.reg` carries
-  `[Software\\Microsoft\\Wow64\\amd64] @="libarm64ecfex.dll"` and
-  `[Software\\Microsoft\\Wow64\\x86] @="libwow64fex.dll"`, read back out of the
-  hive rather than inferred from `regedit`'s exit code. The x86-32 launch below
-  is the second, independent proof: without the `x86` key, `wow64.dll` has no
-  emulator to load and the process cannot start at all.
+- [x] **Nothing had ever rendered a triangle. It has now, in both bitnesses.**
+  *Evidence, 2026-08-09,* `tools/device-graphics.sh --only d3d11` on the device:
 
-- [x] **`libwow64fex.dll` never reaches `syswow64`.** It reaches `system32`,
-  which is where WoW64 looks — the emulator DLL named by
-  `HKLM\Software\Microsoft\Wow64\x86` is a 64-bit DLL and is loaded into the
-  64-bit side of the process. `syswow64` holds the 32-bit DXVK instead.
-  *Evidence:* `system32` has `libarm64ecfex.dll`, `libwow64fex.dll` and
-  `xtajit64.dll`; `syswow64` has the 32-bit `d3d11.dll` and the rest of DXVK.
-  A `.exe` built for i686 and launched **from the app's launcher** printed
-  `VESSEL-OK bits=32 sum=333338333350000 argc=1` into the session log, after
-  `Loaded L"C:\\windows\\system32\\libwow64fex.dll"` and FEX's own
-  `D EC Load module hello-i686.exe`. §3 has the whole matrix.
+  ```
+  VESSEL-GFX api=d3d11 bits=64 result=PASS in=ffff0000 out_a=ff0000ff out_b=ff0000ff
+  VESSEL-GFX api=d3d11 bits=32 result=PASS in=ffff0000 out_a=ff0000ff
+  adapter="Adreno (TM) 829 (unknown)" vendor=0x5143 feature_level=12_0
+  ```
 
-- [x] **A program launched from the home screen, in a window, taking keyboard
-  input.** The thing the shell exists to do.
-  *Evidence, 2026-08-09:* `notepad.exe` added from the file browser, tapped on
-  its tile on home with nothing running. The container started, the program came
-  up with it, the window is centred on the desktop and themed — Nocturne title
-  bar, working minimise/maximise/close — the taskbar lists it, and
-  `adb shell input text` put **VESSEL-KEYBOARD-OK** into it, `Ln 1, Col 19`.
-  Backing out of the desktop and returning left the window and its text intact,
-  which is the black-desktop-on-return fix confirmed as well.
-  *Three defects found by doing it, all fixed in `6f720d1`:* a tile on home
-  refused every launch with "belongs to a different container" because nothing
-  was running to compare against; only `C:` shortcuts could resolve at all; and
-  windows opened hard against the top-left corner.
+  Cleared to blue, one red triangle, read back, three pixels checked by value.
+  That is FEX → ARM64EC → DXVK → winevulkan → adrenotools → Turnip → KGSL
+  proven end to end. Headless: these probes create no swapchain, which is why
+  the item below is separate rather than the same item.
+
+- [x] **32-bit D3D11, which failed for a reason that never looked like OpenGL.**
+  `WINEDLLOVERRIDES` sets `opengl32=n` for every process, `wined3d` imports
+  `opengl32`, and the OpenGL package shipped `system32/` only — so a 32-bit
+  program died with `cannot load d3dcompiler_47.dll`. `build/zink.sh` builds
+  twice now, arm64ec into `system32` and i386 into `syswow64`, the same two-pass
+  shape `dxvk.sh` and `vkd3d.sh` already used. `tools/device-graphics.sh` was
+  never copying the package's `syswow64` half into the prefix either.
+
+- [x] **`MESA_VK_WSI_DEBUG=sw`, which is not a debug switch on this build.**
+  Mesa's X11 WSI is one file with two halves and the DRI3 half is entirely
+  behind `#ifdef HAVE_X11_DRM`, which `meson.build` defines only when
+  `with_dri_platform == 'drm'` — never, for a KGSL build with no gallium driver.
+  Read out of the shipped `libvulkan_freedreno.so`: `xcb_put_image` is present
+  and there is not one `xcb_dri3_*`, `xcb_present_*` or `xcb_shm_*` reference.
+  Half a WSI was compiled and it is the software half. Unset, a present measures
+  12.8 ms — which is `__builtin_unreachable()` running off the end of a
+  function, not a slow path.
+  *The note this replaces blamed KGSL for being unable to export a dma-buf.*
+  Wrong twice: that code is not compiled in, and `/dev/dma_heap/system` opens
+  and allocates from this app's uid anyway — `open=OK alloc=OK bytes=3686400`.
+
+- [ ] **No D3D program has drawn into a window, and the cause is now known and
+  is not what any previous note said.**
+
+  **Turnip was built as an Android Vulkan HAL.** Its only dynamic symbol is
+  `HMI`, so only Android's `libvulkan.so` can load it — and that loader does not
+  forward the window-system layer. It implements
+  `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` and `vkCreateSwapchainKHR` itself
+  against its own `ANativeWindow`-backed surface, and casts an X11 surface
+  handle to the wrong type. `tools/gfx/x11present.c` reaches `surface created`,
+  then takes a SIGSEGV whose top two frames are in `libvulkan.so` — the same
+  failure, in the same call, that Wine reported as
+  `err:vulkan:vkGetPhysicalDeviceSurfaceCapabilitiesKHR Exception 0xc0000005 in
+  Unix call`. The X11 WSI was in the driver the whole time and nothing could
+  reach it.
+
+  Built as an ordinary ICD instead — `VESSEL_TURNIP_ICD=1 ./build/turnip.sh`,
+  which drops `android` from `-Dplatforms` and exports
+  `vk_icdGetInstanceProcAddr` — a swapchain presents to Vessel's own X server:
+
+  ```
+  VESSEL-X11PRESENT device="Adreno (TM) 829" driver_id=18  swapchain images=3
+  result=PASS wsi="sw" 1280x720 frames=400
+    mean_ms=2.245 p50_ms=1.632 p95_ms=4.945 fps=445.5
+  ```
+
+  **~2.4 ms a frame, about 14% of a 60 Hz budget**, end to end including the
+  Java X server. That is the present baseline this project never had.
+  *Done when:* a windowed D3D11 program draws through the ICD inside a session.
+
+- [ ] **Wine cannot load the ICD yet, and that is the next piece of work.**
+  `patches/wine/0006` opens Vulkan through libadrenotools; an ICD needs a plain
+  `dlopen` and `vk_icdGetInstanceProcAddr`. Until that lands the ICD package is
+  deliberately out of the sideload bill of materials and out of
+  `registry/contents.json`, so nothing can install a driver Wine cannot open.
+  The change is small — try the ICD entry point first, fall back to the
+  adrenotools path.
+
+- [-] **`MESA_VK_WSI_DEBUG=sw,linear`** — tried on the paper argument, measured,
+  and reverted. It removes a 0.60 ms GPU blit and is still ~14% slower on the
+  mean and ~35% on the median, three runs of 400 frames each and the same
+  direction every time: rendering into a linear image makes the GMEM resolve
+  write an untiled layout, which costs more than the blit it saves.
+
+- [ ] **Zero-copy present. Specified, unstarted, and both halves proven
+  separately.** The route is DRI3 `BufferFromPixmap`: the vendored X server
+  already hands back the window's AHardwareBuffer dma-buf fd over `SCM_RIGHTS`
+  and `presentPixmap` already has the flip branch, and `tools/gfx/wsiprobe.c`
+  proved Turnip imports that fd and binds a `TILING_LINEAR` image to it at
+  rowPitch 5120. Two things that were assumed and are false on this part:
+  gralloc returns a **tight linear** buffer for `GPU_COLOR_OUTPUT` alone, so
+  there is no UBWC problem; and `VK_EXT_external_memory_host` is absent, so
+  Mesa's MIT-SHM path was never reachable. Needs a `patches/mesa/` WSI image
+  type plus `xcb-dri3`/`xcb-present` in the package. **Note the direction**: the
+  server's `pixmapFromBuffer` mmaps the client's fd on the CPU, so the other
+  DRI3 direction is one copy, not zero.
+
+- [ ] **FEX asserts on any large PE inside a container, and it blocks the test
+  loop.** x86-64 and ARM64EC binaries over roughly 200 KB die at
+  `FEXCore::Assert::ForcedAssert` — `hlt #1`, `libarm64ecfex.dll` RVA
+  `0x1766E4` — during `BTCpuProcessInit`, before FEX logs anything.
+  `hello-x86_64.exe` (88 KB) runs in the same container with the same
+  environment; `d3d11probe-x86_64.exe` runs in the standalone `files/graphics`
+  prefix and not in the app's container. Only two `ERROR_AND_DIE` sites exist in
+  FEX's Windows layer — `"Unhandled relocation"` and `"Couldn't detect CPU
+  features"`. Undiagnosed, and it is why every D3D result above comes from the
+  standalone harness rather than from a session.
 
 - [ ] **At session start the desktop background is black until something
-  repaints it.** Narrow and reproducible: with a program's window mapped, the
-  area around it is black rather than `#161826`. Leaving the desktop and coming
-  back paints it correctly and it stays correct, and an empty desktop is correct
-  from the start — so this is paint ordering at startup (the first composite
-  happens before Wine's desktop window has painted its background, and nothing
-  damages it afterwards) rather than the compositing bug it looks like. Window
-  contents are never affected.
-  *Not diagnosed further; recorded rather than guessed at.*
+  repaints it.** Fixed in code and not yet watched: a texture is uploaded at
+  allocation and after that only on damage, and the desktop's background paint
+  lands in the gap. `GLRenderer.updateScene` now distrusts every texture in the
+  scene whenever the scene is rebuilt. *Done when:* a program is launched with
+  the session and the area around its window is `#161826` in a screenshot.
 
-- [ ] **The guest has working sockets and no network adapters.** Measured, not
-  inferred, on 2026-08-09.
-  *What works:* a WinHTTP `GET http://example.com/` from `wscript` inside the
-  session returned **`VESSEL-NET-OK status=200 bytes=559`** — DNS, TCP and HTTP
-  all fine. `INTERNET` is granted and Wine uses the host's sockets, so anything
-  that just opens a connection works.
-  *What does not:* `ipconfig` prints **nothing at all** — not "no adapters",
-  zero output. Wine cannot enumerate an interface, which is what
-  `nsi:poll_events bind failed, errno 13` and `nsi:update_if_table
-  if_nameindex failed, errno 13` have been saying all along. Android denies an
-  untrusted app `bind()` on a `NETLINK_ROUTE` socket, and Wine's
-  `nsiproxy.sys` binds one.
-  *Why it matters, and it is not cosmetic:* every program that asks "is there a
-  network" through `GetAdaptersAddresses`, `IsNetworkAlive`, .NET's
-  `NetworkInterface`, or WMI will be told there is none — while a plain socket
-  to the same host succeeds. Installers and launchers that gate on connectivity
-  will refuse to run on a device that is online.
-  *The shape of the fix:* enumerate through `getifaddrs()` rather than binding
-  netlink. Wine already uses `getifaddrs()` on some paths and the FreeBSD port
-  carries a `patch-nsiproxy.sys` for exactly this class of platform difference,
-  so this is a Wine patch in `patches/wine/`, not app code. Known across the
-  ecosystem — Hangover, Winlator and Termux's wine all report the same two
-  lines.
-  *Done when:* `ipconfig` names an adapter with the phone's address, and the
-  WinHTTP probe still passes.
+- [x] **The prefix had no `C:` drive at all, and it was one cause with a long
+  tail.** `server_init_process_done` creates `drive_c` and `dosdevices/c:`
+  **only** on the pass that creates `dosdevices` itself; Vessel maps shared
+  storage before the first boot, so `mkdir` returned `EEXIST` and Wine skipped
+  the block for the life of the prefix. That produced 773
+  `setupapi:create_dest_file failed … (error=3)` lines, `wineboot: Cannot set
+  the dir to L"C:\windows" (2)`, and `Couldn't start services.exe: error 267`
+  — ERROR_DIRECTORY. It needed the storage permission to be granted *before*
+  the container was created, which `+` has now made the normal path.
+  *Evidence:* `DriveMap.ensureSystemDrive` repaired a broken container on the
+  device — `c: -> ../drive_c`, 852 files in `system32` — and a fresh container
+  built the same way. A boot log went from 918 lines and 796 errors to **201
+  lines and 5**.
 
-- [ ] **The taskbar draws a letter where a program has an icon.** `PeIconReader`
-  feeds the app tiles now; a taskbar button still shows the first letter of the
-  window title. The button knows `GuestWindow.program`, so the mapping to a
-  shortcut's icon exists — it is wiring, not a new capability.
+- [x] **`RpcSs` would not start inside the app.** It was the missing `C:` drive:
+  `services.exe` could not start at all with `error 267`, so nothing it hosts
+  could. No separate fix was needed and the `dlls/combase/rpc.c:229` lead was a
+  dead end.
+  *Evidence:* `ps` in a session now lists `rpcss.exe`, `services.exe`,
+  `plugplay.exe` and `svchost.exe -k LocalServiceNetworkRestricted`.
 
-- [ ] **Nothing has ever rendered a triangle.**
-  **The reason has changed, and the old one is gone.** With the app's X server
-  up, `VK_KHR_win32_surface` *is* reached — DXVK 2.7.1 loads, finds
-  `vkGetInstanceProcAddr` in `winevulkan.dll`, and asks for it by name. What
-  fails now is one step earlier than the old BLOCKED and it is a build option,
-  not a mystery:
+- [x] **The taskbar drew a letter where a program has an icon.** It draws the
+  real icon now, from the shortcut when there is one and from the prefix by name
+  when there is not.
+  *Worth recording rather than chasing:* five of the programs on the launcher's
+  built-in row carry **no icon resource at all** — `control.exe`,
+  `explorer.exe`, `oleview.exe`, `write.exe` and `wineconsole.exe` have only a
+  manifest, checked by reading their PE resource directories. `cmd`, `notepad`,
+  `regedit`, `taskmgr`, `winecfg` and `winemine` do have one. A glyph for the
+  first five is the right answer, not a fallback.
 
-  ```
-  info:  Enabled instance extensions: … VK_KHR_win32_surface
-  err:   DxvkInstance::createInstance: Failed to create Vulkan instance
-  err:   D3D11CreateDevice: Failed to create a DXGI factory
-  ```
-
-  `winevulkan`'s own `vkEnumerateInstanceExtensionProperties` does not list
-  `VK_KHR_win32_surface` among the client extensions, so `wine_vkCreateInstance`
-  refuses the one DXVK always enables. It is absent because **the Turnip we
-  build has no X11 WSI**: `build/turnip.sh` configures Mesa with
-  `-Dplatforms=android`, and `strings` on the shipped `libvulkan_freedreno.so`
-  finds exactly two surface extensions — `VK_KHR_android_surface` and
-  `VK_EXT_headless_surface`. `winex11.drv` maps `VK_KHR_win32_surface` from
-  `VK_KHR_xlib_surface`/`xcb`, and neither exists, so there is nothing to map.
-  The stock Qualcomm loader has no xlib surface either, so this is not something
-  turning Turnip off would fix.
-  *Same failure, one cause, all of them:* d3d11 (`createdevice`), d3d12
-  (`createfactory`), d3d9 and d3d8 (`DxvkInstance::createInstance`). The plain
-  Vulkan probe passes in the same session — `driver_id=18`, `turnip Mesa driver`,
-  `Mesa 26.3.0-devel (git-9c475fc367)`, `Adreno (TM) 829`, api 1.4.358 — so the
-  driver underneath is fine and only the window system is missing.
-  *The next step used to be `-Dplatforms=x11` for Mesa, and that is no longer
-  the whole story.* It was tried, and what it exposed is a kernel-side limit
-  rather than a build option: **KGSL cannot export a dma-buf for a buffer Turnip
-  allocated.** `kgsl_bo_export_dmabuf` can only re-export an fd it imported, so
-  the X11 WSI's "client allocates, the server imports" shape cannot work on this
-  driver at all; the shape that can is the Android side allocating and the client
-  importing. Every D3D probe still dies, now at swapchain creation — one step
-  further along than the extension list, and a design question rather than a
-  build flag. Nothing else in this item can be tested until that is answered.
-  *Done when:* a D3D probe passes its pixel readback, **and** a real program with
-  a 3D window keeps drawing while its screens are navigated by touch.
-
-- [x] **No desktop has been seen since the redesign.**
-  *Evidence:* the desktop draws, with Turnip on, in landscape. Three pixels
-  sampled out of `adb exec-out screencap` at (926,421), (1390,632) and
-  (1945,884) are all `#161826`, the seeded Nocturne background, and the same
-  session's log carries the winediag line naming `libvulkan_freedreno.so`. A
-  guest window drawn *into* that desktop — `wscript.exe`'s dialog — is in the
-  screenshot too, so this is a compositing desktop and not a cleared surface.
-  *Not covered:* only one landscape direction was photographed.
+- [ ] **The guest has working sockets and no network adapters.** Unchanged in
+  substance: a WinHTTP `GET` returns 200 and `ipconfig` prints nothing, because
+  Android denies an untrusted app `bind()` on a `NETLINK_ROUTE` socket.
+  `patches/wine/0007` is built and its rate-limiting half is confirmed working —
+  the log carries **one** `nsi:poll_events bind failed, errno 13;
+  address-change notifications are off.` where there used to be fifty. Its
+  `getifaddrs` half is still unproven: the count it logs is on the `nsi` warn
+  channel, which `WINEDEBUG` does not enable, so the fallback has never been
+  read. *Done when:* a session runs with `+nsi` and either `ipconfig` names an
+  adapter or the log says `getifaddrs found 0` — the second answer closes the
+  Wine-patch approach for good and moves it to the Android side.
 
 ## 2. Self-sufficient install
 
-- [~] **Bundle the `.wcp` packages into the `sideload` flavour.**
-  Uninstall, install, everything works — no side-loading, no downloads. About
-  100 MB of `dist/*.wcp` into `app/src/sideload/assets/`, installed through the
-  existing `WcpArchive`/`WcpInstaller` so the store layout is identical to the
-  download path. `play` keeps downloading; this is an additional source, not a
-  replacement.
-  *Done when:* `adb uninstall` then `adb install`, and a container reaches a
-  desktop without any script being run or any file pushed by hand.
+- [x] **Bundle the `.wcp` packages into the `sideload` flavour.**
+  *Evidence, 2026-08-09:* `adb uninstall` then `adb install` of the signed
+  release APK, twice. The setup dialog unpacked 180 MB of assets with no
+  network, downloaded Git from the components release, and a container reached a
+  desktop — no script run, no file pushed by hand. The APK is 108 MB and carries
+  Wine, DXVK, vkd3d, Turnip, Zink and FEX.
 
-- [~] **First-run setup progress UI.**
-  A named-step checklist in the established style, not a spinner: which
-  component, how far, how much left. Honest refusal on failure — say which
-  component and what would fix it.
-  *Done when:* screenshotted on a genuinely fresh install, in portrait.
+- [x] **First-run setup progress UI.**
+  A named-step checklist with per-component byte counts, in the launch dialog
+  rather than on a screen of its own. *Evidence:* watched on a genuinely fresh
+  install — `64% · 115 MB of 180 MB read`, then a row per component with its
+  file count and unpacked size.
 
 ## 3. The launch-type matrix
 
@@ -367,11 +395,71 @@ Four things the interface said that were not true, and one that still is.
   stays the fallback.
   *Evidence:* `regedit` and `notepad` tiles on the device draw Wine's own icons.
 
-- [ ] **RpcSs.** `StartServiceW` fails inside the app and succeeds under
-  `run-as`. Diagnosed to `dlls/combase/rpc.c:229`; unexplained.
+- [x] **`RpcSs`.** Closed by the `C:` drive fix; see §1.
+- [x] **Deleting a container deleted the user's mapped folders.** The most
+  serious defect this project has had. `File.deleteRecursively()` walks with
+  `listFiles()`, and `listFiles()` on a symlink to a directory returns the
+  *target's* children — and a container's `dosdevices` is nothing but such
+  symlinks. Deleting a container emptied the phone's shared storage and every
+  mapped folder, removed the now-empty links, and reported success. Reported as
+  downloaded games disappearing, twice.
+  `core/deleteTree` replaces it at all ten call sites: `Files.walkFileTree` does
+  not follow links unless asked, so a symlink is visited as a file and unlinked.
+  `ContainerRepository.delete` also unmaps every drive first, because the two
+  failures are independent. `DeleteTreeTest` covers a symlinked directory, a
+  symlinked file, a symlinked root, a dangling link and a real nested tree;
+  every case fails against the old call.
+- [x] **Wine processes surviving a reinstall — and the diagnosis was wrong.**
+  Measured: `am force-stop` and `kill -9` of the app process each took the whole
+  Wine tree with them, because Android kills the process group. What survived
+  was `u0_a443`, the **previous installation's** uid, which the current install
+  cannot signal. Those go on reboot and nothing here can hurry it.
+  `GuestProcessTree.killOrphans()` went in anyway, called before a session
+  starts — the one moment anything of the guest's that is alive is by definition
+  an orphan — because the reachable case is a session that ended without
+  teardown while the app kept running, and a leftover `wineserver` holds the
+  sockets the next session needs. Every kill is logged at WARN.
 - [ ] **Move the `drive_c` reader out of `ui/vm`.** `FilesViewModel` reads the
   prefix directly with `java.io.File`, which is correct but belongs in `data/`
   alongside the import/export copies. A decision, not an oversight.
+- [x] **Every drive, not just `C:`.** `GuestPath.upTo` and `parentOf` wrote the
+  literal `C:`, so the first breadcrumb crumb navigated to `C:\` from any
+  drive; the browser then resolved that against whichever drive was open, listed
+  one drive under another drive's name, and built every row's path as `C:\…`.
+  Downstream that made "Add as app" store a shortcut to a path that does not
+  exist, made Import and Export look C:-only, and made the `D:` tab do nothing.
+  One cause, four reports. `AppSheetViewModel` also resolved every executable
+  against `drive_c`, refusing a real file with "there is no file at
+  `D:\Games\…` on this container's C: drive".
+- [x] **The shell's window actions.** Long-pressing a taskbar button offers
+  Minimize, Close and Force close. Close sends `WM_DELETE_WINDOW` — the vendored
+  X server had no `ClientMessage` event at all, so `events/ClientMessage` and
+  `Window.requestClose()` are new — which `winex11.drv` turns into `WM_CLOSE`,
+  so a program still gets its "save changes?" dialog. Minimize unmaps, which is
+  what iconifying *is*, and keeps the button in the bar: Wine's desktop has no
+  taskbar, so an unmapped window would otherwise be unreachable.
+  *Maximize is deliberately absent* — Wine draws its own caption with a working
+  maximise button, geometry inside the desktop is Wine's WM's job, and
+  `_NET_WM_STATE_MAXIMIZED` needs an EWMH-aware WM which Wine-as-client is not.
+- [x] **A frame-rate readout.** `GLRenderer` counts composited frames;
+  `XServerDisplay` turns two reads and a clock into a rate twice a second. The
+  taskbar draws 20 seconds of history behind the number, coloured against the
+  container's own `display.fpsLimit`. The session metrics get a `frames` card
+  whose headline is the **1% low** — the mean of the slowest 1% — because `min`
+  is 0 in every run that ever dropped a frame.
+  *Evidence:* watched on the device.
+- [x] **Git, and the shell that cannot work here.** The component installs and
+  `git version 2.55.0.windows.3`, `ls (GNU coreutils) 8.32`, `sed (GNU sed)
+  4.9`, `awk` and real pipelines all run from `cmd` — `ls --version | grep -i
+  coreutils` is two x86-64 MSYS2 processes under FEX with cmd's pipe between
+  them.
+  **Git Bash is not offered.** `bash.exe --login -i` starts and hangs: parent
+  waiting, child spinning a whole core at 98.6% with `wchan` 0 and state `R`,
+  which is MSYS2's `fork()` emulation deadlocking under Wine. `/etc/profile`
+  forks on its way in and bash forks for every external command, so there is no
+  version of this that works. `git-bash.exe` fails earlier and more quietly —
+  it launches `mintty`, which wants a pty from the same DLL. The whole
+  measurement is on `TerminalProfile`'s doc so nobody re-tries it.
 
 ## 5. Performance
 
@@ -413,7 +501,9 @@ Still open:
 
 ## 6. Before the repository goes public
 
-The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
+The remote is set (`prskid1000/Vessel`), everything is pushed, and
+**v0.2.0 is published** with a signed 108 MB APK that carries all six
+components.
 
 - [~] **`docs/LICENSING.md` blockers.** Eight of ten closed; that document now
   ends in a table with the status and the evidence for each. What was found and
@@ -478,36 +568,39 @@ The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
 
 ## Where things actually stand
 
-*Last rewritten 2026-08-09, after a session spent on the device.*
+*Last rewritten 2026-08-09, after a day on the device.*
 
 The **CPU story is done and measured**: ARM64EC plus FEX costs 1.09x native on
-integer and 0.99x on memory, x86-32 through WoW64 costs 2.28x, Wine starts a
-process in 197 ms, and all three run from the app's own launcher. The **driver
-story is done and switched on**: Turnip answers inside a Wine session, proven by
-`driverID 18`, `Found compatible device '/dev/kgsl-3d0'` and the winediag line.
+integer and 0.99x on memory, x86-32 through WoW64 costs 2.28x, and all three run
+from the app's own launcher.
 
-The **shell works**, and that is new. Tap a program on the home screen with
-nothing running: the container starts, the program comes up with it, its window
-is centred and themed with a working title bar, the taskbar lists it, the
-keyboard reaches it, and backing out and returning leaves it intact. Every one of
-those was a separate unverified claim a day ago.
+**The middle has moved, and it moved a long way.** A Windows program renders
+through D3D11 and reads its pixels back correct, in both bitnesses. Separately,
+a Vulkan swapchain presents to Vessel's own X server at 2.245 ms a frame. Those
+are two halves of the same sentence and they have not been joined yet: joining
+them needs Wine to load an ICD instead of an Android HAL, which is a small
+change to `patches/wine/0006`, and it needs the FEX assert on large PEs solved
+before it can be tested inside a session at all.
 
-**Storage works.** Android storage is drives inside the container — shared
-storage on `D:`, a folder or a whole USB volume on the next free letter, mapped
-from Android's own picker — and Wine's File Explorer lists and opens them. The
-unix root does not appear at all any more, by either of the two routes it used
-to.
+**Three recorded causes turned out to be wrong today**, which is worth more than
+any of the fixes. The D3D blocker was never KGSL's inability to export a
+dma-buf. It was not `HAVE_X11_DRM` either — that switch is real and needed, but
+what actually killed a windowed program was Android's `libvulkan.so` owning the
+WSI for a HAL-shaped driver. And the Wine processes surviving a reinstall were
+from a previous installation's uid, not a teardown bug. Each of those had a
+plausible story attached to it and each story was false.
 
-**The middle is still the middle, and its reason has moved.** No Windows program
-has drawn through D3D. It is no longer a missing extension: Mesa built with
-`-Dplatforms=x11` gets past that and dies at swapchain creation, because KGSL
-cannot export a dma-buf for a buffer Turnip allocated. That is a design question
-about who allocates, not a build flag, and it is the one thing left that a day of
-careful work will not obviously fix.
+**The shell is in good shape.** Drives, icons, the launcher, window actions, a
+frame-rate readout, and a first-run install that needs no network. What is
+missing is not shell work.
 
-What is honestly unfinished elsewhere: the desktop background is black at session
-start until something repaints it; the taskbar draws letters where it could draw
-icons; `.msi` payloads reach their UI and do not install; `RpcSs` will not start
-inside the app; the component downloader is written, tested and has never run on
-the device; and no CI build has yet published the `contents.json` or the source
-offer the workflow now generates.
+**One defect cost user data** — deleting a container followed the drive symlinks
+and emptied the folders behind them. It is fixed, tested, and the rule it broke
+was already written down in `docs/DRIVE-MAPPING.md` for a different function.
+That is the failure mode to watch for in this codebase: a rule stated for one
+call site and not applied to the next one.
+
+Honestly unfinished: no D3D window; FEX asserts on large PEs in a container;
+presentation is a CPU copy and zero-copy is specified but unstarted; `ipconfig`
+still prints nothing and the patch that should fix it has never had its output
+read; `.msi` packages reach their UI and do not install; and there is no sound.
