@@ -171,17 +171,27 @@ private fun HomeContent(
             VRootToolbar(
                 title = "Vessel",
                 subtitle = state.subtitle,
-                trailing = { VIconButton(VIcons.Plus, "New container", onNewContainer) },
+                trailing = {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // **The licence notice, as an icon rather than a line of
+                        // prose.** LGPL 2.1 section 6 wants prominent notice with
+                        // each copy that the Library is used in the work, and a
+                        // full-width sentence at the foot of home was the literal
+                        // reading of "prominent". It is not the only one: an About
+                        // affordance on the root screen, one tap from every launch,
+                        // is what essentially every shipped application does and is
+                        // discoverable without hunting. The words themselves did not
+                        // move — `LicencesScreen` still names the X server, its
+                        // authors and the licence, in full.
+                        VIconButton(VIcons.Info, "Licences", onOpenLicences)
+                        VIconButton(VIcons.Plus, "New container", onNewContainer)
+                    }
+                },
             )
         },
-        // **The licence notice, and it is at the foot of the root screen on
-        // purpose.** LGPL 2.1 section 6 wants prominent notice with each copy of
-        // the work; home is the only screen every user of every copy sees, and
-        // the bottom bar is the only slot on it that is there in both the
-        // empty-device state and the full one. A row inside the list would
-        // vanish on a fresh install, which is the copy most likely to be
-        // somebody's first.
-        bottomBar = { LicenceNoticeBar(onOpenLicences) },
     ) {
         if (state.containers.isEmpty()) {
             // Only once the store has answered. Showing this while the first read
@@ -227,42 +237,6 @@ private fun HomeContent(
                 )
             }
         }
-    }
-}
-
-/**
- * One line, always present: what Vessel contains and how to read the licences.
- *
- * Muted and small because it is a legal notice rather than an action, and the
- * whole row is the target because "Licences" as a link inside a sentence is a
- * 30 px tap on a phone.
- */
-@Composable
-private fun LicenceNoticeBar(onOpenLicences: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onOpenLicences)
-            .navigationBarsPadding()
-            .padding(
-                horizontal = Vessel.metrics.screenGutter,
-                vertical = Vessel.metrics.s6,
-            ),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            "Contains the Winlator X server, under the GNU LGPL 2.1. Licences",
-            style = Vessel.type.bodySmall,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.weight(1f),
-        )
-        Icon(
-            VIcons.Info,
-            contentDescription = "Licences",
-            tint = Vessel.colors.textMuted,
-            modifier = Modifier.size(Vessel.metrics.s6),
-        )
     }
 }
 

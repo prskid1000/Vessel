@@ -1,0 +1,127 @@
+diff --git a/dlls/nsiproxy.sys/ndis.c b/dlls/nsiproxy.sys/ndis.c
+index 5dde17244d9..f13cca2ad00 100644
+--- a/dlls/nsiproxy.sys/ndis.c
++++ b/dlls/nsiproxy.sys/ndis.c
+@@ -31,6 +31,10 @@
+ #include <unistd.h>
+ #include <errno.h>
+ 
++#ifdef HAVE_IFADDRS_H
++#include <ifaddrs.h>
++#endif
++
+ #ifdef HAVE_NET_IF_H
+ #include <net/if.h>
+ #endif
+@@ -307,6 +311,53 @@ static struct if_entry *add_entry( UINT index, char *name )
+     return entry;
+ }
+ 
++#ifdef HAVE_IFADDRS_H
++/* VESSEL: enumerate through getifaddrs() when if_nameindex() is refused.
++ *
++ * Android denies an untrusted app bind() on a NETLINK_ROUTE socket, and
++ * bionic's if_nameindex() binds one, so it fails with EACCES and Wine ends up
++ * with no interfaces at all. The symptom is precise and misleading: ipconfig
++ * prints nothing, GetAdaptersAddresses returns an empty list, and every program
++ * that asks "is there a network" is told there is none -- while a socket to the
++ * same host connects perfectly. Measured on a Motorola Signature running
++ * Android 16: a WinHTTP GET returned status 200 in the same session in which
++ * ipconfig printed nothing at all.
++ *
++ * getifaddrs() reaches the kernel over an *unbound* netlink socket, which is
++ * permitted, so it answers where if_nameindex() cannot. It yields one entry per
++ * address rather than one per interface; find_entry_from_index() already
++ * de-duplicates, which is why this loop needs no set of its own.
++ *
++ * Tried second rather than first, so nothing changes on a platform where
++ * if_nameindex() works.
++ */
++static unsigned int update_if_table_from_ifaddrs( void )
++{
++    struct ifaddrs *addrs, *cur;
++    unsigned int append_count = 0;
++
++    if (getifaddrs( &addrs ) < 0)
++    {
++        ERR( "getifaddrs failed, errno %d.\n", errno );
++        return 0;
++    }
++
++    for (cur = addrs; cur; cur = cur->ifa_next)
++    {
++        unsigned int index;
++
++        if (!cur->ifa_name) continue;
++        index = if_nametoindex( cur->ifa_name );
++        if (!index) continue;
++        if (!find_entry_from_index( index ) && add_entry( index, cur->ifa_name ))
++            ++append_count;
++    }
++
++    freeifaddrs( addrs );
++    return append_count;
++}
++#endif
++
+ static unsigned int update_if_table( void )
+ {
+     struct if_nameindex *indices, *entry;
+@@ -315,8 +366,17 @@ static unsigned int update_if_table( void )
+     indices = if_nameindex();
+     if (!indices)
+     {
+-        ERR( "if_nameindex failed, errno %d.\n", errno );
++#ifdef HAVE_IFADDRS_H
++        static int warned;
++
++        if (!warned++) WARN( "if_nameindex failed, errno %d; using getifaddrs.
++", errno );
++        return update_if_table_from_ifaddrs();
++#else
++        ERR( "if_nameindex failed, errno %d.
++", errno );
+         return 0;
++#endif
+     }
+ 
+     for (entry = indices; entry->if_index; entry++)
+diff --git a/dlls/nsiproxy.sys/nsi.c b/dlls/nsiproxy.sys/nsi.c
+index 09ced8f814e..32ac1a69c12 100644
+--- a/dlls/nsiproxy.sys/nsi.c
++++ b/dlls/nsiproxy.sys/nsi.c
+@@ -189,11 +189,23 @@ static NTSTATUS add_notification( const NPI_MODULEID *module, UINT32 table )
+ static NTSTATUS poll_events(void)
+ {
+     static int netlink_fd = -1;
++    /* VESSEL: remember a refusal instead of repeating it.
++     *
++     * Android will not let an untrusted app bind() a NETLINK_ROUTE socket, so
++     * this fails on every call -- fifty identical ERR lines in one session log,
++     * for a facility whose absence is already handled. Returning
++     * STATUS_NOT_IMPLEMENTED means "no address-change notifications", and the
++     * interface table is still read on demand. Failing once loudly and then
++     * quietly is the honest shape; failing loudly for ever buries the lines
++     * that matter. */
++    static int unavailable;
+     char buffer[PIPE_BUF];
+     struct nlmsghdr *nlh;
+     NTSTATUS status;
+     int len;
+ 
++    if (unavailable) return STATUS_NOT_IMPLEMENTED;
++
+     if (netlink_fd == -1)
+     {
+         struct sockaddr_nl addr;
+@@ -211,7 +223,9 @@ static NTSTATUS poll_events(void)
+         {
+             close( netlink_fd );
+             netlink_fd = -1;
+-            ERR( "bind failed, errno %d.\n", errno );
++            unavailable = 1;
++            ERR( "bind failed, errno %d; address-change notifications are off.
++", errno );
+             return STATUS_NOT_IMPLEMENTED;
+         }
+     }

@@ -96,9 +96,13 @@ class LicensingTest {
         val home = RepoFiles
             .file("app/src/main/java/app/vessel/ui/screens/HomeScreen.kt")
             .readText()
+        // An affordance on the root screen, whatever its shape. This was a
+        // full-width line of prose at the foot of home and is now an icon in
+        // its toolbar; what section 6 requires is that a user of any copy can
+        // reach the notice, not that it is a sentence they cannot dismiss.
         assertTrue(
             "home does not offer a way to the licences",
-            home.contains("LicenceNoticeBar") && home.contains("GNU LGPL 2.1"),
+            home.contains("onOpenLicences") && home.contains("""VIcons.Info, "Licences""""),
         )
     }
 
