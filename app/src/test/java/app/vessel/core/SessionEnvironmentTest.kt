@@ -192,7 +192,12 @@ class SessionEnvironmentTest {
     fun `the DXVK and vkd3d levels are the documented ones`() {
         val environment = env()
         assertEquals("info", environment["DXVK_LOG_LEVEL"])
-        assertEquals(logs.absolutePath, environment["DXVK_LOG_PATH"])
+        // Both layers write to the pipe the session log reads, and neither is
+        // allowed to open a file instead. vkd3d does it by having no
+        // `VKD3D_LOG_FILE` at all; DXVK needs the word `none`, because an unset
+        // `DXVK_LOG_PATH` means "next to the executable" rather than "nowhere".
+        assertEquals("none", environment["DXVK_LOG_PATH"])
+        assertFalse(environment.containsKey("VKD3D_LOG_FILE"))
         assertEquals("warn", environment["VKD3D_DEBUG"])
         // A separate channel with its own level: VKD3D_DEBUG does not carry it.
         assertEquals("warn", environment["VKD3D_SHADER_DEBUG"])
@@ -491,7 +496,11 @@ class SessionEnvironmentTest {
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n",
                 "DISPLAY" to ":0",
                 "DXVK_LOG_LEVEL" to "info",
-                "DXVK_LOG_PATH" to logs.absolutePath,
+                // `none`, not the log directory: on a Wine build DXVK sends every
+                // line to `__wine_dbg_output` *and* to a file, and a path here made
+                // it write `<exe>_dxgi.log` beside the session log while the session
+                // log itself got nothing. Measured on a real game launch.
+                "DXVK_LOG_PATH" to "none",
                 "VKD3D_DEBUG" to "warn",
                 "VKD3D_SHADER_DEBUG" to "warn",
                 "VKD3D_CONFIG" to "nodxr",

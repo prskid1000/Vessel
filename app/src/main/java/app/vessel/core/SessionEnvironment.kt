@@ -238,7 +238,13 @@ data class TurnipDriver(
 data class SessionPaths(
     /** `WINEPREFIX` — `files/containers/<id>/prefix`. */
     val prefix: File,
-    /** `DXVK_LOG_PATH` — `files/logs/<id>`. Insurance only — see below. */
+    /**
+     * `DXVK_LOG_PATH` used to be this, and is now `none`.
+     *
+     * Still needed: it is where the session log itself is written. But
+     * pointing DXVK at it put the D3D layer's output in files beside the
+     * log rather than in it — see the assignment in `sessionEnvironment`.
+     */
     val logs: File,
     /**
      * Where the three shader caches live, per container.
@@ -328,7 +334,29 @@ fun sessionEnvironment(
     environment["DISPLAY"] = display
 
     environment["DXVK_LOG_LEVEL"] = "info"
-    environment["DXVK_LOG_PATH"] = paths.logs.absolutePath
+
+    // **`none`, so DXVK's output lands in the session log instead of beside it.**
+    //
+    // This pointed at `files/logs/<id>`, and the effect was the opposite of what
+    // it looks like: DXVK wrote `<exe>_dxgi.log` and `<exe>_d3d11.log` into that
+    // directory and the session log got **nothing**. Measured on a real game
+    // launch — `grep -c 'info: '` over the session log: zero, while
+    // `metro_dxgi.log` sat in the same folder holding the adapter, the enabled
+    // extensions and the display mode. The one place a user is told to look was
+    // the one place the D3D layer never wrote to.
+    //
+    // `log.cpp` is explicit about it. On a Wine build `emitMsg` sends every line
+    // to `m_wineLogOutput` — Wine's own debug output, which is the pipe the
+    // session log reads — *and* to a file if one is open; and `getFileName`
+    // opens no file when the path is `none`, or when it is empty and
+    // `m_wineLogOutput` exists. So `none` does not lose anything. It routes.
+    //
+    // This is the rule [RESERVED_SESSION_ENV] already states for
+    // `VKD3D_LOG_FILE`, arrived at from the other direction: that one is
+    // reserved to guarantee its *absence*, because setting it makes vkd3d open a
+    // file **instead of** resolving `__wine_dbg_output`. Same mistake, same fix,
+    // and the two layers now behave the same way.
+    environment["DXVK_LOG_PATH"] = "none"
 
     environment["VKD3D_DEBUG"] = "warn"
     environment["VKD3D_SHADER_DEBUG"] = "warn"
