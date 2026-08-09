@@ -60,6 +60,25 @@ data class ParsedLogLine(
     val source: LogSource,
     val level: LogLevel,
     val text: String,
+    /**
+     * Which thread inside the guest wrote this, as the emitter spelled it.
+     *
+     * **Wine and FEX both stamp every line with the thread that produced it and
+     * this was being thrown away.** Wine writes `0150:err:module:import_dll …`
+     * and FEX writes `D F8 Load module …`; the parser consumed both prefixes to
+     * get at the useful part and kept nothing. So a session log was one
+     * undifferentiated stream in which `explorer.exe`, `services.exe` and a game
+     * were indistinguishable — which is exactly the state a crash has to be read
+     * in, and it is why a game dying produced a log that simply stopped.
+     *
+     * Kept raw rather than parsed to a number: Wine prints hex without `0x`, FEX
+     * prints hex with no padding, and the only thing anyone does with it is
+     * compare it to the next line's. Null for output with no prefix at all —
+     * DXVK's `info:` lines, Mesa's, and anything a guest program prints itself.
+     *
+     * [GuestUnits] turns this into a program name.
+     */
+    val unit: String? = null,
 )
 
 /**
@@ -96,6 +115,20 @@ fun parseSessionLogLine(raw: String): ParsedLogLine {
         return ParsedLogLine(LogSource.FEX, level, line.substring(match.range.last + 1).trim())
     }
 
+    // FEX's other form, and the one it actually uses here: `D F8 Load module …`
+    // — a one-letter level, then the thread in hex, then the message. It is not
+    // the bracketed form above and was falling through to the generic path,
+    // which read the whole thing as prose.
+    FEX_UNIT.matchAt(line, 0)?.let { match ->
+        val level = FEX_LEVEL_LETTERS[match.groupValues[1]] ?: LogLevel.INFO
+        return ParsedLogLine(
+            LogSource.FEX,
+            level,
+            line.substring(match.range.last + 1).trim(),
+            match.groupValues[2],
+        )
+    }
+
     MESA_PREFIX.matchAt(line, 0)?.let { match ->
         val level = LEVEL_WORDS[match.groupValues[2].lowercase()] ?: LogLevel.INFO
         return ParsedLogLine(LogSource.DRIVER, level, line.substring(match.range.last + 1).trim())
@@ -104,7 +137,28 @@ fun parseSessionLogLine(raw: String): ParsedLogLine {
     val marker = findLevelToken(line)
     val body = if (marker == null) line.trim() else line.substring(marker.second + 1).trimStart()
     val level = marker?.first ?: LogLevel.INFO
-    return ParsedLogLine(sourceOf(body), level, body)
+    // The prefix `findLevelToken` walked over is Wine's `pid:tid:` — the last
+    // numeric field before the level is the thread, and it is the only thing in
+    // the line that says which guest process wrote it.
+    val unit = marker?.let { unitOf(line, it.second) }
+    return ParsedLogLine(sourceOf(body), level, body, unit)
+}
+
+/**
+ * The last numeric field before the level token — Wine's thread id.
+ *
+ * `0.012:0024:0028:err:…` is timestamp, pid, tid: the field nearest the level
+ * is the thread, which is what identifies the writer. A line with no numeric
+ * prefix at all (`err:module:…`, which is what `WINEDEBUG` produces without
+ * `+tid`) has no unit, and null is the honest answer rather than inventing one.
+ */
+private fun unitOf(line: String, levelColon: Int): String? {
+    // `levelColon` is the colon *after* the level word, so the span still ends
+    // in the level itself — `00f8:trace`. Drop that last field first, or the
+    // answer is always the word `trace` and never a thread.
+    val beforeLevel = line.substring(0, levelColon).substringBeforeLast(':', "")
+    val last = beforeLevel.substringAfterLast(':').trim()
+    return last.takeIf { it.isNotEmpty() && NUMERIC_FIELD.matches(it) }
 }
 
 /**
@@ -223,6 +277,25 @@ private val LEVEL_WORDS: Map<String, LogLevel> = mapOf(
 
 /** A pid, a tid, or a `12.345` timestamp — hex or decimal, never a channel name. */
 private val NUMERIC_FIELD = Regex("^[0-9A-Fa-f]+(\\.[0-9A-Fa-f]+)?$")
+
+/**
+ * `D F8 Load module …` — FEX's unbracketed line: level letter, thread, message.
+ *
+ * Anchored on a single letter followed by a hex field so it cannot match prose.
+ * `D` is what FEX emits at the default verbosity here; the rest are included
+ * because the letter set is fixed and a build with more logging on should not
+ * suddenly fall through to the generic path.
+ */
+private val FEX_UNIT = Regex("^([DIWEA]) ([0-9A-Fa-f]{1,8}) ")
+
+/** FEX's one-letter levels. `A` is an assertion, which is the interesting one. */
+private val FEX_LEVEL_LETTERS = mapOf(
+    "D" to LogLevel.TRACE,
+    "I" to LogLevel.INFO,
+    "W" to LogLevel.WARN,
+    "E" to LogLevel.ERROR,
+    "A" to LogLevel.ERROR,
+)
 
 private val FEX_BRACKET = Regex("^\\[(ERR|ERROR|CRIT|ASSERT|WARN|WARNING|INFO|DEBUG|TRACE)]\\s*")
 

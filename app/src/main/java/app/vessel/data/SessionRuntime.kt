@@ -2,6 +2,7 @@ package app.vessel.data
 
 import android.content.Context
 import android.os.PowerManager
+import app.vessel.core.GuestUnits
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
 import app.vessel.core.DEFAULT_DISPLAY
@@ -270,6 +271,15 @@ class SessionRuntime @Inject constructor(
     @Volatile
     private var pausedPids: List<Int> = emptyList()
 
+    /**
+     * Thread id to program name, for the session that is running.
+     *
+     * Replaced per session rather than cleared: a unit id means nothing
+     * across two runs of `wineserver`, and carrying one over would label
+     * a new process with a dead one's name.
+     */
+    private var units = GuestUnits()
+
     private var wakeLock: PowerManager.WakeLock? = null
 
     /** Throttles [SessionState.lastLine]; the log itself is never throttled here. */
@@ -477,6 +487,7 @@ class SessionRuntime @Inject constructor(
             fpsLimit = fpsLimit,
         )
 
+        units = GuestUnits()
         val log = logs.open(containerId, startedAt)
         log.header(
             listOf(
@@ -1284,7 +1295,16 @@ class SessionRuntime @Inject constructor(
      */
     private fun record(log: SessionLog, raw: String) {
         val parsed = parseSessionLogLine(raw)
-        log.line(parsed.source, parsed.level, parsed.text)
+        // **Which guest program wrote this.** Every process in the container
+        // inherits the desktop's stderr, so without this the log is one
+        // interleaved stream in which `explorer.exe`, `services.exe` and a game
+        // are indistinguishable — which is the state a crash has to be read in.
+        // Wine and FEX both stamp the writing thread on every line and the
+        // parser used to discard it; `GuestUnits` turns that stamp into a name
+        // learned from the guest's own module-load lines.
+        val owner = units.label(parsed.unit, parsed.text)
+        val text = if (owner == null) parsed.text else "[$owner] ${parsed.text}"
+        log.line(parsed.source, parsed.level, text)
         if (parsed.text.isBlank()) return
 
         val diagnosis = diagnoseSessionLine(raw)
