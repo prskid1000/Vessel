@@ -177,17 +177,18 @@ class FilesViewModel @Inject constructor(
      * the mapping.
      */
     private fun refreshDrives() {
-        // **A drive this app cannot list is not offered as a tab.** `Z:` is the
-        // Unix root, which SELinux denies to `untrusted_app`, so its tab could
-        // only ever open onto a refusal — and a destination that always refuses
-        // is one the user has to learn to avoid. It stays in the prefix, because
-        // Wine creates it and reaches absolute Unix paths through it; it simply
-        // is not somewhere to send anybody.
+        // **A drive this app cannot list is not offered as a tab.** A tab that
+        // could only ever open onto a refusal is a destination the user has to
+        // learn to avoid.
         //
-        // The rule generalises past `Z:`, which is why it is a readability test
-        // rather than a special case: a card that has been unmounted and a
-        // mapped folder that has been deleted both disappear from the row for
-        // the same reason and without further code.
+        // This was written for `Z:`, which no longer exists — the unix root is
+        // removed from the prefix outright now, for the reason in
+        // `DriveMap.removeRootDrive`. The rule is kept because it was never
+        // really about `Z:`: a card that has been unmounted and a mapped folder
+        // that has been deleted both leave a dangling symlink, and both drop out
+        // of the row here without another line of code. The mapping stays in
+        // `dosdevices` on purpose, so plugging the card back in brings the drive
+        // back with the letter it had.
         val list = drives.drives(prefix).filter { drive ->
             File(File(prefix, DriveMap.DOSDEVICES), "${drive.letter}:").list() != null
         }

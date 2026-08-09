@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.os.Environment
+import android.os.storage.StorageManager
 import android.util.Log
 import app.vessel.core.DriveMap
 import app.vessel.core.GuestDrive
@@ -51,8 +52,41 @@ class AndroidDrives @Inject constructor(
      */
     val canMap: Boolean get() = Environment.isExternalStorageManager()
 
-    /** Every drive the prefix has. Straight through; the reader is the truth. */
-    fun drives(prefix: File): List<GuestDrive> = DriveMap.drives(prefix)
+    /**
+     * Every drive the prefix has, with removable volumes named the way Android
+     * names them.
+     *
+     * [DriveMap.labelFor] can only see the path, and a removable volume's path
+     * ends in its uuid — so an HDD the user calls "HDD" came out as
+     * `B210-B412`. Android knows the real name and this is the only layer that
+     * can ask it. Volume roots only: a folder *inside* a volume is named after
+     * itself, which is what the user picked and what they will recognise.
+     *
+     * Primary storage is deliberately left alone. Its description is "Internal
+     * shared storage", and [DriveMap.PHONE_STORAGE]'s "Phone" is both shorter
+     * and what a drive tab has room for.
+     */
+    fun drives(prefix: File): List<GuestDrive> {
+        val named = volumeNames()
+        return DriveMap.drives(prefix).map { drive ->
+            named[drive.target]?.let { drive.copy(label = it) } ?: drive
+        }
+    }
+
+    /** Removable volume root path to the name Android shows for it. */
+    private fun volumeNames(): Map<String, String> {
+        val storage = context.getSystemService(StorageManager::class.java) ?: return emptyMap()
+        return runCatching {
+            storage.storageVolumes
+                .filterNot { it.isPrimary }
+                .mapNotNull { volume ->
+                    val path = volume.directory?.canonicalPath ?: return@mapNotNull null
+                    val name = volume.getDescription(context)?.trim().orEmpty()
+                    if (name.isEmpty()) null else path to name
+                }
+                .toMap()
+        }.getOrDefault(emptyMap())
+    }
 
     /**
      * Put the user-visible part of the phone on `D:`, if we may.

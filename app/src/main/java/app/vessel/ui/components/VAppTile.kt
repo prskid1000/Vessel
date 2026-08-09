@@ -1,6 +1,7 @@
 package app.vessel.ui.components
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -16,6 +18,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -63,7 +68,7 @@ fun VAppTile(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
     ) {
-        VAppIcon(shortcut.initial)
+        VAppIcon(shortcut.initial, icon = rememberProgramIcon(shortcut))
         Text(
             shortcut.name,
             style = Vessel.type.label,
@@ -79,21 +84,49 @@ fun VAppTile(
 }
 
 /**
- * The icon square: a letter in a ringed box.
+ * The icon square: the program's own icon, or a letter in a ringed box.
  *
- * `mono` rather than the sans, because the letter is standing in for a machine
- * fact — which file this is — and not for a word. It is also what stops the tile
- * reading as a contact avatar.
+ * The letter is the fallback and stays the fallback. `mono` rather than the
+ * sans, because it is standing in for a machine fact — which file this is — and
+ * not for a word; it is also what stops the tile reading as a contact avatar. A
+ * generic grey application glyph was the alternative and is worse: four
+ * identical glyphs in a row say "these are apps", four different letters say
+ * "these are *these* apps".
+ *
+ * The ring is dropped when there is a real icon. It exists to give the letter an
+ * edge to sit inside; around an icon that has its own silhouette it reads as a
+ * box drawn on top of the artwork.
  */
 @Composable
-fun VAppIcon(initial: String, modifier: Modifier = Modifier) {
+fun VAppIcon(initial: String, modifier: Modifier = Modifier, icon: ImageBitmap? = null) {
     Box(
         modifier
             .size(Vessel.metrics.tileIcon)
-            .vRing(Vessel.colors.neutral800, Vessel.metrics.shapeMd),
+            .then(
+                if (icon == null) {
+                    Modifier.vRing(Vessel.colors.neutral800, Vessel.metrics.shapeMd)
+                } else {
+                    Modifier
+                },
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(initial, style = Vessel.type.cardTitle, color = Vessel.colors.textMuted)
+        if (icon == null) {
+            Text(initial, style = Vessel.type.cardTitle, color = Vessel.colors.textMuted)
+        } else {
+            Image(
+                bitmap = icon,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                // Icons are square and drawn into a square, so Fit and Crop
+                // agree — Fit is the one that stays right if either stops being
+                // true, and an icon letterboxed is better than one cropped.
+                contentScale = ContentScale.Fit,
+                // Nearest-neighbour would be sharper for an exact 2× or 4×, and
+                // 110 px from a 128 px source is neither.
+                filterQuality = FilterQuality.Medium,
+            )
+        }
     }
 }
 
