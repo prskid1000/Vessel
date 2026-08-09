@@ -238,6 +238,15 @@ class FilesViewModel @Inject constructor(
         openDrive(letter)
     }
 
+    /**
+     * Re-read the drives after a trip to Android's settings.
+     *
+     * The All-files-access grant is a toggle on a settings page, not a dialog,
+     * so the activity result carries nothing — whether it was given is only
+     * knowable by asking again.
+     */
+    fun refreshAfterPermission() = refreshDrives()
+
     /** Remove a mapping. The folder it pointed at is untouched. */
     fun unmapDrive(letter: Char) {
         if (!drives.unmap(prefix, letter)) return

@@ -1,5 +1,8 @@
 package app.vessel.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +31,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -89,6 +93,14 @@ fun FilesScreen(
     // decided on.
     var unmapping by remember { mutableStateOf<GuestDrive?>(null) }
 
+    val context = LocalContext.current
+
+    // Comes back with no result — the grant is a settings toggle, not a dialog —
+    // so the drive list is re-read on return rather than trusting a callback.
+    val allFilesAccess = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { viewModel.refreshAfterPermission() }
+
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { tree -> if (tree != null) viewModel.mapPickedFolder(tree) }
@@ -116,7 +128,25 @@ fun FilesScreen(
         onOpen = viewModel::open,
         onCrumb = viewModel::goTo,
         onDrive = viewModel::openDrive,
-        onAddDrive = { folderPicker.launch(null) },
+        // **When the permission is missing, `+` asks for it instead of refusing.**
+        // All-files access is a per-install grant, so an uninstall silently takes
+        // it away — a reinstalled app has no `D:` and a `+` that did nothing,
+        // with the reason nowhere on screen because the sheet that used to carry
+        // it was replaced by Android's own picker. Nothing in Vessel had ever
+        // asked for the permission at all; the manifest declared it and the user
+        // was left to find the settings page themselves.
+        onAddDrive = {
+            if (state.canMapDrives) {
+                folderPicker.launch(null)
+            } else {
+                allFilesAccess.launch(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.fromParts("package", context.packageName, null),
+                    ),
+                )
+            }
+        },
         onImport = { importer.launch(IMPORT_MIME) },
         onExport = { selected?.let { exporter.launch(it.name) } },
         onAddAsApp = {
@@ -361,14 +391,22 @@ private fun DriveTabs(
             }
         }
 
-        // Drawn even when it cannot be used, and disabled rather than absent:
-        // "can Vessel map a folder" is answered by the button being there, and
-        // the reason it is grey belongs on the sheet it would have opened.
+        // Drawn dimmed without the permission, and still tappable: it opens
+        // Android's All-files-access page rather than doing nothing. Disabled was
+        // the old behaviour and it was a dead end — the reason was meant to live
+        // "on the sheet it would have opened", and that sheet no longer exists.
         Box(
             Modifier
                 .size(Vessel.metrics.touchTarget)
                 .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
-                .clickable(enabled = canMap, onClickLabel = "Map a folder as a drive", onClick = onAdd),
+                .clickable(
+                    onClickLabel = if (canMap) {
+                        "Map a folder as a drive"
+                    } else {
+                        "Give Vessel access to all files, so a folder can be mapped"
+                    },
+                    onClick = onAdd,
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Icon(

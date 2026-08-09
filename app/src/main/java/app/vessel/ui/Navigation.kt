@@ -339,6 +339,10 @@ private fun SessionHost(
     navController: NavHostController,
     native: DisplayGeometry?,
 ) {
+    // Whether the log is the thing on screen. The launch dialog is hosted above
+    // the NavHost, so it would otherwise cover the log it just opened.
+    val route by navController.currentBackStackEntryAsState()
+    val onLogRoute = route?.destination?.route?.startsWith(LOGS_PREFIX) == true
     // Whether the checklist is up. Dismissing it hides a progress report and does
     // not cancel anything — see SessionLaunchDialog. Saveable so a process death
     // mid-launch does not reopen a dialog the user put down.
@@ -380,18 +384,19 @@ private fun SessionHost(
     LaunchedEffect(quietExit) { if (quietExit) session.dismiss() }
 
     when {
-        state.active && !running && showChecklist ->
+        state.active && !running && showChecklist && !onLogRoute ->
             SessionLaunchDialog(
                 state = state,
                 onCancel = session::stop,
                 onDismiss = { showChecklist = false },
-                // Put the checklist down on the way, so the log is not opened
-                // underneath a dialog that covers it.
-                onOpenLogs = {
-                    val route = state.logRoute()
-                    showChecklist = false
-                    navController.navigate(route)
-                },
+                // **Navigate without putting the checklist down.** Dismissing it
+                // first did keep the dialog off the log screen, and cost the
+                // thing the button exists for: coming back left no checklist and
+                // no way to get one, so a launch still in progress became
+                // untrackable. It is suppressed while the log is on top instead
+                // — see `onLogRoute` — and returns with the launch when you go
+                // back.
+                onOpenLogs = { navController.navigate(state.logRoute()) },
             )
 
         // A failed launch or a non-zero exit is the diagnosis, and it is the one
@@ -426,6 +431,9 @@ private fun SessionHost(
         )
     }
 }
+
+/** Both log routes start with this; see [Routes.SESSION_LOGS]. */
+private const val LOGS_PREFIX = "logs/"
 
 /**
  * The running session's own log where there is one, and the container's history
