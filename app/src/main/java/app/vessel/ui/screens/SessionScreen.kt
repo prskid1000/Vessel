@@ -528,8 +528,11 @@ fun SessionDesktop(
                     onFocusWindow = onFocusWindow,
                     // The same list the launcher above draws. A window knows its
                     // executable's name; a shortcut knows its path, which is
-                    // what an icon can be read out of.
+                    // what an icon can be read out of. The container is for the
+                    // other half — a window opened from the built-in row has no
+                    // shortcut, and its icon is read out of the prefix by name.
                     shortcuts = shortcuts,
+                    containerId = state.containerId,
                 )
             }
         }

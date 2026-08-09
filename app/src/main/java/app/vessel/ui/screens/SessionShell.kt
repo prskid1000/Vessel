@@ -112,6 +112,8 @@ fun SessionTaskbar(
      * business. Empty is fine — every button falls back to its glyph or letter.
      */
     shortcuts: List<AppShortcut> = emptyList(),
+    /** Which prefix to read a built-in program's icon out of. */
+    containerId: String? = null,
 ) {
     Row(
         modifier
@@ -153,7 +155,7 @@ fun SessionTaskbar(
             // The unavailable reason still has a home: the launcher panel prints it
             // above Browse C:, where there is room for a sentence.
             windows.forEach { window ->
-                TaskbarWindow(window, shortcuts) { onFocusWindow(window.id) }
+                TaskbarWindow(window, shortcuts, containerId) { onFocusWindow(window.id) }
             }
         }
 
@@ -224,6 +226,7 @@ private fun StartButton(open: Boolean, onClick: () -> Unit) {
 private fun TaskbarWindow(
     window: GuestWindow,
     shortcuts: List<AppShortcut>,
+    containerId: String?,
     onClick: () -> Unit,
 ) {
     val shape = Vessel.metrics.shapeMd
@@ -249,7 +252,13 @@ private fun TaskbarWindow(
                 it.executable.substringAfterLast('\\').equals(window.program, ignoreCase = true)
             }
         }
-        val icon = rememberProgramIcon(owner)
+        // **Two lookups, because a window can come from either list.** Matching
+        // shortcuts alone left regedit and winecfg drawing a letter: they are
+        // opened from the built-in row and are not shortcuts, so nothing owned
+        // them. The built-in lookup finds any program Wine provides, by name.
+        val owned = rememberProgramIcon(owner)
+        val builtIn = rememberBuiltInIcon(containerId, window.program)
+        val icon = owned ?: builtIn
         val glyph = windowGlyph(window.program)
 
         when {

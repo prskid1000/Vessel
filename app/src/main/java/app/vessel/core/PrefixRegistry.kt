@@ -95,6 +95,8 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 18 named the graphics driver, so Wine stops probing for `winemac.drv` it
+     * cannot have and logging the failure twenty-two times a session;
      * 17 took the unix root off the desktop — see [unixNamespace] — which with
      * `DriveMap.removeRootDrive` is what stops `Z:` and `/` handing a guest
      * program this app's own private storage;
@@ -117,7 +119,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 17
+    const val SEED_VERSION: Int = 18
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -567,6 +569,27 @@ object PrefixRegistry {
      * replacement. `z:` was the case that made it visible: the symlink went and
      * the value stayed.
      */
+    /**
+     * The one graphics driver this device has, named so Wine stops guessing.
+     *
+     * With no value here Wine walks its built-in list and tries each in turn.
+     * On this device that means loading `winemac.drv`, which does not exist in
+     * an Android build, and logging `Failed to load module L"winemac.drv";
+     * status=c0000135` every time — twenty-two lines in one session, all of them
+     * red, none of them a problem. Naming the driver removes the probe and the
+     * noise together.
+     *
+     * `winex11.drv` is the only one that can work: Vessel runs an X server in
+     * the app and Wine talks to it over a unix socket. It still fails to
+     * initialise during provisioning, because `wineboot` and `regedit` run
+     * before any X server exists — that failure is expected and is a different
+     * line.
+     */
+    val graphicsDriver: RegistryKey = RegistryKey(
+        path = """HKEY_CURRENT_USER\Software\Wine\Drivers""",
+        values = listOf(RegistryValue("Graphics", "x11")),
+    )
+
     private val driveTypesReset = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Wine\Drives""",
         remove = true,
@@ -726,6 +749,7 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
+        graphicsDriver,
         driveTypesReset,
         driveTypes(letters),
         consoleColours,
