@@ -29,6 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
+    # **Serialised on the release, not on the component.** Two components
+    # finishing at once both rebuild `contents.json` from what is on the release
+    # at that moment, and the loser would publish an index missing the winner's
+    # package. `cancel-in-progress` is false because a cancelled build has
+    # already uploaded its `.wcp` and would leave the index not naming it.
+    concurrency:
+      group: components-release
+      cancel-in-progress: false
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,3 +109,39 @@ jobs:
             || gh release create components --title "Components" \
                  --notes "Rolling release of built .wcp component packages." --latest=false
           gh release upload components dist/*.wcp dist/*.wcp.sha256 --clobber
+
+      # **The index the app reads, and the source offer the licence requires.**
+      #
+      # Both are generated from the release's own contents rather than from
+      # `dist/`, because a component build produces one package and the release
+      # holds all of them. Nothing published `contents.json` before this, so the
+      # app's catalogue fetch was a 404 by construction — the downloader was
+      # written, tested and unreachable. And the release body said nothing about
+      # where the source of the binaries on it lives, which LGPL 2.1 section
+      # 6(a) asks for; see `docs/LICENSING.md`.
+      #
+      # Downloading every `.wcp` to do it is ~150 MB and about twenty seconds on
+      # a runner, against GitHub's own CDN. The alternative — a per-package
+      # sidecar so the index can be built without the archives — is a second
+      # format to keep in step with the first, and the twenty seconds only
+      # happen on a main push that actually built something.
+      - name: Publish the component index and the source offer
+        if: steps.decide.outputs.build == 'true' && inputs.publish && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          work=$(mktemp -d)
+          gh release download components --dir "$work" --pattern '*.wcp' --clobber
+          gh release download components --dir "$work" --pattern '*.wcp.sha256' --clobber
+
+          python3 build/gen_registry.py \
+            --dist "$work" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/components" \
+            --out "$work/contents.json"
+          gh release upload components "$work/contents.json" --clobber
+
+          python3 build/source_offer.py \
+            --dist "$work" \
+            --repo "${{ github.repository }}" \
+            --out "$work/release-notes.md"
+          gh release edit components --notes-file "$work/release-notes.md"

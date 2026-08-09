@@ -297,6 +297,13 @@ fetch_source() {
   local name="$1" repo="$2" ref="$3" exact="${4:-}"
   local dir="$NATIVE_DIR/$name"
 
+  # Remembered for write_provenance, and through it for the source offer on the
+  # components release. LGPL 2.1 section 6(a) wants the Library's complete
+  # source "including whatever changes were used in the work" — the ref and the
+  # commit were already recorded and are useless without saying which repository
+  # they are commits *of*. Set here because this is the one place that is told.
+  SOURCE_REPO="$repo"
+
   if [ ! -d "$dir/.git" ]; then
     log "cloning $name from $repo"
     # The two -c flags apply to the clone's own checkout, which happens before
@@ -369,6 +376,7 @@ write_provenance() {
   "version": "$version",
   "target": "$TARGET_NAME",
   "targetDesc": "$TARGET_DESC",
+  "sourceRepo": "${SOURCE_REPO:-unknown}",
   "sourceRef": "${COMPONENT_REF:-unknown}",
   "sourceSha": "${SOURCE_SHA:-unknown}",
   "cpuFlags": "${VESSEL_CPU_FLAGS:-none}",

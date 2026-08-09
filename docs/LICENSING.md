@@ -131,7 +131,15 @@ Adding this closed the reason **the APK should not be distributed**; a release
 had already been published before it existed, which is recorded here rather than
 quietly fixed.
 
-**3. One of 6(a)–(e) — 6(a), satisfied on the day the repository is public.**
+**3. One of 6(a)–(e) — 6(a), satisfied for the app, and now for the components
+release too.** The components release publishes built binaries of Wine, FEX,
+DXVK, vkd3d and Mesa, every one from a patched upstream tree, and for a while its
+body said nothing about where any of that source is. A repository that happens to
+be public is not an offer; a page that hands out binaries has to say where their
+source lives. `build/source_offer.py` now writes that body from the packages' own
+provenance and `_component.yml` publishes it beside `contents.json`.
+
+
 6(a) wants the Library's complete source "including whatever changes were used in
 the work", plus the work that uses it "as object code and/or source code, so that
 the user can modify the Library and then relink". Vessel's whole source, the
@@ -262,7 +270,7 @@ open items below are done; the APK needs the third as well.**
 | 6 | Trademarks must not be in the product name or icon | **Closed.** Checked, and the name is asserted. |
 | 7 | Our Wine/vkd3d patches must be the only difference from upstream | **Closed.** `assert_pristine()` fails the build on a drifted checkout; the `winefile` drift that prompted it is gone. |
 | 8 | Prominent notice, in the interface, that the app contains LGPL code | **Closed.** A permanent line at the foot of home naming the X server and its licence, opening `LicencesScreen`; five entries, each with its full text out of `res/raw`. libadrenotools' BSD-2-Clause notice is in the APK now too, which it had not been. Asserted three ways in `LicensingTest`. |
-| 9 | **A source offer on the component release page** | **OPEN.** Each `.wcp` embeds its upstream commit, but the GitHub release the packages are published from says nothing about where their source is. One line per component on that release — upstream repo, tag or commit, and a link to `patches/<name>/` — closes it. This is `.github/workflows/_component.yml` and the release body, not code. |
+| 9 | A source offer on the component release page | **Closed in code, unproven until a build runs.** `build/source_offer.py` renders the release body from the packages' own provenance — component, version, upstream repository, ref, commit, and the `patches/<name>/` directory — and `_component.yml` writes it with `gh release edit` after each publish. Generated rather than hand-written because a hand-maintained list goes stale on the first pin bump, and a stale source offer is worse than none: it looks like one. `sourceRepo` is new in provenance; the ref and commit were recorded already and are useless without saying which repository they are commits *of*. |
 | 10 | A `README` that is true on the day | Tracked in `docs/TODO.md` §6, not here. |
 
 Two things that are *not* blockers and were checked so they can stop being
