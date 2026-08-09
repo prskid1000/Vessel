@@ -42,4 +42,23 @@ log "building wsiprobe for $TARGET_ABI (api $NDK_API) ${VESSEL_CPU_FLAGS:+with $
 file "$OUT/wsiprobe" | grep -q 'ARM aarch64' \
   || die "wsiprobe is not an aarch64 binary: $(file -b "$OUT/wsiprobe")"
 
+# --- x11present --------------------------------------------------------------
+# Needs the cross-built X11 sysroot for <xcb/xcb.h> and -lxcb. At *runtime* it
+# resolves libxcb.so from whichever directory is on LD_LIBRARY_PATH, which is
+# deliberately the same copy the Wine session uses: an xcb_connection_t made by
+# one libxcb and passed to another is undefined behaviour, and this probe exists
+# partly to rule that class of fault in or out.
+SYSROOT="$WORK_DIR/androidsysroot"
+"$COMMON_SH_DIR/x11-sysroot.sh" >/dev/null \
+  || die "x11-sysroot.sh failed; x11present needs libxcb headers and a stub to link against"
+[ -f "$SYSROOT/usr/include/xcb/xcb.h" ] || die "no xcb.h in $SYSROOT"
+
+log "building x11present"
+# shellcheck disable=SC2086
+"$NDK_CC" -O2 -Wall -Wextra -fvisibility=default ${VESSEL_CPU_FLAGS:-} \
+  -I"$SYSROOT/usr/include" \
+  -o "$OUT/x11present" "$REPO_ROOT/tools/gfx/x11present.c" \
+  -L"$SYSROOT/usr/lib" -lxcb -ldl -landroid -llog \
+  || die "x11present failed to build"
+
 ok "out/gfx-native: $(ls "$OUT" | tr '\n' ' ')"

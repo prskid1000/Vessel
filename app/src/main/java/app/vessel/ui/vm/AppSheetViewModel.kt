@@ -103,20 +103,84 @@ class AppSheetViewModel @Inject constructor(
     private var shortcutId: String = ""
     private var opened = false
 
-    /** Add a program to [containerId]. */
+    /**
+     * This view model has already committed an add.
+     *
+     * **Separate from [AppSheetUiState.finished], and the two must not be
+     * conflated — I tried, and it broke the other half.** `finished` is a
+     * one-shot *event*: the sheet reads it, dismisses, and clears it. This is a
+     * durable *fact* about the instance, and `hiltViewModel` hands the same
+     * instance back for the next Add on the same container. Testing `finished`
+     * in [openNew] worked only until the event was correctly consumed, at which
+     * point the reset stopped firing and the second Add came up still holding
+     * the program that had just been added.
+     */
+    private var committed = false
+
+    /**
+     * Add a program to [containerId].
+     *
+     * **The second Add did nothing at all, and this is why.** `AppSheet` asks
+     * for its view model with `hiltViewModel(key = "add-to-$containerId")`, and
+     * that key is scoped to the nav entry — so every Add on the same container
+     * gets back *the same instance*, carrying whatever the last one left in it.
+     * Two pieces of that state then conspired:
+     *
+     *  - `opened` is a one-shot guard, so this function returned immediately and
+     *    the draft was never reset — the sheet would have come up still holding
+     *    the program just added; and
+     *  - `finished` stayed true, and `AppSheet` has
+     *    `LaunchedEffect(state.finished) { if (state.finished) onDismiss() }`,
+     *    so the sheet dismissed itself in the same frame it opened.
+     *
+     * The visible symptom was the second one: tap Add, nothing happens, for ever.
+     *
+     * A finished sheet therefore starts a **new draft** rather than returning
+     * early. The guard still holds for a re-entry that has *not* committed —
+     * which is the case it was written for: a rotation, or the browser round
+     * trip, must not wipe what the user has already chosen.
+     */
     fun openNew(containerId: String) {
-        if (opened) return
+        if (opened && !committed) return
+        committed = false
         opened = true
+
+        // **Synchronously, outside the coroutine, and that is the whole fix.**
+        // The first version of this reset inside `viewModelScope.launch`, which
+        // is a frame too late: `AppSheet` composes, its dismiss effect reads a
+        // `finished` that is still true, and the sheet closes before the reset
+        // lands. Same symptom as before the fix, one layer down.
+        //
+        // A fresh value, not a `copy`. Copying carried `executable`, `name`,
+        // `arch`, `args`, `refusal` and `alreadyAdded` over from the last add —
+        // so the reset names nothing in order to reset everything, and a field
+        // added to the state later cannot be forgotten here.
+        _state.value = AppSheetUiState(loading = false, creating = true, containerId = containerId)
+
+        // The name is a read, so it stays asynchronous. It only fills a subtitle.
         viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    loading = false,
-                    creating = true,
-                    containerId = containerId,
-                    containerName = containers.get(containerId)?.name.orEmpty(),
-                )
-            }
+            val name = containers.get(containerId)?.name.orEmpty()
+            _state.update { if (it.containerId == containerId) it.copy(containerName = name) else it }
         }
+    }
+
+    /**
+     * The sheet has acted on [AppSheetUiState.finished]; clear it.
+     *
+     * **`finished` is documented as one-shot and was never actually consumed.**
+     * It stayed true for the life of the view model, and `AppSheet` asks
+     * `hiltViewModel` for one keyed `"add-to-$containerId"` — the same instance
+     * for every Add on that container. So the second Add opened a sheet whose
+     * very first frame said "you are finished", and it dismissed itself before
+     * anyone saw it. From the outside: tapping Add did nothing, for ever.
+     *
+     * Consuming it here rather than only resetting in [openNew] because the two
+     * fix different halves. [openNew] stops the *draft* leaking between adds;
+     * this stops the *event* doing it, and an event that survives being handled
+     * is a bug waiting for the next reader.
+     */
+    fun acknowledgeFinished() {
+        _state.update { if (it.finished) it.copy(finished = false) else it }
     }
 
     /** Open the profile of a program that already exists. */
@@ -300,6 +364,7 @@ class AppSheetViewModel @Inject constructor(
                     workingDir = current.workingDir.trim(),
                 ),
             )
+            committed = true
             _state.update { it.copy(finished = true) }
         }
     }

@@ -73,7 +73,16 @@ fun AppSheet(
     }
 
     val state by viewModel.state.collectAsStateWithLifecycle()
-    LaunchedEffect(state.finished) { if (state.finished) onDismiss() }
+    // Consumed, then acted on. `finished` is a one-shot and the view model
+    // outlives this composable — `hiltViewModel` keys it by container, so the
+    // next Add gets the same instance back. Leaving the flag set meant that
+    // instance opened already-finished and dismissed itself in its first frame.
+    LaunchedEffect(state.finished) {
+        if (state.finished) {
+            viewModel.acknowledgeFinished()
+            onDismiss()
+        }
+    }
 
     // Android's own picker. `OpenDocument` rather than `GetContent`, because a
     // persistable URI is what an import needs and `GetContent` does not promise

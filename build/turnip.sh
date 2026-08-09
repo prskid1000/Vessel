@@ -20,11 +20,54 @@ COMPONENT=turnip
 SOURCE_NAME=mesa
 COMPONENT_REF="$MESA_REF"
 
+# --- ICD mode ------------------------------------------------------------------
+#
+#   VESSEL_TURNIP_ICD=1 ./build/turnip.sh    # -> dist/turnip-<ver>-icd-<target>.wcp
+#
+# The default build is an **Android Vulkan HAL**: `-Dplatforms=android,x11` makes
+# Mesa export exactly one dynamic symbol, `HMI`, so the only thing that can load
+# the driver is Android's own `libvulkan.so`, with libadrenotools redirecting its
+# HAL lookup. That is what ships, and for headless rendering it is correct and
+# proven — D3D11 passes its pixel readback through it.
+#
+# It cannot present to an X server, and the reason is structural rather than a
+# missing build flag. Android's platform loader does not forward the WSI: it
+# implements `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`, `vkCreateSwapchainKHR`
+# and the rest itself, against its own `Surface` struct wrapping an
+# `ANativeWindow`. Hand it a `VkSurfaceKHR` that Turnip's `vkCreateXcbSurfaceKHR`
+# made and it casts the handle to the wrong type. Measured on the device with
+# `tools/gfx/x11present.c`, which gets as far as
+#     VESSEL-X11PRESENT surface created
+#     VESSEL-X11PRESENT queue 0 graphics=1 present=1
+# and then takes SIGSEGV at a null dereference inside
+# `/memfd:/system/lib64/libvulkan.so`, two frames below the probe — the loader,
+# not the driver. The X11 WSI is compiled into the shipped driver (`xcb_put_image`
+# and the whole `xcb_randr_*` set are in its symbol table); nothing can reach it.
+#
+# Dropping `android` from `-Dplatforms` makes Mesa emit an ordinary Vulkan ICD —
+# `vk_icdGetInstanceProcAddr`, `vk_icdNegotiateLoaderICDInterfaceVersion` and
+# `vkGetInstanceProcAddr` as real exports — which a plain `dlopen` can drive with
+# no Android loader in the path at all. Turnip talks to `/dev/kgsl-3d0` directly
+# and needs nothing from the HAL, so the driver underneath is the same driver.
+#
+# Kept as a flag rather than a replacement because the two builds are not
+# interchangeable: the ICD has no `VK_ANDROID_external_memory_android_hardware_buffer`
+# and nothing in the app can load it through `AdrenotoolsManager`. Which one a
+# session should use is a decision for whoever wires it up, and it wants both
+# packages present to be able to compare them.
+if [ "${VESSEL_TURNIP_ICD:-0}" = "1" ]; then
+  TURNIP_PLATFORMS=x11
+  TURNIP_VARIANT=icd
+else
+  TURNIP_PLATFORMS=android,x11
+  TURNIP_VARIANT=hal
+fi
+
 fetch_source "$SOURCE_NAME" "$MESA_REPO" "$MESA_REF" "${MESA_SHA:-}"
 
 SRC="$NATIVE_DIR/$SOURCE_NAME"
-BUILD="$WORK_DIR/$COMPONENT"
-STAGE="$WORK_DIR/stage-$COMPONENT"
+BUILD="$WORK_DIR/$COMPONENT-$TURNIP_VARIANT"
+STAGE="$WORK_DIR/stage-$COMPONENT-$TURNIP_VARIANT"
 SYSROOT="$WORK_DIR/androidsysroot"
 rm -rf "$BUILD" "$STAGE"
 mkdir -p "$STAGE"
@@ -58,6 +101,7 @@ if [ -z "$MESA_VERSION" ]; then
   MESA_VERSION="$TARGET_GPU_GEN"
 fi
 VERSION="$MESA_VERSION-${SOURCE_SHA:0:8}"
+[ "$TURNIP_VARIANT" = icd ] && VERSION="$VERSION-icd"
 
 resolve_cpu_flags "$NDK_CC"
 
@@ -106,7 +150,7 @@ for f in ${VESSEL_CPU_FLAGS:-}; do
   CPU_ARGS="$CPU_ARGS'$f'"
 done
 
-CROSS="$WORK_DIR/$COMPONENT-cross.ini"
+CROSS="$WORK_DIR/$COMPONENT-$TURNIP_VARIANT-cross.ini"
 cat > "$CROSS" <<EOF
 [binaries]
 c = '$NDK_CC'
@@ -164,17 +208,28 @@ done
 #      the DRM path, which this kernel does not expose for the GPU.
 #   2. the .so does land at src/freedreno/vulkan/, and the check below keeps it
 #      honest if a future rebase moves it.
-log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $NDK_API)"
+log "configuring $COMPONENT (freedreno/$TARGET_KMD, api $NDK_API, platforms=$TURNIP_PLATFORMS)"
 
 # Only the Vulkan driver is wanted: no GL, no EGL, no gallium, no window system
 # integration. android-stub replaces the platform libraries we cannot link
 # against in the container, and libbacktrace is disabled for the same reason.
+#
+# `android-stub` is refused outright without `platforms=android`:
+#   meson.build:1122: ERROR: Problem encountered: `-D android-stub=true` makes
+#   no sense without `-D platforms=android` or emulated Android
+# which is correct — the ICD build needs none of libcutils/liblog/libnativewindow,
+# so there is nothing to stub. Passed as an array so the option disappears
+# entirely rather than being set to false, which is a different thing to meson.
+ANDROID_OPTS=()
+if [ "$TURNIP_VARIANT" = hal ]; then
+  ANDROID_OPTS=(-Dandroid-stub=true -Dandroid-libbacktrace=disabled)
+fi
+
 meson setup "$BUILD" "$SRC" \
   --cross-file "$CROSS" \
-  -Dplatforms=android,x11 \
+  -Dplatforms="$TURNIP_PLATFORMS" \
   -Dplatform-sdk-version="$NDK_API" \
-  -Dandroid-stub=true \
-  -Dandroid-libbacktrace=disabled \
+  "${ANDROID_OPTS[@]}" \
   -Degl=disabled \
   -Dgbm=disabled \
   -Dgles1=disabled \
@@ -214,6 +269,24 @@ file "$SO" | grep -q 'ARM aarch64' \
   || die "libvulkan_freedreno.so is not an aarch64 binary: $(file -b "$SO")"
 file "$SO" | grep -q 'shared object' \
   || die "libvulkan_freedreno.so is not a shared object: $(file -b "$SO")"
+
+# What the .so exports decides what can load it, and both wrong answers are
+# silent: a HAL build dlopen'd directly resolves no entry point, and an ICD
+# build handed to libadrenotools is not a HAL, so the stock Qualcomm driver
+# answers instead with nothing said anywhere.
+EXPORTS="$("$NDK_BIN/llvm-readelf" --dyn-syms "$SO" 2>/dev/null | grep -v ' UND ' || true)"
+if [ "$TURNIP_VARIANT" = icd ]; then
+  grep -q 'vk_icdGetInstanceProcAddr' <<< "$EXPORTS" \
+    || die "the ICD build exports no vk_icdGetInstanceProcAddr.
+     -Dplatforms=$TURNIP_PLATFORMS was supposed to drop the Android HAL
+     packaging and emit a normal ICD. See what it did export with:
+       $NDK_BIN/llvm-readelf --dyn-syms $SO"
+  ok "exports vk_icdGetInstanceProcAddr — a plain dlopen can drive this"
+else
+  grep -qw 'HMI' <<< "$EXPORTS" \
+    || die "the HAL build exports no HMI; Android's Vulkan loader could not load it"
+  ok "exports HMI — the Android Vulkan loader can load this"
+fi
 
 install -m 0644 "$SO" "$STAGE/libvulkan_freedreno.so"
 # -Dstrip=true only applies at `meson install`, and we copy straight out of the
@@ -316,7 +389,7 @@ write_provenance "$STAGE/provenance.json" "$COMPONENT" "$VERSION"
 log "packaging"
 python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Turnip \
-  --name "Turnip $VERSION ($TARGET_NAME)" \
+  --name "Turnip $VERSION ($TARGET_NAME, $TURNIP_VARIANT)" \
   --version "$VERSION" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
