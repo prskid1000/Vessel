@@ -15,7 +15,7 @@ import java.io.File
  * `docs/LOGGING.md` is the source of truth for every term here and why it earns
  * its place. Change that document first.
  */
-const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+loaddll"
+const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+loaddll,+debugstr"
 
 /**
  * The Direct3D and WGL DLLs that must resolve to the shipped native builds.
@@ -25,8 +25,9 @@ const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+load
  * with `native,builtin` so a prefix launched without the environment still
  * prefers the real thing rather than silently falling back to wined3d.
  *
- * `opengl32` is in the list because a Mesa/Zink `opengl32.dll` replaces WGL, not
- * Direct3D — see the `OpenGL` package type in `build/package_wcp.py`.
+ * `opengl32` was in this list, on the reasoning that a Mesa/Zink `opengl32.dll`
+ * replaces WGL rather than Direct3D. It is out — see [WGL_DLL], which is the
+ * measurement that removed it.
  *
  * **This list must name only DLLs we actually ship.** `=n` means native *only*:
  * Wine's `loader.c` turns a missing native file into `STATUS_DLL_NOT_FOUND`
@@ -41,8 +42,51 @@ const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+load
  * the override the builtin silently wins and the DXVK we shipped never loads.
  */
 val D3D_DLL_OVERRIDES: List<String> = listOf(
-    "d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi", "opengl32",
+    "d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi",
 )
+
+/**
+ * **`opengl32` was in the list above and had to come out. It killed games.**
+ *
+ * Measured on the device with Metro 2033 Redux, twice each way, one variable:
+ *
+ * | `opengl32` | modules loaded | last line before it died |
+ * |---|---|---|
+ * | `=n` (Zink) | `libgallium_wgl.dll` | **`libgallium_wgl.dll`** |
+ * | `=b` (Wine's) | never loads Zink | `coml2.dll`, nine lines further |
+ *
+ * The process vanished on the native path with no exception, no tombstone and
+ * nothing on `debugstr` — a clean exit during `libgallium_wgl.dll`'s load.
+ *
+ * **The reason it reached a game that never asked for OpenGL is a static import
+ * chain**, and it is why this could not stay a per-container setting:
+ *
+ * ```
+ * metro.exe → d3dx11_43.dll → d3dcompiler_47.dll → wined3d.dll → opengl32.dll
+ *                                                              → libgallium_wgl.dll
+ * ```
+ *
+ * `d3dx11_43` is Wine's builtin D3DX11 helper, `d3dcompiler_47` imports
+ * `wined3d`, and `wined3d` imports `opengl32`. Those are load-time imports, so
+ * merely *touching* D3DX11 pulls in the whole GL stack — and the same run never
+ * loaded `d3d11.dll` or `dxgi.dll` at all. A pure Direct3D title was paying
+ * Zink's cost, and its crash, on the way to an API it never reached.
+ *
+ * **What this does not break.** Zink is still built, still packaged and still
+ * installed into `system32`; what changed is that nothing is *forced* onto it.
+ * A container that wants it says `opengl32=n` in its extra DLL overrides, which
+ * is the field that exists for exactly this. And the fallback is not a
+ * regression: Wine's builtin `opengl32` goes through `winex11`'s EGL bridge,
+ * which on this device already fails with `egl_init Failed to find required
+ * extension EGL_KHR_client_get_all_proc_addresses` — so an OpenGL title had no
+ * working path either way. The difference is that it now fails at the call
+ * instead of killing the process at load.
+ *
+ * Kept as a named constant rather than deleted so that the reasoning has
+ * somewhere to live and so the seed and the environment cannot disagree about
+ * it.
+ */
+const val WGL_DLL: String = "opengl32"
 
 /**
  * `WINEDLLOVERRIDES`, named because two places have to agree about it and one of

@@ -130,6 +130,9 @@ class XServerDisplay @Inject constructor(
     private val _frameRate = MutableStateFlow(FrameRate())
     override val frameRate: StateFlow<FrameRate> = _frameRate.asStateFlow()
 
+    private val _desktopUp = MutableStateFlow(false)
+    override val desktopUp: StateFlow<Boolean> = _desktopUp.asStateFlow()
+
     /**
      * Samples [GLRenderer.compositedFrames] on a timer while a session runs.
      *
@@ -243,6 +246,7 @@ class XServerDisplay @Inject constructor(
                 // stays a thing that owns sockets and a view and knows nothing
                 // about what the taskbar wants.
                 started.onWindowsChanged = { list -> _windows.value = list }
+            started.onDesktopUp = { _desktopUp.value = true }
                 _surface.value = started.view
                 startSampling(started.view.renderer, request.fpsLimit)
                 DisplayOutcome.Started(started.environment)
@@ -272,6 +276,7 @@ class XServerDisplay @Inject constructor(
         // Cleared here and not on session end: a taskbar still showing the
         // windows of a session that has stopped is worse than an empty one.
         _windows.value = emptyList()
+        _desktopUp.value = false
         session?.let { runCatching { it.stop() }.onFailure { e -> Log.w(TAG, "teardown", e) } }
         session = null
     }
@@ -320,6 +325,15 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     var onWindowsChanged: ((List<TopLevelWindow>) -> Unit)? = null
 
     /**
+     * Called, possibly repeatedly, once the Windows desktop has a window here.
+     *
+     * Deliberately idempotent rather than edge-triggered: [publishWindows] runs
+     * on every window change and the owner latches a `Boolean`, so there is no
+     * state to keep on this side and no first-call to miss.
+     */
+    var onDesktopUp: (() -> Unit)? = null
+
+    /**
      * Publish the current top-level window list.
      *
      * Called from the X server's own threads, which is why the whole thing is
@@ -363,9 +377,15 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * none is a window in any sense a user would recognise.
      */
     private fun publishWindows() {
-        val listener = onWindowsChanged ?: return
         val manager = xServer.windowManager
         val root = manager.rootWindow
+        // **Latched, and set before the early return.** The desktop appears
+        // before there is anything to put on the taskbar, which is exactly the
+        // moment a program is waiting for — and it must not go false again when
+        // the last window closes, because a desktop does not stop existing
+        // because nothing is on it. See [SessionDisplayServer.desktopUp].
+        if (root.children.any { it.isVirtualDesktop(root) }) onDesktopUp?.invoke()
+        val listener = onWindowsChanged ?: return
         val focused = manager.focusedWindow?.id
         val list = root.children.mapNotNull { window ->
             if (!window.isRealWindow()) return@mapNotNull null

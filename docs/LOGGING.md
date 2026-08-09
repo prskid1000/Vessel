@@ -94,6 +94,23 @@ this is a common failure.
 enable the 46 TRACE sites in `loader.c` plus six other files that default to the
 module channel.
 
+### `debugstr` — the guest program's own voice
+
+`OutputDebugStringA/W` is how a Windows program reports its own diagnostics, and
+it is the only channel a *game* writes to: a GUI application has no console, so
+its `printf` goes nowhere, and everything it wants to say about why it is giving
+up goes through this call. Wine implements it in `ntdll` and logs it on the
+`debugstr` channel — and with the channel off it is discarded silently.
+
+Added after a real failure. Metro 2033 Redux opened its window, ran for 1.2
+seconds and exited **cleanly** — no unhandled exception, no tombstone, no
+non-zero exit anybody could see. The session log's last line was a DLL load. A
+program that exits deliberately has a reason, and this is the channel it would
+have said the reason on.
+
+Cheap, unlike the excluded ones below: a program only pays for the strings it
+chooses to emit, and most emit none.
+
 ### `seh` — excluded, and crashes are free anyway
 
 It is far noisier than its macro count suggests: `dispatch_exception`

@@ -48,7 +48,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -245,6 +247,17 @@ class SessionRuntime @Inject constructor(
     private val launched = mutableListOf<Process>()
 
     /**
+     * The session's one output stream, shared by the desktop and every program.
+     *
+     * See [GuestOutputPipe] for why a per-process pipe silently loses everything
+     * a launched program says. Null when the FIFO could not be made, in which
+     * case the old per-process draining still applies and the log is merely
+     * poorer.
+     */
+    @Volatile
+    private var guestOutput: GuestOutputPipe? = null
+
+    /**
      * Whether the user asked for this.
      *
      * A session the user stopped ends [SessionExit.OK]. Without the flag it would
@@ -408,6 +421,26 @@ class SessionRuntime @Inject constructor(
                 "there is no running desktop to start it on",
             )
         }
+
+        // **`RUNNING` means the desktop process was spawned; this waits until it
+        // is the desktop.** Starting a program is a second
+        // `explorer /desktop=vessel,WxH`, and Wine gives the desktop to whichever
+        // of the two reaches `wine_create_desktop` first — see
+        // [SessionDisplayServer.desktopUp] for what losing that race did.
+        //
+        // Bounded, and a timeout starts the program anyway: a desktop that never
+        // appears is a different failure, and refusing to launch would hide it
+        // behind a message about the launcher.
+        if (!display.desktopUp.value) {
+            withTimeoutOrNull(DESKTOP_READY_TIMEOUT_MS) { display.desktopUp.first { it } }
+                ?: current.log.line(
+                    LogSource.VESSEL,
+                    LogLevel.WARN,
+                    "the desktop has not appeared after " +
+                        "${DESKTOP_READY_TIMEOUT_MS / 1000} s; starting $program anyway",
+                )
+        }
+
         // Reaped rather than tracked forever: a session left open all afternoon
         // would otherwise hold a Process object for every program ever started.
         launched.removeAll { !it.isAlive }
@@ -438,6 +471,10 @@ class SessionRuntime @Inject constructor(
             ),
             environment = current.environment,
             workingDirectory = workingDirectory?.takeIf { it.isDirectory } ?: current.layout.base,
+            // The launcher `explorer` exits about a second after the program
+            // starts. Its pipe dies with it and the program's does not exist —
+            // this is the case [GuestOutputPipe] was written for.
+            output = guestOutput?.file,
         )
         current.log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
 
@@ -454,8 +491,11 @@ class SessionRuntime @Inject constructor(
         // Its output belongs in the session log like everything else: a program
         // that starts and immediately dies is diagnosed from the lines it wrote,
         // and dropping them would make the launcher the one place in this app
-        // where a failure is silent.
-        scope.launch { runner.drain(process) { line -> record(current.log, line) } }
+        // where a failure is silent. With the FIFO the session reader already
+        // has it; without one this is the old, lossy path.
+        if (guestOutput == null) {
+            scope.launch { runner.drain(process) { line -> record(current.log, line) } }
+        }
         ProgramLaunch.Started
     }
 
@@ -731,10 +771,21 @@ class SessionRuntime @Inject constructor(
         // give the user somewhere to click would put a second, worse shell
         // underneath the real one.
         running.geometry = geometry
+
+        // Opened before the first guest process and read for the whole session,
+        // because the guest talks for far longer than any one child of ours
+        // lives. [GuestOutputPipe] has the measurement.
+        val pipe = GuestOutputPipe.create(File(running.layout.base, "tmp/guest.out"))
+        guestOutput = pipe
+        val reader = pipe?.let { open ->
+            scope.launch(Dispatchers.IO) { open.drain { line -> record(log, line) } }
+        }
+
         val spec = ProcessSpec(
             argv = running.tree.desktopArgv(geometry, emptyList()),
             environment = running.environment,
             workingDirectory = running.layout.base,
+            output = pipe?.file,
         )
         log.line(LogSource.VESSEL, LogLevel.INFO, "exec ${spec.commandLine}")
 
@@ -746,8 +797,11 @@ class SessionRuntime @Inject constructor(
         acquireWakeLock()
         _state.update { it.copy(phase = SessionPhase.RUNNING) }
 
-        runner.drain(process) { line -> record(log, line) }
-        val code = withContext(Dispatchers.IO) { process.waitFor() }
+        // With the FIFO in place the desktop's own pipe carries nothing, so
+        // waiting on it would only delay noticing that the desktop exited.
+        if (pipe == null) runner.drain(process) { line -> record(log, line) }
+        val code = withContext(Dispatchers.IO) { runInterruptible { process.waitFor() } }
+        reader?.cancel()
 
         // A non-zero exit is Failed rather than Exited even though DESIGN.md's
         // Exited state "states the exit code plainly". It does — but Failed is
@@ -1226,6 +1280,22 @@ class SessionRuntime @Inject constructor(
      */
     private suspend fun teardown(log: SessionLog) {
         val current = plan
+        // **Say why the session is ending, in the session's own log.**
+        //
+        // Without this a session that stopped on its own looks identical to one
+        // the user stopped: the file simply ends, the sidecar says `CRASHED`
+        // with no code, and the only way to tell a cancelled coroutine from a
+        // desktop that exited is to reason backwards from a null. Measured on
+        // the device while chasing a game that "did nothing": every run ended
+        // the same way and the log could not distinguish the causes.
+        val ending = _state.value
+        log.line(
+            LogSource.VESSEL,
+            LogLevel.INFO,
+            "session ending: phase=${ending.phase}" +
+                " exit=${ending.exitCode?.toString() ?: "none"}" +
+                " requested=$stopRequested",
+        )
         signals.withLock { resumeGuest() }
         desktop?.takeIf { it.isAlive }?.destroy()
         // Ahead of `wineserver -k` for the same reason as the desktop: these are
@@ -1256,6 +1326,12 @@ class SessionRuntime @Inject constructor(
         launched.clear()
         wineserver = null
         plan = null
+
+        // After `wineserver -k`, so the last thing a dying guest says is still
+        // read: closing the FIFO is the only thing that ends its reader, and
+        // doing it first would drop exactly the lines that explain the exit.
+        guestOutput?.close()
+        guestOutput = null
 
         runCatching { display.stop() }
         releaseWakeLock()
@@ -1779,6 +1855,17 @@ class SessionRuntime @Inject constructor(
 
         /** Long enough for a prefix with processes to shut down, short enough to feel like Stop. */
         const val KILL_TIMEOUT_MS = 8_000L
+
+        /**
+         * How long a program waits for the desktop to appear before it gives up
+         * waiting and starts anyway.
+         *
+         * Generous because the thing being waited for is a whole Wine desktop on
+         * a cold prefix, and cheap because the wait ends the instant the window
+         * maps — on this device that is well under a second, and the timeout is
+         * only ever paid by a session that was going to fail regardless.
+         */
+        const val DESKTOP_READY_TIMEOUT_MS = 20_000L
 
         const val PUBLISH_INTERVAL_MS = 150L
 

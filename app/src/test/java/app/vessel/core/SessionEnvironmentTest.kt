@@ -119,7 +119,7 @@ class SessionEnvironmentTest {
 
     @Test
     fun `WINEDEBUG is exactly the documented string, in the documented order`() {
-        assertEquals("-all,err+all,warn+module,+winediag,+loaddll", env()["WINEDEBUG"])
+        assertEquals("-all,err+all,warn+module,+winediag,+loaddll,+debugstr", env()["WINEDEBUG"])
     }
 
     @Test
@@ -273,7 +273,7 @@ class SessionEnvironmentTest {
     @Test
     fun `WINEDLLOVERRIDES names every D3D and WGL DLL as native`() {
         assertEquals(
-            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n",
+            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
             env()["WINEDLLOVERRIDES"],
         )
     }
@@ -290,7 +290,7 @@ class SessionEnvironmentTest {
             manifest = manifest,
         )
         assertEquals(
-            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n;winhttp=n,b",
+            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;winhttp=n,b",
             environment["WINEDLLOVERRIDES"],
         )
     }
@@ -302,7 +302,7 @@ class SessionEnvironmentTest {
         val manifest = fexManifest.withDllOverrides()
         for (blank in listOf("", "   ", ";")) {
             assertEquals(
-                "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n",
+                "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 env(mapOf("wine.dllOverrides" to ParamValue.Text(blank)), manifest)["WINEDLLOVERRIDES"],
             )
         }
@@ -492,8 +492,8 @@ class SessionEnvironmentTest {
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
                 "WINEESYNC" to "1",
-                "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll",
-                "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi,opengl32=n",
+                "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
+                "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
                 "DXVK_LOG_LEVEL" to "info",
                 // `none`, not the log directory: on a Wine build DXVK sends every

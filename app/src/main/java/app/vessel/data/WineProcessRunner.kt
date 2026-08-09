@@ -20,6 +20,14 @@ data class ProcessSpec(
     /** Overlaid onto the inherited environment, never replacing it. */
     val environment: Map<String, String>,
     val workingDirectory: File,
+    /**
+     * Where merged output goes, or null for a pipe of this process's own.
+     *
+     * Set to [GuestOutputPipe.file] for anything whose descendants outlive it —
+     * the desktop and every launched program. That class has the measurement
+     * for why a pipe loses their output.
+     */
+    val output: File? = null,
 ) {
     /** The command as one line, for the session log's header. */
     val commandLine: String get() = argv.joinToString(" ")
@@ -64,6 +72,11 @@ class WineProcessRunner @Inject constructor() {
         val builder = ProcessBuilder(spec.argv)
         builder.directory(spec.workingDirectory)
         builder.redirectErrorStream(true)
+        // `appendTo` and not `to`: several processes share the one FIFO and a
+        // truncating open would be nonsense on it. On a FIFO the open blocks
+        // until a reader exists, which [GuestOutputPipe] guarantees by holding
+        // one for the session.
+        spec.output?.let { builder.redirectOutput(ProcessBuilder.Redirect.appendTo(it)) }
         builder.environment().putAll(spec.environment)
         builder.start()
     }

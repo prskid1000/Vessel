@@ -215,6 +215,32 @@ interface SessionDisplayServer {
     val frameRate: StateFlow<FrameRate>
 
     /**
+     * Whether the Windows desktop has actually appeared on this server.
+     *
+     * **Not the same as "the desktop process started", and the difference ends
+     * sessions.** Wine's `explorer.exe /desktop=name,WxH` races to become the
+     * owner of the named desktop: the first one to reach `wine_create_desktop`
+     * wins and manages it, and every later one starts its command line and
+     * *exits*. Vessel starts the bare desktop and then — a millisecond later,
+     * as soon as the phase reads `RUNNING` — starts the program through a second
+     * `explorer` with the same desktop name. Whichever loses that race exits, and
+     * when the loser is the one this app is holding a `Process` for, the session
+     * tears down while a perfectly healthy desktop and game keep running
+     * underneath it.
+     *
+     * That is what "I launch a game and it drops me back to the home screen"
+     * was. Measured on the device: `session ending: phase=EXITED exit=0
+     * requested=false`, about 1.4 s in, with `explorer.exe /desktop=vessel` and
+     * the game both still alive afterwards.
+     *
+     * The X server is the only thing that can answer honestly, because the
+     * desktop existing *is* a window on it: the winning explorer maps one child
+     * of the root at the full desktop size. False until then, and true for the
+     * rest of the session.
+     */
+    val desktopUp: StateFlow<Boolean>
+
+    /**
      * Raise a window and give it the input focus.
      *
      * A no-op for an id the server does not have. A taskbar button pressed while
@@ -305,6 +331,10 @@ interface SessionDisplayServer {
         // session, where the alternative is a counter reporting a stall.
         override val frameRate: StateFlow<FrameRate> =
             MutableStateFlow(FrameRate()).asStateFlow()
+
+        // Headless: no desktop will ever appear, so a program launched into this
+        // session must not sit waiting for one that cannot come.
+        override val desktopUp: StateFlow<Boolean> = MutableStateFlow(true).asStateFlow()
 
         override fun focusWindow(id: Int) = Unit
 
