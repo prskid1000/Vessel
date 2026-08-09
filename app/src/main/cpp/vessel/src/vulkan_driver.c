@@ -124,7 +124,16 @@ static void probe_handle(void *handle, vessel_vk_driver *out)
 
     get_instance_proc_addr = (PFN_vkGetInstanceProcAddr)dlsym(handle, "vkGetInstanceProcAddr");
     if (!get_instance_proc_addr) {
-        set_error(out, "the loader exports no vkGetInstanceProcAddr: %s", dlerror());
+        /* An ICD exports the loader interface instead, and nothing else. The two
+         * differ only in what a NULL instance may return, which is the four
+         * global commands either way -- everything below asks for those and then
+         * asks the instance for the rest, so one path serves both. */
+        get_instance_proc_addr =
+            (PFN_vkGetInstanceProcAddr)dlsym(handle, "vk_icdGetInstanceProcAddr");
+    }
+    if (!get_instance_proc_addr) {
+        set_error(out, "exports neither vkGetInstanceProcAddr nor vk_icdGetInstanceProcAddr: %s",
+                  dlerror());
         return;
     }
 
@@ -240,6 +249,41 @@ void vessel_vk_probe_system(vessel_vk_driver *out)
     probe_handle(handle, out);
     /* Deliberately not dlclose()d. The platform loader keeps per-process global
      * state and a second probe in the same process must reach the same copy. */
+}
+
+void vessel_vk_probe_icd(const char *icd_path, vessel_vk_driver *out)
+{
+    void *handle;
+
+    memset(out, 0, sizeof(*out));
+    out->source = VESSEL_VK_SOURCE_ICD;
+
+    if (!icd_path || !*icd_path) {
+        set_error(out, "no ICD path given");
+        return;
+    }
+
+    /* No loader, no namespace surgery: an ICD is an ordinary shared library and
+     * this is the whole of loading one. Its own dependencies -- libxcb and
+     * friends for the x11 WSI -- resolve from the directory it sits in, which is
+     * on the search path in the app process and put there explicitly for the
+     * Wine one. See patches/wine/0009. */
+    handle = dlopen(icd_path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        set_error(out, "dlopen(%s) failed: %s", icd_path, dlerror());
+        return;
+    }
+
+    if (!dlsym(handle, "vk_icdGetInstanceProcAddr")) {
+        /* A HAL build reaches here whenever one is installed. Saying which shape
+         * the file is beats "it did not load": the caller's next move is the
+         * adrenotools probe, and that is only correct for a HAL. */
+        set_error(out, "%s exports no vk_icdGetInstanceProcAddr — this is a HAL build, "
+                       "not an ICD", icd_path);
+        return;
+    }
+
+    probe_handle(handle, out);
 }
 
 void vessel_vk_probe_adrenotools(const char *hooks_dir,

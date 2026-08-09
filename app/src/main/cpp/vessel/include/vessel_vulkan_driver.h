@@ -31,6 +31,8 @@ typedef enum {
     VESSEL_VK_SOURCE_SYSTEM = 0,
     /** `adrenotools_open_libvulkan()` with ADRENOTOOLS_DRIVER_CUSTOM. */
     VESSEL_VK_SOURCE_ADRENOTOOLS = 1,
+    /** A plain `dlopen` of an ICD, driven through `vk_icdGetInstanceProcAddr`. */
+    VESSEL_VK_SOURCE_ICD = 2,
 } vessel_vk_source;
 
 /**
@@ -107,6 +109,19 @@ void vessel_vk_probe_adrenotools(const char *hooks_dir,
                                  const char *driver_dir,
                                  const char *driver_name,
                                  vessel_vk_driver *out);
+
+/**
+ * Ask an ICD directly, with no loader in front of it.
+ *
+ * @param icd_path Absolute path of the driver `.so`.
+ *
+ * This is the shape the Wine side uses (`patches/wine/0009`) and the only one
+ * that can present to a window: the Android platform loader keeps the WSI
+ * surface layer for itself and understands only surfaces it made for an
+ * `ANativeWindow`. Fails with a message saying so when handed a HAL build, which
+ * is the caller's signal to try [vessel_vk_probe_adrenotools] instead.
+ */
+void vessel_vk_probe_icd(const char *icd_path, vessel_vk_driver *out);
 
 /** True only when Mesa/Turnip is the thing that answered. */
 int vessel_vk_driver_is_turnip(const vessel_vk_driver *driver);

@@ -32,12 +32,17 @@ val bundledPackages = listOf(
     "dxvk-2.7.1-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",
     "zink-26.3.0-devel-9c475fc3-canoe.wcp",
-    "turnip-26.3.0-devel-9c475fc3-canoe.wcp",
-    // Both Turnip builds, and the ICD wins: `build/turnip.sh` gives it the next
-    // versionCode up (260301 against 260300) precisely so the two can sit side
-    // by side, and `adoptLatest` takes the highest. It is the only one of the
-    // two that can present to a window — see docs/GRAPHICS.md — while the HAL
-    // build stays installed as the fallback that patches/wine/0006 drives.
+    // The ICD build of Turnip, and not the HAL build beside it in `dist/`. Only
+    // the ICD can present to a window: the Android platform loader the HAL has
+    // to be driven through keeps the WSI surface layer for itself and knows only
+    // surfaces it made for an ANativeWindow, so a swapchain on Wine's X11 window
+    // faults in the loader. docs/GRAPHICS.md has the whole story. Shipping the
+    // HAL too would cost 2 MB for a driver nothing would choose — `adoptLatest`
+    // takes the highest versionCode and the ICD is 260301 against its 260300.
+    //
+    // `build/turnip.sh` still builds the HAL by default and it stays in `dist/`;
+    // both `GpuProbe` and `patches/wine/0009` handle either shape by asking the
+    // file which it is, so installing one by hand still works.
     "turnip-26.3.0-devel-9c475fc3-icd-canoe.wcp",
 )
 

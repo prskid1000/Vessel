@@ -67,17 +67,35 @@ class GpuProbe @Inject constructor(
                 return@withContext GpuDrivers(system = failed, custom = null)
             }
             val system = read(VulkanSource.SYSTEM) { nativeProbeSystemVulkan() }
-            val custom = driver?.let {
-                read(VulkanSource.ADRENOTOOLS) {
-                    nativeProbeCustomVulkan(
-                        hooksDir.absolutePath,
-                        it.directory.absolutePath,
-                        it.libraryName,
-                    )
-                }
-            }
+            val custom = driver?.let { probeInstalled(it) }
             GpuDrivers(system = system, custom = custom)
         }
+
+    /**
+     * The installed driver, asked the way it can actually be loaded.
+     *
+     * Two package shapes exist and they need different mechanisms: an ICD is a
+     * plain `dlopen`, a HAL can only be reached through libadrenotools. Rather
+     * than read the package metadata and decide, this asks the file — exactly
+     * what `patches/wine/0009` does on the Wine side, so both answer the same
+     * way about the same driver. Falling back only on a failed ICD probe also
+     * means a HAL install still reports through the path that suits it.
+     *
+     * The ICD's failure is discarded when the fallback runs, and deliberately:
+     * "this is a HAL build, not an ICD" is not a fault, it is the other case.
+     */
+    private fun probeInstalled(driver: InstalledDriver): VulkanDriver {
+        val library = File(driver.directory, driver.libraryName)
+        val icd = read(VulkanSource.ICD) { nativeProbeIcdVulkan(library.absolutePath) }
+        if (icd.loaded) return icd
+        return read(VulkanSource.ADRENOTOOLS) {
+            nativeProbeCustomVulkan(
+                hooksDir.absolutePath,
+                driver.directory.absolutePath,
+                driver.libraryName,
+            )
+        }
+    }
 
     private inline fun read(source: VulkanSource, probe: () -> Array<String?>?): VulkanDriver =
         runCatching { probe() }
@@ -167,6 +185,8 @@ class GpuProbe @Inject constructor(
 
     private external fun nativeProbeSystemVulkan(): Array<String?>?
 
+    private external fun nativeProbeIcdVulkan(icdPath: String): Array<String?>?
+
     private external fun nativeProbeCustomVulkan(
         hooksDir: String,
         driverDir: String,
@@ -201,6 +221,13 @@ enum class VulkanSource(val label: String) {
 
     /** `adrenotools_open_libvulkan` with a driver Vessel installed. */
     ADRENOTOOLS("adrenotools"),
+
+    /**
+     * A plain `dlopen` of an installed ICD, driven through
+     * `vk_icdGetInstanceProcAddr` — the shape Wine uses, and the only one whose
+     * window-system integration works. See `docs/GRAPHICS.md`.
+     */
+    ICD("icd"),
 }
 
 /** VkDriverId values worth naming. Kept in step with `vessel_vulkan_driver.h`. */

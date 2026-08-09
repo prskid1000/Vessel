@@ -64,7 +64,8 @@ static jobjectArray to_array(JNIEnv *env, const vessel_vk_driver *driver)
 
     put(env, array, FIELD_OK, driver->ok ? "1" : "0");
     put(env, array, FIELD_SOURCE,
-        driver->source == VESSEL_VK_SOURCE_ADRENOTOOLS ? "adrenotools" : "system");
+        driver->source == VESSEL_VK_SOURCE_ADRENOTOOLS ? "adrenotools" :
+        driver->source == VESSEL_VK_SOURCE_ICD ? "icd" : "system");
     put(env, array, FIELD_ERROR, driver->error);
     put(env, array, FIELD_DEVICE_NAME, driver->device_name);
     put(env, array, FIELD_DRIVER_NAME, driver->driver_name);
@@ -87,6 +88,21 @@ Java_app_vessel_data_GpuProbe_nativeProbeSystemVulkan(JNIEnv *env, jobject thiz)
     vessel_vk_driver driver;
     (void)thiz;
     vessel_vk_probe_system(&driver);
+    return to_array(env, &driver);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_app_vessel_data_GpuProbe_nativeProbeIcdVulkan(JNIEnv *env, jobject thiz, jstring icd_path)
+{
+    vessel_vk_driver driver;
+    const char *path = NULL;
+
+    (void)thiz;
+
+    if (icd_path) path = (*env)->GetStringUTFChars(env, icd_path, NULL);
+    vessel_vk_probe_icd(path, &driver);
+    if (path) (*env)->ReleaseStringUTFChars(env, icd_path, path);
+
     return to_array(env, &driver);
 }
 
