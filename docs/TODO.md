@@ -98,15 +98,83 @@ is putting those pixels in a window.
   `dlopen` ok, loader interface version 5, `VK_KHR_xlib_surface` advertised,
   instance created, `Adreno (TM) 829` enumerated at api 1.4.358.
 
-- [ ] **Retire the HAL Turnip package.** Both builds ship today and only the ICD
-  can present to a window, so the HAL's only remaining job is offscreen work and
-  the `patches/wine/0006` path. Blocked on one windowed D3D frame through the
-  ICD, and on `GpuProbe`: it reaches the driver through libadrenotools by
-  construction, so handed the ICD directory it will report that the custom
-  driver did not answer while Wine is using it — a false negative in the one
-  screen built to prevent them. Teach it the ICD shape (`dlopen` +
-  `vk_icdGetInstanceProcAddr` + `driverID`, which is what
-  `tools/gfx/x11present.c` already does) in the same change.
+- [x] **A D3D program draws in a session, and the HAL package is retired.**
+  Metro 2033 Redux renders through the ICD inside a real container — the thing
+  no D3D program had ever done. So the HAL left the sideload bill of materials:
+  it cannot present to a window, and `adoptLatest` would never pick it over the
+  ICD's higher versionCode anyway. It still builds by default and still sits in
+  `dist/`; both `GpuProbe` and `patches/wine/0009` ask the *file* which shape it
+  is (`vk_icdGetInstanceProcAddr` present → ICD, else libadrenotools), so
+  installing one by hand still works.
+
+  `GpuProbe` had to learn the ICD shape in the same change or it would have
+  reported a working driver as absent — it reaches drivers through
+  libadrenotools by construction, and the container now references the ICD.
+
+## The graphics bugs Metro exposed
+
+Running an actual game found four things at once. Two are fixed; two are not,
+and the two that are not share a root cause.
+
+- [x] **A stopped program kept its taskbar button for the rest of the session.**
+  `OnWindowModificationListener` has **no destroy callback** — the taskbar only
+  ever kept up because `destroyWindow` unmaps first and *that* publishes. But
+  `unmapWindow` is guarded by `isMapped()`, so destroying an already-unmapped
+  window notified nothing and `removeAllSubwindowsAndWindow` took it out of the
+  tree in silence. Two ways in: stopping a minimised program, and any child of a
+  destroyed window, since the recursion unmaps none of them. Fixed by listening
+  to `onFreeResource`, which fires once per window removed, mapped or not.
+
+- [x] **The long-press window menu could not be opened.** The taskbar hides
+  itself after 4 s and the menu was state *inside* the taskbar button, so the
+  timer disposed the button mid-press and took the menu with it. Moved beside
+  the launcher, which had already solved exactly this, and added to the linger
+  effect's condition. Redrawn as a panel with a row of icon buttons, and given
+  the scrim it needed to be dismissable.
+
+- [ ] **A game that minimises itself cannot be restored, and Maximize cannot be
+  built.** Both are the same missing piece. Measured on device: Metro minimises
+  itself on focus loss — open `cmd` and the game's X window goes `1280x720` →
+  `160x46`, which is Wine shrinking it to the Win32 iconic size. It stays in the
+  taskbar, but tapping it does nothing, and Wine says why:
+
+  ```c
+  if (data->current_state.wm_state == IconicState) style |= WS_MINIMIZE;
+  ...
+  if (style & WS_MINIMIZE) return FALSE;      /* can_activate_window() */
+  ```
+  `dlls/winex11.drv/event.c:445`
+
+  Wine refuses to activate a minimised window, and the vendored server sets **no
+  `WM_STATE` at all** (zero hits across `com/winlator/xserver/`), so there is no
+  protocol-level way to say "restore". Wine is running *unmanaged* — it is
+  authoritative over its own geometry, which is also why a WM-initiated resize
+  would not give us Maximize.
+
+  *The fix is one piece of work for both:* enough ICCCM/EWMH that Wine treats the
+  session as managed — `_NET_SUPPORTING_WM_CHECK`, `_NET_SUPPORTED`, and a
+  maintained `WM_STATE` — after which restore is setting `WM_STATE` to
+  `NormalState` and activation is `_NET_ACTIVE_WINDOW`. **The risk is the point:**
+  flipping Wine from unmanaged to managed changes geometry and focus handling for
+  every window, not just the one being restored, so it needs on-device retesting
+  of the cases that work today. *Done when:* a fullscreen game survives a round
+  trip to `cmd` and back, and Maximize is a control that does something.
+
+- [ ] **A white bar across the top of a fullscreen game.** Roughly 36 of the 720
+  guest rows, which is suspiciously a Win32 caption height, and the game's parent
+  window and its client child are both `1280x720` — consistent with the client
+  being offset down by a caption and its bottom rows clipped. **Unproven**, and
+  it cannot be proven from the tooling as it stands: `dumpTree` prints size but
+  not **x/y**. Add those (and the decoration mask) to the `VesselWindows` dump
+  first; it is one line and the answer probably falls out of it.
+
+- [ ] **4 FPS in Metro, and nothing measured says where it goes.** The FPS
+  readout said 4 with the game rendering. The present path is **2.245 ms**, so at
+  a 250 ms frame it is ~1% — *the present path is not the bottleneck and neither
+  zero-copy nor anything else in the present chain should be started before this
+  is attributed.* Suspects in order: the game is x86-64 so FEX is on the hot
+  path; GPU render cost at 1280x720 on a phone; the full-window texture upload
+  per composited frame. See the present-path audit below.
 
 - [-] **`MESA_VK_WSI_DEBUG=sw,linear`** — tried on the paper argument, measured,
   and reverted. It removes a 0.60 ms GPU blit and is still ~14% slower on the
