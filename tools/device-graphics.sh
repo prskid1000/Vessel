@@ -341,7 +341,8 @@ in_app "cp $APP_DIR/pkg/dxvk/system32/*.dll  $SYS32/ && \
         cp $APP_DIR/pkg/dxvk/syswow64/*.dll  $WOW64/ && \
         cp $APP_DIR/pkg/vkd3d/system32/*.dll $SYS32/ && \
         cp $APP_DIR/pkg/vkd3d/syswow64/*.dll $WOW64/ && \
-        cp $APP_DIR/pkg/zink/system32/*.dll  $SYS32/"
+        cp $APP_DIR/pkg/zink/system32/*.dll  $SYS32/ && \
+        cp $APP_DIR/pkg/zink/syswow64/*.dll  $WOW64/ 2>/dev/null || true"
 
 # Read the sizes back rather than trusting cp's exit status. A DXVK d3d11.dll is
 # ~4 MB and Wine's builtin is ~1.5 MB, so the number alone says which one is
@@ -351,11 +352,19 @@ for f in system32/d3d11.dll system32/d3d12core.dll system32/opengl32.dll syswow6
   sz="$(in_app "stat -c %s $APP_DIR/prefix/drive_c/windows/$f 2>/dev/null || echo 0" | tr -cd '0-9')"
   printf '       %-28s %s bytes\n' "$f" "${sz:-0}"
 done
-# Zink ships an ARM64EC opengl32.dll and nothing for i386, so there is no
-# 32-bit desktop GL at all. Saying so here means the i686 opengl result reads as
-# a packaging gap rather than as a rendering failure.
+# Zink used to ship an ARM64EC opengl32.dll and nothing for i386, and the cost
+# of that was not confined to OpenGL: WINEDLLOVERRIDES above sets `opengl32=n`
+# for every process, so a 32-bit process had no native opengl32 to load, Wine
+# refused the builtin, and wined3d — which imports opengl32 — failed to load,
+# taking d3dcompiler_47 and every i686 D3D11 run down with it:
+#     err:module:import_dll Library opengl32.dll (which is needed by
+#                           L"C:\windows\system32\wined3d.dll") not found
+#     VESSEL-GFX api=d3d11 bits=32 result=FAIL msg=cannot load d3dcompiler_47.dll
+# build/zink.sh builds both halves now. Warn rather than die so an older package
+# still runs the suite, but say what it will cost.
 in_app_test "test -f $APP_DIR/pkg/zink/syswow64/opengl32.dll" \
-  || warn "the Zink package has no syswow64/opengl32.dll — 32-bit OpenGL cannot work"
+  || warn "the Zink package has no syswow64/opengl32.dll — 32-bit OpenGL cannot
+     work, and neither can 32-bit D3D11, because wined3d imports opengl32"
 ok "graphics DLLs installed"
 
 # --- Turnip ------------------------------------------------------------------
