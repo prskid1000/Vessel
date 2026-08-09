@@ -213,6 +213,37 @@ enum class TerminalProfile(
     ),
 
     /**
+     * Git Bash, the one entry here that is not always there.
+     *
+     * **The first profile with a real [installedAt], and the mechanism exists
+     * for exactly this.** Everything else on the menu is built from the Wine
+     * tree this project compiles, so it cannot be missing from a working
+     * prefix. Git is a component: 80 MB of native ARM64 Git for Windows,
+     * repackaged verbatim, installed on demand. Until it is there the button is
+     * drawn disabled and says why -- the same rule that removed PowerShell and
+     * `sh` when nothing stood behind them. The difference is that this one has
+     * something behind it.
+     *
+     * `git-bash.exe` rather than the bare `bash.exe`: the wrapper sets up the
+     * MSYS2 environment and opens mintty, which is what "Git Bash" means to
+     * anyone who has used it.
+     *
+     * **git.exe is the safe half and bash is the risk.** Git itself is a native
+     * Win32 program and should behave; `bash.exe` is MSYS2 and leans on
+     * `msys-2.0.dll`'s `fork()` emulation, which is the classic thing that
+     * misbehaves under Wine. The POSIX tools reach `cmd` through PATH either
+     * way -- see `PrefixRegistry.toolsPath` -- so `ls` and `grep` do not depend
+     * on this button working.
+     */
+    GIT_BASH(
+        label = "Git Bash",
+        program = "git-bash.exe",
+        installedAt = GIT_BASH_PATH,
+        missingReason = "Git is not installed in this container yet.",
+        viaConsole = false,
+    ),
+
+    /**
      * Not a joke.
      *
      * A real Win32 program with a menu, a dialog, a bitmap blit and a mouse,
@@ -249,6 +280,7 @@ enum class TerminalProfile(
             CONTROL_PANEL -> "control"
             WRITE -> "write"
             OLE_VIEW -> "oleview"
+            GIT_BASH -> "git bash"
             MINESWEEPER -> "winemine"
         }
 }
@@ -267,3 +299,14 @@ data class TerminalOption(
 ) {
     val enabled: Boolean get() = unavailable == null
 }
+
+/**
+ * Where the Git component's shell wrapper lands, as a guest path.
+ *
+ * The literal rather than a reference to `PrefixRegistry.GIT_DIR`, because this
+ * file is `ui/shell` and that one is `core`: the launcher already depends on
+ * core for `PeArchitecture`, so the import would be legal, but a `const` in an
+ * enum's initialiser cannot be a cross-module expression here. The two are
+ * asserted equal by `TerminalProfileTest`.
+ */
+private const val GIT_BASH_PATH = """C:\Program Files\Git\git-bash.exe"""

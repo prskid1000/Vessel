@@ -973,6 +973,13 @@ class SessionRuntime @Inject constructor(
             }
         mark(STEP_D3D, if (d3d == null) ProvisionStatus.SKIPPED else ProvisionStatus.DONE, d3d ?: NO_D3D)
 
+        // Tools last, and folded into the D3D step's line rather than given a
+        // row of its own: a container without Git is not missing anything the
+        // desktop needs, so a permanently SKIPPED row would be a checklist
+        // entry that means nothing on most launches.
+        runCatching { installTools(container, layout, current.log) }
+            .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "tools: ${it.message}") }
+
         return BootstrapOutcome.Applied
     }
 
@@ -1353,6 +1360,57 @@ class SessionRuntime @Inject constructor(
         "${installed.joinToString(", ")} — ${total.describe()}"
     }
 
+    /**
+     * Put the Tools component where a Windows program expects to find it.
+     *
+     * **A whole tree, not a handful of DLLs, which is why this is not
+     * [copyWindowsPayload].** DXVK and friends are a few files that belong in
+     * `system32`; Git is 7894 of them under a directory that has to keep its
+     * shape — `cmd\git.exe` finds its helpers by walking up from where it lives,
+     * so flattening or relocating any of it breaks the install in ways that only
+     * show up on the first command that shells out.
+     *
+     * `C:\Program Files\Git` because that is where Git for Windows puts itself
+     * and where every instruction on the internet says it is. The name is
+     * [PrefixRegistry.GIT_DIR], which the machine PATH already lists — the seed
+     * names those directories whether or not they exist, so installing the
+     * component needs no registry write and no relaunch to be on PATH.
+     *
+     * Copied rather than symlinked, on the same reasoning as the D3D payload: a
+     * link would let a guest program write through into the shared store that
+     * every other container on this version reads.
+     *
+     * Skipped entirely when the component is absent, which is the common case.
+     */
+    private suspend fun installTools(
+        containerId: String,
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val source = components.directoryFor(containerId, ComponentType.TOOLS) ?: return@withContext
+        val target = File(layout.prefix, GIT_PREFIX_DIR)
+
+        // Present already? The marker is the one file everything else hangs off.
+        if (File(target, GIT_SENTINEL).isFile) {
+            log.line(LogSource.VESSEL, LogLevel.INFO, "tools: ${PrefixRegistry.GIT_DIR} already installed")
+            return@withContext
+        }
+
+        if (!target.parentFile!!.isDirectory && !target.parentFile!!.mkdirs()) {
+            error("could not create ${target.parentFile!!.path}")
+        }
+        // Into a sibling and renamed, so a launch killed mid-copy leaves no
+        // half-tree that the sentinel check above would then call installed.
+        val staging = File(target.parentFile, "${target.name}$STAGING_SUFFIX")
+        staging.deleteRecursively()
+        source.copyRecursively(staging, overwrite = true)
+        target.deleteRecursively()
+        if (!staging.renameTo(target)) error("could not move the tools payload into place")
+
+        val files = target.walkTopDown().count { it.isFile }
+        log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $files file(s) into ${PrefixRegistry.GIT_DIR}")
+    }
+
     /** What one package's payload cost. */
     private data class Deployed(val copied: Int = 0, val present: Int = 0) {
         operator fun plus(other: Deployed) = Deployed(copied + other.copied, present + other.present)
@@ -1667,6 +1725,15 @@ class SessionRuntime @Inject constructor(
          * of its own, because a missing FEX stops the prefix running anything at
          * all rather than only its Direct3D.
          */
+        /** [PrefixRegistry.GIT_DIR] as a path under the prefix. */
+        const val GIT_PREFIX_DIR = "drive_c/Program Files/Git"
+
+        /** The one file whose presence means the tree finished copying. */
+        const val GIT_SENTINEL = "cmd/git.exe"
+
+        /** Where a tools tree is assembled before it is renamed into place. */
+        const val STAGING_SUFFIX = ".staging"
+
         val D3D_COMPONENTS = listOf(
             ComponentType.DXVK,
             ComponentType.VKD3D,
