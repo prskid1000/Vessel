@@ -145,12 +145,24 @@ class SessionShellHost @Inject constructor(
             return profile.missingReason
         }
 
+        // **The full path when the profile has one, the bare name otherwise.**
+        // Wine resolves a bare name against PATH, which is right for everything
+        // it ships — those all live in system32 — and wrong for a component.
+        // `git-bash.exe` sits in `C:\Program Files\Git`, and PATH names Git's
+        // `cmd`, `usr/bin` and `clangarm64/bin` subdirectories rather than its
+        // root, because that is what Git's own installer puts there. So the
+        // launch was `wine explorer /desktop=… git-bash.exe`, Wine found
+        // nothing, and the button did nothing at all — no window, no error.
+        // `installedAt` already names the exact file; it was checked for
+        // existence just above and then not used.
+        val target = installedAt ?: profile.program
+
         return when (
             val outcome = runtime.launchProgram(
                 // A shell gets a console drawn around it; a Windows application
                 // opens its own window and would be given a second, empty one.
-                program = if (profile.viaConsole) WINE_CONSOLE else profile.program,
-                arguments = if (profile.viaConsole) listOf(profile.program) else emptyList(),
+                program = if (profile.viaConsole) WINE_CONSOLE else target,
+                arguments = if (profile.viaConsole) listOf(target) else emptyList(),
                 // The user's own drive, not the shell's install directory. A
                 // terminal that opens in `C:\Program Files\PowerShell\7` has put
                 // the user somewhere they did not ask to be and cannot write to.
