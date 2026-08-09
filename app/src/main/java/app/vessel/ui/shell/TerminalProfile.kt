@@ -24,6 +24,17 @@ package app.vessel.ui.shell
  * So a "profile" here is what Windows Terminal's profiles are: a name and the
  * program to start. The list is fixed rather than user-editable.
  *
+ * **Internet Explorer was here and is gone, and the reason is worth keeping.**
+ * Wine's `iexplore.exe` is not a browser: it is a thin shell over `mshtml.dll`,
+ * and Wine's built-in `mshtml` renders nothing itself — it delegates the whole
+ * HTML engine to **wine-gecko**, a packaged Firefox build that Wine downloads
+ * separately when a prefix is created. Vessel provisions non-interactively and
+ * neither ships nor fetches Gecko, so `C:\windows\system32\gecko` holds an empty
+ * `plugin` directory and the window opens with no engine behind it. Networking
+ * is not the problem and was checked: `INTERNET` is granted and Wine uses the
+ * host's sockets. Bundling Gecko would be ~50 MB for a Firefox fork old enough
+ * that modern HTTPS fails before rendering matters.
+ *
  * **PowerShell and a POSIX shell were here and are gone.** Both were drawn
  * disabled, truthfully saying they were not installed, and both stayed that way
  * because neither component was ever built — a button that has only ever
@@ -191,18 +202,6 @@ enum class TerminalProfile(
     ),
 
     /**
-     * Renders almost nothing written this decade, and is still the only thing
-     * here that can open an HTML file.
-     */
-    INTERNET_EXPLORER(
-        label = "Internet Explorer",
-        program = "iexplore.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
      * The COM object browser. Niche, and the only window onto the OLE registry.
      */
     OLE_VIEW(
@@ -249,7 +248,6 @@ enum class TerminalProfile(
             TASK_MANAGER -> "taskmgr"
             CONTROL_PANEL -> "control"
             WRITE -> "write"
-            INTERNET_EXPLORER -> "iexplore"
             OLE_VIEW -> "oleview"
             MINESWEEPER -> "winemine"
         }
