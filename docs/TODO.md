@@ -84,13 +84,29 @@ is putting those pixels in a window.
   Java X server. That is the present baseline this project never had.
   *Done when:* a windowed D3D11 program draws through the ICD inside a session.
 
-- [ ] **Wine cannot load the ICD yet, and that is the next piece of work.**
-  `patches/wine/0006` opens Vulkan through libadrenotools; an ICD needs a plain
-  `dlopen` and `vk_icdGetInstanceProcAddr`. Until that lands the ICD package is
-  deliberately out of the sideload bill of materials and out of
-  `registry/contents.json`, so nothing can install a driver Wine cannot open.
-  The change is small — try the ICD entry point first, fall back to the
-  adrenotools path.
+- [x] **Wine can load the ICD.** `patches/wine/0009` tries the ICD entry point
+  first and falls back to the adrenotools path, exactly as this note predicted:
+  `VESSEL_VULKAN_ICD` is dlopen'ed by absolute path and kept only if it exports
+  `vk_icdGetInstanceProcAddr`. The one wrinkle the note did not foresee is that
+  `vkGetDeviceProcAddr` cannot be resolved at dlopen time — an ICD exports no
+  other Vulkan symbol and answers a NULL instance for the four global commands
+  only — so the instance is caught in a `vkGetInstanceProcAddr` wrapper and the
+  device entry point resolved from it on first use.
+
+  The ICD package is now in the sideload bill of materials. Verified on device
+  before the Wine side existed, in a plain `linker64` process as the app's uid:
+  `dlopen` ok, loader interface version 5, `VK_KHR_xlib_surface` advertised,
+  instance created, `Adreno (TM) 829` enumerated at api 1.4.358.
+
+- [ ] **Retire the HAL Turnip package.** Both builds ship today and only the ICD
+  can present to a window, so the HAL's only remaining job is offscreen work and
+  the `patches/wine/0006` path. Blocked on one windowed D3D frame through the
+  ICD, and on `GpuProbe`: it reaches the driver through libadrenotools by
+  construction, so handed the ICD directory it will report that the custom
+  driver did not answer while Wine is using it — a false negative in the one
+  screen built to prevent them. Teach it the ICD shape (`dlopen` +
+  `vk_icdGetInstanceProcAddr` + `driverID`, which is what
+  `tools/gfx/x11present.c` already does) in the same change.
 
 - [-] **`MESA_VK_WSI_DEBUG=sw,linear`** — tried on the paper argument, measured,
   and reverted. It removes a 0.60 ms GPU blit and is still ~14% slower on the
