@@ -63,27 +63,22 @@ enum class TerminalProfile(
      */
     val viaConsole: Boolean = true,
 ) {
+    // **Everything Wine provides that opens a window, in the order anybody
+    // reaches for it.** Enum order is display order and the strip scrolls, so
+    // ordering is the whole of the design work here: the first handful are what
+    // a user wants on a phone screen without swiping, and the tail is real,
+    // niche, and costs nothing to carry because Vessel ships none of it.
+    //
+    // Every one was verified present in a provisioned prefix on 2026-08-09. They
+    // are all built from `programs/` in the Wine tree this project compiles,
+    // which is the same argument that makes `cmd.exe` safe to offer with no
+    // check — see `installedAt`.
+
     COMMAND_PROMPT(
         label = "Command Prompt",
         program = "cmd.exe",
         installedAt = null,
         missingReason = "",
-    ),
-
-    /**
-     * Wine's own registry editor, interactively this time.
-     *
-     * Vessel already runs it non-interactively on every launch to apply
-     * `prefix-seed.reg`, so it is present in every prefix by definition. Having
-     * it on the menu is the difference between a container whose settings are
-     * whatever Vessel decided and one the user can actually inspect and change.
-     */
-    REGEDIT(
-        label = "Registry Editor",
-        program = "regedit.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
     ),
 
     /**
@@ -106,11 +101,10 @@ enum class TerminalProfile(
     /**
      * Wine's Notepad, which is a real Win32 program and not a stand-in.
      *
-     * Built from `programs/notepad` in the tree this project compiles, so it is
-     * in every prefix by the same argument as `cmd.exe`. Worth a permanent slot
-     * for a reason beyond editing text: it is the shortest way to prove the
-     * guest is *working* — a window, a menu bar, a caret, and a keyboard that
-     * reaches it. It was the program this project used to prove exactly that.
+     * Worth a permanent slot for more than editing text: it is the shortest way
+     * to prove the guest is *working* - a window, a menu bar, a caret, and a
+     * keyboard that reaches it. It is what this project used to prove exactly
+     * that.
      */
     NOTEPAD(
         label = "Notepad",
@@ -121,16 +115,32 @@ enum class TerminalProfile(
     ),
 
     /**
+     * Wine's own registry editor, interactively this time.
+     *
+     * Vessel already runs it non-interactively on every launch to apply
+     * `prefix-seed.reg`, so it is present in every prefix by definition. Having
+     * it on the menu is the difference between a container whose settings are
+     * whatever Vessel decided and one the user can inspect and change.
+     */
+    REGEDIT(
+        label = "Registry Editor",
+        program = "regedit.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
      * Wine's own configuration, and the closest thing this product has to
      * settings for a container.
      *
-     * `docs/DESIGN.md` removed Vessel's settings screen deliberately — a
+     * `docs/DESIGN.md` removed Vessel's settings screen deliberately - a
      * container is configured correctly for this device and there is nothing
      * for a user to decide. That argument covers *Vessel's* settings and not
-     * Wine's: the Windows version a program checks, a DLL override for a
-     * specific title, the audio driver. Those are real, they are per-prefix, and
-     * winecfg is where a Wine user already knows to look for them. Shipping the
-     * tool beats reimplementing a subset of it.
+     * Wine's: the Windows version a program checks, a DLL override for one
+     * title, the audio driver. Those are real, per-prefix, and winecfg is where
+     * a Wine user already knows to look. Shipping the tool beats reimplementing
+     * a subset of it.
      */
     WINECFG(
         label = "Wine Configuration",
@@ -139,6 +149,167 @@ enum class TerminalProfile(
         missingReason = "",
         viaConsole = false,
     ),
+
+    /**
+     * The one entry here that does something nothing else in Vessel can.
+     *
+     * Vessel's rail can pause or stop the whole session. It cannot end *one*
+     * guest program that has stopped responding, and there is no other way to:
+     * the taskbar focuses a window, it does not kill one. That is why this sits
+     * above the rest of the tail.
+     */
+    TASK_MANAGER(
+        label = "Task Manager",
+        program = "taskmgr.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * The other half of installing something.
+     *
+     * A container accumulates installs and nothing in Vessel removes one. The
+     * only lever it has is deleting the whole container, which takes the rest of
+     * the prefix with it.
+     */
+    UNINSTALLER(
+        label = "Add or Remove Programs",
+        program = "uninstaller.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Control Panel - a shell over the applets, winecfg's among them.
+     */
+    CONTROL_PANEL(
+        label = "Control Panel",
+        program = "control.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Thinner than it sounds, and still the first thing anybody debugging this
+     * project's graphics will open.
+     */
+    DXDIAG(
+        label = "DirectX Diagnostics",
+        program = "dxdiag.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * What the guest thinks it is running on.
+     */
+    MSINFO(
+        label = "System Information",
+        program = "msinfo32.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * The Windows version a program would be told, in one dialog.
+     */
+    WINVER(
+        label = "About Windows",
+        program = "winver.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * In Wine this hands off to whatever is registered for `.rtf` and usually
+     * lands back on Notepad. Carried because it is what a Windows user expects
+     * to find, not because it is a second editor.
+     */
+    WRITE(
+        label = "WordPad",
+        program = "write.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Renders almost nothing written this decade, and is still the only thing
+     * here that can open an HTML file.
+     */
+    INTERNET_EXPLORER(
+        label = "Internet Explorer",
+        program = "iexplore.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * The COM object browser. Niche, and the only window onto the OLE registry.
+     */
+    OLE_VIEW(
+        label = "OLE/COM Object Viewer",
+        program = "oleview.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Present because Wine ships it.
+     */
+    ODBC(
+        label = "ODBC Data Sources",
+        program = "odbcad32.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Windows 3.1's shell, still built and still starts.
+     */
+    PROGRAM_MANAGER(
+        label = "Program Manager",
+        program = "progman.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * It draws, and on this project that is not nothing.
+     */
+    CLOCK(
+        label = "Clock",
+        program = "clock.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Not a joke.
+     *
+     * A real Win32 program with a menu, a dialog, a bitmap blit and a mouse,
+     * which makes it the cheapest end-to-end 2D smoke test in the prefix and the
+     * only program here anybody would open twice.
+     */
+    MINESWEEPER(
+        label = "Minesweeper",
+        program = "winemine.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
     ;
 
     /** Whether this shell is one Wine provides rather than one somebody installed. */
@@ -153,10 +324,23 @@ enum class TerminalProfile(
     val shortLabel: String
         get() = when (this) {
             COMMAND_PROMPT -> "cmd"
-            REGEDIT -> "reg"
             WINE_EXPLORER -> "files"
             NOTEPAD -> "notepad"
+            REGEDIT -> "reg"
             WINECFG -> "winecfg"
+            TASK_MANAGER -> "taskmgr"
+            UNINSTALLER -> "uninstall"
+            CONTROL_PANEL -> "control"
+            DXDIAG -> "dxdiag"
+            MSINFO -> "msinfo"
+            WINVER -> "winver"
+            WRITE -> "write"
+            INTERNET_EXPLORER -> "iexplore"
+            OLE_VIEW -> "oleview"
+            ODBC -> "odbc"
+            PROGRAM_MANAGER -> "progman"
+            CLOCK -> "clock"
+            MINESWEEPER -> "winemine"
         }
 }
 

@@ -406,10 +406,17 @@ fun SessionLauncher(
                     // bulleted-list mark for the *registry editor*.
                     icon = when (option.profile) {
                         TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
-                        TerminalProfile.REGEDIT -> VIcons.List
                         TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
-                        TerminalProfile.NOTEPAD -> VIcons.File
+                        TerminalProfile.REGEDIT -> VIcons.List
                         TerminalProfile.WINECFG -> VIcons.Monitor
+                        TerminalProfile.TASK_MANAGER -> VIcons.List
+                        TerminalProfile.DXDIAG -> VIcons.Monitor
+                        TerminalProfile.MSINFO -> VIcons.Info
+                        TerminalProfile.WINVER -> VIcons.Info
+                        // Everything else is a document-shaped program, and the
+                        // glyph is only what shows for the moment before its
+                        // real icon arrives.
+                        else -> VIcons.File
                     },
                     bitmap = rememberBuiltInIcon(containerId, option.profile.program),
                     caption = option.profile.shortLabel,

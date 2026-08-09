@@ -1,6 +1,7 @@
 package app.vessel.di
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.core.DataStoreFactory
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
@@ -24,6 +25,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
+import java.io.File
 import javax.inject.Singleton
 
 @Module
@@ -107,7 +109,10 @@ object DataModule {
         json: Json,
     ): DataStore<ContainerDocument> = DataStoreFactory.create(
         serializer = ContainerDocumentSerializer(json),
-        corruptionHandler = ReplaceFileCorruptionHandler { ContainerDocument() },
+        corruptionHandler = ReplaceFileCorruptionHandler {
+            preserveCorruptFile(context, CONTAINERS_FILE, it)
+            ContainerDocument()
+        },
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
         produceFile = { context.dataStoreFile(CONTAINERS_FILE) },
     )
@@ -127,11 +132,57 @@ object DataModule {
         json: Json,
     ): DataStore<AppShortcutDocument> = DataStoreFactory.create(
         serializer = AppShortcutDocumentSerializer(json),
-        corruptionHandler = ReplaceFileCorruptionHandler { AppShortcutDocument() },
+        corruptionHandler = ReplaceFileCorruptionHandler {
+            preserveCorruptFile(context, SHORTCUTS_FILE, it)
+            AppShortcutDocument()
+        },
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
         produceFile = { context.dataStoreFile(SHORTCUTS_FILE) },
     )
 
+    /**
+     * Keep the bytes, and say so, before a corruption handler throws them away.
+     *
+     * **`ReplaceFileCorruptionHandler` deletes the user's data and leaves no
+     * evidence at all.** That was the arrangement here: an unreadable
+     * `shortcuts.json` became an empty one, silently, and the only way anyone would
+     * learn of it is by noticing their programs had gone. It happened on this
+     * device on 2026-08-09 — two shortcuts, a 47-byte empty document written while
+     * the app sat idle, and nothing anywhere saying why. The cause is still unknown
+     * and that is the point: there was nothing left to diagnose it with.
+     *
+     * So the file is moved aside rather than overwritten, and the event is logged at
+     * ERROR with the reason the serializer gave. Replacing is still the right
+     * behaviour — an app that cannot open is worse than one that has forgotten your
+     * tiles — but it must be recoverable and it must be provable.
+     *
+     * `.corrupt` and not a timestamped series: one copy is enough to diagnose from,
+     * and a directory that grows a file per failure is its own problem. A second
+     * failure overwrites the first, which is the right trade — the most recent one
+     * is the one somebody is looking into.
+     *
+     * Best-effort throughout. This runs while DataStore is recovering, and throwing
+     * from here would turn a recoverable read into the crash the handler exists to
+     * prevent.
+     */
+    private fun preserveCorruptFile(context: Context, name: String, cause: Throwable) {
+        runCatching {
+            val file = context.dataStoreFile(name)
+            val kept = File(file.parentFile, "$name.corrupt")
+            val bytes = if (file.isFile) file.length() else 0L
+            if (file.isFile) {
+                kept.delete()
+                if (!file.renameTo(kept)) file.copyTo(kept, overwrite = true)
+            }
+            Log.e(
+                "VesselData",
+                "$name could not be read and has been replaced with an empty one. " +
+                    "The previous $bytes bytes are at ${kept.absolutePath}. " +
+                    "Cause: ${cause.message}",
+                cause,
+            )
+        }
+    }
 
     /**
      * The provisioner's narrow view of Android storage. See [PrefixDrives].
