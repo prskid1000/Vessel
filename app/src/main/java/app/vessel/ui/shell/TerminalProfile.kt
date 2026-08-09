@@ -43,6 +43,46 @@ package app.vessel.ui.shell
  * from source and belongs in the APK, PowerShell 7 cannot be built from source
  * and belongs behind the component downloader. Until then the honest list is
  * the programs Wine itself provides.
+ *
+ * **Git was here, in three forms, and is gone — because [COMMAND_PROMPT]
+ * already is it.** The Git component is still installed and still on the
+ * machine PATH (`PrefixRegistry.toolsPath`); what was removed is a button, and
+ * only after measuring what a button could add.
+ *
+ * *`git-bash.exe` did nothing at all.* It is a launcher for `mintty`, which
+ * wants a pty from `msys-2.0.dll`, and it is GUI-subsystem — so it started,
+ * failed, and exited with no window and no error.
+ *
+ * *`usr\bin\bash.exe --login -i` under `wineconsole` started and then hung the
+ * phone.* `ps` during the launch:
+ *
+ * ```
+ * 317  bash.exe --login -i     1.4%  S   <- parent, waiting
+ * 336  bash.exe --login -i    98.6%  R   <- child, spinning
+ * ```
+ *
+ * `wchan` 0, state `R`: a userspace busy loop. That is MSYS2's `fork()`
+ * emulation deadlocking under Wine — the child never completes the handshake
+ * that hands it the parent's cloned address space. Device-wide CPU sat at 96%
+ * user until it was killed, which is also what the "Git Bash freezes the
+ * pointer" report really was. `/etc/profile` forks on its way in, so a login
+ * shell never reaches a prompt, and reaching one would not help: bash forks for
+ * every external command.
+ *
+ * *`git-cmd.exe` worked, and was still not worth a button.* It reached a `C:\>`
+ * prompt and `git --version` answered `git version 2.55.0.windows.3`. But all
+ * it does beyond `cmd.exe` is set two variables and try to make a `doskey`
+ * macro so `git` resolves without PATH — and it printed an error doing even
+ * that, because Wine ships no `doskey.exe`. With Git's three directories
+ * already on the machine PATH the macro was redundant before it failed.
+ *
+ * **What the Command Prompt gives you instead, watched working on the device:**
+ * `git version 2.55.0.windows.3`, `ls (GNU coreutils) 8.32`, `sed (GNU sed)
+ * 4.9`, `awk "BEGIN{print 7*6}"` → `42`, and `ls --version | grep -i coreutils`
+ * — a real pipeline between two x86-64 MSYS2 processes under FEX, because cmd
+ * pipes with two processes and a handle rather than with `fork()`. The only
+ * thing missing is the shell language itself: subshells, `$(…)`, and `.sh`
+ * scripts.
  */
 enum class TerminalProfile(
     /** What the launcher calls it. */
@@ -73,17 +113,6 @@ enum class TerminalProfile(
      * putting a console in front of one would give it a second, empty one.
      */
     val viaConsole: Boolean = true,
-
-    /**
-     * Arguments the program needs to be the thing the label promises.
-     *
-     * Empty for every entry today — `cmd.exe` with no arguments is a command
-     * prompt, and `git-cmd.exe` sets up its own. Kept because it is the
-     * difference between a shell binary and a shell: it carried `--login -i` for
-     * the `bash.exe` entry that [GIT_CMD] replaced, and the next component that
-     * needs a switch to be interactive will need it again.
-     */
-    val arguments: List<String> = emptyList(),
 ) {
     // **Everything Wine provides that opens a window, in the order anybody
     // reaches for it.** Enum order is display order and the strip scrolls, so
@@ -224,64 +253,6 @@ enum class TerminalProfile(
     ),
 
     /**
-     * Git's own command prompt — and **not** Git Bash, which cannot work here.
-     *
-     * The one entry on this menu that is not always there. Everything else is
-     * built from the Wine tree this project compiles; Git is a component,
-     * installed on demand, so until it is there the button is drawn disabled and
-     * says why.
-     *
-     * ## Why this is not Git Bash, measured on the device
-     *
-     * Pointing it at `usr\bin\bash.exe --login -i` under `wineconsole` really
-     * does start. `ps` during a launch:
-     *
-     * ```
-     * 310  wineconsole  bash.exe --login -i
-     * 313  conhost.exe --server 0x30
-     * 317  bash.exe --login -i     1.4%  S   <- parent, waiting
-     * 336  bash.exe --login -i    98.6%  R   <- child, spinning
-     * ```
-     *
-     * `wchan` is 0 and the state is `R`: a userspace busy loop, not a blocked
-     * syscall. That is `msys-2.0.dll`'s `fork()` emulation deadlocking under
-     * Wine. Cygwin-style `fork()` clones the parent's address space into a
-     * freshly created child at the same base and hands control over through
-     * shared memory and events; here the handshake never completes, the parent
-     * waits for ever and the child burns a whole core. Device-wide CPU sat at
-     * 96% user until the process was killed. `/etc/profile` forks on its way in,
-     * so a login shell never reaches a prompt — and reaching one would not help,
-     * because bash forks for every external command.
-     *
-     * The version before that pointed at `git-bash.exe` and did nothing at all:
-     * that is a launcher for `mintty`, which wants a pty from the same DLL, and
-     * it is GUI-subsystem so it failed silently. Both are the same dead end
-     * approached from different sides.
-     *
-     * `git-cmd.exe` has none of it in the way: `aa64` native, sets Git's
-     * environment, starts `cmd.exe`. A Win32 console is the one thing this stack
-     * is known to provide — [COMMAND_PROMPT] has worked since the first session.
-     * [viaConsole] is false because it opens its own.
-     *
-     * ## What is actually lost
-     *
-     * Less than it sounds. `git-cmd.exe`, `cmd\git.exe` and
-     * `clangarm64\bin\git.exe` are all `aa64` — **Git itself never needed
-     * MSYS2**. The POSIX tools work too: `usr\bin` is on the machine PATH (see
-     * `PrefixRegistry.toolsPath`), those binaries are x86-64 and run through
-     * FEX, and `ls` and `grep` were watched working from `cmd`. What is gone is
-     * the *shell* — pipelines, subshells, and shell scripts — because every one
-     * of those is a `fork()`.
-     */
-    GIT_CMD(
-        label = "Git",
-        program = GIT_CMD_PATH,
-        installedAt = GIT_CMD_PATH,
-        missingReason = "Git is not installed in this container yet.",
-        viaConsole = false,
-    ),
-
-    /**
      * Not a joke.
      *
      * A real Win32 program with a menu, a dialog, a bitmap blit and a mouse,
@@ -318,7 +289,6 @@ enum class TerminalProfile(
             CONTROL_PANEL -> "control"
             WRITE -> "write"
             OLE_VIEW -> "oleview"
-            GIT_CMD -> "git"
             MINESWEEPER -> "winemine"
         }
 }
@@ -337,16 +307,3 @@ data class TerminalOption(
 ) {
     val enabled: Boolean get() = unavailable == null
 }
-
-/**
- * Where the Git component's command prompt lands, as a guest path.
- *
- * The literal rather than a reference to `PrefixRegistry.GIT_DIR`, because this
- * file is `ui/shell` and that one is `core`: the launcher already depends on
- * core for `PeArchitecture`, so the import would be legal, but a `const` in an
- * enum's initialiser cannot be a cross-module expression here.
- *
- * `git-cmd.exe`, not `git-bash.exe` and not `usrinash.exe` — see
- * [TerminalProfile.GIT_CMD] for the two measurements that ruled both out.
- */
-private const val GIT_CMD_PATH = """C:\Program Files\Git\git-cmd.exe"""

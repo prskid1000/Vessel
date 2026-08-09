@@ -174,11 +174,7 @@ class SessionShellHost @Inject constructor(
                 // A shell gets a console drawn around it; a Windows application
                 // opens its own window and would be given a second, empty one.
                 program = if (profile.viaConsole) WINE_CONSOLE else target,
-                arguments = if (profile.viaConsole) {
-                    listOf(target) + profile.arguments
-                } else {
-                    profile.arguments
-                },
+                arguments = if (profile.viaConsole) listOf(target) else emptyList(),
                 // The user's own drive, not the shell's install directory. A
                 // terminal that opens in `C:\Program Files\PowerShell\7` has put
                 // the user somewhere they did not ask to be and cannot write to.
