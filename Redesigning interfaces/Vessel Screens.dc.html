@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="stylesheet" href="_ds/nocturne-6f1e3ee2-fbd5-4e24-8875-bd2da8907777/styles.css">
+<script src="_ds/nocturne-6f1e3ee2-fbd5-4e24-8875-bd2da8907777/_ds_bundle.js"></script>
+<style>
+body{margin:0;background:#161826;}
+a{color:#9184D9;text-decoration:none;}
+a:hover{color:#B5ABFC;}
+</style>
+</helmet>
+
+<section style="display:flex;flex-direction:column;gap:72px;padding:56px 56px 96px;background:#161826;font-family:-apple-system,'Segoe UI',Roboto,system-ui,sans-serif;color:#E9E9ED">
+
+  <div style="display:flex;flex-direction:column;gap:11px;max-width:840px">
+    <h1 style="margin:0;font-weight:500;font-size:26px;line-height:30px;letter-spacing:-0.015em">Vessel — the proposed screens</h1>
+    <p style="margin:0;font-size:13.5px;line-height:19px;color:rgba(233,233,237,0.70)">Drawn at 1&nbsp;px&nbsp;=&nbsp;1&nbsp;dp on the target device: 421&nbsp;×&nbsp;927 portrait, 927&nbsp;×&nbsp;422 landscape. Every colour, size, radius and spacing step is a token from <code style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px">VesselTheme.kt</code>.</p>
+    <p style="margin:0;font-size:13.5px;line-height:19px;color:rgba(233,233,237,0.70)"><strong style="font-weight:500;color:#E9E9ED">Home does everything.</strong> There is one root and no bottom nav — a program is listed inside the container that owns it, so Apps is not a screen. The bottom edge is left clear for the taskbar. Short things are bottom sheets over home; only Files and the log viewer are pushes.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;padding-top:6px">
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#F5F4FF;background:#423A6A;border-radius:6px;padding:3px 10px">back ↩ annotated on every frame</span>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#F3F5FE;background:#3F424D;border-radius:6px;padding:3px 10px">sheet dismiss = swipe down, tap outside, or back</span>
+    </div>
+  </div>
+
+  <!-- ======================= 1a HOME ======================= -->
+  <div id="1a" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1a</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Home</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">containers · the only root</span>
+    </div>
+
+    <div style="display:flex;gap:28px;align-items:flex-start">
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Two containers, six programs</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="display:flex;align-items:center;gap:8px;padding:8px 6px 8px 11px">
+            <div style="flex:1;display:flex;flex-direction:column">
+              <div style="font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+              <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">2 containers · 6 programs</div>
+            </div>
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg></div>
+          </div>
+
+          <div style="flex:1;display:flex;flex-direction:column;gap:6px;padding:3px 11px 22px;overflow:hidden">
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:6px 6px 8px 11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="font-weight:500;font-size:14px;line-height:18px">Display proof</div>
+                  <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">ran 12 minutes ago · 1280×720 · 60 fps</div>
+                </div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg></div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#9184D9"><path d="M8 5v14l11-7z"></path></svg></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding-right:5px">
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">N</div>
+                  <span style="font-size:11px;line-height:14px;color:#E9E9ED;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Notepad++</span>
+                  <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#5BD99A;background:rgba(91,217,154,0.18);border-radius:6px;padding:1px 8px">arm64</span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">W</div>
+                  <span style="font-size:11px;line-height:14px;color:#E9E9ED;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Winamp</span>
+                  <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#E0A458;background:rgba(224,164,88,0.18);border-radius:6px;padding:1px 8px">x86</span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">S</div>
+                  <span style="font-size:11px;line-height:14px;color:#E9E9ED;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Stalker</span>
+                  <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#7FB0F0;background:rgba(127,176,240,0.18);border-radius:6px;padding:1px 8px">x64</span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:8px 4px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg>
+                  <span style="font-size:10px;line-height:13px;color:rgba(233,233,237,0.55)">Add</span>
+                </div>
+              </div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:6px 6px 8px 11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="font-weight:500;font-size:14px;line-height:18px">Canoe test</div>
+                  <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">ran 3 days ago · 1920×1080 · 30 fps</div>
+                </div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg></div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#9184D9"><path d="M8 5v14l11-7z"></path></svg></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding-right:5px">
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">7</div>
+                  <span style="font-size:11px;line-height:14px;color:#E9E9ED;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">7-Zip</span>
+                  <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#7FB0F0;background:rgba(127,176,240,0.18);border-radius:6px;padding:1px 8px">x64</span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">?</div>
+                  <span style="font-size:11px;line-height:14px;color:#E9E9ED;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">setup.exe</span>
+                  <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#75798C;background:rgba(117,121,140,0.18);border-radius:6px;padding:1px 8px">unread</span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">R</div>
+                  <span style="font-size:11px;line-height:14px;color:#E9E9ED;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Regedit</span>
+                  <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#5BD99A;background:rgba(91,217,154,0.18);border-radius:6px;padding:1px 8px">arm64</span>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:8px 4px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg>
+                  <span style="font-size:10px;line-height:13px;color:rgba(233,233,237,0.55)">Add</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <div style="display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — leaves the app. Home is the root; nothing is below it.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Tap a tile to launch it, long-press for its profile sheet <a href="#1c">1c</a>. Tap the container name or meta line for the settings sheet <a href="#1b">1b</a>; the folder icon pushes Files <a href="#1d">1d</a>. Nothing at the bottom edge — that belongs to the taskbar <a href="#1f">1f</a>.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">First run · nothing configured</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="display:flex;align-items:center;gap:8px;padding:8px 6px 8px 11px">
+            <div style="flex:1;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg></div>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:17px">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="rgba(233,233,237,0.55)"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg>
+            <p style="margin:0;max-width:320px;text-align:center;font-size:12px;line-height:17px;color:rgba(233,233,237,0.70)">No containers yet. A new one is already configured correctly for this device — you do not have to know what any of it means.</p>
+            <div style="display:flex;align-items:center;justify-content:center;min-height:36px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">New container</div>
+          </div>
+          <div style="display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — leaves the app.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">One sentence, one action, and nothing else. <em>New container</em> opens the same sheet as <a href="#1b">1b</a> with empty values.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================= 1b CONTAINER SHEET ======================= -->
+  <div id="1b" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1b</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Container sheet</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">new and edit are the same sheet</span>
+    </div>
+
+    <div style="display:flex;gap:28px;align-items:flex-start">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Edit — over home</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column;position:relative">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500;opacity:0.4"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="flex:1;opacity:0.4;padding:8px 11px 0">
+            <div style="font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+            <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">2 containers · 6 programs</div>
+            <div style="margin-top:14px;background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:6px 6px 8px 11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="font-weight:500;font-size:14px;line-height:18px">Display proof</div>
+                  <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">ran 12 minutes ago · 1280×720 · 60 fps</div>
+                </div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16)"></div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px #9184D9"></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding-right:5px">
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)"></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="position:absolute;left:0;right:0;bottom:0;background:#232532;border-radius:14px 14px 0 0;box-shadow:0 0 0 1px #9397AB,0 -16px 40px rgba(0,0,0,0.65);padding:11px 17px 30px;display:flex;flex-direction:column;gap:11px">
+            <div style="display:flex;justify-content:center;padding-bottom:6px"><div style="width:36px;height:4px;border-radius:2px;background:#595D6C"></div></div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;font-weight:500;font-size:17px;line-height:21px">Display proof</div>
+              <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">Save</div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Name</span>
+              <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px #9184D9;padding:6px 8px;display:flex;align-items:center;font-size:13.5px;line-height:19px">Display proof</div>
+            </div>
+
+            <div style="display:flex;gap:8px">
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Resolution</span>
+                <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;gap:8px">
+                  <span style="flex:1;font-size:13.5px;line-height:19px">1280×720</span>
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)"><path d="M7.41 8.59L12 13.17l4.58-4.58L18 10l-6 6-6-6 1.41-1.41z"></path></svg>
+                </div>
+              </div>
+              <div style="width:134px;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Frame rate</span>
+                <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;gap:8px">
+                  <span style="flex:1;font-size:13.5px;line-height:19px">60</span>
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)"><path d="M7.41 8.59L12 13.17l4.58-4.58L18 10l-6 6-6-6 1.41-1.41z"></path></svg>
+                </div>
+              </div>
+            </div>
+            <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55);margin-top:-6px">Lower resolutions gain a lot of performance on this phone. Capping frame rate keeps it cool, which keeps performance steady over a long session.</div>
+
+            <div style="display:flex;align-items:center;gap:8px;padding-top:3px">
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">Open a file manager</span>
+                <span style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Starts Wine's own file manager alongside the desktop.</span>
+              </div>
+              <div style="width:36px;height:20px;border-radius:10px;background:#5D5294;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:2px;box-sizing:border-box;display:flex;align-items:center;flex:none">
+                <div style="width:16px;height:16px;border-radius:8px;background:#E7E5FE;margin-left:16px"></div>
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Extra DLL overrides</span>
+              <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">name=native,builtin</div>
+            </div>
+
+            <div style="height:1px;margin:6px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16) 48px,rgba(233,233,237,0.16) calc(100% - 48px),transparent)"></div>
+
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #E5697A;font-weight:500;font-size:12.5px;line-height:16px;color:#E5697A">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="#E5697A"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"></path></svg>Delete
+              </div>
+              <div style="flex:1"></div>
+              <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="#E9E9ED"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"></path></svg>Session logs
+              </div>
+            </div>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — closes the sheet, edits kept in the field state, nothing saved. Home is behind it.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Five fields, per §4. The sheet sits over the container it edits, so the name at the top is not a second copy of a title bar. <em>New container</em> is this sheet with empty values and no Delete or Session logs row. <em>Session logs</em> pushes <a href="#1g">1g</a> — the one place the sheet leaves home.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Delete confirm — over the sheet</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column;position:relative;align-items:center;justify-content:center">
+          <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500;opacity:0.3"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="position:absolute;left:0;right:0;bottom:0;height:520px;background:#232532;border-radius:14px 14px 0 0;box-shadow:0 0 0 1px #595D6C;opacity:0.35"></div>
+          <div style="position:relative;width:100%;padding:0 11px;box-sizing:border-box;display:flex;justify-content:center">
+            <div style="width:100%;max-width:420px;background:#232532;border-radius:14px;box-shadow:0 0 0 1px #9397AB,0 16px 40px rgba(0,0,0,0.65);padding:17px;display:flex;flex-direction:column;gap:11px">
+              <div style="font-weight:500;font-size:17px;line-height:21px">Delete Display proof?</div>
+              <div style="font-size:13.5px;line-height:19px;color:rgba(233,233,237,0.70)">Its settings are removed from this device. Installed components are shared and are not touched.</div>
+              <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:6px">
+                <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">Cancel</div>
+                <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #E5697A;font-weight:500;font-size:12.5px;line-height:16px;color:#E5697A">Delete</div>
+              </div>
+            </div>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — dismisses the confirm only; the sheet stays open underneath.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">A centred panel rather than a second sheet: two stacked sheets have no visible order, and a destructive confirmation is the one place the buttons stay words. Confirming closes both and returns to home.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= 1c APP SHEET ======================= -->
+  <div id="1c" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1c</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">App sheet</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">long-press a tile · the app-profile screen is deleted</span>
+    </div>
+
+    <div style="display:flex;gap:28px;align-items:flex-start">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Profile — over home</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column;position:relative">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500;opacity:0.4"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="flex:1;opacity:0.4;padding:8px 11px 0">
+            <div style="font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+            <div style="margin-top:14px;background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:6px 6px 8px 11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="font-weight:500;font-size:14px;line-height:18px">Display proof</div>
+                  <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">ran 12 minutes ago · 1280×720 · 60 fps</div>
+                </div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16)"></div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px #9184D9"></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding-right:5px">
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)"></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="position:absolute;left:0;right:0;bottom:0;background:#232532;border-radius:14px 14px 0 0;box-shadow:0 0 0 1px #9397AB,0 -16px 40px rgba(0,0,0,0.65);padding:11px 17px 30px;display:flex;flex-direction:column;gap:11px">
+            <div style="display:flex;justify-content:center;padding-bottom:6px"><div style="width:36px;height:4px;border-radius:2px;background:#595D6C"></div></div>
+            <div style="display:flex;align-items:center;gap:11px">
+              <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">N</div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-weight:500;font-size:17px;line-height:21px">Notepad++</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">in Display proof</span>
+              </div>
+              <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="#9184D9"><path d="M8 5v14l11-7z"></path></svg>Launch
+              </div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Executable</span>
+              <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;gap:8px">
+                <span style="flex:1;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.70);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">C:\Program Files\Notepad++\notepad++.exe</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#5BD99A;background:rgba(91,217,154,0.18);border-radius:6px;padding:3px 10px;flex:none">arm64</span>
+              </div>
+              <div style="padding-top:3px;font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Read from the PE header's machine field — <code style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px">IMAGE_FILE_MACHINE_ARM64</code>. It runs without translation.</div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Launch arguments</span>
+              <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">-multiInst -nosession</div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Working directory</span>
+              <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.70)">C:\Program Files\Notepad++</div>
+              <div style="padding-top:3px;font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Left empty, the executable's own folder is used.</div>
+            </div>
+
+            <div style="height:1px;margin:6px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16) 48px,rgba(233,233,237,0.16) calc(100% - 48px),transparent)"></div>
+
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="flex:1;font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Everything else is the container's. Two places to configure one thing is one too many.</span>
+              <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #E5697A;font-weight:500;font-size:12.5px;line-height:16px;color:#E5697A;flex:none">Remove</div>
+            </div>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — closes the sheet, returns to home. <em>Launch</em> closes it and raises the checklist <a href="#1h">1h</a>.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Three fields and one read-only fact, per §5.2. Architecture keeps its functional colour and says how it was determined, so <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11px">unread</span> is a different statement from <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11px">x86</span>.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Add a program — the same sheet, empty</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column;position:relative">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500;opacity:0.4"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="flex:1;opacity:0.4;padding:8px 11px 0">
+            <div style="font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+            <div style="margin-top:14px;background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:6px 6px 8px 11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="font-weight:500;font-size:14px;line-height:18px">Display proof</div>
+                  <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">ran 12 minutes ago · 1280×720 · 60 fps</div>
+                </div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16)"></div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px #9184D9"></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding-right:5px">
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)"></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="position:absolute;left:0;right:0;bottom:0;background:#232532;border-radius:14px 14px 0 0;box-shadow:0 0 0 1px #9397AB,0 -16px 40px rgba(0,0,0,0.65);padding:11px 17px 30px;display:flex;flex-direction:column;gap:11px">
+            <div style="display:flex;justify-content:center;padding-bottom:6px"><div style="width:36px;height:4px;border-radius:2px;background:#595D6C"></div></div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-weight:500;font-size:17px;line-height:21px">Add a program</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">to Display proof</span>
+              </div>
+              <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:rgba(233,233,237,0.45)">Add</div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:3px">
+              <span style="font-size:11px;line-height:14px;color:rgba(233,233,237,0.70)">Executable</span>
+              <div style="min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;gap:8px">
+                <span style="flex:1;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">choose an .exe on C:</span>
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg>
+              </div>
+              <div style="padding-top:3px;font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">The name, icon and architecture are read from the file. Nothing here is typed twice.</div>
+            </div>
+
+            <div style="height:1px;margin:6px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16) 48px,rgba(233,233,237,0.16) calc(100% - 48px),transparent)"></div>
+
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)" style="flex:none"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">Browse this container's C:</span>
+                <span style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Opens the file browser to pick the file.</span>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)" style="flex:none"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">Import from Android storage</span>
+                <span style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Copies the file into the container first, then adds it.</span>
+              </div>
+            </div>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — closes the sheet, returns to home. <em>Browse C:</em> pushes Files <a href="#1d">1d</a>; back from there returns to this sheet with the file filled in.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Add is disabled until a file is chosen — 45% opacity, not a different palette. Args and working directory are not asked for up front; they appear on the profile sheet once the shortcut exists.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= 1d FILES ======================= -->
+  <div id="1d" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1d</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Files</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">a push, not a sheet — you navigate into it</span>
+    </div>
+
+    <div style="display:flex;gap:28px;align-items:flex-start">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">drive_c, read from Android</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="display:flex;align-items:center;gap:3px;padding:6px 6px 6px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"></path></svg></div>
+            <div style="flex:1;padding-left:3px;display:flex;flex-direction:column">
+              <span style="font-weight:500;font-size:17px;line-height:21px">Display proof</span>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">14.2 GB free of 62 GB</span>
+            </div>
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:6px;padding:8px 11px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">
+            <span style="color:#9184D9">C:</span><span style="color:rgba(233,233,237,0.55)">\</span><span style="color:#9184D9">users</span><span style="color:rgba(233,233,237,0.55)">\</span><span style="color:#9184D9">vessel</span><span style="color:rgba(233,233,237,0.55)">\</span><span style="color:#E9E9ED">Downloads</span>
+          </div>
+
+          <div style="flex:1;padding:0 11px 22px;overflow:hidden">
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)" style="flex:none"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg>
+              <span style="flex:1;font-size:13.5px;line-height:19px">..</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="#9184D9" style="flex:none"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">Android download</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">→ /storage/emulated/0/Download</span>
+              </div>
+              <span style="font-size:10px;line-height:13px;letter-spacing:0.02em;color:#F5F4FF;background:#423A6A;border-radius:6px;padding:3px 10px;flex:none">shared</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="width:18px;height:18px;border-radius:4px;box-shadow:inset 0 0 0 1px #5BD99A;display:flex;align-items:center;justify-content:center;flex:none;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;color:#5BD99A">E</div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">npp.8.6.9.portable.arm64.exe</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">4.8 MB · 12 Aug 19:04</span>
+              </div>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#5BD99A;background:rgba(91,217,154,0.18);border-radius:6px;padding:3px 10px;flex:none">arm64</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="width:18px;height:18px;border-radius:4px;box-shadow:inset 0 0 0 1px #7FB0F0;display:flex;align-items:center;justify-content:center;flex:none;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;color:#7FB0F0">E</div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">7z2408-x64.exe</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">1.6 MB · 11 Aug 22:31</span>
+              </div>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#7FB0F0;background:rgba(127,176,240,0.18);border-radius:6px;padding:3px 10px;flex:none">x64</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="width:18px;height:18px;border-radius:4px;box-shadow:inset 0 0 0 1px #595D6C;flex:none"></div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">savegame.dat</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">228 KB · today 07:14</span>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="width:18px;height:18px;border-radius:4px;box-shadow:inset 0 0 0 1px #595D6C;flex:none"></div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:13.5px;line-height:19px">dxdiag.txt</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">42 KB · 12 Aug 19:22</span>
+              </div>
+            </div>
+
+            <div style="padding-top:17px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#75798C">read directly from the prefix on Android — Wine is not running, and does not need to be</div>
+          </div>
+
+          <div style="border-top:1px solid rgba(233,233,237,0.16);padding:8px 11px 11px;display:flex;gap:8px">
+            <div style="flex:1;min-height:36px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">Import</div>
+            <div style="flex:1;min-height:36px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">Export</div>
+            <div style="flex:1;min-height:36px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">Add as app</div>
+          </div>
+          <div style="display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — up one folder while the path has depth, then home. The toolbar arrow does the same, so back and the arrow never disagree.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Entered from the container row on home, or from the app sheet's <em>Browse C:</em> — in which case back returns to that sheet. The action bar is the bottom edge here because Files is a push and the taskbar only exists over a session.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================= 1e SESSION RAIL ======================= -->
+  <div id="1e" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1e</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Session rail</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">927 × 422 landscape · over the running desktop</span>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:28px">
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Rail open</div>
+        <div style="width:927px;height:422px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;position:relative;display:flex;align-items:center">
+          <div style="position:absolute;inset:0;background:#292B31;display:flex;align-items:center;justify-content:center">
+            <div style="width:300px;height:200px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;background:#232532;display:flex;flex-direction:column">
+              <div style="height:26px;background:#3F424D;border-radius:4px 4px 0 0;display:flex;align-items:center;padding:0 8px;font-size:11px;color:rgba(233,233,237,0.70)">Notepad++</div>
+              <div style="flex:1;padding:11px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">the guest's own output</div>
+            </div>
+          </div>
+
+          <div style="position:relative;width:212px;padding:6px;box-sizing:border-box">
+            <div style="background:rgba(35,37,50,0.92);border-radius:8px;box-shadow:0 0 0 1px #595D6C,0 6px 18px rgba(0,0,0,0.55);padding:8px;display:flex;flex-direction:column">
+              <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Display proof · running</div>
+              <div style="height:1px;margin:6px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16),transparent)"></div>
+
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  <div style="display:flex;align-items:flex-end">
+                    <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">CPU</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:13px;line-height:16px">62</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55);padding-left:3px">%</span>
+                  </div>
+                  <div style="height:22px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                    <svg viewBox="0 0 122 16" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                      <line x1="0" y1="8" x2="122" y2="8" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                      <path d="M0 15 L8 14 L16 12 L24 9 L32 6 L40 4 L48 5 L57 7 L65 6 L73 3 L81 1 L89 3 L97 6 L105 7 L113 8 L122 6 L122 16 L0 16 Z" fill="rgba(145,132,217,0.20)"></path>
+                      <path d="M0 15 L8 14 L16 12 L24 9 L32 6 L40 4 L48 5 L57 7 L65 6 L73 3 L81 1 L89 3 L97 6 L105 7 L113 8 L122 6" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                    </svg>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  <div style="display:flex;align-items:flex-end">
+                    <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">GPU</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:13px;line-height:16px;color:#E0A458">84</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55);padding-left:3px">%</span>
+                  </div>
+                  <div style="height:22px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                    <svg viewBox="0 0 122 16" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                      <line x1="0" y1="8" x2="122" y2="8" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                      <path d="M0 15 L10 13 L20 10 L30 7 L40 5 L50 6 L60 4 L70 2 L80 2 L90 3 L100 2 L110 1 L122 2 L122 16 L0 16 Z" fill="rgba(167,161,219,0.20)"></path>
+                      <path d="M0 15 L10 13 L20 10 L30 7 L40 5 L50 6 L60 4 L70 2 L80 2 L90 3 L100 2 L110 1 L122 2" fill="none" stroke="#A7A1DB" stroke-width="1.6"></path>
+                    </svg>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  <div style="display:flex;align-items:flex-end">
+                    <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">CLOCK</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:13px;line-height:16px">2.14 GHz</span>
+                  </div>
+                  <div style="height:22px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                    <svg viewBox="0 0 122 16" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                      <line x1="0" y1="8" x2="122" y2="8" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                      <path d="M0 12 L12 10 L24 11 L36 7 L48 8 L60 5 L72 6 L84 4 L96 5 L108 3 L122 4" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                    </svg>
+                  </div>
+                </div>
+
+                <div style="display:flex;flex-direction:column;gap:2px">
+                  <div style="display:flex;align-items:flex-end">
+                    <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">MEMORY</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:13px;line-height:16px">3.4 GB</span>
+                  </div>
+                  <div style="height:22px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                    <svg viewBox="0 0 122 16" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                      <line x1="0" y1="8" x2="122" y2="8" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                      <path d="M0 14 L12 13 L24 12 L36 12 L48 11 L60 10 L72 10 L84 9 L96 9 L108 8 L122 8" fill="none" stroke="#A7A1DB" stroke-width="1.6"></path>
+                    </svg>
+                  </div>
+                </div>
+
+                <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">248 samples · t+4:08</div>
+              </div>
+
+              <div style="height:1px;margin:6px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16),transparent)"></div>
+
+              <div style="display:flex;gap:3px">
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M13 1.07V9h7c0-4.08-3.05-7.44-7-7.93zM4 15c0 4.42 3.58 8 8 8s8-3.58 8-8v-4H4v4zm7-13.93C7.05 1.56 4 4.92 4 9h7V1.07z"></path></svg></div>
+                  <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">PAD</span>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"></path></svg></div>
+                  <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">KEYS</span>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg></div>
+                  <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">FILES</span>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"></path></svg></div>
+                  <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;color:rgba(233,233,237,0.55)">LOG</span>
+                </div>
+              </div>
+
+              <div style="height:1px;margin:6px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16),transparent)"></div>
+
+              <div style="display:flex;gap:6px">
+                <div style="flex:1;display:flex;justify-content:center">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path></svg></div>
+                </div>
+                <div style="flex:1;display:flex;justify-content:center">
+                  <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #E5697A;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E5697A"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:8px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:927px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — closes the rail. With the rail already closed, back leaves the session; the container keeps running and the notification brings it back.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">212 dp, hugging its content, vertically centred, <code style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11px">surface</code> at 0.92 because it floats over the user's own output. Four sparklines, each against its own ceiling. Captions stay under the four tools; Pause and Stop are bare glyphs at the foot because a triangle and a cross carry themselves. <em>Files</em> and <em>Log</em> push over the desktop; back returns here.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55);">Rail closed — the edge handle, and the taskbar's own handle</div>
+        <div style="width:927px;height:422px;background:#292B31;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center">
+          <div style="width:300px;height:200px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;background:#232532;display:flex;flex-direction:column">
+            <div style="height:26px;background:#3F424D;border-radius:4px 4px 0 0;display:flex;align-items:center;padding:0 8px;font-size:11px;color:rgba(233,233,237,0.70)">Notepad++</div>
+            <div style="flex:1;padding:11px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">nothing of Vessel's is on screen</div>
+          </div>
+          <div style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:4px;height:105px;background:rgba(145,132,217,0.55)"></div>
+          <div style="position:absolute;left:0;bottom:0;right:0;display:flex;justify-content:center;padding-bottom:8px">
+            <div style="width:108px;height:4px;border-radius:2px;background:rgba(145,132,217,0.55)"></div>
+          </div>
+        </div>
+        <div style="width:927px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — leaves the session.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Two edges, two gestures, and they must not collide: the rail comes in from the <strong style="font-weight:500;color:#E9E9ED">left</strong> through a full-height 20 dp target with a 4 dp accent mark; the taskbar comes up from the <strong style="font-weight:500;color:#E9E9ED">bottom</strong> and takes the gesture bar's own width as its handle. An Android overlay always covers a fullscreen Windows app, so both auto-hide — there is no z-order in which either sits under the guest.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================= 1f SHELL ======================= -->
+  <div id="1f" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1f</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">The shell — taskbar and launcher</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">drawn in Compose over the GL surface, not inside Wine</span>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:28px">
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Taskbar revealed</div>
+        <div style="width:927px;height:422px;background:#292B31;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center">
+          <div style="width:340px;height:200px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;background:#232532;display:flex;flex-direction:column;margin-bottom:52px">
+            <div style="height:26px;background:#3F424D;border-radius:4px 4px 0 0;display:flex;align-items:center;padding:0 8px;font-size:11px;color:rgba(233,233,237,0.70)">Notepad++</div>
+            <div style="flex:1;padding:11px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">the guest's own output</div>
+          </div>
+
+          <div style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:4px;height:105px;background:rgba(145,132,217,0.55)"></div>
+
+          <div style="position:absolute;left:0;right:0;bottom:0;background:rgba(35,37,50,0.92);border-top:1px solid rgba(233,233,237,0.16);padding:6px 11px 12px;display:flex;align-items:center;gap:8px">
+            <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;display:flex;align-items:center;justify-content:center;flex:none">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+                <div style="width:6px;height:6px;background:#9184D9"></div><div style="width:6px;height:6px;background:#9184D9"></div>
+                <div style="width:6px;height:6px;background:#9184D9"></div><div style="width:6px;height:6px;background:#9184D9"></div>
+              </div>
+            </div>
+
+            <div style="height:26px;width:1px;background:rgba(233,233,237,0.16);flex:none"></div>
+
+            <div style="display:flex;align-items:center;gap:8px;min-height:44px;padding:0 11px 0 6px;border-radius:8px;background:rgba(145,132,217,0.12);box-shadow:inset 0 0 0 1px #9184D9">
+              <div style="width:32px;height:32px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.70)">N</div>
+              <span style="font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">Notepad++</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;min-height:44px;padding:0 11px 0 6px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)">
+              <div style="width:32px;height:32px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">S</div>
+              <span style="font-weight:500;font-size:12.5px;line-height:16px;color:rgba(233,233,237,0.70)">Stalker</span>
+            </div>
+
+            <div style="flex:1"></div>
+
+            <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Display proof · t+4:08 · 62%</span>
+            <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);display:flex;align-items:center;justify-content:center;flex:none"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path></svg></div>
+            <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #E5697A;display:flex;align-items:center;justify-content:center;flex:none"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E5697A"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg></div>
+          </div>
+        </div>
+        <div style="width:927px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — hides the taskbar. With it already hidden, back leaves the session.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Swipe up from the bottom edge to reveal, and it auto-hides after a few seconds of no touch. It shows only what Vessel launched: <strong style="font-weight:500;color:#E9E9ED">tray icons cannot work</strong> without a helper process inside the guest, which this project does not ship, so a program that minimises to tray vanishes from this bar rather than docking — and the bar must not imply otherwise. Pause and Stop are repeated here from the rail because the taskbar is the surface that is already open when a session needs ending.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Launcher — the start button, opened</div>
+        <div style="width:927px;height:422px;background:#292B31;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;position:relative;display:flex;align-items:flex-end">
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">
+            <div style="width:340px;height:200px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;background:#232532;margin-bottom:52px;opacity:0.5"></div>
+          </div>
+
+          <div style="position:absolute;left:11px;bottom:62px;width:420px;background:#232532;border-radius:14px;box-shadow:0 0 0 1px #9397AB,0 16px 40px rgba(0,0,0,0.65);padding:17px;display:flex;flex-direction:column;gap:11px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;min-height:36px;box-sizing:border-box;background:#292B31;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);padding:6px 8px;display:flex;align-items:center;font-size:13.5px;line-height:19px;color:rgba(233,233,237,0.55)">Search programs</div>
+            </div>
+
+            <div style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">In Display proof</div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">N</div>
+                <span style="font-size:11px;line-height:14px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Notepad++</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#5BD99A;background:rgba(91,217,154,0.18);border-radius:6px;padding:1px 8px">arm64</span>
+              </div>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">W</div>
+                <span style="font-size:11px;line-height:14px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Winamp</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#E0A458;background:rgba(224,164,88,0.18);border-radius:6px;padding:1px 8px">x86</span>
+              </div>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">S</div>
+                <span style="font-size:11px;line-height:14px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Stalker</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#7FB0F0;background:rgba(127,176,240,0.18);border-radius:6px;padding:1px 8px">x64</span>
+              </div>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:8px 4px;border-radius:8px;background:#292B31">
+                <div style="width:44px;height:44px;border-radius:8px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:14px;color:rgba(233,233,237,0.55)">R</div>
+                <span style="font-size:11px;line-height:14px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Regedit</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#5BD99A;background:rgba(91,217,154,0.18);border-radius:6px;padding:1px 8px">arm64</span>
+              </div>
+            </div>
+
+            <div style="height:1px;margin:3px 0;background:linear-gradient(to right,transparent,rgba(233,233,237,0.16) 48px,rgba(233,233,237,0.16) calc(100% - 48px),transparent)"></div>
+
+            <div style="display:flex;align-items:center;gap:11px">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="rgba(233,233,237,0.55)" style="flex:none"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg>
+              <span style="flex:1;font-size:13.5px;line-height:19px">Browse C:</span>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">run any .exe</span>
+            </div>
+          </div>
+
+          <div style="position:relative;width:100%;background:rgba(35,37,50,0.92);border-top:1px solid rgba(233,233,237,0.16);padding:6px 11px 12px;display:flex;align-items:center;gap:8px;box-sizing:border-box">
+            <div style="width:44px;height:44px;border-radius:8px;background:rgba(145,132,217,0.22);box-shadow:0 0 0 1px #9184D9;display:flex;align-items:center;justify-content:center;flex:none">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+                <div style="width:6px;height:6px;background:#9184D9"></div><div style="width:6px;height:6px;background:#9184D9"></div>
+                <div style="width:6px;height:6px;background:#9184D9"></div><div style="width:6px;height:6px;background:#9184D9"></div>
+              </div>
+            </div>
+            <div style="height:26px;width:1px;background:rgba(233,233,237,0.16);flex:none"></div>
+            <div style="display:flex;align-items:center;gap:8px;min-height:44px;padding:0 11px 0 6px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)">
+              <div style="width:32px;height:32px;border-radius:4px;box-shadow:0 0 0 1px #3F424D;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">N</div>
+              <span style="font-weight:500;font-size:12.5px;line-height:16px;color:rgba(233,233,237,0.70)">Notepad++</span>
+            </div>
+            <div style="flex:1"></div>
+            <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Display proof · t+4:08 · 62%</span>
+          </div>
+        </div>
+        <div style="width:927px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — closes the launcher, taskbar stays up. Back again hides the taskbar; back again leaves the session.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">The same tiles as home <a href="#1a">1a</a>, at the same 44 dp, scoped to the running container — one concept drawn once. It anchors to the start button rather than filling the screen, because launching a second program is not a reason to hide the first. <em>Browse C:</em> is the escape hatch for an executable that has no shortcut yet.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================= 1g LOGS ======================= -->
+  <div id="1g" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1g</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Logs and metrics</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">a log belongs to the container that produced it</span>
+    </div>
+
+    <div style="display:flex;gap:28px;align-items:flex-start">
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Session history</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="display:flex;align-items:center;gap:3px;padding:6px 6px 6px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"></path></svg></div>
+            <div style="flex:1;padding-left:3px;display:flex;flex-direction:column">
+              <span style="font-weight:500;font-size:17px;line-height:21px">Logs</span>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Display proof</span>
+            </div>
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E5697A"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"></path></svg></div>
+          </div>
+          <div style="flex:1;padding:8px 11px 22px;overflow:hidden">
+            <div style="display:flex;flex-direction:column;gap:3px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="flex:1;font-size:13.5px;line-height:19px">just now</span>
+                <span style="font-size:10px;line-height:13px;letter-spacing:0.02em;color:#F5F4FF;background:#423A6A;border-radius:6px;padding:3px 10px">running</span>
+              </div>
+              <div style="display:flex;gap:8px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)"><span>running</span><span>412 KB</span></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="flex:1;font-size:13.5px;line-height:19px">12 minutes ago</span>
+                <span style="font-size:10px;line-height:13px;letter-spacing:0.02em;color:#E5697A;background:rgba(229,105,122,0.16);border-radius:6px;padding:3px 10px">crashed</span>
+              </div>
+              <div style="display:flex;gap:8px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)"><span>4 m 07 s</span><span>2.1 MB</span></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="flex:1;font-size:13.5px;line-height:19px">2 hours ago</span>
+                <span style="font-size:10px;line-height:13px;letter-spacing:0.02em;color:#5BD99A;background:rgba(91,217,154,0.16);border-radius:6px;padding:3px 10px">ok</span>
+              </div>
+              <div style="display:flex;gap:8px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)"><span>41 s</span><span>88 KB</span><span style="color:#E0A458">errors logged</span></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;padding:8px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="flex:1;font-size:13.5px;line-height:19px">3 days ago</span>
+                <span style="font-size:10px;line-height:13px;letter-spacing:0.02em;color:#5BD99A;background:rgba(91,217,154,0.16);border-radius:6px;padding:3px 10px">ok</span>
+              </div>
+              <div style="display:flex;gap:8px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)"><span>1 h 12 m</span><span>8.0 MB</span></div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — returns to the container sheet <a href="#1b">1b</a>, which is where it was opened from.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Flat rows, four facts, colour only on the status. <span style="color:#E5697A">crashed</span> is the only red thing on the screen, which is the whole reason to open it.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">One session · Log</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="display:flex;align-items:center;gap:3px;padding:6px 6px 6px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"></path></svg></div>
+            <div style="flex:1;padding-left:3px;display:flex;flex-direction:column">
+              <span style="font-weight:500;font-size:17px;line-height:21px">Session log</span>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">12 minutes ago</span>
+            </div>
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zM19 5H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path></svg></div>
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"></path></svg></div>
+          </div>
+          <div style="padding:0 11px">
+            <div style="margin-top:8px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16);padding:3px;display:flex;gap:3px">
+              <div style="flex:1;border-radius:4px;background:rgba(145,132,217,0.12);padding:8px 0;text-align:center;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">Log</div>
+              <div style="flex:1;border-radius:4px;padding:8px 0;text-align:center;font-weight:500;font-size:12.5px;line-height:16px;color:rgba(233,233,237,0.55)">Metrics</div>
+            </div>
+          </div>
+          <div style="flex:1;padding:8px 11px 22px;overflow:hidden;display:flex;flex-direction:column;gap:6px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px">
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">vessel</span><span style="color:rgba(233,233,237,0.55)">wine    wine-11.0-arm64ec</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">vessel</span><span style="color:rgba(233,233,237,0.55)">driver  turnip-25.2.0-gen8-canoe</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">vessel</span><span style="color:rgba(233,233,237,0.55)">d3d     dxvk-2.7.1</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">wine</span><span style="color:#75798C">loaddll:load_native_dll loaded L"kernel32.dll"</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">driver</span><span style="color:rgba(233,233,237,0.55)">MESA-INTEL: warning: Performance support disabled</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">dxvk</span><span style="color:rgba(233,233,237,0.55)">DXVK: v2.7.1</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">dxvk</span><span style="color:rgba(233,233,237,0.55)">DXVK: Device : Turnip Adreno (TM) 829</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">fex</span><span style="color:rgba(233,233,237,0.55)">Core: TSO enabled, vector TSO disabled</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">wine</span><span style="color:#E0A458">d3d:wined3d_check_device_format stub  ×1204</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">vkd3d</span><span style="color:#E0A458">vkd3d_instance_init: extension not available</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">wine</span><span style="color:#E5697A">module:import_dll Library d3dx9_43.dll not found</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">vessel</span><span style="color:#E0A458">… logging rate-limited, 8412 lines dropped …</span></div>
+            <div style="display:flex;gap:6px"><span style="width:38px;color:#595D6C;flex:none">wine</span><span style="color:#E5697A">seh:NtRaiseException Unhandled exception c0000005</span></div>
+          </div>
+          <div style="display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — returns to the history list. Opened from the session rail instead, back returns to the desktop.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Every line, always — no severity filter. Fixed source gutter, wrapping text, follow-tail until you scroll up.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">One session · Metrics</div>
+        <div style="width:421px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px 3px;font-size:13px;font-weight:500"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="display:flex;align-items:center;gap:3px;padding:6px 6px 6px 0;border-bottom:1px solid rgba(233,233,237,0.16)">
+            <div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"></path></svg></div>
+            <div style="flex:1;padding-left:3px;display:flex;flex-direction:column">
+              <span style="font-weight:500;font-size:17px;line-height:21px">Session log</span>
+              <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">12 minutes ago</span>
+            </div>
+          </div>
+          <div style="padding:0 11px">
+            <div style="margin-top:8px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16);padding:3px;display:flex;gap:3px">
+              <div style="flex:1;border-radius:4px;padding:8px 0;text-align:center;font-weight:500;font-size:12.5px;line-height:16px;color:rgba(233,233,237,0.55)">Log</div>
+              <div style="flex:1;border-radius:4px;background:rgba(145,132,217,0.12);padding:8px 0;text-align:center;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">Metrics</div>
+            </div>
+          </div>
+          <div style="flex:1;padding:8px 11px 22px;display:flex;flex-direction:column;gap:8px">
+            <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Finished run · 4:07 · 248 samples</div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">cpu</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:17px;line-height:20px">62</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55);padding:0 0 3px 2px">%</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 46 L24 42 L48 35 L72 26 L96 17 L120 12 L144 16 L168 21 L192 18 L216 9 L240 3 L264 10 L288 18 L312 22 L336 25 L360 19 L360 50 L0 50 Z" fill="rgba(145,132,217,0.20)"></path>
+                  <path d="M0 46 L24 42 L48 35 L72 26 L96 17 L120 12 L144 16 L168 21 L192 18 L216 9 L240 3 L264 10 L288 18 L312 22 L336 25 L360 19" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">91%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">peak</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">54%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">mean</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">11%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">min</span></div>
+              </div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">clock · per core</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 44 L40 40 L80 33 L120 27 L160 24 L200 26 L240 20 L280 18 L320 22 L360 21" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 46 L40 43 L80 38 L120 31 L160 29 L200 30 L240 25 L280 23 L320 26 L360 25" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 47 L40 45 L80 42 L120 36 L160 33 L200 34 L240 30 L280 28 L320 31 L360 29" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 48 L40 47 L80 45 L120 41 L160 38 L200 39 L240 35 L280 33 L320 36 L360 34" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 43 L40 44 L80 43 L120 42 L160 43 L200 42 L240 41 L280 42 L320 41 L360 42" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 30 L40 24 L80 14 L120 8 L160 5 L200 7 L240 4 L280 3 L320 6 L360 5" fill="none" stroke="#A7A1DB" stroke-width="1.6" stroke-dasharray="6 4"></path>
+                  <path d="M0 33 L40 27 L80 18 L120 12 L160 9 L200 11 L240 7 L280 6 L320 10 L360 8" fill="none" stroke="#A7A1DB" stroke-width="1.6" stroke-dasharray="6 4"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:11px;flex-wrap:wrap">
+                <div style="display:flex;align-items:center;gap:3px"><div style="width:9px;height:2px;background:#9184D9"></div><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">cpu0–5 · 3.32 GHz</span></div>
+                <div style="display:flex;align-items:center;gap:3px"><div style="display:flex;gap:2px"><div style="width:3.5px;height:2px;background:#A7A1DB"></div><div style="width:3.5px;height:2px;background:#A7A1DB"></div></div><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">cpu6–7 · 3.80 GHz</span></div>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">3.71 GHz</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">cpu7</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">2.98 GHz</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">cpu0</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px;color:rgba(233,233,237,0.55)">parked</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">cpu5</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">2.14 GHz</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">mean</span></div>
+              </div>
+              <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#75798C">each core against its own rated maximum, so the two clusters compare</div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">gpu</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:17px;line-height:20px">84</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55);padding:0 0 3px 2px">%</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 47 L30 40 L60 31 L90 22 L120 16 L150 19 L180 12 L210 6 L240 6 L270 9 L300 6 L330 3 L360 6 L360 50 L0 50 Z" fill="rgba(167,161,219,0.20)"></path>
+                  <path d="M0 47 L30 40 L60 31 L90 22 L120 16 L150 19 L180 12 L210 6 L240 6 L270 9 L300 6 L330 3 L360 6" fill="none" stroke="#A7A1DB" stroke-width="1.6"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">96%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">peak</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">71%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">mean</span></div>
+              </div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">memory</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:17px;line-height:20px">3.4 GB</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 44 L36 41 L72 38 L108 37 L144 34 L180 32 L216 31 L252 28 L288 27 L324 25 L360 24" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 20 L36 20 L72 19 L108 19 L144 18 L180 18 L216 17 L252 17 L288 16 L324 16 L360 15" fill="none" stroke="#9397AB" stroke-width="1.6" stroke-dasharray="6 4"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">3.6 GB</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">peak</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">1.3 GB</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">added</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">6.9 GB</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">device free</span></div>
+              </div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">temperature</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:17px;line-height:20px">48</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55);padding:0 0 3px 2px">°C</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 40 L36 38 L72 35 L108 32 L144 30 L180 28 L216 27 L252 26 L288 25 L324 24 L360 24" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                  <path d="M0 43 L36 41 L72 38 L108 34 L144 31 L180 29 L216 28 L252 27 L288 26 L324 26 L360 25" fill="none" stroke="#A7A1DB" stroke-width="1.6"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">48°</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">cpu</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">46°</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">gpu</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">51°</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">cpu peak</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">49°</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">gpu peak</span></div>
+              </div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">power · total draw</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:17px;line-height:20px">5.2 W</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 45 L30 41 L60 34 L90 27 L120 21 L150 24 L180 17 L210 12 L240 14 L270 10 L300 15 L330 12 L360 16 L360 50 L0 50 Z" fill="rgba(147,151,171,0.20)"></path>
+                  <path d="M0 45 L30 41 L60 34 L90 27 L120 21 L150 24 L180 17 L210 12 L240 14 L270 10 L300 15 L330 12 L360 16" fill="none" stroke="#9397AB" stroke-width="1.6"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">6.4 W</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">peak</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">4.8 W</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">mean</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">4%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">battery used</span></div>
+              </div>
+              <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#75798C">battery current × voltage — the whole phone, not this session</div>
+            </div>
+
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:flex-end">
+                <span style="flex:1;font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">battery</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-weight:500;font-size:17px;line-height:20px">76</span>
+                <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55);padding:0 0 3px 2px">%</span>
+              </div>
+              <div style="height:56px;border-radius:4px;background:#292B31;padding:3px 6px;box-sizing:border-box">
+                <svg viewBox="0 0 360 50" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+                  <line x1="0" y1="25" x2="360" y2="25" stroke="rgba(233,233,237,0.16)" stroke-width="1"></line>
+                  <path d="M0 10 L40 10 L80 11 L120 11 L160 12 L200 12 L240 13 L280 13 L320 14 L360 15" fill="none" stroke="#9184D9" stroke-width="1.6"></path>
+                </svg>
+              </div>
+              <div style="display:flex;gap:17px;flex-wrap:wrap">
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">80%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">start</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">4%</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">used</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">4.209 V</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">voltage</span></div>
+                <div style="display:flex;flex-direction:column"><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;line-height:16px">-1240 mA</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.02em;text-transform:uppercase;color:rgba(233,233,237,0.55)">current</span></div>
+              </div>
+              <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#75798C">level from the battery broadcast; current from the health HAL</div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — same as the Log tab; the tab is state, not a destination.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">Shown as one full scroll rather than cropped to the 927&nbsp;dp window. A card per quantity, each against its own ceiling, each with the statistics anyone would quote. A source that could not be read is left off rather than drawn as a zero.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================= 1h LAUNCH & OUTCOME ======================= -->
+  <div id="1h" style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <span style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:#9184D9;border:1px solid #9184D9;border-radius:6px;padding:3px 10px">1h</span>
+      <h2 style="margin:0;font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Launch and outcome</h2>
+      <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:11.5px;color:rgba(233,233,237,0.55)">dialogs over home — a checklist is not a place</span>
+    </div>
+
+    <div style="display:flex;gap:28px;align-items:flex-start">
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Preparing</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center">
+          <div style="position:absolute;top:0;left:0;right:0;padding:9px 14px 3px;display:flex;justify-content:space-between;font-size:13px;font-weight:500;opacity:0.35"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+          <div style="position:absolute;left:0;right:0;top:34px;padding:8px 6px 8px 11px;opacity:0.35;display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;display:flex;flex-direction:column">
+                <div style="font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+                <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">2 containers · 6 programs</div>
+              </div>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED" style="margin-right:13px"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg>
+            </div>
+            <div style="background:#232532;border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:6px 6px 8px 11px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="font-weight:500;font-size:14px;line-height:18px">Display proof</div>
+                  <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">ran 12 minutes ago · 1280×720 · 60 fps</div>
+                </div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16)"></div>
+                <div style="width:40px;height:40px;border-radius:8px;box-shadow:0 0 0 1px #9184D9"></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding-right:5px">
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;background:#292B31"></div>
+                <div style="height:86px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(233,233,237,0.16)"></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="position:relative;width:100%;padding:0 11px;box-sizing:border-box;display:flex;justify-content:center">
+            <div style="width:100%;background:#232532;border-radius:14px;box-shadow:0 0 0 1px #9397AB,0 16px 40px rgba(0,0,0,0.65);padding:17px;display:flex;flex-direction:column;gap:11px">
+              <div style="font-weight:500;font-size:17px;line-height:21px">Display proof</div>
+
+              <div style="display:flex;flex-direction:column">
+                <div style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55);padding-bottom:6px">Preparing</div>
+
+                <div style="display:flex;gap:8px;padding:3px 0">
+                  <div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="#5BD99A"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></div>
+                  <div style="flex:1;display:flex;flex-direction:column">
+                    <span style="font-size:13.5px;line-height:19px">Resolve components</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Wine/1114 · DXVK/271</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px;padding:3px 0">
+                  <div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="#5BD99A"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></div>
+                  <div style="flex:1;display:flex;flex-direction:column">
+                    <span style="font-size:13.5px;line-height:19px">Install FEX</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">libarm64ecfex.dll — 2 file(s) copied into the prefix</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px;padding:3px 0">
+                  <div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="#5BD99A"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></div>
+                  <div style="flex:1;display:flex;flex-direction:column">
+                    <span style="font-size:13.5px;line-height:19px">Install D3D layers</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">DXVK, vkd3d — 18 file(s) copied into the prefix</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px;padding:3px 0">
+                  <div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="rgba(233,233,237,0.55)"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></div>
+                  <div style="flex:1;display:flex;flex-direction:column">
+                    <span style="font-size:13.5px;line-height:19px;color:rgba(233,233,237,0.55)">Create prefix</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">Already created</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px;padding:3px 0">
+                  <div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="#5BD99A"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></div>
+                  <div style="flex:1;display:flex;flex-direction:column">
+                    <span style="font-size:13.5px;line-height:19px">First-run registry</span>
+                    <span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">4 keys written to prefix-seed.reg</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px;padding:3px 0">
+                  <div style="width:16px;height:16px;margin-top:3px;flex:none;display:flex;align-items:center;justify-content:center"><div style="width:8px;height:8px;border-radius:4px;background:#9184D9"></div></div>
+                  <div style="flex:1;font-size:13.5px;line-height:19px">Initialise Wine prefix</div>
+                </div>
+              </div>
+
+              <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">loaddll:build_module Loaded L"C:\windows\system32\dxgi.dll"</div>
+              <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.70)">Starting the Windows desktop at 1280×720.</div>
+
+              <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:6px">
+                <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #E5697A;font-weight:500;font-size:12.5px;line-height:16px;color:#E5697A">Cancel</div>
+                <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">Hide</div>
+              </div>
+            </div>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — same as <em>Hide</em>: puts the report down and returns to home. It does not cancel the launch; only <em>Cancel</em> does, and the desktop still appears when the container reaches RUNNING.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">A checklist rather than a spinner: when a launch fails, the row it failed on is the whole diagnosis, and a spinner turns six distinguishable failures into one. Running is a filled dot, pending an empty ring — the same shape at two weights.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55)">Failed — the checklist stays behind it</div>
+        <div style="width:421px;height:927px;background:#161826;border-radius:14px;box-shadow:0 0 0 1px #3F424D,0 16px 40px rgba(0,0,0,0.65);overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center">
+          <div style="position:absolute;top:0;left:0;right:0;padding:9px 14px 3px;display:flex;justify-content:space-between;font-size:13px;font-weight:500;opacity:0.35"><span>7:32</span><span style="font-size:11px">5G+&nbsp;&nbsp;80%</span></div>
+
+          <div style="position:absolute;left:0;right:0;top:34px;padding:8px 6px 8px 11px;opacity:0.3;display:flex;flex-direction:column;gap:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;display:flex;flex-direction:column">
+                <div style="font-weight:500;font-size:21px;line-height:25px;letter-spacing:-0.015em">Vessel</div>
+                <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">2 containers · 6 programs</div>
+              </div>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="#E9E9ED" style="margin-right:13px"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"></path></svg>
+            </div>
+          </div>
+
+          <div style="position:absolute;left:11px;right:11px;top:120px;background:#232532;border-radius:14px;box-shadow:0 0 0 1px #595D6C;padding:17px;display:flex;flex-direction:column;gap:6px;opacity:0.4">
+            <div style="font-weight:500;font-size:17px;line-height:21px">Display proof</div>
+            <div style="font-size:10px;line-height:13px;letter-spacing:0.08em;text-transform:uppercase;color:rgba(233,233,237,0.55);padding-top:6px">Progress</div>
+            <div style="display:flex;gap:8px;padding:3px 0"><div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="#5BD99A"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg></div><span style="flex:1;font-size:13.5px;line-height:19px">First-run registry</span></div>
+            <div style="display:flex;gap:8px;padding:3px 0"><div style="width:16px;height:16px;margin-top:3px;flex:none"><svg viewBox="0 0 24 24" width="16" height="16" fill="#E5697A"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg></div><div style="flex:1;display:flex;flex-direction:column"><span style="font-size:13.5px;line-height:19px">Initialise Wine prefix</span><span style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#E5697A">wineboot exited with 1</span></div></div>
+          </div>
+
+          <div style="position:relative;width:100%;padding:0 11px;box-sizing:border-box;display:flex;justify-content:center">
+            <div style="width:100%;background:#232532;border-radius:14px;box-shadow:0 0 0 1px #9397AB,0 16px 40px rgba(0,0,0,0.65);padding:17px;display:flex;flex-direction:column;gap:11px">
+              <div style="font-weight:500;font-size:17px;line-height:21px;color:#E5697A">Wine could not make its own code executable</div>
+              <div style="font-size:13.5px;line-height:19px;color:rgba(233,233,237,0.70)">The loader mapped a PE section and the kernel refused to mark it executable, so nothing inside the prefix can run.</div>
+
+              <div style="border-radius:8px;box-shadow:0 0 0 1px #3F424D;padding:11px;display:flex;flex-direction:column;gap:6px;font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:rgba(233,233,237,0.55)">
+                <div>wineboot exited with 1</div>
+                <div>err:virtual:map_image_into_view failed to set 60000020 protection on ntdll.dll section .text, noexec filesystem?</div>
+                <div>exit code 1</div>
+              </div>
+
+              <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:6px">
+                <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px rgba(233,233,237,0.16);font-weight:500;font-size:12.5px;line-height:16px;color:#E9E9ED">View log</div>
+                <div style="min-height:36px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;box-shadow:0 0 0 1px #9184D9;font-weight:500;font-size:12.5px;line-height:16px;color:#9184D9">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="#9184D9"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"></path></svg>Retry
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:center;padding-bottom:9px"><div style="width:108px;height:4px;border-radius:2px;background:#9397AB"></div></div>
+        </div>
+        <div style="width:421px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-family:ui-monospace,'Roboto Mono',Menlo,monospace;font-size:10px;line-height:14px;color:#9184D9">↩ back — dismisses the outcome and returns to home. <em>View log</em> pushes <a href="#1g">1g</a>; back from there also lands on home, not on this dialog.</div>
+          <div style="font-size:12px;line-height:17px;color:rgba(233,233,237,0.55)">The checklist stays visible behind it, because which of six steps failed is the whole diagnosis. The headline is the plain-language reading; the raw line stays underneath in mono, because that is what a bug report quotes. A clean exit shows none of this — the session simply ends.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</section>
+</x-dc>
+</body>
+</html>
