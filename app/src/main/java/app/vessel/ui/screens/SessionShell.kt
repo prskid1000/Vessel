@@ -61,9 +61,6 @@ import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VRule
-import app.vessel.ui.components.VSheet
-import app.vessel.ui.components.VSheetHeader
-import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.rememberBuiltInIcon
 import app.vessel.ui.components.rememberProgramIcon
 import app.vessel.ui.shell.AppShortcut
@@ -129,12 +126,18 @@ fun SessionTaskbar(
     containerId: String? = null,
     /** Composited frames per second, drawn at the trailing edge. */
     frameRate: FrameRate = FrameRate(),
-    /** Long press → Minimize, or Restore for one that is already hidden. */
-    onMinimizeWindow: (Int) -> Unit = {},
-    /** Long press → Close: `WM_CLOSE`, so the program can offer to save. */
-    onCloseWindow: (Int) -> Unit = {},
-    /** Long press → Force close: `SIGKILL` to the process behind the window. */
-    onKillWindow: (Int) -> Unit = {},
+    /**
+     * Long press → the window's actions.
+     *
+     * **The panel is the caller's to draw, and that is not a style choice.** It
+     * used to be a sheet owned by the button, and it could not be opened: the
+     * bar hides itself on a timer, hiding disposes the button, and the disposal
+     * took the `menuOpen` state with it — so a long press that outlived the
+     * timer showed nothing at all. The launcher already solved this by living
+     * above the bar rather than inside it and holding the timer open while it
+     * is up. Same shape here.
+     */
+    onWindowMenu: (GuestWindow) -> Unit = {},
 ) {
     Row(
         modifier
@@ -181,9 +184,7 @@ fun SessionTaskbar(
                     shortcuts = shortcuts,
                     containerId = containerId,
                     onClick = { onFocusWindow(window.id) },
-                    onMinimize = { onMinimizeWindow(window.id) },
-                    onClose = { onCloseWindow(window.id) },
-                    onKill = { onKillWindow(window.id) },
+                    onMenu = { onWindowMenu(window) },
                 )
             }
         }
@@ -366,11 +367,8 @@ private fun TaskbarWindow(
     shortcuts: List<AppShortcut>,
     containerId: String?,
     onClick: () -> Unit,
-    onMinimize: () -> Unit = {},
-    onClose: () -> Unit = {},
-    onKill: () -> Unit = {},
+    onMenu: () -> Unit = {},
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     val shape = Vessel.metrics.shapeMd
     Box(
         Modifier
@@ -395,8 +393,8 @@ private fun TaskbarWindow(
             .combinedClickable(
                 onClickLabel = window.title,
                 onClick = onClick,
-                onLongClickLabel = "Close ${window.title}",
-                onLongClick = { menuOpen = true },
+                onLongClickLabel = "Actions for ${window.title}",
+                onLongClick = onMenu,
             )
             .semantics { contentDescription = window.title },
         contentAlignment = Alignment.Center,
@@ -435,29 +433,6 @@ private fun TaskbarWindow(
             else -> Text(window.initial, style = Vessel.type.mono, color = tint)
         }
 
-        // **A sheet, not a dropdown.** A `DropdownMenu` anchored to a 44 dp
-        // button at the very bottom of a phone screen opens upward into the
-        // guest's output and puts destructive rows under the thumb that just
-        // long-pressed. The sheet is the surface this product already uses for
-        // "an action, and what it will do".
-        if (menuOpen) {
-            WindowActionsSheet(
-                window = window,
-                onDismiss = { menuOpen = false },
-                onMinimize = {
-                    menuOpen = false
-                    onMinimize()
-                },
-                onClose = {
-                    menuOpen = false
-                    onClose()
-                },
-                onKill = {
-                    menuOpen = false
-                    onKill()
-                },
-            )
-        }
     }
 }
 
@@ -478,51 +453,99 @@ private fun TaskbarWindow(
  * them with a labelled button.
  */
 @Composable
-private fun WindowActionsSheet(
+fun WindowActionsPanel(
     window: GuestWindow,
-    onDismiss: () -> Unit,
     onMinimize: () -> Unit,
     onClose: () -> Unit,
     onKill: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    VSheet(
-        onDismiss = onDismiss,
-        header = {
-            VSheetHeader(
-                // The window's own title, which is the only string the user
-                // recognises. A window that has not set one falls back to the
-                // program, and to a generic word only if it has neither — never
-                // to an empty header, which would read as a broken sheet.
-                title = window.title.ifBlank { window.program.ifBlank { "This window" } },
-                subtitle = if (window.title.isBlank()) null else window.program.ifBlank { null },
+    val shape = Vessel.metrics.shapeLg
+    Column(
+        modifier
+            .widthIn(max = Vessel.metrics.launcherWidth)
+            .vElevation(VElev.lg, shape)
+            .background(Vessel.colors.surface, shape)
+            .vRing(VElev.lg.ring, shape)
+            // Swallow taps, so a press inside the panel does not reach the
+            // scrim that closes it. Same as the launcher's.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
             )
-        },
+            .padding(Vessel.metrics.s17),
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
-        // First, because it is the only non-destructive one and the most
-        // reached for. Restore rather than Minimize when it is already hidden:
-        // the same row, saying what it will actually do.
-        VSheetRow(
-            icon = if (window.minimized) VIcons.ArrowClockwise else VIcons.CaretDown,
-            title = if (window.minimized) "Restore" else "Minimize",
-            help = if (window.minimized) {
-                "Shows the window again."
-            } else {
-                "Hides the window. It stays in the taskbar — tap it to bring it back."
-            },
-            onClick = onMinimize,
+        // The window's own title, which is the only string the user recognises.
+        // A window that has not set one falls back to the program, and to a
+        // generic word only if it has neither — never to an empty header.
+        Text(
+            window.title.ifBlank { window.program.ifBlank { "This window" } },
+            style = Vessel.type.title,
+            color = Vessel.colors.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
-        VSheetRow(
-            icon = VIcons.X,
-            title = "Close",
-            help = "Asks the program to close, so it can offer to save first.",
-            onClick = onClose,
+
+        Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
+            // Non-destructive first and Restore rather than Minimize when the
+            // window is already hidden: one button, saying what it will do.
+            WindowAction(
+                icon = if (window.minimized) VIcons.ArrowClockwise else VIcons.CaretDown,
+                label = if (window.minimized) "Restore" else "Minimize",
+                onClick = onMinimize,
+            )
+            WindowAction(icon = VIcons.X, label = "Close", onClick = onClose)
+            // Destructive, and drawn as such. Offered unconditionally rather
+            // than only after Close fails, because the case it exists for is a
+            // program that is not reading its message queue — which is exactly
+            // the case where Close returns nothing and says nothing.
+            WindowAction(
+                icon = VIcons.Trash,
+                label = "Force close",
+                tint = Vessel.colors.danger,
+                onClick = onKill,
+            )
+        }
+
+        // One line, for the only two that are not self-evident. Close asks;
+        // Force close does not.
+        Text(
+            "Close asks the program first, so it can offer to save. " +
+                "Force close ends it immediately.",
+            style = Vessel.type.label,
+            color = Vessel.colors.textLabel,
         )
-        VSheetRow(
-            icon = VIcons.Trash,
-            title = "Force close",
-            help = "Ends the process immediately. Anything unsaved is lost.",
-            onClick = onKill,
-        )
+    }
+}
+
+/** One icon button in [WindowActionsPanel], with its label under it. */
+@Composable
+private fun WindowAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    tint: Color = Vessel.colors.textPrimary,
+) {
+    val shape = Vessel.metrics.shapeMd
+    Column(
+        Modifier
+            .clickable(onClickLabel = label, onClick = onClick)
+            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+    ) {
+        Box(
+            Modifier
+                .size(Vessel.metrics.touchTarget)
+                .background(Vessel.colors.surfaceRaised, shape)
+                .vRing(Vessel.colors.divider, shape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, Modifier.size(Vessel.metrics.iconMd), tint = tint)
+        }
+        Text(label, style = Vessel.type.label, color = Vessel.colors.textLabel, maxLines = 1)
     }
 }
 

@@ -56,6 +56,8 @@ import com.winlator.xserver.Window
 import com.winlator.xserver.WindowManager
 import com.winlator.xserver.XClientConnectionHandler
 import com.winlator.xserver.XClientRequestHandler
+import com.winlator.xserver.XResource
+import com.winlator.xserver.XResourceManager
 import com.winlator.xserver.XServer
 import com.winlator.xserver.events.ConfigureNotify
 import com.winlator.xserver.events.Event
@@ -631,9 +633,14 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * desktop has no taskbar of its own, so there would be nothing left that
      * could bring it back.
      *
-     * An id is removed on restore and when the window is destroyed; a stale id
-     * for a window that no longer exists is harmless, because every read goes
-     * through `getWindow(id)` first.
+     * An id is removed on restore and when the window is freed — the second by
+     * the `onFreeResource` listener in `init`, which had to be added for it.
+     *
+     * *The note here used to say a stale id was harmless because every read went
+     * through `getWindow(id)` first.* It does not: [isRealWindow] tests
+     * `id in minimized` directly, which is the whole point of the set, so a
+     * stale id kept a destroyed window on the taskbar for the rest of the
+     * session.
      */
     private val minimized = mutableSetOf<Int>()
 
@@ -753,6 +760,34 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                 override fun onChangeWindowZOrder(window: Window) = publishWindows()
                 override fun onModifyWindowProperty(window: Window, property: Property) =
                     publishWindows()
+            },
+        )
+
+        // **A window going away is not one of those seven callbacks.** There is
+        // no destroy notification in OnWindowModificationListener at all, and
+        // the only reason the taskbar usually keeps up is a side effect:
+        // `destroyWindow` unmaps first, and *that* publishes. But `unmapWindow`
+        // is guarded by `isMapped()`, so destroying a window that is already
+        // unmapped notifies nothing, and `removeAllSubwindowsAndWindow` then
+        // takes it out of the tree in silence. Two ways to reach that state, and
+        // a taskbar entry for a window that no longer exists survives both:
+        // stopping a program that was minimised, and any child of a destroyed
+        // window, since the recursion unmaps none of them.
+        //
+        // `onFreeResource` fires once per window removed, mapped or not, for the
+        // whole subtree. It is the destroy callback the other interface lacks.
+        xServer.windowManager.addOnResourceLifecycleListener(
+            object : XResourceManager.OnResourceLifecycleListener {
+                override fun onFreeResource(resource: XResource) {
+                    // Order matters. This fires *before* `parent.removeChild`,
+                    // so the window is still in the tree that publishWindows
+                    // walks, and a minimised id is exactly what keeps an
+                    // unmapped window listed — see `isRealWindow`. Forget it
+                    // first and the republish below drops the entry; forget it
+                    // after and the entry outlives the window it names.
+                    minimized -= resource.id
+                    publishWindows()
+                }
             },
         )
 

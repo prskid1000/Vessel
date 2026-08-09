@@ -408,11 +408,20 @@ fun SessionDesktop(
     var launcherQuery by remember { mutableStateOf("") }
     var confirmingStop by remember { mutableStateOf(false) }
 
+    /** The window whose actions are showing, or null. Held here, not in the bar. */
+    var windowMenu by remember { mutableStateOf<GuestWindow?>(null) }
+
     // The taskbar puts itself away. An overlay over a fullscreen game that stays
     // up is an overlay covering the game, and there is no z-order that fixes it.
-    // Keyed so any reveal or launcher toggle restarts the clock.
-    LaunchedEffect(taskbarOpen, launcherOpen) {
-        if (taskbarOpen && !launcherOpen) {
+    // Keyed so any reveal or menu toggle restarts the clock.
+    //
+    // **`windowMenu` is in the condition for the same reason `launcherOpen` is,
+    // and leaving it out was a bug that made the long-press menu unreachable.**
+    // The menu used to be state inside the taskbar button. The timer would fire
+    // while a finger was still down, hiding the bar, disposing the button, and
+    // taking the menu's state with it — so the press appeared to do nothing.
+    LaunchedEffect(taskbarOpen, launcherOpen, windowMenu) {
+        if (taskbarOpen && !launcherOpen && windowMenu == null) {
             delay(TASKBAR_LINGER_MS)
             taskbarOpen = false
         }
@@ -422,8 +431,9 @@ fun SessionDesktop(
     // unconditionally, which made Back a trap: every press reopened it and
     // nothing could ever leave a running session. Leaving does not stop the
     // container — the foreground service owns it, not this composable.
-    BackHandler(enabled = railOpen || taskbarOpen || launcherOpen) {
+    BackHandler(enabled = railOpen || taskbarOpen || launcherOpen || windowMenu != null) {
         when {
+            windowMenu != null -> windowMenu = null
             launcherOpen -> launcherOpen = false
             taskbarOpen -> taskbarOpen = false
             else -> railOpen = false
@@ -574,9 +584,43 @@ fun SessionDesktop(
                     shortcuts = shortcuts,
                     containerId = state.containerId,
                     frameRate = frameRate,
-                    onMinimizeWindow = onMinimizeWindow,
-                    onCloseWindow = onCloseWindow,
-                    onKillWindow = onKillWindow,
+                    onWindowMenu = { windowMenu = it },
+                )
+            }
+        }
+
+        // The window's actions, anchored above its button — the launcher's
+        // placement, because it is the same kind of thing: a panel over the
+        // guest that the bar opened and the bar does not own.
+        windowMenu?.let { target ->
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .navigationBarsPadding()
+                    .padding(
+                        start = Vessel.metrics.s11,
+                        bottom = Vessel.metrics.touchTarget + Vessel.metrics.s22,
+                        end = Vessel.metrics.s11,
+                    ),
+            ) {
+                WindowActionsPanel(
+                    // Redrawn from the live list, so a window that minimises
+                    // itself while the panel is up says Restore rather than
+                    // going stale. Gone from the list means gone: the panel
+                    // closes rather than acting on a window that has exited.
+                    window = windows.firstOrNull { it.id == target.id } ?: target,
+                    onMinimize = {
+                        windowMenu = null
+                        onMinimizeWindow(target.id)
+                    },
+                    onClose = {
+                        windowMenu = null
+                        onCloseWindow(target.id)
+                    },
+                    onKill = {
+                        windowMenu = null
+                        onKillWindow(target.id)
+                    },
                 )
             }
         }
