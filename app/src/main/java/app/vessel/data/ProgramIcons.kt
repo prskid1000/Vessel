@@ -134,12 +134,23 @@ class ProgramIcons @Inject constructor(
      * and Wine puts these in two places: the shell programs in `windows`, the
      * command-line ones in `windows\system32`. Looked up in that order, which is
      * the order Windows itself would find them for a bare name.
+     *
+     * **A profile with a real path resolves it instead.** Every entry on the
+     * menu was a bare name until Git arrived, and Git is not in `windows` — so
+     * the row that most needed an icon to tell it apart was the one that drew a
+     * letter. A `\` in the string is the whole test: it is a guest path, so it
+     * is resolved against the drive it names, exactly as a shortcut's is.
      */
     suspend fun iconForBuiltIn(containerId: String, program: String): Bitmap? {
-        val windows = File(paths.of(containerId).prefix, DRIVE_C_WINDOWS)
-        val file = sequenceOf(File(windows, program), File(windows, "system32/$program"))
-            .firstOrNull { it.isFile }
-            ?: return null
+        val layout = paths.of(containerId)
+        val file = if (program.contains('\\')) {
+            layout.resolveGuestPath(program)?.takeIf { it.isFile } ?: return null
+        } else {
+            val windows = File(layout.prefix, DRIVE_C_WINDOWS)
+            sequenceOf(File(windows, program), File(windows, "system32/$program"))
+                .firstOrNull { it.isFile }
+                ?: return null
+        }
         return iconOf(file)
     }
 

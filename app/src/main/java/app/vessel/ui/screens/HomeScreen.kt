@@ -19,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,9 +88,20 @@ fun HomeScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    // Which container a browse was started for. Held across the push to Files —
-    // home stays on the back stack, so this survives the round trip.
-    var pickingFor by remember { mutableStateOf<String?>(null) }
+    // Which container a browse was started for, kept across the push to Files.
+    //
+    // **`rememberSaveable`, and the difference is the whole feature.** It was
+    // `remember`, on the reasoning that home stays on the back stack — which is
+    // true of the *entry* and not of the composition. `NavHost` disposes the
+    // composable of a destination the moment another is on top, so every
+    // `remember` in it is thrown away; only the saveable registry is kept and
+    // restored for the entry. So this was always null on the way back, the
+    // effect below never fired, and **choosing a file did nothing at all** —
+    // Add a program → Browse → tap an `.exe` → Choose returned to a home screen
+    // with no sheet and no program added. It looked like the browser had
+    // refused the file, which is why it was reported as one drive's `.exe`
+    // files not being addable; it is neither the drive nor the file.
+    var pickingFor by rememberSaveable { mutableStateOf<String?>(null) }
     var sheet by remember { mutableStateOf<HomeSheet?>(null) }
 
     // A file came back from the browser: reopen the sheet that asked for it.

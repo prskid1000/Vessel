@@ -73,6 +73,15 @@ enum class TerminalProfile(
      * putting a console in front of one would give it a second, empty one.
      */
     val viaConsole: Boolean = true,
+
+    /**
+     * Arguments the program needs to be the thing the label promises.
+     *
+     * Empty for everything Wine ships — `cmd.exe` with no arguments is a command
+     * prompt. Not empty for a shell binary that has to be *told* it is being
+     * opened as one; see [GIT_BASH].
+     */
+    val arguments: List<String> = emptyList(),
 ) {
     // **Everything Wine provides that opens a window, in the order anybody
     // reaches for it.** Enum order is display order and the strip scrolls, so
@@ -224,23 +233,39 @@ enum class TerminalProfile(
      * `sh` when nothing stood behind them. The difference is that this one has
      * something behind it.
      *
-     * `git-bash.exe` rather than the bare `bash.exe`: the wrapper sets up the
-     * MSYS2 environment and opens mintty, which is what "Git Bash" means to
-     * anyone who has used it.
+     * **`bash.exe` in Wine's own console, not `git-bash.exe`, and the first
+     * version of this was the second one.** Tapping it did nothing at all: no
+     * window, no error, nothing in the log. `git-bash.exe` is not a terminal —
+     * it is a tiny launcher that sets three environment variables and spawns
+     * `mintty.exe`, and mintty is a terminal *emulator* that wants a pty from
+     * `msys-2.0.dll`. It is also a GUI-subsystem program, so it starts, fails to
+     * get one, and exits silently, which is exactly the shape of the symptom.
      *
-     * **git.exe is the safe half and bash is the risk.** Git itself is a native
-     * Win32 program and should behave; `bash.exe` is MSYS2 and leans on
-     * `msys-2.0.dll`'s `fork()` emulation, which is the classic thing that
-     * misbehaves under Wine. The POSIX tools reach `cmd` through PATH either
-     * way -- see `PrefixRegistry.toolsPath` -- so `ls` and `grep` do not depend
-     * on this button working.
+     * Wine already has the part mintty is emulating. `wineconsole` attaches a
+     * real Win32 console and `conhost.exe` draws it, so pointing this at
+     * `usr\bin\bash.exe` gives a shell in a genuine console and skips the pty
+     * layer entirely. `--login -i` because that is what `git-bash.exe` passes:
+     * `--login` sources `/etc/profile` (which is what builds the Unix `PATH`
+     * from `MSYSTEM` — see `PrefixRegistry.toolsPath`) and `-i` makes it
+     * interactive when its handles are a console rather than a terminal device.
+     *
+     * **What is actually being asked of the emulator here, measured.** In the
+     * ARM64 build of Git for Windows the native half is native and the POSIX
+     * half is not: `git-bash.exe`, `cmd\git.exe` and `clangarm64\bin\git.exe`
+     * are all `aa64`, while `usr\bin\bash.exe` and `msys-2.0.dll` are `8664`.
+     * So a Git Bash prompt runs x86-64 through FEX, and `git` itself does not.
+     * That is a known-good path here — the `usr\bin` tools already work from
+     * `cmd` — but `msys-2.0.dll`'s `fork()` emulation is the one thing in this
+     * package with a real chance of not working, and every pipeline and
+     * subshell needs it. The POSIX tools reach `cmd` through PATH regardless,
+     * so `ls` and `grep` do not depend on this button.
      */
     GIT_BASH(
         label = "Git Bash",
-        program = "git-bash.exe",
+        program = GIT_BASH_PATH,
         installedAt = GIT_BASH_PATH,
         missingReason = "Git is not installed in this container yet.",
-        viaConsole = false,
+        arguments = listOf("--login", "-i"),
     ),
 
     /**
@@ -301,12 +326,17 @@ data class TerminalOption(
 }
 
 /**
- * Where the Git component's shell wrapper lands, as a guest path.
+ * Where the Git component's shell binary lands, as a guest path.
  *
  * The literal rather than a reference to `PrefixRegistry.GIT_DIR`, because this
  * file is `ui/shell` and that one is `core`: the launcher already depends on
  * core for `PeArchitecture`, so the import would be legal, but a `const` in an
  * enum's initialiser cannot be a cross-module expression here. The two are
  * asserted equal by `TerminalProfileTest`.
+ *
+ * `usr\bin\bash.exe` and not `bin\bash.exe`, though both exist: `bin\` holds
+ * three forwarding stubs that Git's own installer puts on the machine PATH,
+ * while `usr\bin\` is the MSYS2 tree the login shell expects to be running out
+ * of.
  */
-private const val GIT_BASH_PATH = """C:\Program Files\Git\git-bash.exe"""
+private const val GIT_BASH_PATH = """C:\Program Files\Git\usr\bin\bash.exe"""

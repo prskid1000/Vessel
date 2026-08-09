@@ -95,6 +95,9 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 21 added `MSYSTEM` beside the PATH in [toolsPath], because a login shell
+     * started as `bash.exe` rather than through `git-bash.exe` has nothing else
+     * to tell it which MSYS2 prefix it is in;
      * 20 moved the applied-stamp into the machine hive, which is the one
      * SessionRuntime reads - it was written to user.reg and looked for in
      * system.reg, so every launch re-ran regedit and two wine.inf passes;
@@ -125,7 +128,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 20
+    const val SEED_VERSION: Int = 21
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -718,6 +721,18 @@ object PrefixRegistry {
                     """$GIT_DIR\clangarm64\bin""",
                 ).joinToString(";"),
             ),
+            // **Which MSYS2 prefix the shell belongs to, and it has to be set
+            // before `bash --login` runs.** `/etc/profile` reads `MSYSTEM` to
+            // decide what to put on the Unix `PATH` and what `MSYSTEM_PREFIX`
+            // is; unset, it falls through to the MSYS prefix and a login shell
+            // comes up without `clangarm64/bin` on its path — so `git` works
+            // from `cmd` and not from the shell that exists to run it.
+            // `git-bash.exe` sets this itself, which is exactly why launching
+            // `bash.exe` directly needs it set somewhere else.
+            //
+            // `CLANGARM64` for the same reason the PATH above says `clangarm64`:
+            // this is the ARM64 build of Git for Windows.
+            RegistryValue("MSYSTEM", "CLANGARM64"),
         ),
     )
 

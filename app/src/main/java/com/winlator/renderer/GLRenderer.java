@@ -336,6 +336,31 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         try (XLock lock = xServer.lock(XServer.Lockable.WINDOW_MANAGER, XServer.Lockable.DRAWABLE_MANAGER)) {
             renderableWindows.clear();
             collectRenderableWindows(xServer.windowManager.rootWindow, xServer.windowManager.rootWindow.getX(), xServer.windowManager.rootWindow.getY());
+
+            // VESSEL: a scene change re-uploads every window, not just the new one.
+            //
+            // The symptom this fixes: launch a program with the session, and the
+            // desktop around its window is black instead of the seeded #161826.
+            // An empty desktop is correct from the start, and leaving the desktop
+            // and coming back paints it correctly for good — which is the whole
+            // diagnosis. Coming back destroys the EGL context, every texture
+            // fails isAllocated(), and updateFromDrawable() re-uploads from the
+            // ByteBuffer. It comes back *right*, so the pixels were in the
+            // drawable the entire time and only the texture was stale.
+            //
+            // Stale because a texture is uploaded once at allocation and after
+            // that only when the drawable damages it. The desktop's background
+            // paint lands in the window between its texture being allocated
+            // (empty) and anything else asking to draw, and nothing damages it
+            // again — an idle desktop has nothing to repaint.
+            //
+            // A map, an unmap or a resize is the one moment we know the scene is
+            // wrong, so it is the honest place to distrust every texture in it.
+            // The cost is one full upload per window per scene change, and those
+            // are user-scale events: opening a window, not drawing in one.
+            for (RenderableWindow window : renderableWindows) {
+                if (!window.content.isOffscreenStorage()) window.content.getTexture().setNeedsUpdate(true);
+            }
         }
     }
 
