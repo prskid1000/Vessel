@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -33,7 +34,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.input.pointer.pointerInput
@@ -47,6 +52,8 @@ import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VSheetRow
+import app.vessel.ui.components.rememberBuiltInIcon
+import app.vessel.ui.components.rememberProgramIcon
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestWindow
 import app.vessel.ui.shell.TerminalOption
@@ -96,6 +103,15 @@ fun SessionTaskbar(
     onFocusWindow: (Int) -> Unit,
     modifier: Modifier = Modifier,
     launcherOpen: Boolean = false,
+    /**
+     * The running container's programs, so a button can draw the real icon.
+     *
+     * A window knows its executable's *name* and not its path; a shortcut has
+     * the path. Matching one to the other is what turns `notepad.exe` into an
+     * icon, and it is the reason this list is here rather than in the bar's own
+     * business. Empty is fine — every button falls back to its glyph or letter.
+     */
+    shortcuts: List<AppShortcut> = emptyList(),
 ) {
     Row(
         modifier
@@ -137,7 +153,7 @@ fun SessionTaskbar(
             // The unavailable reason still has a home: the launcher panel prints it
             // above Browse C:, where there is room for a sentence.
             windows.forEach { window ->
-                TaskbarWindow(window) { onFocusWindow(window.id) }
+                TaskbarWindow(window, shortcuts) { onFocusWindow(window.id) }
             }
         }
 
@@ -198,11 +214,18 @@ private fun StartButton(open: Boolean, onClick: () -> Unit) {
  * is not anonymous to a screen reader or to a long press — it is anonymous only
  * to the eye, which has the window itself to look at.
  *
- * The letter is [GuestWindow.initial] until a PE icon is drawn here. `PeIconReader`
- * exists and nothing calls it yet; when it does, this is where it goes.
+ * Three marks, in order of how much they know: the program's **own icon** when
+ * the window can be matched to one of the container's shortcuts, a **glyph** for
+ * the handful of programs Vessel itself launches, and the window's **initial**
+ * when neither applies. A letter is a poor icon and an honest one — a generic
+ * application glyph would make four unrelated programs look like one.
  */
 @Composable
-private fun TaskbarWindow(window: GuestWindow, onClick: () -> Unit) {
+private fun TaskbarWindow(
+    window: GuestWindow,
+    shortcuts: List<AppShortcut>,
+    onClick: () -> Unit,
+) {
     val shape = Vessel.metrics.shapeMd
     Box(
         Modifier
@@ -217,11 +240,31 @@ private fun TaskbarWindow(window: GuestWindow, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         val tint = if (window.focused) Vessel.colors.textPrimary else Vessel.colors.textLabel
+
+        // The window's program name against each shortcut's file name. A window
+        // carries `notepad.exe`; a shortcut carries `C:\windows\notepad.exe`.
+        // Case-insensitively, because Windows paths are.
+        val owner = remember(window.program, shortcuts) {
+            shortcuts.firstOrNull {
+                it.executable.substringAfterLast('\\').equals(window.program, ignoreCase = true)
+            }
+        }
+        val icon = rememberProgramIcon(owner)
         val glyph = windowGlyph(window.program)
-        if (glyph != null) {
-            Icon(glyph, contentDescription = null, Modifier.size(Vessel.metrics.iconMd), tint = tint)
-        } else {
-            Text(window.initial, style = Vessel.type.mono, color = tint)
+
+        when {
+            icon != null -> Image(
+                bitmap = icon,
+                contentDescription = null,
+                modifier = Modifier.size(Vessel.metrics.iconMd),
+                contentScale = ContentScale.Fit,
+                filterQuality = FilterQuality.Medium,
+            )
+
+            glyph != null ->
+                Icon(glyph, contentDescription = null, Modifier.size(Vessel.metrics.iconMd), tint = tint)
+
+            else -> Text(window.initial, style = Vessel.type.mono, color = tint)
         }
     }
 }
@@ -273,6 +316,8 @@ fun SessionLauncher(
     modifier: Modifier = Modifier,
     terminals: List<TerminalOption> = emptyList(),
     onTerminal: (TerminalProfile) -> Unit = {},
+    /** Which prefix to read the built-in programs' icons out of. */
+    containerId: String? = null,
 ) {
     val shape = Vessel.metrics.shapeLg
     val matching = remember(shortcuts, query) {
@@ -355,11 +400,18 @@ fun SessionLauncher(
         ) {
             terminals.forEach { option ->
                 LauncherAction(
+                    // The glyph is the fallback now, not the answer. These are
+                    // Wine's own programs and they carry their own icons; the
+                    // stand-ins were a giveaway that no good one existed — a
+                    // bulleted-list mark for the *registry editor*.
                     icon = when (option.profile) {
                         TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
                         TerminalProfile.REGEDIT -> VIcons.List
                         TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
+                        TerminalProfile.NOTEPAD -> VIcons.File
+                        TerminalProfile.WINECFG -> VIcons.Monitor
                     },
+                    bitmap = rememberBuiltInIcon(containerId, option.profile.program),
                     caption = option.profile.shortLabel,
                     description = option.unavailable ?: "Open ${option.profile.label}",
                     enabled = option.enabled,
@@ -398,6 +450,14 @@ private fun LauncherAction(
     description: String,
     enabled: Boolean,
     onClick: () -> Unit,
+    /**
+     * The program's own icon, when it has one.
+     *
+     * [icon] stays the fallback rather than being replaced, because it is what
+     * shows while the PE is being read and what shows for a container that is
+     * not running yet.
+     */
+    bitmap: ImageBitmap? = null,
 ) {
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Column(
@@ -409,12 +469,22 @@ private fun LauncherAction(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            Modifier.size(Vessel.metrics.iconMd),
-            tint = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
-        )
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.size(Vessel.metrics.iconMd).alpha(alpha),
+                contentScale = ContentScale.Fit,
+                filterQuality = FilterQuality.Medium,
+            )
+        } else {
+            Icon(
+                icon,
+                contentDescription = null,
+                Modifier.size(Vessel.metrics.iconMd),
+                tint = Vessel.colors.textMuted.copy(alpha = Vessel.colors.textMuted.alpha * alpha),
+            )
+        }
         Text(
             caption,
             style = Vessel.type.monoSmall,

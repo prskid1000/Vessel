@@ -497,6 +497,7 @@ fun SessionDesktop(
             ) {
                 SessionLauncher(
                     containerName = state.containerName.ifBlank { "this container" },
+                    containerId = state.containerId,
                     shortcuts = shortcuts,
                     terminals = terminals,
                     onTerminal = {
@@ -525,6 +526,10 @@ fun SessionDesktop(
                     launcherOpen = launcherOpen,
                     onStart = { launcherOpen = !launcherOpen },
                     onFocusWindow = onFocusWindow,
+                    // The same list the launcher above draws. A window knows its
+                    // executable's name; a shortcut knows its path, which is
+                    // what an icon can be read out of.
+                    shortcuts = shortcuts,
                 )
             }
         }

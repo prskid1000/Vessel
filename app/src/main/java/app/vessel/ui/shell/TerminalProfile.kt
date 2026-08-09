@@ -102,6 +102,43 @@ enum class TerminalProfile(
         missingReason = "",
         viaConsole = false,
     ),
+
+    /**
+     * Wine's Notepad, which is a real Win32 program and not a stand-in.
+     *
+     * Built from `programs/notepad` in the tree this project compiles, so it is
+     * in every prefix by the same argument as `cmd.exe`. Worth a permanent slot
+     * for a reason beyond editing text: it is the shortest way to prove the
+     * guest is *working* — a window, a menu bar, a caret, and a keyboard that
+     * reaches it. It was the program this project used to prove exactly that.
+     */
+    NOTEPAD(
+        label = "Notepad",
+        program = "notepad.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
+
+    /**
+     * Wine's own configuration, and the closest thing this product has to
+     * settings for a container.
+     *
+     * `docs/DESIGN.md` removed Vessel's settings screen deliberately — a
+     * container is configured correctly for this device and there is nothing
+     * for a user to decide. That argument covers *Vessel's* settings and not
+     * Wine's: the Windows version a program checks, a DLL override for a
+     * specific title, the audio driver. Those are real, they are per-prefix, and
+     * winecfg is where a Wine user already knows to look for them. Shipping the
+     * tool beats reimplementing a subset of it.
+     */
+    WINECFG(
+        label = "Wine Configuration",
+        program = "winecfg.exe",
+        installedAt = null,
+        missingReason = "",
+        viaConsole = false,
+    ),
     ;
 
     /** Whether this shell is one Wine provides rather than one somebody installed. */
@@ -118,6 +155,8 @@ enum class TerminalProfile(
             COMMAND_PROMPT -> "cmd"
             REGEDIT -> "reg"
             WINE_EXPLORER -> "files"
+            NOTEPAD -> "notepad"
+            WINECFG -> "winecfg"
         }
 }
 

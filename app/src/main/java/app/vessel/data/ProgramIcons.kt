@@ -68,8 +68,11 @@ class ProgramIcons @Inject constructor(
      * program whose icon is in a format the reader will not guess at are all
      * null and none of them is an error.
      */
-    suspend fun iconFor(shortcut: AppShortcut): Bitmap? {
-        val file = fileFor(shortcut) ?: return null
+    suspend fun iconFor(shortcut: AppShortcut): Bitmap? =
+        fileFor(shortcut)?.let { iconOf(it) }
+
+    /** The cached decode of one file. Both callers land here. */
+    private suspend fun iconOf(file: File): Bitmap? {
         val key = "${file.path}@${file.lastModified()}"
         cache.get(key)?.let { return it.bitmap }
 
@@ -118,6 +121,28 @@ class ProgramIcons @Inject constructor(
             .resolveGuestPath(shortcut.executable)
             ?.takeIf { it.isFile }
 
+    /**
+     * The icon of a program Wine itself provides, by bare file name.
+     *
+     * The start menu's built-in row — cmd, regedit, explorer, notepad, winecfg —
+     * had hand-picked glyphs standing in for icons, and the stand-ins were the
+     * giveaway: a bulleted-list glyph for the *registry editor*, because there
+     * is no obvious mark for one. These programs are in the prefix and carry
+     * their own icons, so there is nothing to choose.
+     *
+     * By name and not by path, because that is what a `TerminalProfile` knows,
+     * and Wine puts these in two places: the shell programs in `windows`, the
+     * command-line ones in `windows\system32`. Looked up in that order, which is
+     * the order Windows itself would find them for a bare name.
+     */
+    suspend fun iconForBuiltIn(containerId: String, program: String): Bitmap? {
+        val windows = File(paths.of(containerId).prefix, DRIVE_C_WINDOWS)
+        val file = sequenceOf(File(windows, program), File(windows, "system32/$program"))
+            .firstOrNull { it.isFile }
+            ?: return null
+        return iconOf(file)
+    }
+
     private companion object {
         /**
          * A 44 dp tile on this phone is about 110 px, so 128 looks identical to
@@ -125,6 +150,9 @@ class ProgramIcons @Inject constructor(
          * 256, which is the largest an ICO can describe.
          */
         const val MAX_ICON_PX = 128
+
+        /** Where Wine puts the programs it provides, under a prefix. */
+        const val DRIVE_C_WINDOWS = "drive_c/windows"
 
         /** Four megabytes — about sixty 128 px icons, far more than a device has. */
         const val CACHE_BYTES = 4 * 1024 * 1024

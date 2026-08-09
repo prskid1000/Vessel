@@ -33,7 +33,7 @@ import dagger.hilt.components.SingletonComponent
  * indicator for forty milliseconds is worse than one that changes.
  */
 @Composable
-fun rememberProgramIcon(shortcut: AppShortcut): ImageBitmap? {
+fun rememberProgramIcon(shortcut: AppShortcut?): ImageBitmap? {
     // A preview has no Hilt application behind it, and asking would throw.
     if (LocalInspectionMode.current) return null
 
@@ -45,10 +45,39 @@ fun rememberProgramIcon(shortcut: AppShortcut): ImageBitmap? {
     }
 
     // Keyed on the path rather than the id: renaming a shortcut does not change
-    // its icon, and repointing one at a different file does.
-    var icon by remember(shortcut.executable) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(shortcut.executable) {
-        icon = icons.iconFor(shortcut)?.asImageBitmap()
+    // its icon, and repointing one at a different file does. Nullable because
+    // the taskbar asks about a window it may not have matched to a shortcut, and
+    // a caller that has to branch around this would be calling a composable in
+    // one arm of an `if` — legal, and worse than taking a null here.
+    var icon by remember(shortcut?.executable) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(shortcut?.executable) {
+        icon = shortcut?.let { icons.iconFor(it)?.asImageBitmap() }
+    }
+    return icon
+}
+
+/**
+ * The icon of a program Wine itself provides, for the start menu's built-in row.
+ *
+ * Null until read, null without a running container, and null for a program
+ * whose icon cannot be extracted — the caller keeps its glyph for all three.
+ */
+@Composable
+fun rememberBuiltInIcon(containerId: String?, program: String): ImageBitmap? {
+    if (LocalInspectionMode.current) return null
+
+    val context = LocalContext.current
+    val icons = remember(context) {
+        EntryPointAccessors
+            .fromApplication(context.applicationContext, ProgramIconsEntryPoint::class.java)
+            .programIcons()
+    }
+
+    var icon by remember(containerId, program) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(containerId, program) {
+        icon = containerId
+            ?.takeIf { it.isNotBlank() }
+            ?.let { icons.iconForBuiltIn(it, program)?.asImageBitmap() }
     }
     return icon
 }
