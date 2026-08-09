@@ -35,6 +35,7 @@ import app.vessel.core.serverArgv
 import app.vessel.core.sessionEnvironment
 import app.vessel.core.toolArgv
 import app.vessel.core.wineLauncherEnvironment
+import app.vessel.core.deleteTree
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1402,9 +1403,9 @@ class SessionRuntime @Inject constructor(
         // Into a sibling and renamed, so a launch killed mid-copy leaves no
         // half-tree that the sentinel check above would then call installed.
         val staging = File(target.parentFile, "${target.name}$STAGING_SUFFIX")
-        staging.deleteRecursively()
+        deleteTree(staging)
         source.copyRecursively(staging, overwrite = true)
-        target.deleteRecursively()
+        deleteTree(target)
         if (!staging.renameTo(target)) error("could not move the tools payload into place")
 
         val files = target.walkTopDown().count { it.isFile }

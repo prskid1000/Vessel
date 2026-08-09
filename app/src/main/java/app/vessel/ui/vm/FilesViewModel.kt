@@ -138,7 +138,24 @@ class FilesViewModel @Inject constructor(
      * directly, which is why `D:` existed in the container and could not be
      * reached from here.
      */
-    private var driveLetter: Char = DriveMap.SYSTEM_DRIVE
+    /**
+     * **Derived from the path being shown, not remembered beside it.**
+     *
+     * This was a `var` set only by [openDrive], and it was a second source of
+     * truth for which drive is open. The two disagreed the moment anything else
+     * changed the path — and [GuestPath.rootOf] describes exactly that: a
+     * breadcrumb tap moved `guestPath` to another drive's root while this stayed
+     * put, so the browser listed one drive under another drive's name, the tab
+     * row highlighted the wrong tab, and tapping the right tab did nothing
+     * because [openDrive] compared against this and returned early.
+     *
+     * A path carries its own drive letter. Reading it is not slower than
+     * remembering it, and it cannot drift.
+     */
+    private val driveLetter: Char
+        get() = state.value.guestPath.firstOrNull()?.lowercaseChar()
+            ?.takeIf { it in 'a'..'z' }
+            ?: DriveMap.SYSTEM_DRIVE
 
     private val driveRoot: File
         get() = File(File(prefix, DriveMap.DOSDEVICES), "$driveLetter:")
@@ -216,9 +233,12 @@ class FilesViewModel @Inject constructor(
 
     /** Show [letter], from its own root. Silent for a drive that is not mapped. */
     fun openDrive(letter: Char) {
-        if (letter == driveLetter) return
         if (state.value.drives.none { it.letter == letter }) return
-        driveLetter = letter
+        // No early return for "already on it". It used to be here and it was the
+        // thing that made the state above unrecoverable: once the browser
+        // believed it was on a drive it was not on, the only control that could
+        // have corrected it refused to act. Re-opening a drive you are already
+        // on is a jump to its root, which is a reasonable thing for a tab to do.
         navigateTo("${letter.uppercaseChar()}:" + SEPARATOR)
     }
 

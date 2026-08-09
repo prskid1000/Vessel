@@ -3,6 +3,8 @@ package app.vessel.data
 import androidx.datastore.core.DataStore
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerProfile
+import app.vessel.core.DriveMap
+import app.vessel.core.deleteTree
 import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
 import kotlinx.coroutines.flow.Flow
@@ -99,7 +101,28 @@ class ContainerRepository @Inject constructor(
             document.copy(containers = document.containers.filterNot { it.id == id })
         }
         sessionLogs.deleteAll(id)
-        paths.of(id).base.deleteRecursively()
+
+        // **Every mapping is unlinked before anything recursive runs, and this
+        // is not belt-and-braces — it is the line that must never be removed.**
+        //
+        // A container's `prefix/dosdevices` holds a symlink per drive: `d:` to
+        // `/storage/emulated/0`, and one per folder the user mapped. Deleting
+        // the container used to be `base.deleteRecursively()`, which walks with
+        // `listFiles()` — and `listFiles()` on a link to a directory returns the
+        // *target's* children. So the delete went through every mapping and
+        // removed the contents of the user's shared storage and of every folder
+        // they had mapped, then unlinked the now-empty links and reported
+        // success. Reported as "my downloaded games got deleted twice", and that
+        // is precisely what happened.
+        //
+        // [deleteTree] is the real fix and refuses to follow a link at all. This
+        // is here as well because the two failures are independent: this leaves
+        // nothing for a walk to follow even if one is reintroduced, and a
+        // deleted container should stop pointing at the user's folders whether
+        // or not the rest of the delete succeeds.
+        val layout = paths.of(id)
+        DriveMap.drives(layout.prefix).forEach { DriveMap.unmap(layout.prefix, it.letter) }
+        deleteTree(layout.base)
     }
 
     /**

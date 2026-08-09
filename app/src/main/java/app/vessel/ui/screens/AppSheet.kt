@@ -177,7 +177,7 @@ private fun AppSheetContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    state.executable.ifBlank { "choose an .exe on C:" },
+                    state.executable.ifBlank { "choose a program on any of this container's drives" },
                     style = Vessel.type.mono,
                     color = if (state.executable.isBlank()) {
                         Vessel.colors.textMuted
@@ -195,7 +195,7 @@ private fun AppSheetContent(
                 // two rows below are the same two routes written out; this is the
                 // one a user reaches for first.
                 if (state.creating) {
-                    VIconButton(VIcons.Folder, "Browse this container's C:", onBrowse)
+                    VIconButton(VIcons.Folder, "Browse this container's drives", onBrowse)
                 }
             }
         }
@@ -225,7 +225,7 @@ private fun AppSheetContent(
             VRule(verticalMargin = Vessel.metrics.s6)
             VSheetRow(
                 icon = VIcons.Folder,
-                title = "Browse this container's C:",
+                title = "Browse this container's drives",
                 help = "Opens the file browser to pick the file. Add it from there and it " +
                     "lands back here.",
                 onClick = onBrowse,

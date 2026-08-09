@@ -3,6 +3,7 @@ package app.vessel.data
 import android.content.Context
 import app.vessel.core.LogEntry
 import app.vessel.core.decodeLogLine
+import app.vessel.core.deleteTree
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -306,7 +307,7 @@ class SessionLogStore @Inject constructor(
     suspend fun deleteAll(containerId: String) = withContext(Dispatchers.IO) {
         writers.keys.filter { it.startsWith("$containerId/") }
             .forEach { writers[it]?.finish(SessionExit.CRASHED, null) }
-        directoryFor(containerId).deleteRecursively()
+        deleteTree(directoryFor(containerId))
         _revision.update { it + 1 }
     }
 

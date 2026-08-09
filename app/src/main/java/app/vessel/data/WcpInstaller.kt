@@ -2,6 +2,7 @@ package app.vessel.data
 
 import app.vessel.core.ComponentType
 import app.vessel.core.WcpProfile
+import app.vessel.core.deleteTree
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -339,7 +340,7 @@ class WcpInstaller @Inject constructor(
         } catch (e: IOException) {
             return WcpInstallResult.Malformed(e.message ?: "I/O error while extracting")
         } finally {
-            staging.deleteRecursively()
+            deleteTree(staging)
         }
     }
 
@@ -540,7 +541,7 @@ class WcpInstaller @Inject constructor(
      */
     private fun swapIntoPlace(staging: File, destination: File): Boolean {
         destination.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) return false }
-        if (destination.exists() && !destination.deleteRecursively()) return false
+        if (destination.exists() && !deleteTree(destination)) return false
         if (staging.renameTo(destination)) return true
         return runCatching {
             staging.copyRecursively(destination, overwrite = true)

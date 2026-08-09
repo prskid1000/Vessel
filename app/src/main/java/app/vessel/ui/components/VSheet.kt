@@ -382,12 +382,12 @@ private fun VSheetPreview() {
                 help = "The name, icon and architecture are read from the file. Nothing here " +
                     "is typed twice.",
             ) {
-                VTextField(value = "", onValueChange = {}, placeholder = "choose an .exe on C:")
+                VTextField(value = "", onValueChange = {}, placeholder = "choose a program on any of this container's drives")
             }
             VRule(verticalMargin = Vessel.metrics.s6)
             VSheetRow(
                 icon = VIcons.Folder,
-                title = "Browse this container's C:",
+                title = "Browse this container's drives",
                 help = "Opens the file browser to pick the file.",
                 onClick = {},
             )

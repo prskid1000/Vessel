@@ -125,10 +125,15 @@ class SessionShellHost @Inject constructor(
      * with its own sentence rather than being dropped from the list.
      */
     override suspend fun terminalProfiles(containerId: String): List<TerminalOption> {
-        val driveC = File(paths.of(containerId).prefix, GuestPath.DRIVE_C)
+        // Against the drive the path names, not against `drive_c`. Everything on
+        // the menu is on `C:` today, so this changes no behaviour — it stops the
+        // next profile that is not from being refused as missing while sitting
+        // right there, which is a defect this project has already shipped once
+        // in `launch` above.
+        val layout = paths.of(containerId)
         return TerminalProfile.entries.map { profile ->
             val installed = profile.installedAt
-                ?.let { GuestPath.resolve(driveC, it)?.isFile } ?: true
+                ?.let { layout.resolveGuestPath(it)?.isFile } ?: true
             TerminalOption(profile, if (installed) null else profile.missingReason)
         }
     }

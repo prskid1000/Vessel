@@ -2,6 +2,7 @@ package app.vessel.data
 
 import app.vessel.core.ComponentType
 import app.vessel.core.WcpProfile
+import app.vessel.core.deleteTree
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -225,7 +226,7 @@ class ComponentStore @Inject constructor(
             if (version in referenced) continue
             val directory = layout.version(version.type, version.versionCode)
             val size = directory.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-            if (!directory.deleteRecursively()) continue
+            if (!deleteTree(directory)) continue
             layout.record(version.type, version.versionCode).delete()
             removed += version
             freed += size
@@ -289,7 +290,7 @@ class ComponentStore @Inject constructor(
                     // Another container already brought this exact version
                     // across. The same key is the same build, so this copy is
                     // duplicate bytes and goes.
-                    if (directory.deleteRecursively()) discarded += version
+                    if (deleteTree(directory)) discarded += version
                 } else {
                     val destination = layout.version(type, versionCode)
                     destination.parentFile?.mkdirs()
@@ -330,10 +331,10 @@ class ComponentStore @Inject constructor(
         if (from.renameTo(to)) return true
         val copied = runCatching { from.copyRecursively(to, overwrite = true) }.getOrDefault(false)
         if (!copied) {
-            to.deleteRecursively()
+            deleteTree(to)
             return false
         }
-        from.deleteRecursively()
+        deleteTree(from)
         return true
     }
 
