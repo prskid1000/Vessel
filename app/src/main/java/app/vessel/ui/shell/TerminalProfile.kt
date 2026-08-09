@@ -167,60 +167,11 @@ enum class TerminalProfile(
     ),
 
     /**
-     * The other half of installing something.
-     *
-     * A container accumulates installs and nothing in Vessel removes one. The
-     * only lever it has is deleting the whole container, which takes the rest of
-     * the prefix with it.
-     */
-    UNINSTALLER(
-        label = "Add or Remove Programs",
-        program = "uninstaller.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
      * Control Panel - a shell over the applets, winecfg's among them.
      */
     CONTROL_PANEL(
         label = "Control Panel",
         program = "control.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
-     * Thinner than it sounds, and still the first thing anybody debugging this
-     * project's graphics will open.
-     */
-    DXDIAG(
-        label = "DirectX Diagnostics",
-        program = "dxdiag.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
-     * What the guest thinks it is running on.
-     */
-    MSINFO(
-        label = "System Information",
-        program = "msinfo32.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
-     * The Windows version a program would be told, in one dialog.
-     */
-    WINVER(
-        label = "About Windows",
-        program = "winver.exe",
         installedAt = null,
         missingReason = "",
         viaConsole = false,
@@ -257,17 +208,6 @@ enum class TerminalProfile(
     OLE_VIEW(
         label = "OLE/COM Object Viewer",
         program = "oleview.exe",
-        installedAt = null,
-        missingReason = "",
-        viaConsole = false,
-    ),
-
-    /**
-     * Present because Wine ships it.
-     */
-    ODBC(
-        label = "ODBC Data Sources",
-        program = "odbcad32.exe",
         installedAt = null,
         missingReason = "",
         viaConsole = false,
@@ -329,15 +269,10 @@ enum class TerminalProfile(
             REGEDIT -> "reg"
             WINECFG -> "winecfg"
             TASK_MANAGER -> "taskmgr"
-            UNINSTALLER -> "uninstall"
             CONTROL_PANEL -> "control"
-            DXDIAG -> "dxdiag"
-            MSINFO -> "msinfo"
-            WINVER -> "winver"
             WRITE -> "write"
             INTERNET_EXPLORER -> "iexplore"
             OLE_VIEW -> "oleview"
-            ODBC -> "odbc"
             PROGRAM_MANAGER -> "progman"
             CLOCK -> "clock"
             MINESWEEPER -> "winemine"

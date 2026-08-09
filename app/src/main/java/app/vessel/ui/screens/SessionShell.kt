@@ -386,55 +386,70 @@ fun SessionLauncher(
 
         VRule(verticalMargin = Vessel.metrics.s3)
 
-        // **One row of buttons, not four stacked rows with sentences.**
-        // Windows Terminal's profiles as full-width rows took more of the panel
-        // than the programs did, and two of the three spent their line
-        // apologising for not being installed. These are four verbs; they belong
-        // side by side, the way the taskbar's own actions are.
-        // Scrolls, because six actions do not fit a phone's width and a row that
-        // silently drops the last two is worse than one that can be pushed.
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            terminals.forEach { option ->
-                LauncherAction(
-                    // The glyph is the fallback now, not the answer. These are
-                    // Wine's own programs and they carry their own icons; the
-                    // stand-ins were a giveaway that no good one existed — a
-                    // bulleted-list mark for the *registry editor*.
-                    icon = when (option.profile) {
-                        TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
-                        TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
-                        TerminalProfile.REGEDIT -> VIcons.List
-                        TerminalProfile.WINECFG -> VIcons.Monitor
-                        TerminalProfile.TASK_MANAGER -> VIcons.List
-                        TerminalProfile.DXDIAG -> VIcons.Monitor
-                        TerminalProfile.MSINFO -> VIcons.Info
-                        TerminalProfile.WINVER -> VIcons.Info
-                        // Everything else is a document-shaped program, and the
-                        // glyph is only what shows for the moment before its
-                        // real icon arrives.
-                        else -> VIcons.File
-                    },
-                    bitmap = rememberBuiltInIcon(containerId, option.profile.program),
-                    caption = option.profile.shortLabel,
-                    description = option.unavailable ?: "Open ${option.profile.label}",
-                    enabled = option.enabled,
-                    onClick = { onTerminal(option.profile) },
-                )
+        // **Wrapped five to a row, not one row that scrolls.**
+        //
+        // A scrolling strip was right for four actions and wrong for thirteen:
+        // everything past the fifth was off-screen behind a gesture nothing on
+        // the panel suggests, so two thirds of the list was invisible unless you
+        // guessed it was there. A grid shows all of it at once, and the panel is
+        // already the tallest thing on the desktop — the cost is a few dp.
+        //
+        // Weighted cells and blank spacers on the last row, the same shape
+        // [VAppGrid] uses above, so a row of three keeps its column width
+        // instead of stretching three buttons across the panel.
+        terminals.chunked(BUILT_IN_COLUMNS).forEach { row ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                row.forEach { option ->
+                    LauncherAction(
+                        // The glyph is the fallback now, not the answer. These
+                        // are Wine's own programs and they carry their own
+                        // icons; the stand-ins were a giveaway that no good one
+                        // existed — a bulleted-list mark for the *registry
+                        // editor*.
+                        icon = when (option.profile) {
+                            TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
+                            TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
+                            TerminalProfile.REGEDIT -> VIcons.List
+                            TerminalProfile.WINECFG -> VIcons.Monitor
+                            TerminalProfile.TASK_MANAGER -> VIcons.List
+                            // Everything else is a document-shaped program, and
+                            // the glyph is only what shows for the moment before
+                            // its real icon arrives.
+                            else -> VIcons.File
+                        },
+                        bitmap = rememberBuiltInIcon(containerId, option.profile.program),
+                        caption = option.profile.shortLabel,
+                        description = option.unavailable ?: "Open ${option.profile.label}",
+                        enabled = option.enabled,
+                        onClick = { onTerminal(option.profile) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                repeat(BUILT_IN_COLUMNS - row.size) { Box(Modifier.weight(1f)) }
             }
-            // **Vessel's own C: browser is not here, and that is deliberate.**
-            // Wine's File Explorer above it already lists the container's
-            // drives, and two file managers side by side in one menu is two
-            // answers to one question. Ours is still reachable from the
-            // container's card on the home screen, which is where getting a
-            // file *in* belongs — it is the only one of the two that can import
-            // from Android storage or add a program as a shortcut.
         }
+
+        // **Vessel's own C: browser is not here, and that is deliberate.**
+        // Wine's File Explorer above it already lists the container's drives,
+        // and two file managers side by side in one menu is two answers to one
+        // question. Ours is still reachable from the container's card on the
+        // home screen, which is where getting a file *in* belongs — it is the
+        // only one of the two that can import from Android storage or add a
+        // program as a shortcut.
     }
 }
+
+/**
+ * Five across for the built-in row.
+ *
+ * The tile grid above is four, and these are deliberately narrower: no
+ * architecture badge, no program name to fit, just a mark and a command.
+ */
+private const val BUILT_IN_COLUMNS = 5
 
 /**
  * A square action in the launcher's bottom row: a glyph over three characters.
@@ -457,6 +472,7 @@ private fun LauncherAction(
     description: String,
     enabled: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     /**
      * The program's own icon, when it has one.
      *
@@ -468,10 +484,10 @@ private fun LauncherAction(
 ) {
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Column(
-        Modifier
+        modifier
             .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
             .clickable(enabled = enabled, onClickLabel = description, onClick = onClick)
-            .padding(vertical = Vessel.metrics.s8, horizontal = Vessel.metrics.s11)
+            .padding(vertical = Vessel.metrics.s8, horizontal = Vessel.metrics.s3)
             .semantics { contentDescription = description },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
