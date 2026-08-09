@@ -24,17 +24,39 @@ class PrefixRegistryTest {
     }
 
     @Test
-    fun `every D3D and WGL DLL is overridden native,builtin`() {
+    fun `every D3D DLL is overridden native,builtin, and opengl32 is removed`() {
         assertEquals(
             listOf("d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi", "opengl32"),
             PrefixRegistry.dllOverrides.values.map { it.name },
         )
-        assertTrue(PrefixRegistry.dllOverrides.values.all { it.data == "native,builtin" })
+        // Every D3D entry forces the shipped native build...
+        assertTrue(
+            PrefixRegistry.dllOverrides.values
+                .filter { it.name != WGL_DLL }
+                .all { it.data == "native,builtin" },
+        )
+        // ...and `opengl32` is here only to be taken *out* of prefixes that
+        // already have it. Seeding it native made `wined3d` — a static import of
+        // `d3dcompiler_47` — pull Zink into every Direct3D game, and Zink's load
+        // killed the process. See `SessionEnvironment.WGL_DLL`.
+        assertEquals(
+            RegistryKind.DELETE,
+            PrefixRegistry.dllOverrides.values.single { it.name == WGL_DLL }.kind,
+        )
     }
 
     @Test
     fun `the DLL override list is the same one the session environment uses`() {
-        assertEquals(D3D_DLL_OVERRIDES, PrefixRegistry.dllOverrides.values.map { it.name })
+        // The shipped list, plus the one value the seed has to *remove* from
+        // prefixes that already carry it. See RegistryKind.DELETE.
+        assertEquals(
+            D3D_DLL_OVERRIDES + WGL_DLL,
+            PrefixRegistry.dllOverrides.values.map { it.name },
+        )
+        assertEquals(
+            RegistryKind.DELETE,
+            PrefixRegistry.dllOverrides.values.last { it.name == WGL_DLL }.kind,
+        )
     }
 
     @Test
@@ -98,7 +120,7 @@ class PrefixRegistryTest {
             """"d3d12"="native,builtin"""",
             """"d3d12core"="native,builtin"""",
             """"dxgi"="native,builtin"""",
-            """"opengl32"="native,builtin"""",
+            """"opengl32"=-""",
             "",
             """[HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\amd64]""",
             """@="libarm64ecfex.dll"""",
@@ -155,7 +177,7 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(21, PrefixRegistry.SEED_VERSION)
+        assertEquals(22, PrefixRegistry.SEED_VERSION)
         // Fourteen keys, the three the seed deletes, and the stamp `renderSeed`
         // appends — which is not in the list, its value being a hash of the rest.
         assertEquals(17, PrefixRegistry.seed.size)

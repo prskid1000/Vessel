@@ -13,7 +13,26 @@ import java.io.File
  * because `ShouldAppsUseDarkMode` reads its value with `RRF_RT_REG_DWORD`,
  * which rejects a string outright.
  */
-enum class RegistryKind { SZ, DWORD }
+enum class RegistryKind {
+    SZ,
+    DWORD,
+
+    /**
+     * `"name"=-`, which removes one value and leaves the key.
+     *
+     * **A `.reg` merge adds and replaces; it never removes**, and that gap has
+     * bitten this project once already at key level — see [RegistryKey.remove].
+     * This is the same problem one level down: taking a value out of [seed] stops
+     * it being written to a *new* prefix and does nothing at all to the thousands
+     * already carrying it.
+     *
+     * Added for `opengl32`, which was seeded `native,builtin` and had to stop
+     * being — see `SessionEnvironment.WGL_DLL`. Without a delete form, every
+     * container created before that change would go on loading Zink into every
+     * process for ever, and the fix would only ever reach a fresh install.
+     */
+    DELETE,
+}
 
 /**
  * One registry value. [name] is empty for a key's default value, which a `.reg`
@@ -31,6 +50,10 @@ data class RegistryValue(
         /** A `REG_DWORD`, rendered as `dword:` and eight lowercase hex digits. */
         fun dword(name: String, value: Int): RegistryValue =
             RegistryValue(name, "%08x".format(value), RegistryKind.DWORD)
+
+        /** `"name"=-` — remove this one value, keep the key. See [RegistryKind.DELETE]. */
+        fun removed(name: String): RegistryValue =
+            RegistryValue(name, "", RegistryKind.DELETE)
     }
 }
 
@@ -95,6 +118,10 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 22 removes the `opengl32` DLL override with `.reg`'s value-delete form,
+     * because dropping it from the list would only ever reach a new prefix and
+     * every existing one would keep loading Zink into every process — see
+     * `SessionEnvironment.WGL_DLL` for the measurement that removed it;
      * 21 added `MSYSTEM` beside the PATH in [toolsPath], because a login shell
      * started as `bash.exe` rather than through `git-bash.exe` has nothing else
      * to tell it which MSYS2 prefix it is in;
@@ -128,7 +155,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 21
+    const val SEED_VERSION: Int = 22
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -232,7 +259,13 @@ object PrefixRegistry {
      */
     val dllOverrides: RegistryKey = RegistryKey(
         path = """HKEY_CURRENT_USER\Software\Wine\DllOverrides""",
-        values = D3D_DLL_OVERRIDES.map { RegistryValue(it, DLL_OVERRIDE_MODE) },
+        values = D3D_DLL_OVERRIDES.map { RegistryValue(it, DLL_OVERRIDE_MODE) } +
+            // **Removed, not omitted.** `opengl32` was seeded here and must stop
+            // being — `SessionEnvironment.WGL_DLL` has the measurement. Dropping
+            // it from the list would only affect prefixes created afterwards; a
+            // `.reg` merge does not remove what it no longer mentions, so every
+            // existing container would keep loading Zink into every process.
+            RegistryValue.removed(WGL_DLL),
     )
 
     /**
@@ -918,6 +951,7 @@ object PrefixRegistry {
                 when (value.kind) {
                     RegistryKind.SZ -> append('"').append(escape(value.data)).append('"')
                     RegistryKind.DWORD -> append("dword:").append(value.data)
+                    RegistryKind.DELETE -> append('-')
                 }
                 append(CRLF)
             }
