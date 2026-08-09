@@ -15,8 +15,9 @@ as won't-do, with the reason.
 
 ## 1. Blocking a working product
 
-The four things between here and one sentence: *a Windows program drew on the
-screen through DXVK*.
+What stands between here and one sentence: *a Windows program drew on the screen
+through DXVK*. As of 2026-08-09 a Windows program draws on the screen and takes
+input; what it does not do is draw through D3D.
 
 - [x] **The registry seed never reaches `system.reg`.** It does now.
   *Evidence:* on the provisioned container, `system.reg` carries
@@ -36,6 +37,35 @@ screen through DXVK*.
   `VESSEL-OK bits=32 sum=333338333350000 argc=1` into the session log, after
   `Loaded L"C:\\windows\\system32\\libwow64fex.dll"` and FEX's own
   `D EC Load module hello-i686.exe`. §3 has the whole matrix.
+
+- [x] **A program launched from the home screen, in a window, taking keyboard
+  input.** The thing the shell exists to do.
+  *Evidence, 2026-08-09:* `notepad.exe` added from the file browser, tapped on
+  its tile on home with nothing running. The container started, the program came
+  up with it, the window is centred on the desktop and themed — Nocturne title
+  bar, working minimise/maximise/close — the taskbar lists it, and
+  `adb shell input text` put **VESSEL-KEYBOARD-OK** into it, `Ln 1, Col 19`.
+  Backing out of the desktop and returning left the window and its text intact,
+  which is the black-desktop-on-return fix confirmed as well.
+  *Three defects found by doing it, all fixed in `6f720d1`:* a tile on home
+  refused every launch with "belongs to a different container" because nothing
+  was running to compare against; only `C:` shortcuts could resolve at all; and
+  windows opened hard against the top-left corner.
+
+- [ ] **At session start the desktop background is black until something
+  repaints it.** Narrow and reproducible: with a program's window mapped, the
+  area around it is black rather than `#161826`. Leaving the desktop and coming
+  back paints it correctly and it stays correct, and an empty desktop is correct
+  from the start — so this is paint ordering at startup (the first composite
+  happens before Wine's desktop window has painted its background, and nothing
+  damages it afterwards) rather than the compositing bug it looks like. Window
+  contents are never affected.
+  *Not diagnosed further; recorded rather than guessed at.*
+
+- [ ] **The taskbar draws a letter where a program has an icon.** `PeIconReader`
+  feeds the app tiles now; a taskbar button still shows the first letter of the
+  window title. The button knows `GuestWindow.program`, so the mapping to a
+  shortcut's icon exists — it is wiring, not a new capability.
 
 - [ ] **Nothing has ever rendered a triangle.**
   **The reason has changed, and the old one is gone.** With the app's X server
@@ -65,9 +95,15 @@ screen through DXVK*.
   Vulkan probe passes in the same session — `driver_id=18`, `turnip Mesa driver`,
   `Mesa 26.3.0-devel (git-9c475fc367)`, `Adreno (TM) 829`, api 1.4.358 — so the
   driver underneath is fine and only the window system is missing.
-  *Next step, concretely:* `-Dplatforms=x11` for Mesa, against the same Android
-  X11 sysroot `build/x11-sysroot.sh` already builds for Wine. Nothing else in
-  this item can be tested until that lands.
+  *The next step used to be `-Dplatforms=x11` for Mesa, and that is no longer
+  the whole story.* It was tried, and what it exposed is a kernel-side limit
+  rather than a build option: **KGSL cannot export a dma-buf for a buffer Turnip
+  allocated.** `kgsl_bo_export_dmabuf` can only re-export an fd it imported, so
+  the X11 WSI's "client allocates, the server imports" shape cannot work on this
+  driver at all; the shape that can is the Android side allocating and the client
+  importing. Every D3D probe still dies, now at swapchain creation — one step
+  further along than the extension list, and a design question rather than a
+  build flag. Nothing else in this item can be tested until that is answered.
   *Done when:* a D3D probe passes its pixel readback, **and** a real program with
   a 3D window keeps drawing while its screens are navigated by touch.
 
@@ -260,32 +296,51 @@ Four things the interface said that were not true, and one that still is.
   *Evidence:* `ComponentRegistryTest` parses the repository's own
   `registry/contents.json` and asserts every entry in it is downloadable, so a
   `gen_registry.py` that stopped writing the field would fail here.
-- [~] **No fonts bundled.** `res/font` now holds Inter 4.001 and JetBrains Mono
-  2.304 as variable fonts, both OFL-1.1, both recorded in `docs/LICENSING.md`
-  with their digests, and both verified from their own `name` and `fvar` tables
-  by `LicensingTest` — including PANOSE `bProportion == 9` on the mono, which is
-  the font's own claim to be monospaced. They are in the APK
-  (`unzip -l` on `app-sideload-debug.apk`).
-  *Not done:* `VesselTheme.kt` does not reference them yet, so nothing has
-  changed on screen. That file is in the UI tree; the ask, including the
-  variable-font trap that makes weight 500 silently render at 400, is item 2 of
-  `out/needs-from-install-agent.md`.
-- [~] **No program icons.** The reader exists; nothing draws with it yet.
-  `core/PeIconReader` walks the optional header's data directory to the resource
-  table, maps the RVA through the section table, descends the type/id/language
-  tree to the lowest-numbered `RT_GROUP_ICON`, chooses an entry, and decodes the
-  `RT_ICON` DIB to straight ARGB — 32, 24, 8, 4 and 1 bit, bottom-up rows, the
-  doubled `biHeight`, the 1-bit AND mask, and the fallback Windows uses when a
-  32-bit icon's alpha channel is entirely zero, which real executables contain
-  and which renders the icon invisible if taken at face value. A 256×256 PNG
-  entry is handed on rather than decoded. Every failure is null, so the lettered
-  placeholder stays the fallback.
-  *Evidence:* 20 tests in `PeIconReaderTest`, against PE images assembled byte by
-  byte from the specification in the test source set rather than from this
-  reader's own output.
-  *Not done:* `VAppTile` still draws the letter. Item 4 of
-  `out/needs-from-install-agent.md` has the two-line call site and the caching
-  note.
+- [x] **Drive mapping.** Android storage is drives in the container, and Wine
+  can see them. `D:` is shared storage, `+` opens Android's folder picker and
+  takes the next free letter, a long press unmaps without touching what it
+  pointed at, and a drive whose volume is unplugged drops out of the tab row and
+  comes back with its letter when the volume returns.
+  *Evidence, 2026-08-09:* a USB HDD mapped to `F:` from the picker and listed its
+  six folders; Wine's own File Explorer listed `(C:) (D:) (E:) (F:)` and opened
+  them. `E:` reading empty was the folder being empty — `ls -1` gives 0 entries
+  and Android's picker says "No items" for the same path.
+  *Two things this cost, both worth knowing:* a symlink is enough for Wine to
+  *resolve* a drive and not to *show* one — `HKLM\Software\Wine\Drives` decides
+  that, and the seed now derives it from `dosdevices` — and `/mnt/media_rw/<uuid>`
+  is the same volume as `/storage/<uuid>` and unreadable even with
+  `MANAGE_EXTERNAL_STORAGE`, which is Winlator-Ludashi#534 found independently.
+  See `docs/DRIVE-MAPPING.md`, *What the design got wrong*.
+
+- [x] **`Z:` and the `/` node handed the guest this app's private storage.**
+  Wine maps the unix root to `Z:` and registers a shell namespace extension so
+  the desktop tree carries a `/`. On Android the unix root is
+  `/data/user/0/app.vessel` plus every other app's sandbox. Both removed —
+  the symlink by `DriveMap.removeRootDrive`, the namespace key by the seed's new
+  `[-key]` delete form.
+  *Evidence:* `dosdevices` is `c/d/e/f`, the hive's `Drives` key matches with no
+  `z:`, and Wine's desktop tree is My Computer / Documents / Trash.
+  *What it cost, and this is the one to remember:* **`wineboot --update` re-runs
+  `wine.inf` after `regedit`, so anything the seed deletes comes back and
+  anything it sets that `wine.inf` also sets is overwritten.** The namespace key
+  was deleted, recreated by the boot, and `/` was still on screen with the
+  registry saying it had gone. The seed is applied a second time after the boot
+  passes now. Every seed value `wine.inf` also touches was subject to this and
+  nobody had looked.
+
+- [x] **No fonts bundled.** Inter and JetBrains Mono are in the APK *and* drawn.
+  `VesselTheme` references them with `FontVariation.weight` per entry — without
+  which a variable font renders at its default instance and every "medium" in
+  the product silently draws at 400 with nothing looking broken.
+  *Evidence:* screenshotted on the device.
+
+- [x] **No program icons.** `PeIconReader` feeds the tiles through
+  `data/ProgramIcons`, which resolves a shortcut's guest path against the drive
+  it names, caches by path and mtime, caches negatives as hard as hits, and
+  decodes one at a time off the composition thread. The lettered placeholder
+  stays the fallback.
+  *Evidence:* `regedit` and `notepad` tiles on the device draw Wine's own icons.
+
 - [ ] **RpcSs.** `StartServiceW` fails inside the app and succeeds under
   `run-as`. Diagnosed to `dlls/combase/rpc.c:229`; unexplained.
 - [ ] **Move the `drive_c` reader out of `ui/vm`.** `FilesViewModel` reads the
@@ -344,16 +399,24 @@ The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
   without an upstream counterpart, every difference marked — by
   `build/verify_vendored.py`, which is now in the repository so the claim stays
   checkable. `LicensingTest` asserts the offline half of all of it.
-  *Two remain, and neither blocks making the repository public:*
-  - [ ] **Prominent notice, in the interface, that the app contains LGPL code.**
-    Section 6's first sentence. The licence text ships in the APK now, but
-    nothing shows it, and a file in a zip is not notice. This one **blocks
-    distributing the APK**, and it needs a screen — item 1 of
-    `out/needs-from-install-agent.md`.
-  - [ ] **A source offer on the component release page.** Each `.wcp` embeds its
-    upstream `sourceRef`/`sourceSha`, but the GitHub release the packages are
-    published from says nothing about where their source is. One line per
-    component on that release closes it.
+  *Both closed on 2026-08-09:*
+  - [x] **Prominent notice, in the interface, that the app contains LGPL code.**
+    A permanent line at the foot of home — present in the empty-device state and
+    the full one — naming the Winlator X server and the LGPL 2.1, opening a
+    Licences screen with five entries and each licence's full text out of
+    `res/raw`. libadrenotools' BSD-2-Clause notice is in the APK for the first
+    time. *Evidence:* screenshotted on the device; `LicensingTest` asserts the
+    words are in the screen, that home reaches it, and that every `R.raw` the
+    list names is a real non-empty file.
+    *Worth recording rather than quietly fixing:* a release was published while
+    this was open, which is exactly the state the item said not to distribute in.
+  - [x] **A source offer on the component release page.** `build/source_offer.py`
+    renders the release body from each package's own provenance — component,
+    version, upstream repository, ref, commit, `patches/<name>/` — and
+    `_component.yml` writes it with `gh release edit` after each publish.
+    Generated rather than hand-written because a hand-maintained list goes stale
+    on the first pin bump, and a stale source offer is worse than none.
+    *Unproven until a component build actually runs.*
 - [x] **Line-ending corruption in `native/wine`.** It was not line endings. All
   53 modified files were `100755 -> 100644` with an empty diff: the clone had
   `core.filemode=true` from being made through a bind mount, and
@@ -368,15 +431,16 @@ The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
   --stat` empty and no CRLF warnings, and all five patches then applied leaving
   exactly the five files they touch. dxvk (2), fex (24), vkd3d (4) and mesa
   (149) were in the same state and are now 0.
-- [ ] **Nothing publishes `registry/contents.json`.** Found while building the
-  downloader. `.github/workflows/_component.yml` uploads `dist/*.wcp` and their
-  `.sha256` sidecars to the rolling `components` release and never runs
-  `build/gen_registry.py`, so there is no index anywhere and the app's catalogue
-  fetch is a 404 by construction. `ComponentCatalog` says so in those words
-  rather than showing an empty list, which is the honest interim state, but the
-  download path cannot be exercised end to end until a build publishes one.
-  *Done when:* a `components` release carries a `contents.json` that
-  `ComponentRegistryTest`'s parser accepts with nothing refused.
+- [~] **Nothing publishes `registry/contents.json`.** It does now, in code.
+  `_component.yml` downloads the release's own `.wcp` files back, runs
+  `build/gen_registry.py` over all of them, and uploads `contents.json` beside
+  them — from the release rather than from `dist/`, because a component build
+  produces one package and the index has to name every one. The job is
+  serialised on a `components-release` concurrency group, or two components
+  finishing at once would each publish an index missing the other's package.
+  *Still open until a build runs.* *Done when:* a `components` release carries a
+  `contents.json` that `ComponentRegistryTest`'s parser accepts with nothing
+  refused.
 - [ ] **Decide what happens to `Redesigning interfaces/`.** Untracked today:
   commit it as the design source, or ignore it. Checked for licensing on
   2026-08-08 and it is clean — the Nocturne design system from the sibling
@@ -388,42 +452,36 @@ The remote is set (`prskid1000/Vessel`) and **nothing has been pushed.**
 
 ## Where things actually stand
 
-The **CPU story is done and measured**: ARM64EC plus FEX costs 1.09× native on
-integer and 0.99× on memory, x86-32 through WoW64 costs 2.28×, Wine starts a
-process in 197 ms — and as of 2026-08-08 all three run from the app's own
-launcher, x86-32 included. The **driver story is done and switched on**: Turnip
-answers inside a Wine session with the desktop drawing at the same time, proven
-by `driverID 18`, `Found compatible device '/dev/kgsl-3d0'`, the winediag line
-and three `#161826` pixels out of one screenshot. The **interface is done** and
-verified in portrait and in landscape.
+*Last rewritten 2026-08-09, after a session spent on the device.*
 
-The **shell is not** — the taskbar, the desktop it sits over, and the windows on
-it. Three faults were found in one screenshot on 2026-08-08 and all three are
-fixed in code and unverified on the device: the bar listed nothing because it
-looked one level down instead of walking the tree, the bottom edge's reveal
-handle was clipped off-screen by an inset applied to the mark rather than its
-touch box, and a desktop you left and came back to sampled black because every
-texture id belonged to a destroyed EGL context. Above those sat **multiple resizable
-windows, themed to match the product** — asked for with a Windows screenshot for
-reference — and the shape of that job turned out to be different from the one
-written here. It said the guest was "a bare `explorer /desktop=` background with
-no decoration story at all". That was wrong: Wine's virtual desktop has been
-drawing a caption, a sizing border and a full non-client frame on every
-top-level window the whole time, and `desktopTheme` has been colouring them
-since seed 3. The missing half was **size**, not decoration or colour — a 22 px
-caption and a **1 px** sizing border are Windows' defaults and a 1 px grab
-region cannot be touched. Seed 8 sets 40 px captions, an 8 px grab region, 24 px
-scrollbars. Unverified on the device, and the thing to check there is not
-whether a window is themed but whether two of them can be dragged, resized and
-raised past each other with a finger.
+The **CPU story is done and measured**: ARM64EC plus FEX costs 1.09x native on
+integer and 0.99x on memory, x86-32 through WoW64 costs 2.28x, Wine starts a
+process in 197 ms, and all three run from the app's own launcher. The **driver
+story is done and switched on**: Turnip answers inside a Wine session, proven by
+`driverID 18`, `Found compatible device '/dev/kgsl-3d0'` and the winediag line.
 
-The prose has also come out of the interface, on the same instruction that
-emptied the Metrics tab: the taskbar's tray-helper paragraph, the launcher's
-empty state, and the `Browse C:` help line.
+The **shell works**, and that is new. Tap a program on the home screen with
+nothing running: the container starts, the program comes up with it, its window
+is centred and themed with a working title bar, the taskbar lists it, the
+keyboard reaches it, and backing out and returning leaves it intact. Every one of
+those was a separate unverified claim a day ago.
 
-What is not proven is still the middle — a Windows program drawing through DXVK
-onto the screen — but it is no longer a mystery. Every D3D probe now loads DXVK,
-reaches `vkCreateInstance`, and is refused `VK_KHR_win32_surface`, because the
-Turnip this project builds is configured `-Dplatforms=android` and has no X11
-WSI for `winex11.drv` to map that extension from. One Mesa build option stands
-between here and a triangle. Section 1.3 has the log lines.
+**Storage works.** Android storage is drives inside the container — shared
+storage on `D:`, a folder or a whole USB volume on the next free letter, mapped
+from Android's own picker — and Wine's File Explorer lists and opens them. The
+unix root does not appear at all any more, by either of the two routes it used
+to.
+
+**The middle is still the middle, and its reason has moved.** No Windows program
+has drawn through D3D. It is no longer a missing extension: Mesa built with
+`-Dplatforms=x11` gets past that and dies at swapchain creation, because KGSL
+cannot export a dma-buf for a buffer Turnip allocated. That is a design question
+about who allocates, not a build flag, and it is the one thing left that a day of
+careful work will not obviously fix.
+
+What is honestly unfinished elsewhere: the desktop background is black at session
+start until something repaints it; the taskbar draws letters where it could draw
+icons; `.msi` payloads reach their UI and do not install; `RpcSs` will not start
+inside the app; the component downloader is written, tested and has never run on
+the device; and no CI build has yet published the `contents.json` or the source
+offer the workflow now generates.
