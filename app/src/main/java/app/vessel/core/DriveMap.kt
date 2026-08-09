@@ -150,6 +150,32 @@ object DriveMap {
         return runCatching { link.delete() }.getOrDefault(false)
     }
 
+    /**
+     * Take `Z:` away, because the unix root is Android and Android is not a
+     * drive the user chose.
+     *
+     * Wine maps `/` to `Z:` on every prefix. On a desktop that is a
+     * convenience; here it hands a guest program `/data/user/0/app.vessel` —
+     * this app's own private storage, writable — under a drive letter nobody
+     * asked for, alongside the whole of `/system` and every other app's
+     * sandbox. Vessel's storage model is that a drive is a folder the user
+     * picked, and this is the one drive that contradicts it.
+     *
+     * Separate from [unmap] rather than an exception inside it, and that is the
+     * safety argument: [unmap] is what a long press on a tab calls, and `Z:`
+     * must stay un-removable *by the user* even while the product removes it.
+     * The two are different decisions and they should not share a code path.
+     *
+     * Called on every provision because `wineboot` recreates the link whenever
+     * it initialises a prefix, so removing it once is removing it until the next
+     * time. Idempotent: false means it was already gone, which is the steady
+     * state and not a failure.
+     */
+    fun removeRootDrive(prefix: File): Boolean {
+        val link = File(File(prefix, DOSDEVICES), "$ROOT_DRIVE:")
+        return runCatching { link.delete() }.getOrDefault(false)
+    }
+
     private fun isSymlink(file: File): Boolean =
         runCatching { java.nio.file.Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
 }

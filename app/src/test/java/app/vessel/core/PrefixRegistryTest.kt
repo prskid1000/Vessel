@@ -155,16 +155,48 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(16, PrefixRegistry.SEED_VERSION)
-        // Thirteen keys plus the stamp `renderSeed` appends, which is not in the
-        // list because its value is a hash of the rest.
-        assertEquals(13, PrefixRegistry.seed.size)
+        assertEquals(17, PrefixRegistry.SEED_VERSION)
+        // Thirteen keys, the three the seed deletes, and the stamp `renderSeed`
+        // appends — which is not in the list, its value being a hash of the rest.
+        assertEquals(16, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `the unix root is deleted from the desktop, in both hive views`() {
+        // Z: and the `/` node are the same mistake shown twice: the unix root
+        // here is Android, and what it hands a guest program is this app's own
+        // private storage. `[-key]` and not an empty key — a key that still
+        // exists is a shell item that still appears.
+        val rendered = PrefixRegistry.renderSeed()
+        assertTrue(
+            rendered.contains(
+                """[-HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Explorer""" +
+                    """\Desktop\Namespace\{9D20AAE8-0625-44B0-9CA7-71889C2254D9}]""",
+            ),
+        )
+        // The 32-bit view too, or a WoW64 program still sees the node.
+        assertTrue(rendered.contains("""Software\Wow6432Node\Microsoft\Windows"""))
+        // And the drive is never declared, whatever is on disk.
+        assertTrue(!PrefixRegistry.renderSeed(listOf('c', 'd', 'z')).contains(""""z:"="hd""""))
+        // The Drives key is deleted before it is written, so a letter the user
+        // unmaps does not keep its type entry for ever.
+        val drives = """HKEY_LOCAL_MACHINE\Software\Wine\Drives"""
+        assertTrue(rendered.indexOf("[-$drives]") < rendered.indexOf("[$drives]"))
+    }
+
+    @Test
+    fun `a removal renders as the delete form and carries no values`() {
+        val rendered = PrefixRegistry.render(
+            listOf(RegistryKey("""HKEY_CURRENT_USER\Software\Gone""", remove = true)),
+        )
+        assertTrue(rendered.contains("""[-HKEY_CURRENT_USER\Software\Gone]"""))
+        assertEquals(1, rendered.lines().count { it.startsWith("[") })
     }
 
     @Test
     fun `the stamp changes when the seed does, so an old prefix re-applies it`() {
-        val withoutE = PrefixRegistry.renderSeed(listOf('c', 'd', 'z'))
-        val withE = PrefixRegistry.renderSeed(listOf('c', 'd', 'e', 'z'))
+        val withoutE = PrefixRegistry.renderSeed(listOf('c', 'd'))
+        val withE = PrefixRegistry.renderSeed(listOf('c', 'd', 'e'))
         // The defect this replaces: both of these are seed 16, so an integer
         // marker would call the second one already applied and the mapped drive
         // would never be declared.
@@ -187,12 +219,14 @@ class PrefixRegistryTest {
     fun `every drive a prefix has is declared, whoever mapped it`() {
         val drives = PrefixRegistry.driveTypes(listOf('d', 'g'))
         assertEquals(
-            listOf("c:", "d:", "g:", "z:"),
+            listOf("c:", "d:", "g:"),
             drives.values.map { it.name },
         )
-        // `c:` and `z:` are added whether or not they were passed: the seed is
-        // rendered before `wineboot` creates them on a first provision.
+        // `c:` is added whether or not it was passed: the seed is rendered
+        // before `wineboot` creates it on a first provision. `z:` is not, and
+        // must not be — seed 17 removes that drive rather than declaring it.
         assertTrue(drives.values.all { it.data == "hd" })
+        assertTrue(drives.values.none { it.name == "z:" })
     }
 
     @Test

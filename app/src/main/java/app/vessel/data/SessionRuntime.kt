@@ -920,6 +920,29 @@ class SessionRuntime @Inject constructor(
             }
             flushHive(current)
 
+            // **The seed goes on again, and this is not belt and braces.**
+            // `wineboot --update` re-runs `wine.inf`, and `wine.inf` writes keys
+            // — so anything the seed *deleted* comes straight back, and anything
+            // it changed that `wine.inf` also sets is overwritten. Seed 17 is
+            // where that stopped being theoretical: the unix root's shell
+            // namespace entry was deleted by the first `regedit`, recreated by
+            // the boot below it, and `/` was still on the desktop with the
+            // registry saying it had been removed.
+            //
+            // Cheap enough not to think about — a 2 KB file and one Wine process
+            // against two full `wine.inf` passes — and it runs *after* the last
+            // thing that can undo it, which the first application cannot.
+            bootProgress("regedit ${regFile.name}, after wine.inf")
+            val reapplied = runTool(
+                current,
+                WINE_REGEDIT,
+                listOf(regFile.absolutePath),
+                "regedit (after wine.inf)",
+                REGEDIT_TIMEOUT_MS,
+            )
+            if (reapplied is BootstrapOutcome.Failed) return reapplied
+            flushHive(current)
+
             // **A warning and not a failure, deliberately.** The 32-bit world is
             // one of three translation paths; the 64-bit desktop is the product.
             // Refusing to start a container because `syswow64` came up short would

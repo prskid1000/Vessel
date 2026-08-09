@@ -1,6 +1,7 @@
 package app.vessel.data
 
 import app.vessel.core.ComponentType
+import app.vessel.core.DriveMap
 import app.vessel.core.PrefixRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -365,6 +366,13 @@ class ContainerProvisioner @Inject constructor(
         // its next launch instead of having to be recreated.
         drives.mapSharedStorage(layout.prefix)
 
+        // And Z: goes, for the reason in DriveMap.removeRootDrive: the unix root
+        // is Android, and a drive nobody chose that reaches this app's own
+        // private storage is the one mapping the product should not ship. Here
+        // as well as after the boot below, because the seed is rendered from
+        // dosdevices and must not describe a drive that is about to be removed.
+        DriveMap.removeRootDrive(layout.prefix)
+
         // — registry seed -----------------------------------------------------
         val seedText = renderSeed(layout)
         if (seedCurrent(layout)) {
@@ -396,6 +404,12 @@ class ContainerProvisioner @Inject constructor(
         } else {
             booted
         }
+        // Again, and this is the call that does the work on a fresh prefix:
+        // `wineboot --init` creates `dosdevices/z:` itself, so removing it
+        // before the boot removes it from a prefix that has not been booted yet.
+        // Idempotent — false here means it was already gone.
+        DriveMap.removeRootDrive(layout.prefix)
+
         when (applied) {
             is BootstrapOutcome.Applied -> mark(STEP_BOOT, ProvisionStatus.DONE)
             is BootstrapOutcome.NotAvailable ->

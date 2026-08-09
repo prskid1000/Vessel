@@ -34,8 +34,20 @@ data class RegistryValue(
     }
 }
 
-/** One key and the values under it. */
-data class RegistryKey(val path: String, val values: List<RegistryValue>)
+/**
+ * One key and the values under it, or a key to delete.
+ *
+ * [remove] renders `[-path]`, which is `.reg`'s delete form and the only way to
+ * take a key out of a hive that `wine.inf` put there. It exists because two of
+ * the things this seed has to change are keys Wine creates and Vessel does not
+ * want — a value written over them would leave the key present and the shell
+ * item with it.
+ */
+data class RegistryKey(
+    val path: String,
+    val values: List<RegistryValue> = emptyList(),
+    val remove: Boolean = false,
+)
 
 /**
  * `r g b`, decimal and space-separated, which is the only form Wine parses.
@@ -83,6 +95,9 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 17 took the unix root off the desktop — see [unixNamespace] — which with
+     * `DriveMap.removeRootDrive` is what stops `Z:` and `/` handing a guest
+     * program this app's own private storage;
      * 16 made the drive list come from `dosdevices` instead of a hardcoded
      * three, so a folder the user maps is declared like the seeded drives are,
      * and made the applied-marker a hash of the rendered text rather than this
@@ -102,7 +117,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 16
+    const val SEED_VERSION: Int = 17
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -535,26 +550,86 @@ object PrefixRegistry {
      * the seed reads the same directory and declares whatever is actually
      * there. A drive gains its type by existing, whoever made it.
      *
-     * `c:` and `z:` are added whether or not they are on disk, because the seed
-     * is rendered before `wineboot` has created them on a first provision and
-     * they are never absent afterwards.
+     * `c:` is added whether or not it is on disk, because the seed is rendered
+     * before `wineboot` has created it on a first provision and it is never
+     * absent afterwards. `z:` is *not*, and no longer exists — see
+     * [unixNamespace].
      */
+    /**
+     * The `Drives` key, deleted before it is written.
+     *
+     * **A `.reg` file merges; it does not replace.** So a drive the user unmaps
+     * leaves its `"e:"="hd"` behind for ever, and the key slowly becomes a list
+     * of every letter the container has ever had. Harmless on its own — a type
+     * without a `dosdevices` link is not a drive — but it is a record that
+     * disagrees with reality, and the whole point of deriving this key from
+     * `dosdevices` was to have one truth. Deleting first makes each write a
+     * replacement. `z:` was the case that made it visible: the symlink went and
+     * the value stayed.
+     */
+    private val driveTypesReset = RegistryKey(
+        path = """HKEY_LOCAL_MACHINE\Software\Wine\Drives""",
+        remove = true,
+    )
+
     fun driveTypes(letters: Collection<Char> = DEFAULT_DRIVES): RegistryKey = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Wine\Drives""",
-        values = (letters.map { it.lowercaseChar() } + DriveMap.SYSTEM_DRIVE + DriveMap.ROOT_DRIVE)
+        values = (letters.map { it.lowercaseChar() } + DriveMap.SYSTEM_DRIVE)
             .distinct()
+            // Never `z:`, even if a link for it is on disk. The provisioner
+            // removes that drive on every launch, and there is a window between
+            // `wineboot` recreating it and the removal running — declaring it in
+            // that window would write a value for a drive the same pass deletes.
+            .filterNot { it == DriveMap.ROOT_DRIVE }
             .sorted()
             .map { RegistryValue("$it:", "hd") },
     )
+
+    /**
+     * The two ways Wine puts the whole Android filesystem in front of the user,
+     * both removed.
+     *
+     * **`Z:` and `/` are the same mistake shown twice.** Wine maps the unix root
+     * to `Z:` on every prefix, and registers a shell namespace extension so the
+     * desktop tree also carries a `/` node. In a desktop Wine that is a
+     * convenience; here the unix root is Android, and what it exposes to a guest
+     * program is `/data/user/0/app.vessel` — this app's own private storage,
+     * writable, one `del /s` away. Vessel's whole storage model is that a drive
+     * is a folder the user chose, so a drive nobody chose that reaches
+     * everything is the one mapping the product should not ship.
+     *
+     * It was already hidden from Vessel's own browser as unreadable. That was
+     * treating the symptom: Wine's File Explorer listed it, and so would every
+     * Open dialog in every guest program.
+     *
+     * The namespace key is deleted rather than emptied, because a key that still
+     * exists is a shell item that still appears. `Wow6432Node` gets the same
+     * treatment — a 32-bit program reads its own view of the hive and would
+     * otherwise still see the node. The `Z:` symlink itself is
+     * [DriveMap.removeRootDrive]'s job; a registry entry cannot unmap a drive.
+     */
+    val unixNamespace: List<RegistryKey> = listOf(
+        RegistryKey(path = """HKEY_LOCAL_MACHINE\$NAMESPACE\$UNIX_FOLDER_CLSID""", remove = true),
+        RegistryKey(path = """HKEY_LOCAL_MACHINE\$WOW_NAMESPACE\$UNIX_FOLDER_CLSID""", remove = true),
+    )
+
+    /** Wine's `ShellFSFolder` for the unix root — the `/` in the desktop tree. */
+    private const val UNIX_FOLDER_CLSID = "{9D20AAE8-0625-44B0-9CA7-71889C2254D9}"
+
+    private const val NAMESPACE =
+        """Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\Namespace"""
+
+    private const val WOW_NAMESPACE =
+        """Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Explorer\Desktop\Namespace"""
 
     /**
      * What [driveTypes] declares when nothing has read a prefix.
      *
      * `d:` is in it because shared storage is mapped on every provision, so a
      * caller with no prefix to read is still describing a container that will
-     * have one.
+     * have one. `z:` is not, because seed 17 removes that drive.
      */
-    val DEFAULT_DRIVES: List<Char> = listOf('c', 'd', 'z')
+    val DEFAULT_DRIVES: List<Char> = listOf('c', 'd')
 
     /**
      * The machine `PATH`, written whole.
@@ -651,9 +726,10 @@ object PrefixRegistry {
         visualStyles,
         windowsDarkMode,
         toolsPath,
+        driveTypesReset,
         driveTypes(letters),
         consoleColours,
-    ) + virtualDesktop
+    ) + virtualDesktop + unixNamespace
 
     /** The seed for a container whose drives nobody has looked at. */
     val seed: List<RegistryKey> get() = seedFor()
@@ -736,6 +812,10 @@ object PrefixRegistry {
 
     private fun block(keys: List<RegistryKey>): String = buildString {
         for (key in keys) {
+            if (key.remove) {
+                append(CRLF).append("[-").append(key.path).append(']').append(CRLF)
+                continue
+            }
             append(CRLF)
             append('[').append(key.path).append(']').append(CRLF)
             for (value in key.values) {
