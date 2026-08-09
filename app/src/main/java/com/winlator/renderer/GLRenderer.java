@@ -153,8 +153,34 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         xServerView.requestRender();
     }
 
+    /**
+     * VESSEL: how many frames this renderer has composited, ever.
+     *
+     * A counter and not a rate, deliberately. Turning it into frames-per-second
+     * needs two reads and the wall time between them, and the thing doing that
+     * is a coroutine on the Android side that already knows what a second is —
+     * so nothing here has to keep a clock, a window of samples, or any state
+     * that could be wrong.
+     *
+     * **What it counts is what the user is actually shown.** The view is
+     * `RENDERMODE_WHEN_DIRTY`, so a frame happens when the guest damages the
+     * screen and not on a display vsync. An idle desktop composites nothing and
+     * reads 0, which is the truth: nothing was drawn. A program rendering flat
+     * out reads its own delivered rate, capped by the surface.
+     *
+     * `volatile` rather than an `AtomicLong`: there is exactly one writer, the
+     * GL thread, and the readers only need to see a recent value. A missed
+     * increment would cost one frame out of a sample of sixty.
+     */
+    public long compositedFrames() {
+        return compositedFrames;
+    }
+
+    private volatile long compositedFrames = 0;
+
     @Override
     public void onDrawFrame(GL10 gl) {
+        compositedFrames++;
         if (toggleFullscreen) {
             fullscreen = !fullscreen;
             toggleFullscreen = false;

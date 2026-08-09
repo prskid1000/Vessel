@@ -117,7 +117,19 @@ class MetricSampler @Inject constructor(
     }
 
     /** One tick. Never throws; a source that fails contributes a null. */
-    fun sample(elapsedMs: Long, atMillis: Long = System.currentTimeMillis()): MetricSample {
+    /**
+     * @param fps composited frames per second, or null before the compositor
+     *   has produced a sample. **Passed in rather than read**: every other field
+     *   here comes from `/proc` or `/sys`, and this one comes from the X
+     *   server's renderer. Giving this class a display dependency to fetch it
+     *   would make the one part of the metrics story that has no Android in it
+     *   depend on the part that is nothing but Android.
+     */
+    fun sample(
+        elapsedMs: Long,
+        atMillis: Long = System.currentTimeMillis(),
+        fps: Float? = null,
+    ): MetricSample {
         if (tick % RESCAN_TICKS == 0) pids = ourPids()
         tick++
 
@@ -171,6 +183,7 @@ class MetricSampler @Inject constructor(
             batteryPercent = batteryPercent.takeIf { it >= 0 },
             batteryMillivolts = batteryMillivolts.takeIf { it > 0 },
             batteryMilliamps = currentMicroAmps()?.div(1000),
+            fps = fps,
         )
     }
 

@@ -51,6 +51,10 @@ class SessionShellHost @Inject constructor(
 
     override suspend fun focus(windowId: Int) = display.focusWindow(windowId)
 
+    override suspend fun close(windowId: Int): Boolean = display.closeWindow(windowId)
+
+    override suspend fun kill(windowId: Int): Boolean = display.killWindow(windowId)
+
     /**
      * Start [shortcut] in the session that is already running.
      *

@@ -1,6 +1,7 @@
 package app.vessel.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -364,5 +365,53 @@ class MetricFormatTest {
         assertEquals("9s", formatElapsed(9_400L))
         assertEquals("1m30s", formatElapsed(90_000L))
         assertEquals("2h05m", formatElapsed(7_500_000L))
+    }
+    // — frame statistics ---------------------------------------------------
+
+    private fun framesOf(vararg fps: Float): MetricHistory =
+        fps.foldIndexed(MetricHistory(capacity = 512)) { i, history, value ->
+            history + MetricSample(elapsedMs = i * 1000L, fps = value)
+        }
+
+    @Test
+    fun `frame stats are null until something has been composited`() {
+        assertNull(MetricHistory().frameStats())
+        assertNull((MetricHistory() + MetricSample(elapsedMs = 0)).frameStats())
+    }
+
+    @Test
+    fun `the one percent low is the mean of the slowest one percent`() {
+        // 200 samples: 198 at 60, two at 10 and 20. One percent of 200 is 2, so
+        // the low is the mean of those two and not the single worst sample.
+        val history = framesOf(*(FloatArray(198) { 60f } + floatArrayOf(10f, 20f)))
+        val stats = history.frameStats()!!
+        assertEquals(15f, stats.onePercentLow, 0.001f)
+        assertEquals(10f, stats.min, 0.001f)
+        assertEquals(60f, stats.peak, 0.001f)
+    }
+
+    @Test
+    fun `a short run still has a one percent low, of its worst single sample`() {
+        // Ten samples: 10/100 rounds to zero, and a statistic that divides by
+        // zero or returns nothing on a short run is worse than a coarse one.
+        val stats = framesOf(60f, 60f, 60f, 60f, 60f, 60f, 60f, 60f, 60f, 12f).frameStats()!!
+        assertEquals(12f, stats.onePercentLow, 0.001f)
+    }
+
+    @Test
+    fun `a session that drew nothing is measured, not missing`() {
+        val stats = framesOf(0f, 0f, 0f).frameStats()!!
+        assertTrue(stats.neverDrew)
+        assertEquals(0f, stats.mean, 0.001f)
+        // Three samples, no gaps: frames are counted by this app, so a zero is a
+        // reading rather than an unreadable source.
+        assertEquals(3, stats.samples)
+    }
+
+    @Test
+    fun `current is the last sample, not the best one`() {
+        val stats = framesOf(60f, 58f, 9f).frameStats()!!
+        assertEquals(9f, stats.current!!, 0.001f)
+        assertFalse(stats.neverDrew)
     }
 }

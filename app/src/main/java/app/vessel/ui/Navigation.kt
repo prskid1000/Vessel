@@ -278,11 +278,18 @@ fun VesselApp(
             val windows by session.windows.collectAsStateWithLifecycle(emptyList())
             val shortcuts by session.shortcuts.collectAsStateWithLifecycle(emptyList())
             val terminals by session.terminalProfiles.collectAsStateWithLifecycle(emptyList())
+            // Collected here rather than inside the taskbar: the readout ticks
+            // twice a second, and a collector inside the bar would recompose the
+            // bar's whole subtree — every window button and its icon — on every
+            // sample. Hoisting it means the taskbar takes a value and only the
+            // readout's own draw is invalidated.
+            val frameRate by session.frameRate.collectAsStateWithLifecycle()
             SessionDesktop(
                 state = state,
                 surface = surface,
                 pointerMode = pointerMode,
                 windows = windows,
+                frameRate = frameRate,
                 shortcuts = shortcuts,
                 shellUnavailableReason = session.shellUnavailableReason,
                 metrics = session.metrics,
@@ -296,6 +303,8 @@ fun VesselApp(
                 onShowKeyboard = session::showKeyboard,
                 onLaunchApp = session::launchApp,
                 onFocusWindow = session::focusWindow,
+                onCloseWindow = session::closeWindow,
+                onKillWindow = session::killWindow,
                 terminals = terminals,
                 onTerminal = session::openTerminal,
             )

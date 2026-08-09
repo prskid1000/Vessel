@@ -1,6 +1,7 @@
 package app.vessel.data
 
 import android.os.SystemClock
+import app.vessel.core.SessionDisplayServer
 import app.vessel.core.MetricHistory
 import app.vessel.core.MetricSource
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +92,7 @@ class SessionMetricsRecorder @Inject constructor(
     private val runtime: SessionRuntime,
     private val traces: SessionTraceStore,
     private val sampler: MetricSampler,
+    private val display: SessionDisplayServer,
 ) {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -166,7 +168,15 @@ class SessionMetricsRecorder @Inject constructor(
         val base = SystemClock.elapsedRealtime()
         try {
             while (coroutineContext.isActive) {
-                val sample = sampler.sample(SystemClock.elapsedRealtime() - base)
+                val sample = sampler.sample(
+                    elapsedMs = SystemClock.elapsedRealtime() - base,
+                    // The compositor's own current reading. Sampled here at
+                    // the recorder's cadence rather than averaged over it:
+                    // the display server already computes the rate over its
+                    // own half-second window, and averaging an average would
+                    // smooth away exactly the dips this graph exists to show.
+                    fps = display.frameRate.value.fps.takeIf { it > 0f || display.frameRate.value.history.isNotEmpty() },
+                )
                 _state.update {
                     if (it.startedAt == startedAt) it.copy(history = it.history + sample) else it
                 }

@@ -397,6 +397,16 @@ data class VMetrics(
     /** A rail sparkline's box. Four of these plus a caption is the rail's middle band. */
     val sparkHeight: Dp = 22.dp,
 
+    /**
+     * The taskbar frame-rate chart.
+     *
+     * 56 dp for 40 samples is a 1.4 dp slot — a bar and a hairline gap, which at
+     * this size reads as texture rather than as forty countable columns, and
+     * that is the intent: the shape of the last twenty seconds, beside a number
+     * that carries the precision.
+     */
+    val sparkWidth: Dp = 56.dp,
+
     /** The Metrics tab's full graph. */
     val graphHeight: Dp = 56.dp,
 

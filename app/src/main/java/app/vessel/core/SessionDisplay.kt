@@ -33,6 +33,53 @@ data class DisplayRequest(
 )
 
 /**
+ * The composited frame rate, and enough history to draw its shape.
+ *
+ * **Frames delivered to the screen, not a program's internal rate.** Vessel
+ * composites on damage, so a title rendering faster than the surface reads as
+ * the surface's rate and a title that has stopped drawing reads zero. That makes
+ * this the honest answer to "is what I am looking at smooth", which is the
+ * question a counter on a taskbar is asked, and the wrong answer to "how fast is
+ * this engine running", which it must not be quoted for.
+ *
+ * @property fps frames per second over the last sample window, rounded for
+ *   display but kept as a Float so the sparkline is not a staircase.
+ * @property history most recent last, oldest first, so a chart can read it
+ *   left-to-right without reversing. Bounded by [HISTORY].
+ * @property limit the container's own `display.fpsLimit`, or null when it has
+ *   none. The readout is coloured against this rather than against 60: a
+ *   container asked to run at 30 and running at 30 is healthy, and colouring it
+ *   amber for missing a number nobody asked for would be a lie in a traffic
+ *   light.
+ */
+data class FrameRate(
+    val fps: Float = 0f,
+    val history: List<Float> = emptyList(),
+    val limit: Int? = null,
+) {
+    /**
+     * Nothing has been drawn for a whole window.
+     *
+     * Drawn as a dash rather than as `0`, because zero frames on an idle desktop
+     * is not a performance reading — it is the absence of one, and a taskbar
+     * flashing red `0` at a user who is simply not doing anything is the counter
+     * lying about the thing it exists to report.
+     */
+    val idle: Boolean get() = fps <= 0f
+
+    /** The rate this is healthy against: the container's limit, or 60. */
+    val target: Int get() = limit ?: DEFAULT_TARGET
+
+    companion object {
+        /** Samples kept for the sparkline. At 500 ms a sample this is 20 seconds. */
+        const val HISTORY: Int = 40
+
+        /** What "smooth" means with no limit set. */
+        const val DEFAULT_TARGET: Int = 60
+    }
+}
+
+/**
  * One mapped top-level window inside the guest.
  *
  * [id] is the X window id, which is what [SessionDisplayServer.focusWindow]
@@ -141,12 +188,62 @@ interface SessionDisplayServer {
     val windows: StateFlow<List<TopLevelWindow>>
 
     /**
+     * How fast the guest's output is reaching the screen, sampled.
+     *
+     * **This counts composited frames, which is not the same as a game's
+     * internal frame rate, and the difference is worth stating because the
+     * number goes in front of the user.** The compositor draws when the guest
+     * damages the screen, so this is *delivered* frames — what you are actually
+     * being shown. A program rendering at 200 fps into a 60 Hz surface reads 60;
+     * a program that has drawn nothing reads 0, and 0 is the truth rather than a
+     * missing reading. [FrameRate.idle] is what tells the two apart for display
+     * purposes.
+     *
+     * On this seam for the same reason [windows] is: the X server's renderer is
+     * the only thing that knows, and nothing vendored crosses the interface.
+     */
+    val frameRate: StateFlow<FrameRate>
+
+    /**
      * Raise a window and give it the input focus.
      *
      * A no-op for an id the server does not have. A taskbar button pressed while
      * the program is closing is an ordinary race, not an error worth surfacing.
      */
     fun focusWindow(id: Int)
+
+    /**
+     * Ask a window to close itself, and say whether anything was asked.
+     *
+     * **The taskbar could focus a window and could not close one**, and the only
+     * other control ends the whole session — so a hung program meant stopping
+     * everything else with it. This sends `WM_DELETE_WINDOW`, which
+     * `winex11.drv` turns into `WM_CLOSE`, so the program gets to put up its
+     * "save changes?" dialog. That is the reason to ask rather than kill.
+     *
+     * False means the window never advertised the protocol and nothing was
+     * sent — the caller's cue to offer ending the process instead. It is not an
+     * error, and false for an id the server does not have is the same ordinary
+     * race [focusWindow] tolerates.
+     */
+    fun closeWindow(id: Int): Boolean
+
+    /**
+     * End the process that owns a window.
+     *
+     * **The escalation, and it is destructive by design.** No `WM_CLOSE`, no
+     * dialog, no chance to save: the program is sent `SIGKILL`. It exists
+     * because [closeWindow] cannot help with the case that most needs helping —
+     * a program wedged so badly it is not reading its message queue — and
+     * because a program that advertises no close protocol has no other way out.
+     *
+     * The pid comes from the window's own `_NET_WM_PID`, which `winex11.drv`
+     * sets to the real unix pid: Wine's processes are ordinary Android
+     * processes of this app's uid, so this app may signal them. Returns false
+     * when the window set no pid, which is the honest answer — there is nothing
+     * to kill and pretending otherwise would leave a dead button.
+     */
+    fun killWindow(id: Int): Boolean
 
     /**
      * Raise the IME over the guest's output.
@@ -182,7 +279,18 @@ interface SessionDisplayServer {
         override val windows: StateFlow<List<TopLevelWindow>> =
             MutableStateFlow(emptyList<TopLevelWindow>()).asStateFlow()
 
+        // Nothing composites, so there is no rate. Zero with no history reads as
+        // idle, which is what the readout draws as a dash — right for a headless
+        // session, where the alternative is a counter reporting a stall.
+        override val frameRate: StateFlow<FrameRate> =
+            MutableStateFlow(FrameRate()).asStateFlow()
+
         override fun focusWindow(id: Int) = Unit
+
+        // Headless: there is no window to ask and no process behind one.
+        override fun closeWindow(id: Int): Boolean = false
+
+        override fun killWindow(id: Int): Boolean = false
 
         override fun showKeyboard() = Unit
 

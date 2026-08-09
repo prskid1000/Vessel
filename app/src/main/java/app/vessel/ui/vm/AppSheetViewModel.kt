@@ -154,13 +154,27 @@ class AppSheetViewModel @Inject constructor(
     fun setExecutable(guestPath: String) {
         val containerId = state.value.containerId
         viewModelScope.launch {
-            val drive = driveOf(containerId)
-            val file = GuestPath.resolve(drive, guestPath)
+            // **Against the drive the path names, not against `drive_c`.**
+            // This resolved every path against C:, so choosing a game on a
+            // mapped drive — the entire reason drive mapping exists — came back
+            // as "There is no file at D:\Games\…\metro.exe on this container's
+            // C: drive", about a file that is there. The sentence even named
+            // the wrong drive while quoting the right one.
+            val file = paths.of(containerId).resolveGuestPath(guestPath)
             if (file == null || !file.isFile) {
+                val drive = GuestPath.driveOf(guestPath)
                 _state.update {
                     it.copy(
                         executable = guestPath,
-                        refusal = "There is no file at $guestPath on this container's C: drive.",
+                        refusal = if (drive == null) {
+                            "$guestPath does not name a drive, so there is nothing to look on."
+                        } else {
+                            // Named, because the usual cause on a mapped drive is
+                            // that the volume is not plugged in — which is a
+                            // thing the user can fix and "not found" is not.
+                            "There is no file at $guestPath. If $drive is removable " +
+                                "storage, check that it is still connected."
+                        },
                     )
                 }
                 return@launch
@@ -318,6 +332,14 @@ class AppSheetViewModel @Inject constructor(
     suspend fun current(): AppShortcut? =
         registry.shortcuts.first().firstOrNull { it.id == shortcutId }
 
+    /**
+     * `C:` specifically, and only for the one caller that means it.
+     *
+     * Import copies a file *into* the container, and the container's own disk is
+     * `C:` — copying onto a mapped drive would be writing into the user's own
+     * folders, which import is not for. Everything that *reads* a guest path
+     * resolves it against the drive the path names instead; see [setExecutable].
+     */
     private fun driveOf(containerId: String): File =
         File(paths.of(containerId).prefix, GuestPath.DRIVE_C)
 

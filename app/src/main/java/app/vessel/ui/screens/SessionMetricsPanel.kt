@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import app.vessel.core.FrameRate
 import app.vessel.core.MetricHistory
 import app.vessel.core.MetricSample
 import app.vessel.core.MetricSource
@@ -33,6 +34,7 @@ import app.vessel.ui.components.VSeriesForm
 import app.vessel.ui.components.VSeriesTone
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
+import kotlin.math.roundToInt
 
 /**
  * The session's telemetry, in the two shapes the product shows it in.
@@ -210,6 +212,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             color = if (state.replayed) Vessel.colors.textMuted else Vessel.colors.accent,
         )
 
+        FrameRateCard(state)
+
         VMetricGraphCard(
             title = "cpu",
             value = sample.cpuPercent?.toString(),
@@ -287,6 +291,75 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
 
         BatteryCard(state)
     }
+}
+
+/**
+ * Frames the compositor delivered, and the four numbers that describe them.
+ *
+ * **First card on the panel, above cpu.** Every other card answers "what is the
+ * phone doing"; this one answers "was it any good", which is the question the
+ * others exist to explain. Reading the cause above the effect is the wrong way
+ * round.
+ *
+ * **`1% low` rather than `min`, and that is the whole reason this card does not
+ * reuse the shared stats row.** One dropped frame gives a `min` of 0 in every
+ * run ever recorded, so `min` sorts nothing and means nothing here. The mean of
+ * the slowest 1% is what stutter feels like — see [app.vessel.core.FrameStats].
+ * `min` is still shown, because a genuine 0 is worth seeing; it is just not the
+ * headline.
+ *
+ * Scaled to the container's own fps limit, like the taskbar readout, so a
+ * container asked for 30 and delivering 30 draws a full graph instead of a half
+ * one.
+ */
+@Composable
+private fun FrameRateCard(state: SessionMetricsState) {
+    val history = state.history
+    val stats = history.frameStats()
+    // The limit is not in the sample — it is a property of the container, and a
+    // trace replayed on a different container should not be rescaled to the new
+    // one's limit. Absent, 60 is the honest default and the same one the taskbar
+    // uses.
+    val ceiling = maxOf(FrameRate.DEFAULT_TARGET, stats?.peak?.roundToInt() ?: 0)
+
+    VMetricGraphCard(
+        title = "frames",
+        value = stats?.current?.roundToInt()?.toString(),
+        unit = "fps",
+        stats = buildList {
+            if (stats == null) return@buildList
+            add(VMetricStat("1% low", formatFps(stats.onePercentLow)))
+            add(VMetricStat("mean", formatFps(stats.mean)))
+            add(VMetricStat("peak", formatFps(stats.peak)))
+            // A minimum equal to the peak means the rate never moved, and two
+            // identical columns is a range that is not one.
+            if (stats.min < stats.peak) add(VMetricStat("min", formatFps(stats.min)))
+        },
+        series = listOfNotNull(
+            history.seriesOrNull(ceiling, VSeriesTone.Primary, VSeriesForm.Area, "fps") {
+                it.fps?.roundToInt()
+            },
+        ),
+        // **Not `unavailable`, because it is not.** Every other card's empty
+        // state is a `/sys` node an app may not read. Frames are counted by this
+        // app, so nothing having been drawn is a measurement — of an idle
+        // session — and calling it unavailable would report a working instrument
+        // as broken.
+        unavailable = when {
+            stats == null -> "no frames have been composited yet"
+            stats.neverDrew -> "the guest has not drawn anything this session"
+            else -> null
+        },
+    )
+}
+
+/** `58` and `59.4` — a fraction only where it says something. */
+private fun formatFps(value: Float): String {
+    val rounded = value.roundToInt()
+    // Whole numbers below 10 are where the fraction matters: 4 fps and 4.4 fps
+    // are meaningfully different and both round to "4", whereas nobody needs to
+    // know that the mean was 58.3 rather than 58.
+    return if (value < 10f && rounded.toFloat() != value) String.format("%.1f", value) else "$rounded"
 }
 
 /**

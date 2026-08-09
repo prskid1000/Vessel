@@ -69,6 +69,25 @@ interface ShellHost {
     suspend fun focus(windowId: Int)
 
     /**
+     * Ask a window to close, the way a title bar's X does.
+     *
+     * Sends `WM_DELETE_WINDOW`, which reaches the guest as `WM_CLOSE`, so a
+     * program with unsaved work gets to say so. False means the window never
+     * advertised the protocol and nothing was sent — the caller's cue to offer
+     * [kill] instead, which is a different and more destructive act.
+     */
+    suspend fun close(windowId: Int): Boolean
+
+    /**
+     * End the process behind a window. No dialog, no chance to save.
+     *
+     * The escalation, for the case [close] cannot reach: a program so wedged it
+     * is not reading its message queue. False when the window set no
+     * `_NET_WM_PID` and there is therefore nothing to end.
+     */
+    suspend fun kill(windowId: Int): Boolean
+
+    /**
      * Start [shortcut] inside the session that is already running.
      *
      * This is the launcher's whole purpose and the single most important thing
@@ -123,6 +142,10 @@ class UnavailableShellHost @Inject constructor() : ShellHost {
             "to accept an executable — neither exists in this build."
 
     override suspend fun focus(windowId: Int) = Unit
+
+    override suspend fun close(windowId: Int): Boolean = false
+
+    override suspend fun kill(windowId: Int): Boolean = false
 
     override suspend fun launch(shortcut: AppShortcut): String = unavailableReason
 

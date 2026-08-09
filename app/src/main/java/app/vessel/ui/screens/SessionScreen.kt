@@ -52,6 +52,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vessel.core.DisplayGeometry
+import app.vessel.core.FrameRate
 import app.vessel.core.SessionDiagnosis
 import app.vessel.data.ProvisionStatus
 import app.vessel.data.ProvisionStep
@@ -381,7 +382,11 @@ fun SessionDesktop(
     onShowKeyboard: () -> Unit,
     onLaunchApp: (AppShortcut) -> Unit,
     onFocusWindow: (Int) -> Unit,
+    onCloseWindow: (Int) -> Unit,
+    onKillWindow: (Int) -> Unit,
     windows: List<GuestWindow> = emptyList(),
+    /** Composited frames per second, for the taskbar's readout. */
+    frameRate: FrameRate = FrameRate(),
     shortcuts: List<AppShortcut> = emptyList(),
     terminals: List<TerminalOption> = emptyList(),
     onTerminal: (TerminalProfile) -> Unit = {},
@@ -567,6 +572,9 @@ fun SessionDesktop(
                     // shortcut, and its icon is read out of the prefix by name.
                     shortcuts = shortcuts,
                     containerId = state.containerId,
+                    frameRate = frameRate,
+                    onCloseWindow = onCloseWindow,
+                    onKillWindow = onKillWindow,
                 )
             }
         }
@@ -980,6 +988,8 @@ private fun SessionDesktopPreview() {
             onShowKeyboard = {},
             onLaunchApp = {},
             onFocusWindow = {},
+            onCloseWindow = {},
+            onKillWindow = {},
         )
     }
 }

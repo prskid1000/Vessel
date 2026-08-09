@@ -5,6 +5,7 @@ import android.view.View
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.vessel.core.DisplayGeometry
+import app.vessel.core.FrameRate
 import app.vessel.core.SessionDisplayServer
 import app.vessel.data.ContainerRepository
 import app.vessel.data.SessionMetricsRecorder
@@ -70,6 +71,15 @@ class SessionViewModel @Inject constructor(
     val windows = shell.windows
 
     /**
+     * Composited frames per second, for the taskbar's readout.
+     *
+     * From the display server rather than from [shell], because the compositor
+     * is the only thing that knows how often it drew — the shell layer sees
+     * windows and processes, and neither has a frame in it.
+     */
+    val frameRate: StateFlow<FrameRate> = display.frameRate
+
+    /**
      * The programs belonging to whichever container is running — the launcher's
      * grid.
      *
@@ -91,6 +101,28 @@ class SessionViewModel @Inject constructor(
 
     fun focusWindow(id: Int) {
         viewModelScope.launch { shell.focus(id) }
+    }
+
+    /**
+     * Ask a window to close, and fall through to killing it if it will not be
+     * asked.
+     *
+     * **The fall-through is the point, and it is not the same as force-closing.**
+     * A false from [ShellHost.close] means the window never advertised
+     * `WM_DELETE_WINDOW`, so nothing was sent and nothing will happen — a Close
+     * button that silently did nothing for those windows would be the worst of
+     * both. Escalating is the only way to honour the press. It is still
+     * distinct from the sheet's Force close, which the user chooses for a window
+     * that *did* accept the request and ignored it.
+     */
+    fun closeWindow(id: Int) {
+        viewModelScope.launch {
+            if (!shell.close(id)) shell.kill(id)
+        }
+    }
+
+    fun killWindow(id: Int) {
+        viewModelScope.launch { shell.kill(id) }
     }
 
     val state: StateFlow<SessionState> = runtime.state

@@ -130,6 +130,32 @@ The modifications, in the order they were made:
    worth recording: the texture is the visible symptom and the program is the
    cause, and the first fix was verified on the device as not working.
 
+14. **`GLRenderer.compositedFrames()`** — a `volatile long` incremented in
+   `onDrawFrame`, and a full re-upload of every window's texture whenever
+   `updateScene()` rebuilds the scene. The counter is what Vessel's taskbar
+   frame-rate readout and its session metrics are computed from; a counter
+   rather than a rate because turning two reads and a wall clock into frames per
+   second belongs to the Android side, which already has both. The re-upload
+   fixes a black desktop at session start: a texture is uploaded once at
+   allocation and after that only on damage, and the desktop's background paint
+   lands in the gap — after its texture was allocated empty, before anything
+   else drew, with nothing to damage it again. A map, an unmap or a resize is
+   the one moment the scene is known to be wrong, so it is where every texture
+   in it is distrusted.
+15. **`Window.requestClose()`, `Property.getIntCount()` and the new
+   `events/ClientMessage`** — the vendored server had no `ClientMessage` (event
+   code 33) at all, so there was no way to send `WM_DELETE_WINDOW` and Vessel's
+   taskbar could focus a guest window but never close one; the only other
+   control ends the entire session. `requestClose()` checks the window's
+   `WM_PROTOCOLS` list — hence `getIntCount()`, since every existing property
+   caller reads word 0 and knows that is all there is — and sends the message
+   only if the client asked to receive it, returning false otherwise so the
+   caller can decide whether to escalate to killing the process. It is delivered
+   to every listener rather than through `isInterestedIn`, because a
+   ClientMessage from the window manager is not selected for by any event mask.
+   `winex11.drv` turns it into `WM_CLOSE`, so the program still gets its "save
+   changes?" dialog — which is the whole reason to ask rather than kill.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -145,14 +171,17 @@ fails the build.
 | `app/src/main/java/com/winlator/core/ImageUtils.java` | 11 |
 | `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
 | `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
-| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13 |
+| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13 |
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
+| `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
+| `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 

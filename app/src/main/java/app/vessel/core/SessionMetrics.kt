@@ -132,6 +132,28 @@ data class MetricSample(
     val batteryMillivolts: Int? = null,
     /** Instantaneous current in mA. Negative is discharging, per the platform. */
     val batteryMilliamps: Int? = null,
+
+    // — display —
+    /**
+     * Composited frames per second over the sample window.
+     *
+     * **The only figure in this record that comes from inside Vessel rather than
+     * from the kernel**, and the only one that is therefore exactly right: it is
+     * a counter this app increments and a clock this app reads, with nothing to
+     * misparse. Every other field here is a `/proc` or `/sys` node that may be
+     * unreadable, which is why they are all nullable — this one is null only
+     * before the compositor has produced its first sample.
+     *
+     * Frames *delivered*, not a program's internal rate: Vessel composites on
+     * damage, so a title rendering faster than the surface reads as the surface
+     * and an idle desktop reads 0. Zero is a measurement here, not a gap — see
+     * [app.vessel.core.FrameRate].
+     *
+     * A Float, and stored as one. Rounding at the sample would turn a steady
+     * 29.6 into an alternating 29/30 and put a sawtooth in a graph of something
+     * that was not changing.
+     */
+    val fps: Float? = null,
 )
 
 /**
@@ -182,6 +204,37 @@ class MetricHistory private constructor(
 
     fun peak(field: (MetricSample) -> Int?): Int? = samples.mapNotNull(field).maxOrNull()
 
+    /**
+     * Frame-rate statistics, which are not the same statistics as everything
+     * else on this panel.
+     *
+     * **`peak / mean / min` is the wrong summary for frames and the right one
+     * for every other field here.** A single dropped frame is a `min` of 0 and
+     * tells you nothing; what a user feels is the *sustained* worst case, which
+     * is why the whole industry reports a 1% low. So this returns its own type
+     * rather than reusing [MetricStats].
+     */
+    fun frameStats(): FrameStats? {
+        val present = samples.mapNotNull { it.fps }
+        if (present.isEmpty()) return null
+        val sorted = present.sorted()
+        // The mean of the slowest 1%, with a floor of one sample. This is the
+        // definition CapFrameX and most reviewers use; the other one in
+        // circulation is "the value at the 1st percentile", which on a short run
+        // is a single sample and jumps around. Written down because a 1% low
+        // whose definition is not stated is a number nobody can compare with
+        // anything.
+        val worstCount = maxOf(1, sorted.size / 100)
+        return FrameStats(
+            current = samples.lastOrNull()?.fps,
+            min = sorted.first(),
+            peak = sorted.last(),
+            mean = present.sum() / present.size,
+            onePercentLow = sorted.take(worstCount).sum() / worstCount,
+            samples = present.size,
+        )
+    }
+
     fun mean(field: (MetricSample) -> Int?): Int? {
         val present = samples.mapNotNull(field)
         return if (present.isEmpty()) null else present.sum() / present.size
@@ -228,6 +281,35 @@ data class MetricStats(
 
     /** True when the value never moved, so a card can print one number not a range. */
     val flat: Boolean get() = min == peak
+}
+
+/**
+ * What a run's frame rate did, summarised the way frame rates are summarised.
+ *
+ * No `gaps` field, and that is the difference from [MetricStats]. Every other
+ * metric on the panel is a `/proc` node that can be unreadable, so "how many
+ * ticks produced no reading" is real information. Frames are counted by this
+ * app, so a sample is never missing — a zero is a measured zero, meaning the
+ * guest drew nothing, which is a fact about the guest and not a gap in the
+ * instrument.
+ */
+data class FrameStats(
+    val current: Float?,
+    val min: Float,
+    val peak: Float,
+    val mean: Float,
+    /**
+     * The mean of the slowest 1% of samples, floor one.
+     *
+     * The number that describes stutter. A run averaging 60 with a 1% low of 12
+     * and a run averaging 60 with a 1% low of 55 feel like different games, and
+     * `mean` alone cannot tell them apart.
+     */
+    val onePercentLow: Float,
+    val samples: Int,
+) {
+    /** True when the guest never drew at all — an idle session, not a stalled one. */
+    val neverDrew: Boolean get() = peak <= 0f
 }
 
 /**

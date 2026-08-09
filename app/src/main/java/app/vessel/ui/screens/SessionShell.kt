@@ -4,13 +4,15 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -19,31 +21,39 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import app.vessel.core.FrameRate
 import app.vessel.core.PeArchitecture
 import app.vessel.ui.components.VAppGrid
 import app.vessel.ui.components.VAppIcon
@@ -51,6 +61,8 @@ import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VRule
+import app.vessel.ui.components.VSheet
+import app.vessel.ui.components.VSheetHeader
 import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.rememberBuiltInIcon
 import app.vessel.ui.components.rememberProgramIcon
@@ -64,6 +76,7 @@ import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vElevation
 import app.vessel.ui.theme.vRing
 import app.vessel.ui.theme.vRuleAbove
+import kotlin.math.roundToInt
 
 /**
  * The Vessel shell — a taskbar and a launcher, drawn in Compose over the GL
@@ -114,6 +127,12 @@ fun SessionTaskbar(
     shortcuts: List<AppShortcut> = emptyList(),
     /** Which prefix to read a built-in program's icon out of. */
     containerId: String? = null,
+    /** Composited frames per second, drawn at the trailing edge. */
+    frameRate: FrameRate = FrameRate(),
+    /** Long press → Close: `WM_CLOSE`, so the program can offer to save. */
+    onCloseWindow: (Int) -> Unit = {},
+    /** Long press → Force close: `SIGKILL` to the process behind the window. */
+    onKillWindow: (Int) -> Unit = {},
 ) {
     Row(
         modifier
@@ -155,9 +174,18 @@ fun SessionTaskbar(
             // The unavailable reason still has a home: the launcher panel prints it
             // above Browse C:, where there is room for a sentence.
             windows.forEach { window ->
-                TaskbarWindow(window, shortcuts, containerId) { onFocusWindow(window.id) }
+                TaskbarWindow(
+                    window = window,
+                    shortcuts = shortcuts,
+                    containerId = containerId,
+                    onClick = { onFocusWindow(window.id) },
+                    onClose = { onCloseWindow(window.id) },
+                    onKill = { onKillWindow(window.id) },
+                )
             }
         }
+
+        FrameRateReadout(frameRate)
 
         // **Pause and Stop are not here.** They were, on the argument that the
         // taskbar is the surface already open when a session needs ending — but
@@ -169,6 +197,112 @@ fun SessionTaskbar(
         // What is left is what a taskbar is: a start button, and the windows.
     }
 }
+
+/**
+ * Frames per second, at the trailing edge of the taskbar.
+ *
+ * **A history and a number, because one of them without the other is not worth
+ * the space.** A bare number tells you what is happening this half-second and
+ * nothing about whether it just dropped; a graph alone cannot be read at a
+ * glance while you are playing something. Twenty seconds of bars behind a mono
+ * figure answers both in one look, which is the whole job of a HUD.
+ *
+ * **Coloured against the container's own limit, not against 60.** A container
+ * configured for 30 fps and delivering 30 is doing exactly what was asked, and
+ * an amber readout for missing a number nobody set would be a traffic light
+ * that lies. [FrameRate.target] is that limit, or 60 when there is none.
+ *
+ * **Idle is a dash, not a zero.** Vessel composites on damage, so a desktop with
+ * nothing moving genuinely produces no frames — that is the absence of a
+ * reading rather than a stall, and a red `0` flashing at somebody who simply is
+ * not doing anything would be the counter misrepresenting the one thing it
+ * exists to report. The bars stay, greyed, so the shape of what just happened
+ * does not vanish the moment a program stops drawing.
+ */
+@Composable
+private fun FrameRateReadout(rate: FrameRate, modifier: Modifier = Modifier) {
+    val colors = Vessel.colors
+    val metrics = Vessel.metrics
+
+    // Rounded once, here, and used for both the digits and the colour, so the
+    // number on screen can never disagree with the colour behind it — 59.6
+    // drawn as "60" beside an amber bar is the kind of detail that makes a
+    // readout feel broken without anybody being able to say why.
+    val shown = rate.fps.roundToInt()
+    val ink = when {
+        rate.idle -> colors.textMuted
+        shown >= rate.target * SMOOTH -> colors.ok
+        shown >= rate.target * ROUGH -> colors.warn
+        else -> colors.danger
+    }
+
+    Row(
+        modifier
+            .background(colors.surfaceSunken, metrics.shapeSm)
+            .padding(horizontal = metrics.s6, vertical = metrics.s3),
+        horizontalArrangement = Arrangement.spacedBy(metrics.s6),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FrameRateBars(rate, ink)
+        Text(
+            if (rate.idle) "—" else shown.toString(),
+            style = Vessel.type.mono,
+            color = ink,
+        )
+        Text("FPS", style = Vessel.type.overline, color = colors.textMuted)
+    }
+}
+
+/**
+ * The last [FrameRate.HISTORY] samples as bars, newest at the right.
+ *
+ * Scaled to the target rather than to the highest sample. Auto-scaling would
+ * make a run at 12 fps look identical to a run at 60 — the bars would fill the
+ * box either way — which is exactly the reassurance a performance readout must
+ * not give. A sample above the target is clamped to full height instead, so the
+ * chart says "at or over the limit" and does not rescale everything else to
+ * accommodate one spike.
+ */
+@Composable
+private fun FrameRateBars(rate: FrameRate, ink: Color, modifier: Modifier = Modifier) {
+    val metrics = Vessel.metrics
+    val track = Vessel.colors.divider
+    val target = rate.target.toFloat().coerceAtLeast(1f)
+
+    Canvas(
+        modifier
+            .size(width = metrics.sparkWidth, height = metrics.sparkHeight)
+            .padding(vertical = metrics.s3),
+    ) {
+        val slots = FrameRate.HISTORY
+        val slot = size.width / slots
+        val barWidth = (slot - metrics.hairline.toPx()).coerceAtLeast(1f)
+        // Right-aligned: a partly filled history grows leftwards from the newest
+        // sample, so the most recent bar is always in the same place and the eye
+        // does not have to hunt for it as the buffer fills.
+        val samples = rate.history.takeLast(slots)
+        val offset = slots - samples.size
+
+        samples.forEachIndexed { index, sample ->
+            val fraction = (sample / target).coerceIn(0f, 1f)
+            val x = (offset + index) * slot
+            // Every slot gets a floor of one pixel so a run of zeroes reads as a
+            // measured nothing rather than as an empty chart with no data in it.
+            val height = (size.height * fraction).coerceAtLeast(metrics.hairline.toPx())
+            drawRect(
+                color = if (sample <= 0f) track else ink,
+                topLeft = Offset(x, size.height - height),
+                size = Size(barWidth, height),
+            )
+        }
+    }
+}
+
+/** At or above this fraction of the target, the readout is green. */
+private const val SMOOTH = 0.9f
+
+/** Below this fraction it is red; between the two, amber. */
+private const val ROUGH = 0.5f
 
 /**
  * The start button — four dots, and not a logo.
@@ -222,13 +356,17 @@ private fun StartButton(open: Boolean, onClick: () -> Unit) {
  * when neither applies. A letter is a poor icon and an honest one — a generic
  * application glyph would make four unrelated programs look like one.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TaskbarWindow(
     window: GuestWindow,
     shortcuts: List<AppShortcut>,
     containerId: String?,
     onClick: () -> Unit,
+    onClose: () -> Unit = {},
+    onKill: () -> Unit = {},
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     val shape = Vessel.metrics.shapeMd
     Box(
         Modifier
@@ -238,7 +376,19 @@ private fun TaskbarWindow(
                 shape,
             )
             .vRing(if (window.focused) Vessel.colors.accent else Vessel.colors.divider, shape)
-            .clickable(onClickLabel = window.title, onClick = onClick)
+            // **Tap focuses, long press offers to close.** Tapping is the
+            // thing done constantly and must stay one gesture with no menu in
+            // front of it; closing is done once per program and is destructive
+            // enough to be worth reaching for. The same split every desktop
+            // taskbar uses, and the reason there is no X on the button: at 44 dp
+            // with an icon in it there is no room for a second target a finger
+            // could hit reliably, and a mis-hit would close the program.
+            .combinedClickable(
+                onClickLabel = window.title,
+                onClick = onClick,
+                onLongClickLabel = "Close ${window.title}",
+                onLongClick = { menuOpen = true },
+            )
             .semantics { contentDescription = window.title },
         contentAlignment = Alignment.Center,
     ) {
@@ -275,6 +425,77 @@ private fun TaskbarWindow(
 
             else -> Text(window.initial, style = Vessel.type.mono, color = tint)
         }
+
+        // **A sheet, not a dropdown.** A `DropdownMenu` anchored to a 44 dp
+        // button at the very bottom of a phone screen opens upward into the
+        // guest's output and puts destructive rows under the thumb that just
+        // long-pressed. The sheet is the surface this product already uses for
+        // "an action, and what it will do".
+        if (menuOpen) {
+            WindowActionsSheet(
+                window = window,
+                onDismiss = { menuOpen = false },
+                onClose = {
+                    menuOpen = false
+                    onClose()
+                },
+                onKill = {
+                    menuOpen = false
+                    onKill()
+                },
+            )
+        }
+    }
+}
+
+/**
+ * What can be done to one guest window, and what each of them costs.
+ *
+ * Two verbs, and the difference between them is the whole content of this
+ * sheet. **Close** is `WM_CLOSE` — the program is asked, and gets to put up its
+ * "save changes?" dialog, so it is the one to reach for and the one drawn first.
+ * **Force close** is `SIGKILL` to the process: no dialog, no save, and it is
+ * described in those words rather than as "not responding", because whether the
+ * program is responding is not something this shell can know.
+ *
+ * Force close is offered unconditionally rather than only after Close fails. A
+ * program wedged badly enough to need it is exactly the program that will not
+ * answer the polite request either, and making the user perform a ritual of
+ * asking nicely first — then wait, then guess how long — is worse than trusting
+ * them with a labelled button.
+ */
+@Composable
+private fun WindowActionsSheet(
+    window: GuestWindow,
+    onDismiss: () -> Unit,
+    onClose: () -> Unit,
+    onKill: () -> Unit,
+) {
+    VSheet(
+        onDismiss = onDismiss,
+        header = {
+            VSheetHeader(
+                // The window's own title, which is the only string the user
+                // recognises. A window that has not set one falls back to the
+                // program, and to a generic word only if it has neither — never
+                // to an empty header, which would read as a broken sheet.
+                title = window.title.ifBlank { window.program.ifBlank { "This window" } },
+                subtitle = if (window.title.isBlank()) null else window.program.ifBlank { null },
+            )
+        },
+    ) {
+        VSheetRow(
+            icon = VIcons.X,
+            title = "Close",
+            help = "Asks the program to close, so it can offer to save first.",
+            onClick = onClose,
+        )
+        VSheetRow(
+            icon = VIcons.Trash,
+            title = "Force close",
+            help = "Ends the process immediately. Anything unsaved is lost.",
+            onClick = onKill,
+        )
     }
 }
 

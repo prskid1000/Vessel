@@ -5,6 +5,7 @@ import android.util.SparseArray;
 
 import com.winlator.core.Bitmask;
 import com.winlator.renderer.FullscreenTransformation;
+import com.winlator.xserver.events.ClientMessage;
 import com.winlator.xserver.events.Event;
 import com.winlator.xserver.events.PropertyNotify;
 
@@ -189,6 +190,54 @@ public class Window extends XResource {
     public int getProcessId() {
         Property property = getProperty(Atom._NET_WM_PID);
         return property != null ? property.getInt(0) : 0;
+    }
+
+    /**
+     * VESSEL: ask this window to close itself, the way a window manager does.
+     *
+     * <p>Before this existed, Vessel's taskbar could focus a guest window and
+     * could not close one, and the only other control ends the whole session —
+     * so "this program has hung" was answered with "stop everything".
+     *
+     * <p>A client that wants to be asked politely says so by listing
+     * `WM_DELETE_WINDOW` in its `WM_PROTOCOLS` property, and every toolkit
+     * Windows programs are built with does. `winex11.drv` turns the message into
+     * `WM_CLOSE`, so the program gets its "save changes?" dialog — which is the
+     * whole reason to send this rather than kill the process.
+     *
+     * <p>Returns false when the window never advertised the protocol. That is
+     * not an error and must not be treated as one: it is the signal that the
+     * only remaining way to close it is to end its process, which is a different
+     * and more destructive act and belongs to the caller to decide on.
+     *
+     * <p>The timestamp is `CurrentTime` (0) rather than a real one. The protocol
+     * allows it, nothing in this stack reads it, and a made-up server timestamp
+     * would be worse than an explicit "no time given".
+     */
+    public boolean requestClose() {
+        int protocols = Atom.internAtom("WM_PROTOCOLS");
+        int deleteWindow = Atom.internAtom("WM_DELETE_WINDOW");
+        Property property = getProperty(protocols);
+        if (property == null) return false;
+
+        boolean supported = false;
+        for (int i = 0; i < property.getIntCount(); i++) {
+            if (property.getInt(i) == deleteWindow) {
+                supported = true;
+                break;
+            }
+        }
+        if (!supported) return false;
+
+        // Delivered whatever the window's event mask says. A ClientMessage sent
+        // by the window manager is not selected for with SubstructureNotify or
+        // anything else — the client is simply the recipient — so filtering it
+        // through isInterestedIn() would drop the message for every well-behaved
+        // program, which is all of them.
+        for (EventListener listener : eventListeners) {
+            listener.sendEvent(new ClientMessage(this, protocols, deleteWindow, 0));
+        }
+        return true;
     }
 
     public int getTransientFor() {

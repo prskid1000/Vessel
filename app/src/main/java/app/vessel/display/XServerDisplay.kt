@@ -19,6 +19,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayRequest
+import app.vessel.core.FrameRate
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDisplayServer
 import app.vessel.core.TopLevelWindow
@@ -38,6 +39,7 @@ import app.vessel.input.X11
 import app.vessel.input.X11KeyMap
 import app.vessel.input.buttons
 import app.vessel.input.toPixel
+import com.winlator.renderer.GLRenderer
 import com.winlator.renderer.ViewTransformation
 import com.winlator.sysvshm.SysVSHMConnectionHandler
 import com.winlator.sysvshm.SysVSHMRequestHandler
@@ -46,8 +48,6 @@ import com.winlator.widget.XServerView
 import com.winlator.xconnector.UnixSocketConfig
 import com.winlator.xconnector.XConnectorEpoll
 import com.winlator.xserver.Atom
-import com.winlator.xserver.events.ConfigureNotify
-import com.winlator.xserver.events.Event
 import com.winlator.xserver.Pointer
 import com.winlator.xserver.Property
 import com.winlator.xserver.SHMSegmentManager
@@ -57,17 +57,26 @@ import com.winlator.xserver.WindowManager
 import com.winlator.xserver.XClientConnectionHandler
 import com.winlator.xserver.XClientRequestHandler
 import com.winlator.xserver.XServer
+import com.winlator.xserver.events.ConfigureNotify
+import com.winlator.xserver.events.Event
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * The vendored X server, wired to a real host.
@@ -118,6 +127,55 @@ class XServerDisplay @Inject constructor(
     private val _windows = MutableStateFlow<List<TopLevelWindow>>(emptyList())
     override val windows: StateFlow<List<TopLevelWindow>> = _windows.asStateFlow()
 
+    private val _frameRate = MutableStateFlow(FrameRate())
+    override val frameRate: StateFlow<FrameRate> = _frameRate.asStateFlow()
+
+    /**
+     * Samples [GLRenderer.compositedFrames] on a timer while a session runs.
+     *
+     * **A poll, and it is the right shape here even though the rest of this
+     * class is event-driven.** The renderer must not push: it runs on the GL
+     * thread and the whole point of the counter is that composing a frame costs
+     * one increment. A rate is two reads and the wall time between them, so the
+     * clock belongs to whoever wants the rate.
+     *
+     * Own scope, cancelled in [teardown], so no sampling outlives a session and
+     * a stopped session's last number cannot sit on the taskbar looking live.
+     */
+    private var sampler: Job? = null
+
+    private fun startSampling(renderer: GLRenderer, limit: Int?) {
+        sampler?.cancel()
+        _frameRate.value = FrameRate(limit = limit)
+        sampler = scope.launch {
+            var previous = renderer.compositedFrames()
+            var previousAt = SystemClock.elapsedRealtime()
+            while (isActive) {
+                delay(SAMPLE_MS)
+                val frames = renderer.compositedFrames()
+                val at = SystemClock.elapsedRealtime()
+                val seconds = (at - previousAt) / 1000f
+                // A zero or negative window would divide by nothing. It cannot
+                // happen with elapsedRealtime, which does not go backwards and
+                // does not stop in deep sleep — the reason it is used here
+                // rather than uptimeMillis, which does stop and would report a
+                // fictitious burst on the first frame after a wake.
+                if (seconds > 0f) {
+                    val fps = (frames - previous) / seconds
+                    _frameRate.update { current ->
+                        current.copy(
+                            fps = fps,
+                            history = (current.history + fps).takeLast(FrameRate.HISTORY),
+                            limit = limit,
+                        )
+                    }
+                }
+                previous = frames
+                previousAt = at
+            }
+        }
+    }
+
     /** Serialises start against stop, so a fast Retry cannot bind X0 twice. */
     private val lifecycle = Mutex()
 
@@ -150,6 +208,23 @@ class XServerDisplay @Inject constructor(
         session?.focusWindow(id)
     }
 
+    override fun closeWindow(id: Int): Boolean = session?.closeWindow(id) ?: false
+
+    override fun killWindow(id: Int): Boolean {
+        val pid = session?.processOf(id) ?: 0
+        // Zero means the window set no `_NET_WM_PID`, and killing "process 0"
+        // would be a signal to the whole process group. Refusing is the only
+        // safe reading of a missing pid.
+        if (pid <= 0) return false
+        Log.w(TAG, "killing pid $pid, which owns window $id")
+        // SIGKILL, not SIGTERM. This is the escalation *after* WM_CLOSE was
+        // refused or ignored, so the case it exists for is a process that is not
+        // servicing anything — including a signal handler.
+        runCatching { android.os.Process.killProcess(pid) }
+            .onFailure { Log.w(TAG, "could not kill pid $pid", it) }
+        return true
+    }
+
     override fun showKeyboard() {
         val view = session?.view ?: return
         view.post { view.showSoftKeyboard() }
@@ -167,6 +242,7 @@ class XServerDisplay @Inject constructor(
                 // about what the taskbar wants.
                 started.onWindowsChanged = { list -> _windows.value = list }
                 _surface.value = started.view
+                startSampling(started.view.renderer, request.fpsLimit)
                 DisplayOutcome.Started(started.environment)
             } catch (t: Throwable) {
                 // Includes the RuntimeException XConnectorEpoll throws when bind
@@ -185,6 +261,11 @@ class XServerDisplay @Inject constructor(
 
     /** Main thread, lock held. */
     private fun teardown() {
+        sampler?.cancel()
+        sampler = null
+        // Reset rather than freeze. A rate left at its last value would sit on
+        // the taskbar after the session ended, reading as a running program.
+        _frameRate.value = FrameRate()
         _surface.value = null
         // Cleared here and not on session end: a taskbar still showing the
         // windows of a session that has stopped is worse than an empty one.
@@ -193,8 +274,26 @@ class XServerDisplay @Inject constructor(
         session = null
     }
 
+    /**
+     * The sampler's home. Cancelled per session, never per instance.
+     *
+     * `SupervisorJob` so a throw in one sample cannot take the scope down and
+     * leave the counter silently dead for the rest of the app's life.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     private companion object {
         const val TAG = "VesselDisplay"
+
+        /**
+         * 500 ms — two readings a second.
+         *
+         * Fast enough that a stutter is visible and slow enough that the number
+         * can be read: a counter updated every frame is a blur, which is the
+         * usual mistake. It also sets the sparkline's span — [FrameRate.HISTORY]
+         * samples is 20 seconds of history.
+         */
+        const val SAMPLE_MS = 500L
     }
 }
 
@@ -508,6 +607,26 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         }.onFailure { Log.w("VesselDisplay", "could not focus window $id", it) }
         publishWindows()
     }
+
+    /**
+     * `WM_DELETE_WINDOW` to a window, if it said it would listen.
+     *
+     * The window list is not republished. A program asked to close has not
+     * closed yet — it may be putting up a "save changes?" dialog, and removing
+     * its taskbar button at the moment of asking would be the shell asserting an
+     * outcome it does not have. The button goes when the window is really
+     * unmapped, through the normal path.
+     */
+    fun closeWindow(id: Int): Boolean {
+        val window = xServer.windowManager.getWindow(id) ?: return false
+        return runCatching { window.requestClose() }
+            .onFailure { Log.w("VesselDisplay", "could not ask window $id to close", it) }
+            .getOrDefault(false)
+    }
+
+    /** The pid behind a window, or 0 — `_NET_WM_PID`, set by `winex11.drv`. */
+    fun processOf(id: Int): Int =
+        runCatching { xServer.windowManager.getWindow(id)?.processId ?: 0 }.getOrDefault(0)
 
     init {
         xServer.setDebugSink { line -> Log.d("VesselDisplay", line) }

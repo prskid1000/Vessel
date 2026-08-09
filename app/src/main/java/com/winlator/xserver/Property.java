@@ -93,6 +93,18 @@ public class Property {
         }
     }
 
+    /**
+     * VESSEL: how many 32-bit words this property holds.
+     *
+     * <p>Needed to read a <em>list</em> property — `WM_PROTOCOLS` is one —
+     * without the caller reaching into {@link #data} and doing the arithmetic
+     * itself. There was no way to ask, because every existing caller reads word
+     * 0 and knows in advance that is all there is.
+     */
+    public int getIntCount() {
+        return data.capacity() / 4;
+    }
+
     public int getInt(int index) {
         return data.getInt(index * 4);
     }
