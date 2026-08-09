@@ -101,6 +101,16 @@ data class TopLevelWindow(
      * the guest's disk. Empty when the window will not say.
      */
     val program: String = "",
+
+    /**
+     * Hidden by [SessionDisplayServer.minimizeWindow], and still listed.
+     *
+     * **A minimised window has to stay in the taskbar or it is gone for good.**
+     * Iconifying in X11 is unmapping, and the window list is built from mapped
+     * windows — so without this the button would disappear at the moment it
+     * became the only way back. Wine's desktop has no taskbar of its own.
+     */
+    val minimized: Boolean = false,
 )
 
 /** How [SessionDisplayServer.start] went. Modelled on `BootstrapOutcome`. */
@@ -226,6 +236,17 @@ interface SessionDisplayServer {
      * error, and false for an id the server does not have is the same ordinary
      * race [focusWindow] tolerates.
      */
+    /**
+     * Hide a window without closing it, and keep it in [windows].
+     *
+     * Unmaps it, which is how a window manager iconifies and what makes
+     * `winex11.drv` report the Win32 window as minimised — so Wine agrees this
+     * happened rather than being worked around. [focusWindow] restores it.
+     *
+     * False when the window is already hidden or gone.
+     */
+    fun minimizeWindow(id: Int): Boolean
+
     fun closeWindow(id: Int): Boolean
 
     /**
@@ -288,6 +309,8 @@ interface SessionDisplayServer {
         override fun focusWindow(id: Int) = Unit
 
         // Headless: there is no window to ask and no process behind one.
+        override fun minimizeWindow(id: Int): Boolean = false
+
         override fun closeWindow(id: Int): Boolean = false
 
         override fun killWindow(id: Int): Boolean = false

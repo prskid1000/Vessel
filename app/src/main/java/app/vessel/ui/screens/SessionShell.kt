@@ -129,6 +129,8 @@ fun SessionTaskbar(
     containerId: String? = null,
     /** Composited frames per second, drawn at the trailing edge. */
     frameRate: FrameRate = FrameRate(),
+    /** Long press → Minimize, or Restore for one that is already hidden. */
+    onMinimizeWindow: (Int) -> Unit = {},
     /** Long press → Close: `WM_CLOSE`, so the program can offer to save. */
     onCloseWindow: (Int) -> Unit = {},
     /** Long press → Force close: `SIGKILL` to the process behind the window. */
@@ -179,6 +181,7 @@ fun SessionTaskbar(
                     shortcuts = shortcuts,
                     containerId = containerId,
                     onClick = { onFocusWindow(window.id) },
+                    onMinimize = { onMinimizeWindow(window.id) },
                     onClose = { onCloseWindow(window.id) },
                     onKill = { onKillWindow(window.id) },
                 )
@@ -363,6 +366,7 @@ private fun TaskbarWindow(
     shortcuts: List<AppShortcut>,
     containerId: String?,
     onClick: () -> Unit,
+    onMinimize: () -> Unit = {},
     onClose: () -> Unit = {},
     onKill: () -> Unit = {},
 ) {
@@ -376,6 +380,11 @@ private fun TaskbarWindow(
                 shape,
             )
             .vRing(if (window.focused) Vessel.colors.accent else Vessel.colors.divider, shape)
+            // **A hidden window looks hidden.** It is still in the bar because
+            // that is the only way back to it, so it has to be tellable from the
+            // ones that are on screen — otherwise the bar claims six windows are
+            // open when two of them are not.
+            .alpha(if (window.minimized) Vessel.colors.disabledAlpha else 1f)
             // **Tap focuses, long press offers to close.** Tapping is the
             // thing done constantly and must stay one gesture with no menu in
             // front of it; closing is done once per program and is destructive
@@ -435,6 +444,10 @@ private fun TaskbarWindow(
             WindowActionsSheet(
                 window = window,
                 onDismiss = { menuOpen = false },
+                onMinimize = {
+                    menuOpen = false
+                    onMinimize()
+                },
                 onClose = {
                     menuOpen = false
                     onClose()
@@ -468,6 +481,7 @@ private fun TaskbarWindow(
 private fun WindowActionsSheet(
     window: GuestWindow,
     onDismiss: () -> Unit,
+    onMinimize: () -> Unit,
     onClose: () -> Unit,
     onKill: () -> Unit,
 ) {
@@ -484,6 +498,19 @@ private fun WindowActionsSheet(
             )
         },
     ) {
+        // First, because it is the only non-destructive one and the most
+        // reached for. Restore rather than Minimize when it is already hidden:
+        // the same row, saying what it will actually do.
+        VSheetRow(
+            icon = if (window.minimized) VIcons.ArrowClockwise else VIcons.CaretDown,
+            title = if (window.minimized) "Restore" else "Minimize",
+            help = if (window.minimized) {
+                "Shows the window again."
+            } else {
+                "Hides the window. It stays in the taskbar — tap it to bring it back."
+            },
+            onClick = onMinimize,
+        )
         VSheetRow(
             icon = VIcons.X,
             title = "Close",

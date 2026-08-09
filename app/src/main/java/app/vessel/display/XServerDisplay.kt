@@ -208,6 +208,8 @@ class XServerDisplay @Inject constructor(
         session?.focusWindow(id)
     }
 
+    override fun minimizeWindow(id: Int): Boolean = session?.minimizeWindow(id) ?: false
+
     override fun closeWindow(id: Int): Boolean = session?.closeWindow(id) ?: false
 
     override fun killWindow(id: Int): Boolean {
@@ -373,6 +375,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                 window.taskbarTitle(),
                 focused = window.id == focused,
                 program = window.programName(),
+                minimized = window.id in minimized,
             )
         } + root.children
             // **And the windows inside the desktop, which is where they move to
@@ -398,6 +401,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                         window.taskbarTitle(),
                         focused = window.id == focused,
                         program = window.programName(),
+                        minimized = window.id in minimized,
                     )
                 }
             }
@@ -540,7 +544,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * user would recognise, and none is ever mapped for long.
      */
     private fun Window.isRealWindow(): Boolean =
-        attributes.isMapped && width > MIN_WINDOW_EDGE && height > MIN_WINDOW_EDGE
+        (attributes.isMapped || id in minimized) && width > MIN_WINDOW_EDGE && height > MIN_WINDOW_EDGE
 
     /**
      * The `explorer /desktop=` window: the one that covers the whole screen.
@@ -597,9 +601,58 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * afterwards is not optional — Z order is what the compositor draws from, and
      * without it the window is logically in front and visually still behind.
      */
+    /**
+     * Windows this session has minimised, by id.
+     *
+     * **Kept here because unmapping loses them otherwise.** Iconifying in X11
+     * *is* unmapping — that is the protocol, and it is what makes Wine treat the
+     * window as minimised — but [publishWindows] lists mapped windows, so an
+     * unmapped one would drop out of the taskbar and become unreachable. Wine's
+     * desktop has no taskbar of its own, so there would be nothing left that
+     * could bring it back.
+     *
+     * An id is removed on restore and when the window is destroyed; a stale id
+     * for a window that no longer exists is harmless, because every read goes
+     * through `getWindow(id)` first.
+     */
+    private val minimized = mutableSetOf<Int>()
+
+    /**
+     * Hide a window without closing it, the way a title bar's `_` does.
+     *
+     * `unmapWindow` rather than anything Vessel invented: a window manager
+     * iconifies by unmapping, the client gets `UnmapNotify`, and `winex11.drv`
+     * turns that into a minimised Win32 window. So Wine agrees this happened
+     * rather than being worked around.
+     */
+    fun minimizeWindow(id: Int): Boolean {
+        val manager = xServer.windowManager
+        val window = manager.getWindow(id) ?: return false
+        if (!window.attributes.isMapped) return false
+        return runCatching {
+            minimized += id
+            manager.unmapWindow(window)
+            publishWindows()
+            true
+        }.onFailure {
+            minimized -= id
+            Log.w("VesselDisplay", "could not minimise window $id", it)
+        }.getOrDefault(false)
+    }
+
     fun focusWindow(id: Int) {
         val manager = xServer.windowManager
         val window = manager.getWindow(id) ?: return
+        // **Tapping a minimised window restores it.** Focusing something that is
+        // not on screen is not a thing a user can mean, and a taskbar button
+        // that did nothing for exactly the windows you cannot otherwise reach
+        // would be the worst button in the product.
+        if (id in minimized) {
+            runCatching {
+                minimized -= id
+                manager.mapWindow(window)
+            }.onFailure { Log.w("VesselDisplay", "could not restore window $id", it) }
+        }
         runCatching {
             window.parent?.moveChildAbove(window, null)
             manager.triggerOnChangeWindowZOrder(window)

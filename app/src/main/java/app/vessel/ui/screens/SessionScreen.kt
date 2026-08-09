@@ -382,6 +382,7 @@ fun SessionDesktop(
     onShowKeyboard: () -> Unit,
     onLaunchApp: (AppShortcut) -> Unit,
     onFocusWindow: (Int) -> Unit,
+    onMinimizeWindow: (Int) -> Unit,
     onCloseWindow: (Int) -> Unit,
     onKillWindow: (Int) -> Unit,
     windows: List<GuestWindow> = emptyList(),
@@ -573,6 +574,7 @@ fun SessionDesktop(
                     shortcuts = shortcuts,
                     containerId = state.containerId,
                     frameRate = frameRate,
+                    onMinimizeWindow = onMinimizeWindow,
                     onCloseWindow = onCloseWindow,
                     onKillWindow = onKillWindow,
                 )
@@ -988,6 +990,7 @@ private fun SessionDesktopPreview() {
             onShowKeyboard = {},
             onLaunchApp = {},
             onFocusWindow = {},
+            onMinimizeWindow = {},
             onCloseWindow = {},
             onKillWindow = {},
         )

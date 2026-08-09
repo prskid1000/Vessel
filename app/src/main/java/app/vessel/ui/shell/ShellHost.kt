@@ -20,6 +20,8 @@ data class GuestWindow(
     val focused: Boolean = false,
     /** The owning executable, lowercased and without a path. May be empty. */
     val program: String = "",
+    /** Hidden by the taskbar's Minimize, and still listed so it can come back. */
+    val minimized: Boolean = false,
 ) {
     /** The tile letter, on the same reasoning as [AppShortcut.initial]. */
     val initial: String get() = title.trim().firstOrNull()?.uppercase() ?: "?"
@@ -76,6 +78,9 @@ interface ShellHost {
      * advertised the protocol and nothing was sent — the caller's cue to offer
      * [kill] instead, which is a different and more destructive act.
      */
+    /** Hide a window without closing it. [focus] brings it back. */
+    suspend fun minimize(windowId: Int): Boolean
+
     suspend fun close(windowId: Int): Boolean
 
     /**
@@ -142,6 +147,8 @@ class UnavailableShellHost @Inject constructor() : ShellHost {
             "to accept an executable — neither exists in this build."
 
     override suspend fun focus(windowId: Int) = Unit
+
+    override suspend fun minimize(windowId: Int): Boolean = false
 
     override suspend fun close(windowId: Int): Boolean = false
 

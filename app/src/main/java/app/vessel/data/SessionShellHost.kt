@@ -41,6 +41,7 @@ class SessionShellHost @Inject constructor(
                     title = it.title,
                     focused = it.focused,
                     program = it.program,
+                    minimized = it.minimized,
                 )
             }
         }
@@ -50,6 +51,8 @@ class SessionShellHost @Inject constructor(
     override val unavailableReason: String? = null
 
     override suspend fun focus(windowId: Int) = display.focusWindow(windowId)
+
+    override suspend fun minimize(windowId: Int): Boolean = display.minimizeWindow(windowId)
 
     override suspend fun close(windowId: Int): Boolean = display.closeWindow(windowId)
 

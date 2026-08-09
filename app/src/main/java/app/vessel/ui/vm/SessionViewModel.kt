@@ -121,6 +121,10 @@ class SessionViewModel @Inject constructor(
         }
     }
 
+    fun minimizeWindow(id: Int) {
+        viewModelScope.launch { shell.minimize(id) }
+    }
+
     fun killWindow(id: Int) {
         viewModelScope.launch { shell.kill(id) }
     }

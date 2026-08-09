@@ -303,6 +303,7 @@ fun VesselApp(
                 onShowKeyboard = session::showKeyboard,
                 onLaunchApp = session::launchApp,
                 onFocusWindow = session::focusWindow,
+                onMinimizeWindow = session::minimizeWindow,
                 onCloseWindow = session::closeWindow,
                 onKillWindow = session::killWindow,
                 terminals = terminals,

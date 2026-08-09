@@ -1408,6 +1408,29 @@ class SessionRuntime @Inject constructor(
         deleteTree(target)
         if (!staging.renameTo(target)) error("could not move the tools payload into place")
 
+        // **The three directories MSYS2's first run tries to make and cannot.**
+        //
+        // Opening Git Bash printed, before anything else:
+        //
+        //   mkdir: cannot create directory '/dev/shm': Read-only file system
+        //   Creating /dev/shm directory failed.
+        //   POSIX semaphores and POSIX shared memory will not work
+        //   mkdir: cannot create directory '/dev/mqueue': Read-only file system
+        //
+        // That is `/etc/post-install/01-devices.post`, which Git for Windows
+        // runs once on first launch. `mkdir` is coreutils, not the runtime, so
+        // this is a script failing rather than the emulator — and `/etc/fstab`
+        // here is `none / cygdrive`, which leaves the MSYS2 root as the
+        // directory holding `usr\bin\msys-2.0.dll`: this one.
+        //
+        // Making them in advance turns the script's `mkdir -p` into a no-op that
+        // succeeds. It costs three empty directories and removes four lines of
+        // alarming red text from the first thing a user sees in a shell they
+        // just opened. If the warning survives this, the path is *not* being
+        // resolved against the install root and that is worth knowing — the
+        // directories are harmless either way, and nothing here depends on them.
+        listOf("dev/shm", "dev/mqueue", "tmp").forEach { File(target, it).mkdirs() }
+
         val files = target.walkTopDown().count { it.isFile }
         log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $files file(s) into ${PrefixRegistry.GIT_DIR}")
     }
