@@ -95,6 +95,9 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 20 moved the applied-stamp into the machine hive, which is the one
+     * SessionRuntime reads - it was written to user.reg and looked for in
+     * system.reg, so every launch re-ran regedit and two wine.inf passes;
      * 19 put Git's three directories on PATH, so git and the POSIX tools
      * work from cmd the moment the component is installed - clangarm64 and
      * not mingw64, which is what the ARM64 build calls its prefix;
@@ -122,7 +125,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 19
+    const val SEED_VERSION: Int = 20
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -158,8 +161,24 @@ object PrefixRegistry {
 
     private val STAMP_PATTERN = Regex(""""Seed"="([^"]+)"""")
 
+    /**
+     * **`HKEY_LOCAL_MACHINE`, and the machine hive is the whole point.**
+     *
+     * This was `HKEY_CURRENT_USER`, which `regedit` writes into `user.reg` —
+     * while `SessionRuntime.hiveText` reads `system.reg`, because that is where
+     * the emulator keys it also checks live. So the stamp was written to one
+     * file and looked for in another, the skip could never fire, and **every
+     * launch re-ran `regedit` and two full `wine.inf` passes**: minutes on this
+     * phone, on a prefix that was already correct. Measured before the fix —
+     * three consecutive sessions each execed `wineboot` twice and `regedit`
+     * twice, on a container that had been provisioned once.
+     *
+     * Moving it rather than teaching the reader about a second file: one hive to
+     * read is the simpler invariant, and everything else this seed asserts about
+     * an applied prefix is already in `system.reg`.
+     */
     private fun stampKey(stamp: String) = RegistryKey(
-        path = """HKEY_CURRENT_USER\Software\Vessel""",
+        path = """HKEY_LOCAL_MACHINE\Software\Vessel""",
         values = listOf(RegistryValue("Seed", stamp)),
     )
 

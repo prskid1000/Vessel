@@ -155,7 +155,7 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(19, PrefixRegistry.SEED_VERSION)
+        assertEquals(20, PrefixRegistry.SEED_VERSION)
         // Fourteen keys, the three the seed deletes, and the stamp `renderSeed`
         // appends — which is not in the list, its value being a hash of the rest.
         assertEquals(17, PrefixRegistry.seed.size)
