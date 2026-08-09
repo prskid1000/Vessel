@@ -176,6 +176,88 @@ and the two that are not share a root cause.
   path; GPU render cost at 1280x720 on a phone; the full-window texture upload
   per composited frame. See the present-path audit below.
 
+  **Do this first, it costs two minutes and no code.** Set the container's
+  `display.resolution` to 640x360 and relaunch. If the rate scales with the pixel
+  count the frame is **GPU-bound**; if it barely moves it is **CPU/FEX-bound**.
+  That one result deletes half of the list below. `docs/ARCHITECTURE.md` already
+  calls resolution the single biggest performance dial here, so it is a fix as
+  well as a probe. Establish what the game does at its own lowest preset in the
+  same sitting — Metro Redux is a 2014 PC title and 4 FPS at max settings on an
+  Adreno 829 is not self-evidently a defect in the stack.
+
+## Cheap wins, queued behind attributing the frame
+
+Everything here comes out of the present-path audit. Each is hours, not weeks,
+and none of them should jump ahead of the resolution probe above — at 4 FPS the
+whole present chain is ~1% of the frame, so these are worth doing when it is the
+frame that is fast and the plumbing that is slow. File references are the
+audit's; they are pointers, not independently re-verified.
+
+- [ ] **Move Mesa's software fence wait off the application thread.**
+  `wsi_common.c:2882-2885` blocks the app's `vkQueuePresentKHR` on the blit
+  fence, but `x11_queue_present` only pushes to a queue
+  (`wsi_common_x11.c:2249`) and the put-image runs on the present-manager thread
+  (`:2510`, `:2559`). The wait belongs there, immediately before
+  `x11_present_to_x11_sw`. Up to the **0.60 ms** blit latency off the app thread
+  — 27% of the measured 2.245 ms mean, and the p95 of 4.945 ms suggests it does
+  not always overlap with the next frame's CPU work. ~30 lines. Needs a
+  `patches/mesa/` directory, which does not exist yet; `docs/UPSTREAM.md` has the
+  shape. *Done when:* `run-presentbench.sh --wsi sw --frames 600` before and
+  after, watching p95 rather than the mean.
+
+- [ ] **Drop the per-present `GetGeometry` round trip.** One request and one
+  reply per frame (`wsi_common_x11.c:1854` + `:1917`), on the present thread,
+  ordered behind the 3.6 MB PutImage on the same connection, and used for
+  nothing but detecting a resize (`:1919-1925`). Selecting `StructureNotify` and
+  reading `ConfigureNotify` answers the same question for free. Small
+  `patches/mesa/` patch, low risk, **win unmeasured** — it is on the present
+  thread, so it may only bound that thread's rate. A `Trace` section around the
+  reply would size it before the patch is written.
+
+- [ ] **Back the window drawable with a `GPUImage` on the software path.**
+  Today `Texture.updateFromDrawable` re-uploads the **whole window every frame**
+  (`Texture.java:147`) — the damage rectangle is computed and then discarded into
+  a boolean (`Drawable.java:194-199`). When a drawable's texture is a `GPUImage`,
+  `Drawable.setData` repoints its `ByteBuffer` at the AHardwareBuffer's mapped
+  memory (`Drawable.java:57-58`), the upload becomes a no-op
+  (`GPUImage.java:46-49`) and the GL texture is an `EGLImageKHR` over the same
+  buffer (`GPUImage.java:42`). Mesa's `xcb_put_image` would then memcpy straight
+  into the buffer the compositor samples, and **3.6 MB of CPU→GPU upload per
+  composited frame disappears**. The machinery already ships and is already used
+  by `PresentExtension` and `DRI3Extension`; a plain `PutImage` simply never
+  triggers it. Medium risk: the buffer is allocated `CPU_WRITE_OFTEN` only
+  (`gpu_image.c:53`) and held locked (`GPUImage.java:32-35`), so any X op that
+  *reads* window content becomes an uncached read, and stride must come from
+  `getStride()` rather than being assumed equal to width. *Note:* this is not
+  inside the 2.245 ms — it will show as composite headroom and lower bandwidth,
+  not as present latency.
+
+- [ ] **Measure the shader cache, cold against warm.** `docs/OPTIMIZATION.md:31`
+  calls pipeline recompilation "the single largest avoidable cost in the whole
+  stack". It was fixed (`SessionEnvironment.kt:430-433`) and explicitly left
+  **Unmeasured** (`:61-63`), and `tools/device-bench.sh:212-217` still refuses to
+  measure it because "the D3D probes are blocked at instance creation because no
+  X server is serving DISPLAY in the headless harness". **That refusal is
+  stale** — `run-presentbench.sh` runs a D3D11 swapchain against the app's own X
+  server. One hour: run it twice with `caches/dxvk` wiped in between. This is the
+  measurement, not a precursor to one.
+
+- [ ] **`FEX_HALFBARRIERTSOENABLED=1` is an unmeasured setting wearing a measured
+  number.** `docs/ARCHITECTURE.md:135` and `SessionEnvironment.kt:352-353` both
+  justify it as "21% cheaper than the alternative" and cite `tools/tso/run.sh` —
+  which never touches that variable. It toggles `FEX_HOSTFEATURES=disablelrcpc2`
+  and nothing else (`run.sh:7, 93, 97`), and the 21% is the **LRCPC2** result
+  (289.3 → 348.8 ms, `docs/ARCHITECTURE.md:84-87`). Fix is cheap: add a third
+  pair to `run_set`. The harness has a control group already, so the answer would
+  be trustworthy. Either the number moves to the right knob or the knob loses its
+  justification — both are better than today.
+
+- [ ] **`-mcpu=oryon-1` for Wine's unix side** (`docs/OPTIMIZATION.md:138-156`).
+  Still undone and still right in principle, but **rank it last for games**: on
+  the DXVK present path the unix side is only win32u's thin Vulkan thunk, and the
+  heavy native code is Turnip, which already gets the flag. It matters for
+  `winex11.drv.so`'s MIT-SHM blitter — the GDI path, not a game.
+
 - [-] **`MESA_VK_WSI_DEBUG=sw,linear`** — tried on the paper argument, measured,
   and reverted. It removes a 0.60 ms GPU blit and is still ~14% slower on the
   mean and ~35% on the median, three runs of 400 frames each and the same
