@@ -55,12 +55,25 @@ COMPONENT_REF="$MESA_REF"
 # and nothing in the app can load it through `AdrenotoolsManager`. Which one a
 # session should use is a decision for whoever wires it up, and it wants both
 # packages present to be able to compare them.
+#
+# The cross file's `system` moves with it, and that is not cosmetic. Mesa keys
+# `DETECT_OS_ANDROID` off it, and `vk_enum_defines.h` then includes
+# `vk_android_native_buffer.h`, which includes `<cutils/native_handle.h>` —
+# a header only `-Dandroid-stub=true` supplies, and that option is refused
+# without `platforms=android`. So an Android-system ICD build cannot compile:
+#   include/vulkan/vk_android_native_buffer.h:22:10:
+#     fatal error: 'cutils/native_handle.h' file not found
+# `system = 'linux'` is also the truthful description of what this build is: a
+# normal Linux Vulkan ICD that happens to be linked against bionic and talks to
+# /dev/kgsl. It is the shape Termux's freedreno ICD package already ships.
 if [ "${VESSEL_TURNIP_ICD:-0}" = "1" ]; then
   TURNIP_PLATFORMS=x11
   TURNIP_VARIANT=icd
+  TURNIP_MESON_SYSTEM=linux
 else
   TURNIP_PLATFORMS=android,x11
   TURNIP_VARIANT=hal
+  TURNIP_MESON_SYSTEM=android
 fi
 
 fetch_source "$SOURCE_NAME" "$MESA_REPO" "$MESA_REF" "${MESA_SHA:-}"
@@ -150,6 +163,106 @@ for f in ${VESSEL_CPU_FLAGS:-}; do
   CPU_ARGS="$CPU_ARGS'$f'"
 done
 
+# The ICD build still compiles for bionic, so the NDK's clang defines
+# __ANDROID__ whatever meson's host system says, and Mesa's DETECT_OS_ANDROID is
+# that macro and not a build option. `vk_enum_defines.h` therefore includes
+# `vk_android_native_buffer.h`, which includes `<cutils/native_handle.h>` for one
+# typedef:
+#   include/vulkan/vk_android_native_buffer.h:22:10:
+#     fatal error: 'cutils/native_handle.h' file not found
+# Mesa ships that header in include/android_stub, but only puts it on the include
+# path `if with_platform_android`. Adding it by hand is the whole fix: header
+# only, no stub libraries, and a no-op for the HAL build which already has it.
+if [ "$TURNIP_VARIANT" = icd ]; then
+  [ -f "$SRC/include/android_stub/cutils/native_handle.h" ] \
+    || die "no include/android_stub/cutils/native_handle.h in $SRC — Mesa moved
+     the stub headers, and the ICD build cannot compile without them."
+  if [ -n "$CPU_ARGS" ]; then CPU_ARGS="$CPU_ARGS, "; fi
+  CPU_ARGS="$CPU_ARGS'-I$SRC/include/android_stub'"
+
+  # Second header the same __ANDROID__-vs-meson mismatch costs.
+  # src/freedreno/meson.build asks for libarchive unconditionally with
+  # `allow_fallback: true`, so the bundled wrap gets configured and built even
+  # though nothing we ship links it, and its archive.h does
+  #     #if defined(__ANDROID__)
+  #     #include "android_lf.h"
+  # expecting the header AOSP's own build supplies. On a 64-bit bionic target
+  # every off_t is already 64-bit, so an empty header is the correct content —
+  # this is the same trick x11-sysroot.sh plays with <values.h>, and for the
+  # same reason: written into WORK_DIR so the checkout stays pristine.
+  ICD_SHIM_INC="$WORK_DIR/$COMPONENT-icd-shim-include"
+  mkdir -p "$ICD_SHIM_INC"
+  cat > "$ICD_SHIM_INC/android_lf.h" <<'SHIM'
+/* Written by build/turnip.sh. libarchive's archive.h includes this on
+ * __ANDROID__ to pick up large-file support; on a 64-bit bionic target off_t is
+ * already 64-bit, so there is nothing to define. Build-time only. */
+#ifndef _VESSEL_ANDROID_LF_H
+#define _VESSEL_ANDROID_LF_H
+#endif
+SHIM
+  CPU_ARGS="$CPU_ARGS, '-I$ICD_SHIM_INC'"
+fi
+
+# Third consequence of the same mismatch, and the last one. `src/util/log.c`
+# calls `__android_log_write` under __ANDROID__, but the `-llog` that satisfies
+# it is added by meson only under `with_platform_android`, so every link — the
+# driver and Mesa's own ir3 test executables, which build by default — ends in
+#     ld.lld: error: undefined symbol: __android_log_write
+# liblog is a real platform library present on every Android device, so linking
+# it is correct rather than a workaround. Empty for the HAL build, which already
+# gets it from Mesa.
+#
+# Three more come with it. Turnip's KGSL backend waits on sync fds
+# (`sync_wait`/`sync_merge`, libsync) and reaches for a buffer's native handle
+# (`AHardwareBuffer_getNativeHandle`, libnativewindow) whatever the window system
+# is, because those are properties of the *kernel driver*, not of the platform:
+#     ld.lld: error: undefined symbol: sync_wait
+#     ld.lld: error: undefined symbol: AHardwareBuffer_getNativeHandle
+# All four are real platform libraries on every Android device, so linking them
+# is correct rather than a workaround. Empty for the HAL build, which gets them
+# from Mesa's own `dep_android`.
+LINK_ARGS=""
+if [ "$TURNIP_VARIANT" = icd ]; then
+  LINK_ARGS="'-llog', '-lsync', '-lnativewindow', '-landroid'"
+
+  # …except `sync_wait`, which is the one that is genuinely not there. The NDK's
+  # libsync.so exports only sync_merge, sync_file_info and sync_file_info_free —
+  # `sync_wait` is platform-internal, which is why Mesa's android-stub carries a
+  # sync_stub.cpp at all. Mesa's stub is a stub; a driver that waits on real KGSL
+  # fences needs the real behaviour, and the real behaviour is four lines of
+  # poll(2) — that is all AOSP's libsync does. Compiled here and linked in by
+  # object path so nothing has to be patched into the Mesa tree.
+  ICD_SHIM_C="$WORK_DIR/$COMPONENT-icd-sync-shim.c"
+  ICD_SHIM_O="$WORK_DIR/$COMPONENT-icd-sync-shim.o"
+  cat > "$ICD_SHIM_C" <<'SHIM'
+/* Written by build/turnip.sh — see the comment there. AOSP's sync_wait, which
+ * the NDK does not export: poll the fence fd until it signals, and report a
+ * timeout as ETIME the way callers expect. */
+#include <errno.h>
+#include <poll.h>
+
+int sync_wait(int fd, int timeout);
+
+int sync_wait(int fd, int timeout)
+{
+    struct pollfd fds = { .fd = fd, .events = POLLIN };
+    int ret;
+
+    do {
+        ret = poll(&fds, 1, timeout);
+    } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+
+    if (ret == 0) { errno = ETIME; return -1; }
+    if (ret < 0) return -1;
+    if (fds.revents & (POLLERR | POLLNVAL)) { errno = EINVAL; return -1; }
+    return 0;
+}
+SHIM
+  "$NDK_CC" -O2 -fPIC -c "$ICD_SHIM_C" -o "$ICD_SHIM_O" \
+    || die "could not compile the sync_wait shim"
+  LINK_ARGS="$LINK_ARGS, '$ICD_SHIM_O'"
+fi
+
 CROSS="$WORK_DIR/$COMPONENT-$TURNIP_VARIANT-cross.ini"
 cat > "$CROSS" <<EOF
 [binaries]
@@ -164,7 +277,7 @@ sys_root = '$SYSROOT'
 pkg_config_libdir = ['$PKGDIR', '$PKGDIR_SHARE']
 
 [host_machine]
-system = 'android'
+system = '$TURNIP_MESON_SYSTEM'
 cpu_family = 'aarch64'
 cpu = 'aarch64'
 endian = 'little'
@@ -172,6 +285,8 @@ endian = 'little'
 [built-in options]
 c_args = [$CPU_ARGS]
 cpp_args = [$CPU_ARGS]
+c_link_args = [$LINK_ARGS]
+cpp_link_args = [$LINK_ARGS]
 EOF
 
 info "cross file: $CROSS"
@@ -225,6 +340,19 @@ if [ "$TURNIP_VARIANT" = hal ]; then
   ANDROID_OPTS=(-Dandroid-stub=true -Dandroid-libbacktrace=disabled)
 fi
 
+# driconf, the per-application workaround database, is the only thing in this
+# build that wants expat. Mesa switches it off for Android automatically ("We
+# don't require expat on Android or Windows"), and with system = 'linux' that
+# exemption stops applying: meson builds the bundled expat wrap and the driver
+# comes out with DT_NEEDED libexpat.so.1, which nothing on the device provides
+# and the closure walk below refuses. Shipping an expat to satisfy a database of
+# workarounds for other people's GPUs is not a trade worth making, so the ICD
+# build says no to it explicitly.
+EXPAT_OPT=()
+if [ "$TURNIP_VARIANT" = icd ]; then
+  EXPAT_OPT=(-Dexpat=disabled)
+fi
+
 meson setup "$BUILD" "$SRC" \
   --cross-file "$CROSS" \
   -Dplatforms="$TURNIP_PLATFORMS" \
@@ -237,7 +365,7 @@ meson setup "$BUILD" "$SRC" \
   -Dgallium-drivers= \
   -Dvulkan-drivers=freedreno \
   -Dfreedreno-kmds="$TARGET_KMD" \
-  -Dvulkan-beta=true \
+  -Dvulkan-beta=true   "${EXPAT_OPT[@]}" \
   -Dvideo-codecs= \
   -Dbuildtype=release \
   -Dstrip=true \

@@ -150,7 +150,29 @@ int main(int argc, char **argv)
     /* --- Vulkan ------------------------------------------------------------ */
     lib = load_loader();
     if (!lib) fail("dlopen-vulkan", 0);
-    gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
+    /* An ICD exports `vk_icdGetInstanceProcAddr` and, deliberately, NOT a plain
+     * `vkGetInstanceProcAddr` — that name belongs to the loader. Asking for the
+     * plain one on a handle that does not have it does not fail loudly: bionic
+     * finds the *platform* loader's copy through the process's global scope, and
+     * the probe then quietly measures the stock Qualcomm driver. The tell was an
+     * instance extension list with `VK_KHR_android_surface` in it and no
+     * `VK_KHR_xcb_surface`, out of a driver built `-Dplatforms=x11`.
+     *
+     * Negotiating the interface version first is what an ICD expects a loader to
+     * do; Mesa tolerates its absence, but a driver that does not would fail in a
+     * far less obvious place. */
+    {
+        VkResult (*negotiate)(uint32_t *) =
+            (VkResult (*)(uint32_t *))dlsym(lib, "vk_icdNegotiateLoaderICDInterfaceVersion");
+        if (negotiate) {
+            uint32_t version = 5;
+            negotiate(&version);
+            printf("VESSEL-X11PRESENT icd_interface_version=%u\n", version);
+        }
+        gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vk_icdGetInstanceProcAddr");
+        if (!gipa)
+            gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr");
+    }
     if (!gipa) fail("no-gipa", 0);
 
 #define IPA(n) ((PFN_##n)gipa(instance, #n))
@@ -162,8 +184,13 @@ int main(int argc, char **argv)
         enum_ext(NULL, &n, NULL);
         VkExtensionProperties *props = calloc(n, sizeof(*props));
         enum_ext(NULL, &n, props);
-        for (uint32_t i = 0; i < n; i++)
+        for (uint32_t i = 0; i < n; i++) {
+            /* Printed in full, not just probed for: "the extension is missing"
+             * and "the loader answering is not the one we asked for" look
+             * identical from a single boolean, and both have happened here. */
+            printf("  instance ext: %s\n", props[i].extensionName);
             if (!strcmp(props[i].extensionName, VK_KHR_XCB_SURFACE_EXTENSION_NAME)) have_xcb = 1;
+        }
         printf("VESSEL-X11PRESENT instance_ext VK_KHR_xcb_surface=%s (%u total)\n",
                have_xcb ? "yes" : "NO", n);
         free(props);

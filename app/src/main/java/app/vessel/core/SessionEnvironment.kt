@@ -395,43 +395,37 @@ fun sessionEnvironment(
     // between a present path and no present path. `MESA_VK_WSI_DEBUG` is in
     // [RESERVED_SESSION_ENV] for exactly that reason.
     //
-    // **`linear` is the second half, and it is worth a copy per frame.**
+    // **`sw` and not `sw,linear`, and that is a measurement overturning an
+    // argument rather than a default nobody questioned.**
     //
     // `sw` alone leaves `wsi_cpu_image_needs_buffer_blit` returning true, so a
     // swapchain image is an OPTIMAL-tiled VkImage *plus* a separate host buffer,
     // and every present does a GPU `vkCmdCopyImageToBuffer` of the whole frame
-    // before `xcb_put_image` reads it. `linear` makes that function return
-    // false, which forces `VK_IMAGE_TILING_LINEAR` on the image and maps the
-    // image's own memory — the render target and the buffer put_image reads
-    // become one allocation, and the blit disappears.
+    // before `xcb_put_image` reads it. Adding `linear` makes that function
+    // return false, forces `VK_IMAGE_TILING_LINEAR`, and maps the image's own
+    // memory — one allocation instead of two, and no blit. On paper that is
+    // strictly less work, and `tools/gfx/wsiprobe.c` costed the blit it removes
+    // at 0.60 ms of GPU time a frame.
     //
-    // Measured on this device with `tools/gfx/wsiprobe.c` (2026-08-09, Turnip
-    // 26.3.0-devel, `Adreno (TM) 829`, run as the app's uid through the system
-    // linker), which is why this is a change and not a guess:
+    // It is slower. Measured on the device with `tools/gfx/x11present.c` —
+    // a real Vulkan swapchain against this app's own X server, 400 frames each,
+    // three runs apiece, 1280x720:
     //
-    //   - a 1280x720 B8G8R8A8 LINEAR colour attachment is created, needs
-    //     3 686 400 bytes and reports rowPitch 5120 — tight, no padding.
-    //   - its `memoryTypeBits` includes type 1, which is
-    //     `DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED`. That is
-    //     precisely what `wsi_select_host_memory_type` asks for when
-    //     `wsi->sw` is set, so the WSI's own selection succeeds rather than
-    //     falling back — IOCOHERENT is on, and the CPU read is a cached read.
-    //   - the blit this removes costs **0.60 ms of GPU time per frame** on its
-    //     own, measured as a timed `vkCmdCopyImageToBuffer` + `vkQueueWaitIdle`
-    //     loop, and it also removes a second 3.6 MB allocation per image.
-    //   - the CPU read that remains costs **0.25 ms** for the frame
-    //     (14.8 GB/s, cold), which is the floor for any path that goes through
-    //     `xcb_put_image` at all.
+    //     sw          mean 2.25 / 2.53 / 2.36 ms   p50 1.63 / 2.15 / 1.77
+    //     sw,linear   mean 2.62 / 2.61 / 2.90 ms   p50 2.47 / 2.79 / 2.50
     //
-    // So the remaining cost of a present here is one full-frame CPU read plus
-    // the socket write and whatever the X server does with it — not the two
-    // full-frame copies it was. It is still not zero-copy, and zero-copy on
-    // this stack means DRI3 `BufferFromPixmap`, which needs a Mesa patch: the
-    // X server already hands out the window's AHardwareBuffer dma-buf fd, and
-    // the same probe proved Turnip imports that fd and binds a LINEAR image to
-    // it. That is the next change here, and when it lands this value changes
-    // again.
-    environment["MESA_VK_WSI_DEBUG"] = "sw,linear"
+    // ~14% worse on the mean and ~35% worse on the median, in the same
+    // direction every run. The paper argument left out the side that matters on
+    // a tiler: rendering *into* a linear image means the GMEM resolve writes an
+    // untiled, uncompressed layout, and that costs more than the tiled resolve
+    // plus the blit it was supposed to save. Adreno wants to render tiled and be
+    // copied out of, not to render straight into a scanout layout.
+    //
+    // Leaving `MESA_VK_WSI_DEBUG` unset entirely is not an option and is not
+    // merely slower: with no `HAVE_X11_DRM` the DRI3 branch is
+    // `__builtin_unreachable()`, and the probe measured 12.8 ms a frame there —
+    // a number produced by undefined behaviour, not by a slow path.
+    environment["MESA_VK_WSI_DEBUG"] = "sw"
 
     // Setting these three is what makes win32u open the adrenotools handle
     // instead of `dlopen`ing the platform loader, and for one cycle they were

@@ -503,12 +503,10 @@ class SessionEnvironmentTest {
                 // Not optional and not diagnostic: the Turnip this project
                 // builds has only the software half of Mesa's X11 WSI compiled
                 // in, and without `sw` every swapchain reaches an UNREACHABLE.
-                // `linear` is the measured half — it drops the per-frame GPU
-                // blit, and tools/gfx/wsiprobe.c proved on the device that a
-                // LINEAR colour attachment binds host-cached coherent memory
-                // here. Both are needed; the order is Mesa's parse order and
-                // does not matter.
-                "MESA_VK_WSI_DEBUG" to "sw,linear",
+                // `sw,linear` was tried and is 14% slower on the mean and 35%
+                // on the median — tools/gfx/x11present.c, 400 frames, three runs
+                // each. The reasoning at the assignment says why.
+                "MESA_VK_WSI_DEBUG" to "sw",
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,
