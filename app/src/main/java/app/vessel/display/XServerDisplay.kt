@@ -10,6 +10,8 @@ import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.Surface
+import android.view.SurfaceHolder
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.BaseInputConnection
@@ -1497,7 +1499,7 @@ private class SessionSurfaceView(
 private class PacedXServerView(
     context: Context,
     xServer: XServer,
-    fpsLimit: Int?,
+    private val fpsLimit: Int?,
 ) : XServerView(context, xServer) {
 
     private val minFrameNanos: Long =
@@ -1525,6 +1527,47 @@ private class PacedXServerView(
         // anyway, and some do under memory pressure. `Texture`'s generation
         // counter is what makes that survivable; this is what makes it rare.
         preserveEGLContextOnPause = true
+
+        // **Tell Android what frame rate this surface wants.** Without this the
+        // platform picks a refresh mode from its own heuristics, and on this
+        // device it picks badly in a way that is self-reinforcing: measured
+        // 2026-08-10 with Metro at its main menu, `dumpsys display` reported
+        // `mActiveModeId=5`, `renderFrameRate 30.000002` — the *panel* had
+        // dropped to a 30 Hz mode out of the six it supports (24/30/60/90/120/
+        // 165). The session then composited at exactly 30.0 fps while the CPU
+        // sat at 17% and no core rose above 2016 MHz of 3321.
+        //
+        // That is the whole of the "renders slowly while the device is idle"
+        // symptom, and the loop is vicious rather than merely unlucky: fewer
+        // vsyncs means fewer opportunities to present, which looks to the
+        // platform like content that does not need a fast panel. The 40 fps
+        // seen minutes earlier was the same arithmetic at 120 Hz — one frame
+        // every third vsync — which is why both numbers were suspiciously
+        // round and neither matched anything the guest was doing.
+        //
+        // `FRAME_RATE_COMPATIBILITY_DEFAULT` rather than `_FIXED_SOURCE`: this
+        // is a desktop, not a video player, so the platform may seamlessly pick
+        // a *higher* multiple, and should. A guest that presents slowly still
+        // gets a panel that can carry it when it speeds up.
+        holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(h: SurfaceHolder) = applyFrameRate(h)
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = applyFrameRate(h)
+            override fun surfaceDestroyed(h: SurfaceHolder) = Unit
+        })
+    }
+
+    /**
+     * The rate to ask for: the container's own limit, or 60 when it has none.
+     *
+     * Not the panel's maximum. Asking for 165 on a guest that will never render
+     * it spends power to no end, and `_COMPATIBILITY_DEFAULT` already lets the
+     * platform go higher when something else on screen needs it.
+     */
+    private fun applyFrameRate(holder: SurfaceHolder) {
+        val wanted = (fpsLimit?.takeIf { it > 0 } ?: DEFAULT_FRAME_RATE).toFloat()
+        runCatching {
+            holder.surface.setFrameRate(wanted, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+        }
     }
 
     override fun requestRender() {
@@ -1551,5 +1594,8 @@ private class PacedXServerView(
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000L
         const val NANOS_PER_MILLI = 1_000_000L
+
+        /** What to ask the panel for when the container names no limit. */
+        const val DEFAULT_FRAME_RATE = 60
     }
 }
