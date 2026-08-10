@@ -55,11 +55,13 @@ object ComponentRegistry {
      * `.github/workflows/_component.yml`, so the index and the artifacts it
      * indexes share an origin and cannot drift onto different hosts.
      *
-     * **Nothing publishes this file yet.** That workflow uploads the `*.wcp` in `dist/`
-     * and their `.sha256` sidecars and never runs `build/gen_registry.py`, so
-     * this URL is a 404 today and [app.vessel.service.ComponentCatalog] says so
-     * in those words. It is written down here rather than left undecided because
-     * a URL nobody can find is how a feature ends up half-built twice.
+     * That workflow's *Publish the component index* step downloads the release's
+     * own packages back, runs `build/gen_registry.py` over them and uploads the
+     * result here, serialised on a `components-release` concurrency group so two
+     * component builds finishing at once cannot each publish an index missing
+     * the other's package. Until a component build runs on `main` the URL is a
+     * 404, and [app.vessel.service.ComponentCatalog] says so in those words
+     * rather than showing an empty list.
      */
     const val DEFAULT_URL =
         "https://github.com/prskid1000/Vessel/releases/download/components/contents.json"

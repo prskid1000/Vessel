@@ -56,11 +56,12 @@ sealed interface CatalogResult {
  * cached, that is an 88 MB body that must never time out and must resume. One
  * OkHttp client configured for both would be wrong for both.
  *
- * ## It is a 404 today, and that is reported rather than smoothed over
+ * ## A 404 is reported rather than smoothed over
  *
- * `.github/workflows/_component.yml` uploads the `*.wcp` in `dist/` and their `.sha256`
- * sidecars to a rolling `components` release. It never runs
- * `build/gen_registry.py`, so no `contents.json` is published anywhere and
+ * `.github/workflows/_component.yml` uploads the `*.wcp` in `dist/` and their
+ * `.sha256` sidecars to a rolling `components` release, then generates
+ * `contents.json` from that release's own contents with `build/gen_registry.py`
+ * and uploads it beside them. Until a component build runs on `main`, though,
  * [ComponentRegistry.DEFAULT_URL] resolves to nothing. This class therefore
  * answers [CatalogResult.Unavailable] with a sentence naming the missing file,
  * which is the whole difference between "there are no components" and "nobody
