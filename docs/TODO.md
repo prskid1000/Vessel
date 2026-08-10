@@ -651,9 +651,34 @@ audit's; they are pointers, not independently re-verified.
   here on purpose.** Two explanations for this item have already been wrong, and
   both were written down before they were measured.
 
-  *Done when:* the access violation is located — the first useful step is
-  whether it survives reverting 0013, which separates "0013 introduced it" from
-  "0013 exposed it" — and `ipconfig` names an adapter.
+  **The A/B was run, and 0013 is the cause.** Two Wine builds differing only in
+  that patch, same device, same relay probe, the control confirmed by
+  `grep -c unreadable …/nsiproxy.so` returning 0:
+
+  | build | `GetAdaptersAddresses` |
+  |---|---|
+  | with `0013` | `c0000005` — access violation |
+  | without `0013` | `00000032` — clean `ERROR_NOT_SUPPORTED` |
+
+  So the patch *introduces* the fault; it does not expose a pre-existing one.
+  **`patches/wine/0013` is therefore reverted** — it delivered no user-visible
+  improvement (`ipconfig` printed nothing either way) and traded a clean error
+  for a memory fault, which is strictly worse to ship. The patch text is in git
+  history at `ea5b239` if it is picked up again.
+
+  *What is still unknown is why.* Reading it does not explain the fault: the
+  early return copies the tail of the upstream function
+  (`if (!want_data || num <= *count) *count = num; else status =
+  STATUS_BUFFER_OVERFLOW;`), and the loopback loop above it fills both entries
+  on the data call because `num < *count` holds for `num` 0 and 1 with
+  `*count == 2`. Something about returning at that point, rather than the values
+  returned, is what breaks the caller. **No cause is named here**; three
+  explanations for this item have now been wrong, and every one of them was
+  written down before it was measured.
+
+  *Done when:* the IPv4 route table returns an empty-but-valid table the way its
+  IPv6 sibling already does, without an access violation, and `ipconfig` names
+  an adapter.
 
   *Superseded, kept because it was wrong in an instructive way.* An
   `+iphlpapi` trace shows exactly **one** `GetAdaptersAddresses` call, eight

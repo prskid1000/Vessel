@@ -17,6 +17,10 @@ include_directories(include)
 # EGLContext that libgladiorenderer needs) and wine_registry_editor.c. Vessel
 # probes the GPU from Kotlin and edits the registry from the container layer,
 # and there is no gladio, so neither is here.
+# VESSEL: src/xshmfence.c is a new file with no upstream counterpart — the
+# server half of the xshmfence ABI, needed by DRI3 FenceFromFD. Upstream
+# implements neither that request nor SYNC fences over an fd, so it has nothing
+# to map. See the file's own header for the layout and where it was read from.
 add_library(winlator SHARED
             src/drawable.c
             src/gpu_image.c
@@ -24,6 +28,7 @@ add_library(winlator SHARED
             src/xconnector_epoll.c
             src/xinput_stream.c
             src/xoutput_stream.c
+            src/xshmfence.c
             src/arrays.c
             src/ring_buffer.c)
 

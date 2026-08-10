@@ -54,9 +54,11 @@ public class DRI3Extension extends Extension {
      * {@code result=PASS wsi=dri3 mean_ms=0.532} against 1.8–2.1 ms for the
      * software path.
      *
-     * Note the version claimed is already too high in the other direction:
-     * {@code FenceFromFD} (4) is a 1.0 request and is not implemented. See the
-     * default branch of {@link #handleRequest}.
+     * <p>VESSEL: the note that used to end this comment — "the version claimed
+     * is already too high in the other direction: {@code FenceFromFD} (4) is a
+     * 1.0 request and is not implemented" — is no longer true. It is
+     * implemented; see {@link #fenceFromFD}. 1.0 is now an honest claim rather
+     * than an overstatement, which is a second reason not to touch the number.
      */
     public static final byte MINOR_VERSION = 0;
     private final Callback<Drawable> onDestroyDrawableListener = (drawable) -> {
@@ -69,8 +71,14 @@ public class DRI3Extension extends Extension {
         private static final byte OPEN = 1;
         private static final byte PIXMAP_FROM_BUFFER = 2;
         private static final byte BUFFER_FROM_PIXMAP = 3;
+        private static final byte FENCE_FROM_FD = 4; // VESSEL
         private static final byte PIXMAP_FROM_BUFFERS = 7;
     }
+
+    /** VESSEL: resolved lazily, the same way PresentExtension does it — the
+     * extensions are built in one array and cannot see each other in their
+     * constructors. */
+    private SyncExtension syncExtension;
 
     public DRI3Extension(XServer xServer, byte majorOpcode) {
         super(xServer, majorOpcode);
@@ -121,14 +129,26 @@ public class DRI3Extension extends Extension {
         byte depth = inputStream.readByte();
         inputStream.skip(1);
 
-        Window window = xServer.windowManager.getWindow(windowId);
-        if (window == null) throw new BadWindow(windowId);
-
-        Pixmap pixmap = xServer.pixmapManager.getPixmap(pixmapId);
-        if (pixmap != null) throw new BadIdChoice(pixmapId);
-
+        // VESSEL: the fd comes off the ancillary queue *before* anything below
+        // can throw. XInputStream keeps one queue per connection and
+        // getAncillaryFd() pops its head, so a request that returns an error
+        // without popping shifts the queue for the rest of the session and
+        // every later fd belongs to the wrong request. That is the same defect
+        // that refusing FenceFromFD had — see fenceFromFD — and a BadWindow or
+        // a BadIdChoice here would have caused it just as surely.
         int fd = inputStream.getAncillaryFd();
-        pixmapFromFd(client, pixmapId, width, height, stride, 0, depth, fd, size);
+        try {
+            Window window = xServer.windowManager.getWindow(windowId);
+            if (window == null) throw new BadWindow(windowId);
+
+            Pixmap pixmap = xServer.pixmapManager.getPixmap(pixmapId);
+            if (pixmap != null) throw new BadIdChoice(pixmapId);
+
+            pixmapFromFd(client, pixmapId, width, height, stride, 0, depth, fd, size);
+        }
+        finally {
+            XConnectorEpoll.closeFd(fd);
+        }
     }
 
     private void bufferFromPixmap(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {

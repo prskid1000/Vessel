@@ -99,6 +99,12 @@ public class XClient extends ConnectedClient implements XResourceManager.OnResou
             xServer.pixmapManager.removeOnResourceLifecycleListener(this);
             xServer.graphicsContextManager.removeOnResourceLifecycleListener(this);
             xServer.cursorManager.removeOnResourceLifecycleListener(this);
+            // VESSEL: the extensions own client state too, and it is keyed on
+            // the very id base being handed back on the next line. SYNC keeps
+            // fences and Present keeps event contexts; neither is an XResource,
+            // so neither is in `resources` above. Ordered before the free so
+            // that no id can be reissued while a stale one is still registered.
+            xServer.freeClientExtensionResources(this);
             xServer.resourceIDs.free(resourceIDBase);
         }
     }

@@ -152,6 +152,14 @@ public class XServer {
         return null;
     }
 
+    // VESSEL: give every extension the chance to drop what it holds for a
+    // client that has disconnected. See Extension.freeClientResources for why
+    // this is a correctness problem and not housekeeping — an extension's
+    // state is keyed on XIDs the next client will be handed again.
+    public void freeClientExtensionResources(XClient client) {
+        for (Extension extension : extensions) extension.freeClientResources(client);
+    }
+
     public void injectPointerMove(int x, int y) {
         try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
             pointer.setPosition(x, y);

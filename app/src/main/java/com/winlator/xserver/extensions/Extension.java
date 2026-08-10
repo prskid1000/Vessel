@@ -33,4 +33,23 @@ public abstract class Extension {
     }
 
     public abstract void handleRequest(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError;
+
+    /**
+     * VESSEL: releases whatever this extension is holding on behalf of a client
+     * that has gone away. A no-op by default, so an extension that owns nothing
+     * per-client needs no change.
+     *
+     * <p>Called from {@link XClient#freeResources()}, under {@code lockAll()},
+     * after the core resources have been freed and before the connection's
+     * streams are destroyed.
+     *
+     * <p>This exists because the core managers are not the whole story. An
+     * extension's state is keyed on client-generated XIDs just as a pixmap is,
+     * and {@code ResourceIDs.free()} hands a disconnecting client's id base
+     * straight back to the next one — so anything left behind is a collision
+     * waiting for the next connection rather than a slow leak. Measured: a
+     * second {@code tools/gfx/run-x11present.sh --wsi dri3} run against a live
+     * session failed with {@code BadIdChoice} on its first swapchain pixmap.
+     */
+    public void freeClientResources(XClient client) {}
 }
