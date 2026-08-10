@@ -669,7 +669,7 @@ index 431264faf31..9eb7b9a127d 100644
      if(stream->local_buffer){
          size = 0;
          NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
-@@ -658,38 +492,29 @@ static NTSTATUS oss_release_stream(void *args)
+@@ -658,38 +492,67 @@ static NTSTATUS oss_release_stream(void *args)
  
  static void silence_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 frames)
  {
@@ -687,6 +687,44 @@ index 431264faf31..9eb7b9a127d 100644
 +/* Frames handed to AAudio and not yet played. The difference of the two
 + * monotonic counters is what SNDCTL_DSP_GETOSPACE used to report as the
 + * filled part of the device buffer. */
++/* AAudio's request* calls are asynchronous. They return before the stream has
++ * reached the state they asked for, and anything that depends on the new state
++ * has to wait for it -- which this driver did not do, and every audible symptom
++ * came from that. Measured on the device 2026-08-10 with winecfg's Test Sound:
++ * 1323 frames were handed to a stream that had not finished STARTING, so the
++ * zero-timeout write dropped them; oss_get_position then returned 0 about 430
++ * times while the client waited for a position that could never move; and the
++ * give-up path called requestFlush() straight after requestPause(), which
++ * returned AAUDIO_ERROR_INVALID_STATE because the stream was still PAUSING.
++ * The cycle repeated five times and the test was silent.
++ *
++ * Bounded at ~200 ms because this runs under oss_lock, and a transition that
++ * has not happened in 200 ms is not going to. Returns the state actually
++ * reached, so a caller can decline a request that would be illegal from it. */
++static aaudio_stream_state_t aaudio_await(AAudioStream *aas,
++                                          aaudio_stream_state_t from,
++                                          aaudio_stream_state_t want)
++{
++    aaudio_stream_state_t state = from;
++    aaudio_result_t res;
++    int spins;
++
++    for(spins = 0; spins < 20 && state != want; spins++){
++        res = AAudioStream_waitForStateChange(aas, state, &state, 10 * 1000000LL);
++        if(res != AAUDIO_OK && res != AAUDIO_ERROR_TIMEOUT){
++            WARN("waitForStateChange failed: %d (%s)\n", res,
++                 AAudio_convertResultToText(res));
++            return AAudioStream_getState(aas);
++        }
++    }
++
++    if(state != want)
++        WARN("stream stayed in %s, wanted %s\n",
++             AAudio_convertStreamStateToText(state),
++             AAudio_convertStreamStateToText(want));
++    return state;
++}
++
 +static UINT32 aaudio_queued_frames(struct oss_stream *stream)
 +{
 +    int64_t queued = AAudioStream_getFramesWritten(stream->aas)
@@ -824,17 +862,20 @@ index 431264faf31..9eb7b9a127d 100644
  
      oss_lock(stream);
  
-@@ -856,6 +680,9 @@ static NTSTATUS oss_start(void *args)
+@@ -856,6 +680,12 @@ static NTSTATUS oss_start(void *args)
      if(stream->playing)
          return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
  
 +    if((res = AAudioStream_requestStart(stream->aas)) != AAUDIO_OK)
 +        WARN("requestStart failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++    else
++        aaudio_await(stream->aas, AAUDIO_STREAM_STATE_STARTING,
++                     AAUDIO_STREAM_STATE_STARTED);
 +
      stream->playing = TRUE;
      if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
  
-@@ -866,12 +693,22 @@ static NTSTATUS oss_stop(void *args)
+@@ -866,12 +693,29 @@ static NTSTATUS oss_stop(void *args)
  {
      struct stop_params *params = args;
      struct oss_stream *stream = handle_get_stream(params->stream);
@@ -847,10 +888,17 @@ index 431264faf31..9eb7b9a127d 100644
  
 +    /* Pause rather than stop: Stop() on an audio client freezes the clock,
 +     * it does not flush. For capture there is no pause, stop is it. */
-+    if(stream->flow == eRender)
++    if(stream->flow == eRender){
 +        res = AAudioStream_requestPause(stream->aas);
-+    else
++        if(res == AAUDIO_OK)
++            aaudio_await(stream->aas, AAUDIO_STREAM_STATE_PAUSING,
++                         AAUDIO_STREAM_STATE_PAUSED);
++    }else{
 +        res = AAudioStream_requestStop(stream->aas);
++        if(res == AAUDIO_OK)
++            aaudio_await(stream->aas, AAUDIO_STREAM_STATE_STOPPING,
++                         AAUDIO_STREAM_STATE_STOPPED);
++    }
 +    if(res != AAUDIO_OK)
 +        WARN("pause/stop failed: %d (%s)\n", res, AAudio_convertResultToText(res));
 +
@@ -865,14 +913,27 @@ index 431264faf31..9eb7b9a127d 100644
  
      oss_lock(stream);
  
-@@ -892,6 +730,10 @@ static NTSTATUS oss_reset(void *args)
+@@ -892,6 +730,23 @@ static NTSTATUS oss_reset(void *args)
          return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
  
      if(stream->flow == eRender){
 +        /* Drop what the device still holds; the paused stream would
 +         * otherwise play stale audio when restarted. */
-+        if((res = AAudioStream_requestFlush(stream->aas)) != AAUDIO_OK)
-+            TRACE("requestFlush failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++        /* Only from PAUSED or STOPPED -- AAudio refuses a flush from any
++         * other state, and asking anyway is what filled the log with
++         * AAUDIO_ERROR_INVALID_STATE. A stream that never started is in OPEN
++         * and has nothing to drop. */
++        aaudio_stream_state_t fstate = AAudioStream_getState(stream->aas);
++
++        if(fstate == AAUDIO_STREAM_STATE_PAUSED ||
++           fstate == AAUDIO_STREAM_STATE_STOPPED){
++            if((res = AAudioStream_requestFlush(stream->aas)) != AAUDIO_OK)
++                WARN("requestFlush failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++            else
++                aaudio_await(stream->aas, AAUDIO_STREAM_STATE_FLUSHING,
++                             AAUDIO_STREAM_STATE_FLUSHED);
++        }else
++            TRACE("no flush from %s\n", AAudio_convertStreamStateToText(fstate));
          stream->written_frames = 0;
          stream->last_pos_frames = 0;
      }else{

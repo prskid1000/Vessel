@@ -86,10 +86,20 @@ Since then: Metro 2033 Redux renders through DXVK on Turnip inside a container,
 and a D3D11 triangle reads back correct in both bitnesses
 (`tools/device-graphics.sh --only d3d11`). Top-level windows have **no Win32
 caption** — a caption is unhittable on a phone and cost 41 unpainted rows, so
-`patches/wine/0010` strips it and the shell supplies the window controls. What is
-*not* done: presentation is still a CPU copy, zero-copy is in progress, and the
-frame is pixel-bound — a game at 1280x720 measures 20-26 fps and the same scene
-at 640x360 reaches the 60 fps cap.
+`patches/wine/0010` strips it and the shell supplies the window controls.
+
+**Presentation is DRI3, and it is measured** (2026-08-10, `tools/gfx/x11present.c`
+against a live session, 300 frames each):
+
+| | mean | p50 | p95 |
+|---|---|---|---|
+| DRI3 | **0.546 ms** | 0.484 ms | 0.588 ms |
+| software | 2.06 ms | 1.51 ms | 4.56 ms |
+
+The server-side copy inside that path costs **252 us** for 1280x720 — 3.6 MB at
+14.3 GB/s — which is what sizes the remaining zero-copy work and is why it is
+currently deferred rather than scheduled. A game renders a frame every 80-125 ms,
+so presentation is under half a percent of it.
 
 All three CPU paths are verified by `./tools/device-session.sh`, which checks the
 arithmetic each program produces rather than that it started:
@@ -105,12 +115,12 @@ VESSEL-OK bits=32 sum=333338333350000   x86-32 via WoW64 + libwow64fex
 | Wine 11.14 | `wine-11.14-canoe.wcp` | Builds a prefix and runs programs in windows |
 | FEX 2608 | `fex-2608-canoe.wcp` | Translates x86-64 and x86-32 correctly on the device |
 | Turnip | `turnip-…-canoe.wcp` | **Answers inside Wine** — `driver_id=18`, Mesa 26.3.0-devel, `Adreno (TM) 829`, api 1.4.358 |
-| Git 2.55.0.3 | `git-2.55.0.3-arm64.wcp` | Native ARM64 Git + Git Bash, repackaged verbatim — **not yet installed by the app** |
-| DXVK 2.7.1 | `dxvk-2.7.1-canoe.wcp` | Loads and reaches `vkCreateInstance` — **no swapchain** |
-| vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Same |
+| Git 2.55.0.3 | `git-2.55.0.3-arm64.wcp` | Native ARM64 Git + Git Bash, repackaged verbatim — built but **not published**, so the app cannot fetch it |
+| DXVK 2.7.1 | `dxvk-2.7.1-canoe.wcp` | **Runs a game** — Metro 2033 Redux presents through it, graphics pipeline libraries in use |
+| vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Built and shipped — **no D3D12 title has been run through it** |
 | Zink (OpenGL) | `zink-…-canoe.wcp` | Built — **not yet run** |
 
-Eleven Wine patches, all in `patches/wine/`, each with its reason in its header. The
+Fifteen Wine patches, all in `patches/wine/`, each with its reason in its header. The
 one that mattered most: a PE image relocated away from its ImageBase can never be
 made executable on Android, because making a *modified* private file mapping
 executable needs SELinux `execmod`, which apps are not granted and parts of the
@@ -118,14 +128,20 @@ policy `dontaudit` — so it fails with `EACCES` and no log line at all.
 
 ### What is actually left
 
-**Direct3D, and the reason has moved twice.** It was "no X11 WSI in Turnip";
-building Mesa with `-Dplatforms=x11` got past that. Every D3D probe now dies one
-step further along, at swapchain creation, because **KGSL cannot export a
-dma-buf for a buffer Turnip allocated** — `kgsl_bo_export_dmabuf` can only
-re-export an fd it imported. The X11 WSI's "client allocates, server imports"
-shape cannot work on this driver; the shape that can is the Android side
-allocating and the client importing. That is a design question, not a build flag,
-and it is the single thing between here and a triangle.
+**Not Direct3D. That is done, and this section said otherwise for a week.**
+It used to read that KGSL cannot export a dma-buf for a buffer Turnip allocated,
+and that this was "the single thing between here and a triangle". A game has
+been rendering through DXVK since; the sentence outlived its subject. What
+actually got past it was `patches/mesa/0004` (a pseudo-DRM platform for KGSL)
+and `0006` (compiling the WSI's DRM image backend without libdrm), after which
+DRI3 present works and is the measured 0.546 ms above.
+
+**What is actually left is a frame rate nobody can yet explain.** Metro's intro
+runs at 8-12 fps while the CPU sits at 0-4%, no core rises above 1.7 GHz of 3.3,
+the GPU reports 14%, and every one of the game's 47 threads is asleep when
+sampled. Presentation is 0.5 ms of a 100 ms frame, so it is not that either.
+Neither compute, nor the GPU, nor the present path, nor — since `setFrameRate`
+landed — the panel's refresh mode accounts for it. It is the open question.
 
 `tools/gfx/` holds probes for D3D8/9/10/11/12 and OpenGL — 21 binaries across
 three architectures, each clearing to blue, drawing one red triangle and
@@ -136,8 +152,16 @@ asserting three specific pixels.
 nothing at all. Android denies an untrusted app `bind()` on a `NETLINK_ROUTE`
 socket and Wine's `nsiproxy` binds one, so `GetAdaptersAddresses` returns an
 empty list and any program that gates on connectivity refuses on a phone that is
-online. `patches/wine/0007` enumerates through `getifaddrs()` instead — built,
-**not yet verified on the device**.
+online. `patches/wine/0007` enumerates through `getifaddrs()` instead.
+
+**Verified 2026-08-10: `ipconfig` prints eight adapters and the phone's address.**
+Getting there took three wrong explanations and one wrong A/B. The last fault was
+not in the network stack at all: this build's `dnsapi.so` has no unix library —
+configure found no resolver — so `__wine_unixlib_handle` stayed 0 and the syscall
+dispatcher indexed a function table at address zero. The access violation was
+*returned* rather than raised, which is why `+seh` printed nothing.
+`patches/wine/0013-0015` are the fix. DNS servers are still empty, because no
+resolver exists to name them.
 
 [docs/TODO.md](docs/TODO.md) is the honest list, with the evidence for every
 closed item and the open ones stated as they are.
