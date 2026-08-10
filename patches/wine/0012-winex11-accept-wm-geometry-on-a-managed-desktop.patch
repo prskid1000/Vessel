@@ -1,0 +1,51 @@
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 297695749a1..fd98ebc36bd 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1746,7 +1746,45 @@ static UINT window_update_client_config( struct x11drv_win_data *data )
+     UINT flags;
+ 
+     if (!data->managed) return 0; /* unmanaged windows are managed by the Win32 side */
+-    if (is_virtual_desktop()) return 0; /* ignore window manager config changes in virtual desktop mode */
++    /* Vessel: ...unless a real window manager owns this desktop.
++     *
++     * This is the second half of patches/wine/0011, and without it that patch
++     * does not achieve the thing its own comment says it exists for. 0011 sets
++     * `managed_mode = TRUE` in X11DRV_init_desktop so that "a ConfigureNotify
++     * that Wine did not ask for ... becomes a SetWindowPos". That clears the
++     * guard one line above -- data->managed comes from is_window_managed(),
++     * which tests managed_mode -- and then execution stops dead here instead,
++     * because is_virtual_desktop() is unconditionally true under
++     * `explorer /desktop=`, which is how every Vessel session runs.
++     *
++     * Measured on the device, 2026-08-10, with WINEDEBUG=+event,+x11drv, by
++     * dragging the shell's resize border on notepad and diffing the trace
++     * against a minimise/restore of the same window:
++     *
++     *   drag:     warn:x11drv:handle_state_change window 0x1006a/1800001
++     *                  unexpected config (298,103)-(1162,616)/90
++     *             X11DRV_GetWindowStateUpdates ... state_cmd 0, swp_flags 0
++     *             -- and no "config changed" line, ever
++     *   restore:  window_update_client_state restoring win 0x1006a/1800001
++     *             X11DRV_WindowPosChanging ... window (298,103)-(1162,616)
++     *
++     * So the X window and its backing pixmap are resized by the WM and the
++     * Win32 window is not: Wine's window surface stays at the old size, the
++     * newly exposed strip is never painted, and the guest window shows a band
++     * of undefined pixels until something else resizes it. Minimise/restore
++     * clears it only because window_update_client_state() -- just above in the
++     * same file -- carries no is_virtual_desktop() guard, so SC_RESTORE reaches
++     * win32u and set_window_normal_placement() copies the host rect onto the
++     * Win32 window. X Expose cannot substitute for that: expose_window_surface()
++     * (dlls/win32u/window.c) intersects the exposed rectangle with the
++     * *existing* surface rect, so the new strip is clipped away before anything
++     * is flushed.
++     *
++     * managed_mode rather than a fresh getenv, so 0011 stays the one switch:
++     * upstream sets it FALSE for every virtual desktop, which leaves this guard
++     * behaving exactly as it does today for anyone not running Vessel. */
++    if (is_virtual_desktop() && !managed_mode)
++        return 0; /* ignore window manager config changes in virtual desktop mode */
+     if (data->desired_state.wm_state != NormalState) return 0; /* ignore config changes on invisible/minimized windows */
+ 
+     if (data->wm_state_serial) return 0; /* another WM_STATE update is pending, wait for it to complete */

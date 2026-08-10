@@ -86,7 +86,15 @@ and the two that are not share a root cause.
   for both" quietly became "one piece of work for three" when the drag borders
   were written up as sharing this cause. They do not: managed mode plus
   `WM_STATE` was the entire fix for resize, measured on the device, with no
-  EWMH advertisement present. `WM_STATE` is also already maintained, so of the
+  EWMH advertisement present.
+
+  *Amended again 2026-08-10, and this sentence was wrong.* Managed mode plus
+  `WM_STATE` fixed **minimise and restore**, not resize. A WM-initiated resize
+  still never reaches the Win32 side, because `window_update_client_config`
+  refuses at `is_virtual_desktop()` — a second guard `patches/wine/0011` does
+  not clear — while `window_update_client_state` has no such guard. What looked
+  like a working resize was the *restore* applying the dragged geometry. See the
+  white-region entry below for the trace. `WM_STATE` is also already maintained, so of the
   three things named above only `_NET_SUPPORTING_WM_CHECK` and `_NET_SUPPORTED`
   are actually outstanding. Whether *restore* needs them is still open —
   `can_activate_window` reads `wm_state`, which it now has — so the next step
@@ -102,6 +110,76 @@ and the two that are not share a root cause.
   not being written up as a defect. *Done when:* minimise and restore are driven
   with nothing else touching the device, and either the window comes back or
   `can_activate_window` is shown refusing it.
+
+- [~] **The white region on resize: cause found and measured, fix written and
+  not yet built.** *2026-08-10.* Three explanations were wrong before this one —
+  a Win32 caption, a compositor coverage gap, and a missing X `Expose` — and this
+  one is not a fourth guess: it is a trace diff taken on the device.
+
+  **Wine never resizes the Win32 window when the window manager resizes the X
+  window, because `window_update_client_config()` returns 0 at
+  `if (is_virtual_desktop()) return 0;`** (`dlls/winex11.drv/window.c:1749`), and
+  every Vessel session runs `explorer /desktop=`, so that is unconditionally
+  true. The X window and its freshly allocated backing `Drawable` grow; Wine's
+  window surface stays the old size; the newly exposed strip is painted by
+  nobody.
+
+  *Measured with `WINEDEBUG=-all,err+all,+x11drv,+event` on notepad, by dragging
+  the shell's right resize border and then minimising and restoring the same
+  window in the same session.* Per drag step:
+
+  ```
+  X11DRV_Expose win 0x1006a (1800001) 0,0 685x513
+  warn:x11drv:handle_state_change window 0x1006a/1800001
+       unexpected config (298,103)-(983,616)/90
+  X11DRV_Expose win 0x1006a (1800001) 0,0 685x513
+  ```
+
+  and then, at the end of the drag, `X11DRV_GetWindowStateUpdates … state_cmd 0,
+  swp_flags 0`. **No `config changed` line, and no `X11DRV_WindowPosChanging`,
+  ever.** The restore, for the same window, one gesture later:
+
+  ```
+  x11drv:window_update_client_state restoring win 0x1006a/1800001
+  X11DRV_GetWindowStateUpdates … state_cmd 0x1f120, rect (298,103)-(1162,616)
+  X11DRV_WindowPosChanging hwnd 0x1006a … window (298,103)-(1162,616)
+  ```
+
+  — the Win32 window finally takes the dragged 864x513, its edit control goes to
+  `(0,0)-(864,438)` and its status bar to `(0,438)-(864,480)`, and the white is
+  gone. `window_update_client_state()` carries **no** `is_virtual_desktop()`
+  guard, which is the entire asymmetry: `SC_RESTORE` reaches win32u, whose
+  branch calls `set_window_normal_placement()` with the host rect. That is the
+  only path in the stack that copies the WM's geometry onto the Win32 side.
+
+  *Why `Expose` was never going to work, so nobody tries it a second time.*
+  `X11DRV_Expose` calls `NtUserExposeWindowSurface`, and `expose_window_surface`
+  (`dlls/win32u/window.c:2436`) **ignores its redraw flags when the window has a
+  surface** and only re-flushes existing bits, having first done
+  `intersect_rect( &exposed_rect, &exposed_rect, &surface->rect )` against the
+  *pre-resize* surface. The new strip is clipped away before anything is sent.
+  Vendored modification 21 is also a literal duplicate: `changeWindowGeometry`
+  already sends an unmasked `Expose` on every resize, which is why two identical
+  `X11DRV_Expose` lines bracket each `ConfigureNotify` above.
+
+  *And `patches/wine/0011` is incomplete, which is the part worth remembering.*
+  Its own comment says it exists so that "a ConfigureNotify that Wine did not ask
+  for … becomes a SetWindowPos". Setting `managed_mode = TRUE` only clears the
+  *first* guard in `window_update_client_config` (`if (!data->managed)`); the
+  `is_virtual_desktop()` guard one line down still refuses. The claim in this
+  file that "managed mode plus `WM_STATE` was the entire fix for resize" is
+  therefore wrong: what managed mode fixed was minimise and restore, and the
+  resize was being carried by the restore all along.
+
+  **`patches/wine/0012-winex11-accept-wm-geometry-on-a-managed-desktop.patch`**
+  is the fix — `if (is_virtual_desktop() && !managed_mode) return 0;`, so that
+  0011 stays the single switch and upstream, which sets `managed_mode = FALSE`
+  for every virtual desktop, is bit-for-bit unaffected. Verified with
+  `git apply --check`. **Not built and not watched working** — Wine is the
+  longest build in the project and this was not run. *Done when:* a border drag
+  repaints the newly exposed area with no minimise/restore, watched on the
+  device, and the trace carries a `config changed` line where today it carries
+  `unexpected config`.
 
 - [~] **A white bar across the top of a fullscreen game — and it is a fixed
   height in *guest* pixels, which rules out most of the candidates.**
@@ -257,51 +335,91 @@ audit's; they are pointers, not independently re-verified.
   heavy native code is Turnip, which already gets the flag. It matters for
   `winex11.drv.so`'s MIT-SHM blitter — the GDI path, not a game.
 
-- [ ] **Zero-copy present. DRI3 now negotiates far enough to fail in one named
-  place, and the place is not where the guesses were.**
+- [x] **DRI3 present works, and it is 3.4× cheaper than the software path.**
   *Measured 2026-08-10 with `tools/gfx/run-x11present.sh`, no Wine and no FEX in
-  the process.* With `MESA_VK_WSI_DEBUG` unset the ICD loads, the instance
-  advertises `VK_KHR_xcb_surface`, the surface is created, the queue supports
-  present, and capabilities and formats both come back:
+  the process, on the device:*
 
   ```
-  caps extent=1280x720 minImageCount=3 maxImageCount=0 usage=0x8009f
-  formats=2 first=50
-  result=FAIL stage=vkCreateSwapchainKHR code=-1000000000
+  VESSEL-WSI image_init dma_buf_fd=6 num_planes=1 modifier=0xffffffffffffff
+             row_pitch=5120 size=3686400 dri3_modifiers=0
+  result=PASS wsi="dri3" 1280x720 frames=300
+    mean_ms=0.602 p50_ms=0.505 p95_ms=1.837 fps=1662
+  result=PASS wsi="sw"   1280x720 frames=300
+    mean_ms=2.143 p50_ms=1.580 p95_ms=4.625 fps=467
   ```
 
-  `-1000000000` is `VK_ERROR_SURFACE_LOST_KHR`. **This is a contained failure and
-  the earlier one was not** — the previous attempt killed the session with
-  `X connection to :0 broken` and no protocol error; this returns an error code
-  and the process exits cleanly, because the probe is not a game and not inside
-  Wine. That difference is the reason this harness exists.
+  A real dma-buf, allocated by Turnip out of `/dev/dma_heap/system`, exported
+  over `SCM_RIGHTS` and imported by the X server as a pixmap. **It is not yet
+  zero copies**: `PresentExtension.presentPixmap` still `memcpy`s the pixmap
+  into the window's drawable. What went away is the *client* copy — Mesa's
+  software path maps the image and pushes 3.6 MB through `xcb_put_image` per
+  frame. The last copy needs `presentPixmap` to bind the dma-buf as a texture
+  and flip; that is a separate item and it is not blocking anything.
 
-  *What the failure is not:* not `xcb_dri3_open` and not a missing DRM fd, both
-  of which were the standing theories — neither is reached, because
-  `vkCreateSwapchainKHR` fails before any DRI3 buffer is allocated. Not the
-  shared `GetGeometry` at `wsi_common_x11.c:3201` either: the `sw` path runs
-  through the same function and passes.
+  Three defects, in the order they were peeled off, because each one hid the
+  next and only the first was where anybody was looking:
 
-  *The first thing to check, and it is cheap:* the vendored `DRI3Extension`
-  advertises **1.0** and implements `QueryVersion`, `Open`, `PixmapFromBuffer`,
-  `BufferFromPixmap` and `PixmapFromBuffers` — opcodes 0, 1, 2, 3 and 7. There
-  is **no `FenceFromFD` (opcode 4)**, and Mesa's DRI3 path creates an xshmfence
-  per swapchain image. A request for an unimplemented opcode is where to look
-  first. *Done when:* the `SURFACE_LOST` is traced to a specific request, by
-  logging the X server's unhandled-opcode path during a `--wsi dri3` run.
+  1. **No XFIXES.** libxcb tore the connection down client-side before a single
+     request was sent. Fixed by `XFixesExtension.java` (`186390f`, vendored item
+     20).
+  2. **Mesa's DRM image backend was not compiled in, and nothing said so.**
+     `src/vulkan/wsi/meson.build` gates `wsi_common_drm.c` on
+     `dep_libdrm.found()`, and Mesa deliberately sets `system_has_kms_drm =
+     false` for a kgsl-only Turnip so that nothing links libdrm on Android. So
+     `HAVE_X11_DRM` compiled the DRI3 *half* of `wsi_common_x11.c` (patch 0004)
+     while `WSI_IMAGE_TYPE_DRM` had no backend at all. That is not a build
+     error: `get_blit_type()` and `configure_image()` put the DRM case behind
+     `#ifdef HAVE_LIBDRM` and end in `default: UNREACHABLE()`, so with one live
+     label a release compiler drops the switch and calls
+     `wsi_configure_cpu_image()` unconditionally. A DRI3 swapchain silently got
+     CPU-linear images, and `x11_image_init` then `dup(-1)`'d:
+     `dma_buf_fd=-1 num_planes=1 modifier=0x0 row_pitch=5120`, `errno=9`,
+     `VK_ERROR_OUT_OF_HOST_MEMORY`. Field for field what
+     `wsi_create_cpu_linear_image_mem` leaves behind. Fixed by
+     `patches/mesa/0006`, which compiles `wsi_common_drm.c` on any pseudo-drm
+     platform against the stubs Mesa already ships in `src/util/libdrm.h`
+     (`drmIoctl` and `drmDevicesEqual` added there) under a new `HAVE_WSI_DRM`.
+     *`kgsl_bo_export_dmabuf`'s `assert(bo->shared_fd != -1)` was never the
+     problem and is never reached with a bad BO — `TU_BO_ALLOC_SHAREABLE` was
+     not set because `wsi_create_native_image_mem`, the only thing that asks
+     for exportable memory, was not in the binary.*
+  3. **Refusing DRI3 `FenceFromFD` (4) leaks the fd that came with it.** With
+     images now real, the *second* present killed the app:
+     `signal 7 (SIGBUS), code 2 (BUS_ADRERR)` in `__memmove_aarch64_nt` under
+     `Drawable.copyArea` / `PresentExtension.presentPixmap`, faulting exactly
+     one page into the source. `XInputStream` keeps one ancillary-fd queue per
+     connection and `getAncillaryFd()` pops its head; a refused request never
+     pops, so every later `PixmapFromBuffer` was handed the previous image's
+     4096-byte xshmfence page instead of its 3686400-byte dma-buf. Worked
+     around by `patches/mesa/0007`, which stops Mesa asking for an idle fence —
+     sound against *this* server because `presentPixmap` copies synchronously
+     before it sends `PresentIdleNotify`, so the idle event is already a
+     complete signal. `VESSEL_WSI_DRI3_FENCE=1` turns the request back on.
 
-  The original specification follows and is unchanged. The route is DRI3
-  `BufferFromPixmap`: the vendored X server
-  already hands back the window's AHardwareBuffer dma-buf fd over `SCM_RIGHTS`
-  and `presentPixmap` already has the flip branch, and `tools/gfx/wsiprobe.c`
-  proved Turnip imports that fd and binds a `TILING_LINEAR` image to it at
-  rowPitch 5120. Two things that were assumed and are false on this part:
-  gralloc returns a **tight linear** buffer for `GPU_COLOR_OUTPUT` alone, so
-  there is no UBWC problem; and `VK_EXT_external_memory_host` is absent, so
-  Mesa's MIT-SHM path was never reachable. Needs a `patches/mesa/` WSI image
-  type plus `xcb-dri3`/`xcb-present` in the package. **Note the direction**: the
-  server's `pixmapFromBuffer` mmaps the client's fd on the CPU, so the other
-  DRI3 direction is one copy, not zero.
+  *What is left on this, and neither piece is a DRI3 problem:*
+
+  - **The server does not implement `FenceFromFD`, which is a DRI3 1.0
+    request** — so it is non-conformant at the version it advertises, and any
+    other DRI3 client will walk into the same fd-queue shift. It needs the
+    fence mapped and triggered through the client's shared page;
+    `SyncExtension` tracks fences as a `SparseBooleanArray` and never touches
+    a page, while `PresentExtension.presentPixmap` already calls
+    `syncExtension.setTriggered(idleFence)` at exactly the right moment. Do
+    not bump `DRI3Extension.MINOR_VERSION` to 2 — see vendored item 21 for why
+    that is the wrong lever and buys nothing.
+  - **A second `--wsi dri3` run against a live session fails with
+    `BadIdChoice`.** The server hands every new client the same resource-ID
+    base and does not reclaim a disconnected client's pixmaps, and
+    `tools/gfx/x11present.c` exits without destroying its swapchain, so
+    `xcb_free_pixmap` is never even sent. Alternate runs collide on their own
+    predecessor's pixmap XIDs. A real guest destroys its swapchain, so this is
+    mostly a harness artefact — but a crashed guest would leak the same way.
+
+  *Kept from the original specification, still true:* the server's
+  `pixmapFromBuffer` mmaps the client's fd on the CPU, gralloc returns a tight
+  linear buffer for `GPU_COLOR_OUTPUT` alone so there is no UBWC problem, and
+  `VK_EXT_external_memory_host` is absent so Mesa's MIT-SHM path was never
+  reachable.
 
 - [ ] **FEX asserts inside a container. The assert is real; "any large PE" is
   not the discriminator.**

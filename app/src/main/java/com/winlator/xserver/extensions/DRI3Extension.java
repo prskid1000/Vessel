@@ -31,6 +31,33 @@ import java.nio.ByteBuffer;
 
 public class DRI3Extension extends Extension {
     public static final byte MAJOR_VERSION = 1;
+    /**
+     * VESSEL: deliberately left at 1.0, and the reasoning is worth keeping
+     * because 1.2 looks like the obvious answer.
+     *
+     * This tree implements {@code PixmapFromBuffers} (opcode 7), which is a
+     * DRI3 1.2 request, and its wire parse is byte-correct for it: 60 bytes of
+     * request body — pixmap, window, num_buffers + 3 pad, width, height, four
+     * stride/offset pairs, depth, bpp + 2 pad, and a 64-bit modifier. But 1.2
+     * is also {@code GetSupportedModifiers} (6) and {@code BuffersFromPixmap}
+     * (8), neither of which exists here, and this handler ignores both
+     * num_buffers and the modifier and takes exactly one fd. Advertising 1.2
+     * would promise three things and deliver one.
+     *
+     * It would also buy nothing. Mesa's {@code has_dri3_modifiers} is
+     * {@code dri3 >= 1.2 && present >= 1.2}; with it false the WSI asks for no
+     * modifier list, {@code wsi_configure_native_image} falls back to the
+     * scanout flag, Turnip makes a {@code DRM_FORMAT_MOD_LINEAR} image, and
+     * {@code x11_image_init} sends the single-fd {@code PixmapFromBuffer} (2)
+     * — the request this server implements, and the one a CPU mmap of the
+     * dma-buf can actually consume. Measured on that path:
+     * {@code result=PASS wsi=dri3 mean_ms=0.532} against 1.8–2.1 ms for the
+     * software path.
+     *
+     * Note the version claimed is already too high in the other direction:
+     * {@code FenceFromFD} (4) is a 1.0 request and is not implemented. See the
+     * default branch of {@link #handleRequest}.
+     */
     public static final byte MINOR_VERSION = 0;
     private final Callback<Drawable> onDestroyDrawableListener = (drawable) -> {
         ByteBuffer data = drawable.getData();
@@ -220,10 +247,31 @@ public class DRI3Extension extends Extension {
                 // in, `vkCreateSwapchainKHR` returns VK_ERROR_SURFACE_LOST_KHR
                 // after the surface, the queue, the capabilities and the
                 // formats all come back good, and nothing anywhere said why —
-                // see docs/TODO.md, "Zero-copy present". The candidate is
-                // FenceFromFD(4), which Mesa issues once per swapchain image
-                // and which is not in the list above, but a candidate is not a
-                // measurement and this is what turns it into one.
+                // see docs/TODO.md, "Zero-copy present".
+                //
+                // VESSEL: what FenceFromFD(4) turned out to be, since the note
+                // above named it as a candidate for that SURFACE_LOST and it
+                // was not. The cause there was a missing XFIXES; but refusing
+                // FenceFromFD is a real defect of its own, and a worse-behaved
+                // one than a returned error. **The request arrives with an fd
+                // over SCM_RIGHTS, and refusing it never consumes that fd.**
+                // XInputStream keeps one ancillary-fd queue per connection and
+                // getAncillaryFd() pops its head, so an unconsumed fd shifts
+                // the queue permanently: the next PixmapFromBuffer is handed
+                // the *previous* image's 4096-byte xshmfence page in place of
+                // its 3686400-byte dma-buf. Measured — the second present took
+                // the server down with SIGBUS/BUS_ADRERR in
+                // Drawable.copyArea, faulting one page into the source.
+                //
+                // FenceFromFD is a DRI3 **1.0** request, so this server is not
+                // conformant at the version it advertises. Two things are
+                // needed to implement it and neither is in this file: the
+                // fence must be mapped and triggered through the client's
+                // shared page (SyncExtension tracks fences as a boolean and
+                // never touches the page), and PresentExtension already calls
+                // syncExtension.setTriggered(idleFence) at the right moment.
+                // Until then Mesa is told not to ask — patches/mesa/0007, off
+                // by default, VESSEL_WSI_DRI3_FENCE=1 to re-measure after.
                 //
                 // Deliberately WARN and not DEBUG: an unimplemented request is
                 // always a defect in this server or a genuine version

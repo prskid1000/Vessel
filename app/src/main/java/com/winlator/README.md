@@ -273,21 +273,83 @@ The modifications, in the order they were made:
    and because a *shrink* exposes no new area yet still needs the client to lay
    out again.
 
-   **This did NOT fix the reported symptom, and the entry stays only because
-   sending `Expose` after a resize is protocol-correct on its own terms.** Tried
-   on the device: the white region still appears on a border drag and still
-   clears on minimise/restore. So the missing repaint is not simply a missing
-   `Expose`, and the next reader should not treat this as the fix.
+   **This did NOT fix the reported symptom, and it never could have. The cause
+   is now measured and it is on the Wine side — see `patches/wine/0012`.** The
+   entry stays because removing the line would be churn, but nothing here is
+   load-bearing and the next reader should know two things about it.
 
-   *What the attempt did establish.* `changeWindowGeometry` replaces the backing
-   `Drawable` with a **freshly created** one, and a new `ByteBuffer` is
-   zero-filled — so the new buffer is transparent black, not white. White
-   therefore has to be something Wine painted *after* the resize: it erased with
-   the class brush and then did not paint the client area. Which means Wine is
-   either not receiving this `Expose` or not acting on it, and that is the thing
-   to measure next — `WINEDEBUG=+event,+x11drv` during a border drag will say
-   which. The compositor is ruled out twice over: it clears to transparent black
-   (`GLRenderer.java:131`), so a coverage gap would show `#161826`.
+   *First, it is a duplicate.* `changeWindowGeometry` (:228-230, **upstream**
+   code) already ends with `window.sendEvent(new Expose(window))` on every
+   resize of a mapped input-output window — and that overload (`Window.java:400`)
+   delivers to **every** listener regardless of event mask, so it is strictly
+   wider than the masked send added here. Wine was already receiving an `Expose`
+   at the full new size before this change, and now receives two per resize
+   step. Confirmed in the trace: `X11DRV_Expose win 0x1006a (1800001) 0,0
+   685x513` appears twice around each `ConfigureNotify`.
+
+   *Second, `Expose` cannot repair this even in principle.* `X11DRV_Expose`
+   hands the rectangle to `NtUserExposeWindowSurface`, and
+   `expose_window_surface` (`dlls/win32u/window.c:2436`) — when the window has a
+   surface, which a mapped window always does — **ignores its redraw flags
+   entirely** and only re-flushes existing surface bits, after
+   `intersect_rect( &exposed_rect, &exposed_rect, &surface->rect )`. The surface
+   is still the pre-resize size, so the newly exposed strip is clipped away
+   before anything is flushed. An `Expose` asks Wine to re-send pixels it has;
+   it does not ask Wine to make pixels it does not have.
+
+   *What the white actually is.* Wine never resizes the **Win32** window in
+   response to a WM-initiated resize, because `window_update_client_config`
+   returns 0 at `if (is_virtual_desktop()) return 0;` and Vessel runs
+   `explorer /desktop=`. So the X window and its freshly allocated `Drawable`
+   grow while Wine's window surface does not, and the new strip is never
+   painted by anybody. Minimise/restore clears it because
+   `window_update_client_state` has no such guard: the `WM_STATE` Iconic→Normal
+   transition yields `SC_RESTORE`, whose win32u branch calls
+   `set_window_normal_placement()` with the host rect — the only path in the
+   whole stack that copies the WM's geometry onto the Win32 window. The
+   compositor was never involved, and neither was the class background brush.
+
+21. **`DRI3Extension` records what its two version numbers actually mean** —
+   comments only, no behaviour change, and both of them correct a note that
+   would otherwise send the next person the wrong way.
+
+   The first is the **advertised minor version, deliberately still 0**. The
+   obvious move once DRI3 negotiates is to bump it to 2, because this tree
+   implements `PixmapFromBuffers` (opcode 7) and that is a 1.2 request — and
+   its wire parse *is* byte-correct for 1.2, 60 bytes of body checked field by
+   field. But 1.2 is also `GetSupportedModifiers` (6) and `BuffersFromPixmap`
+   (8), neither of which exists here, and the handler ignores both
+   `num_buffers` and the modifier. Claiming 1.2 promises three requests and
+   delivers one. It also buys nothing: with `has_dri3_modifiers` false Mesa
+   asks for no modifier list, Turnip makes a `DRM_FORMAT_MOD_LINEAR` image and
+   `x11_image_init` sends the single-fd `PixmapFromBuffer` (2) — which is the
+   request this server implements, and the only shape a CPU `mmap` of the
+   dma-buf can consume. That path measures `mean_ms=0.532` against 1.8–2.1 ms
+   for the software path.
+
+   The second is **`FenceFromFD` (4), which modification 17 named as a
+   candidate for the `SURFACE_LOST` and which was not that** — the cause there
+   was the missing XFIXES of modification 20. It is still a real defect, and a
+   nastier one than a returned error: the request arrives with an fd over
+   `SCM_RIGHTS`, and refusing it **never consumes that fd**. `XInputStream`
+   holds one ancillary-fd queue per connection and `getAncillaryFd()` pops its
+   head, so one unconsumed fd shifts the queue for the rest of the session —
+   the next `PixmapFromBuffer` is handed the previous image's 4096-byte
+   xshmfence page instead of its 3686400-byte dma-buf. Measured: the second
+   present took the whole app down with
+   `signal 7 (SIGBUS), code 2 (BUS_ADRERR)` inside `Drawable.copyArea`,
+   faulting exactly one page into the source.
+
+   `FenceFromFD` is a DRI3 **1.0** request, so this server is non-conformant at
+   the version it already advertises. Implementing it needs two things that are
+   not in this file: the fence has to be mapped and triggered through the
+   client's shared page, and `SyncExtension` tracks fences as a boolean and
+   never touches a page — `PresentExtension.presentPixmap` already calls
+   `syncExtension.setTriggered(idleFence)` at exactly the right moment, so that
+   half is done. Until then `patches/mesa/0007` stops Mesa asking for the
+   fence, which is sound against *this* server because `presentPixmap` copies
+   synchronously before it sends `PresentIdleNotify`; `VESSEL_WSI_DRI3_FENCE=1`
+   turns the request back on to re-measure once the server can answer it.
 
 ### Every file that differs from upstream
 
@@ -319,7 +381,7 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17 |
+| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21 |
 | `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
