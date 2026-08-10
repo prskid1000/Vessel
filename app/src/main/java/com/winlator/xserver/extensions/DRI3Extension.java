@@ -2,6 +2,8 @@ package com.winlator.xserver.extensions;
 
 import static com.winlator.xserver.XClientRequestHandler.RESPONSE_CODE_SUCCESS;
 
+import android.util.Log;
+
 import com.winlator.core.Callback;
 import com.winlator.renderer.GPUImage;
 import com.winlator.renderer.Texture;
@@ -206,7 +208,46 @@ public class DRI3Extension extends Extension {
                 }
                 break;
             default:
+                // VESSEL: name the opcode before refusing it.
+                //
+                // This extension advertises DRI3 1.0 and implements five of its
+                // requests — QueryVersion(0), Open(1), PixmapFromBuffer(2),
+                // BufferFromPixmap(3), PixmapFromBuffers(7). Everything else
+                // landed here and became a bare BadImplementation: an X error
+                // with no record of *which* request the client asked for.
+                //
+                // That invisibility cost a day. With Mesa's DRI3 WSI compiled
+                // in, `vkCreateSwapchainKHR` returns VK_ERROR_SURFACE_LOST_KHR
+                // after the surface, the queue, the capabilities and the
+                // formats all come back good, and nothing anywhere said why —
+                // see docs/TODO.md, "Zero-copy present". The candidate is
+                // FenceFromFD(4), which Mesa issues once per swapchain image
+                // and which is not in the list above, but a candidate is not a
+                // measurement and this is what turns it into one.
+                //
+                // Deliberately WARN and not DEBUG: an unimplemented request is
+                // always a defect in this server or a genuine version
+                // mismatch, never routine traffic.
+                Log.w(PROTO_TAG, "DRI3 request " + opcodeName(opcode) +
+                        " is not implemented — replying BadImplementation");
                 throw new BadImplementation();
         }
     }
+
+    /** VESSEL: DRI3 1.2's request names, so the log says what was asked for. */
+    private static String opcodeName(int opcode) {
+        switch (opcode) {
+            case 4: return "FenceFromFD(4)";
+            case 5: return "FDFromFence(5)";
+            case 6: return "GetSupportedModifiers(6)";
+            case 8: return "BuffersFromPixmap(8)";
+            case 9: return "SetDRMDeviceInUse(9)";
+            case 10: return "ImportSyncobj(10)";
+            case 11: return "FreeSyncobj(11)";
+            default: return "opcode " + opcode;
+        }
+    }
+
+    /** VESSEL: one tag for every unimplemented-request line across extensions. */
+    static final String PROTO_TAG = "VesselXProto";
 }

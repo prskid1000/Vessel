@@ -171,6 +171,22 @@ The modifications, in the order they were made:
    `changeWindowGeometry` that recreates the backing `Drawable` at the new size,
    and a resize that skipped it would leave the window sampling a stale buffer.
 
+17. **`DRI3Extension` and `PresentExtension` name the request they refuse** —
+   both dispatch switches ended in a bare `default: throw new
+   BadImplementation()`, so an unimplemented extension request reached the
+   client as an X error and left **no record of which request it was**. That
+   cost a day: with Mesa's DRI3 WSI compiled in for the first time,
+   `vkCreateSwapchainKHR` returns `VK_ERROR_SURFACE_LOST_KHR` after the surface,
+   the queue, the capabilities and the formats all come back good, and no
+   channel anywhere said why — see `docs/TODO.md`, *Zero-copy present*. Both
+   defaults now log at WARN, under one tag, with DRI3's request names spelled
+   out; the refusal itself is unchanged. WARN and not DEBUG because an
+   unimplemented request is always either a defect in this server or a genuine
+   version mismatch, never routine traffic. Two candidates this makes decidable
+   rather than arguable: DRI3 `FenceFromFD(4)`, which Mesa issues once per
+   swapchain image, and Present `QueryCapabilities(4)` — this tree implements
+   DRI3 opcodes 0,1,2,3,7 and Present 0,1,3, and neither list contains a 4.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`

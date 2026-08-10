@@ -1,5 +1,7 @@
 package com.winlator.xserver.extensions;
 
+import android.util.Log;
+
 import static com.winlator.xserver.XClientRequestHandler.RESPONSE_CODE_SUCCESS;
 
 import android.util.SparseArray;
@@ -191,6 +193,12 @@ public class PresentExtension extends Extension {
                 }
                 break;
             default:
+                // VESSEL: same reasoning as DRI3Extension's default branch.
+                // Present is the other half of the zero-copy path, so a
+                // swapchain that dies without a protocol error could be
+                // refused here just as easily as there.
+                Log.w(DRI3Extension.PROTO_TAG, "Present request opcode " + opcode +
+                        " is not implemented — replying BadImplementation");
                 throw new BadImplementation();
         }
     }
