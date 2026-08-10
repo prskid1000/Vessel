@@ -550,6 +550,10 @@ class SessionEnvironmentTest {
                 "FEX_TSOENABLED" to "1",
                 "FEX_HALFBARRIERTSOENABLED" to "1",
                 "FEX_VECTORTSOENABLED" to "0",
+                // Not defaults: FEX ships both on the memory-frugal side and
+                // documents both as stutter sources. See the assignment.
+                "FEX_DISABLEL2CACHE" to "0",
+                "FEX_DYNAMICL1CACHE" to "0",
             ),
             environment,
         )

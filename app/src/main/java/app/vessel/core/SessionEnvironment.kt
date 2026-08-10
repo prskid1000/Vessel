@@ -227,6 +227,12 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "FEX_TSOENABLED",
     "FEX_HALFBARRIERTSOENABLED",
     "FEX_VECTORTSOENABLED",
+    // The JIT lookup caches. Reserved for a different reason from the three
+    // above: those are defaults kept visible, these are a deliberate
+    // speed-for-memory trade, and a container that flipped one back would get
+    // upstream's stutter with no way to tell that is what happened.
+    "FEX_DISABLEL2CACHE",
+    "FEX_DYNAMICL1CACHE",
 
     // FEX's log destination, for the same reason as WINEDEBUG: docs/LOGGING.md
     // says everything diagnostic arrives on fd 2, and FEX's defaults send it
@@ -404,6 +410,47 @@ fun sessionEnvironment(
     environment["FEX_TSOENABLED"] = "1"
     environment["FEX_HALFBARRIERTSOENABLED"] = "1"
     environment["FEX_VECTORTSOENABLED"] = "0"
+
+    // **FEX's two JIT lookup caches, both turned back on.** Unlike the three
+    // above these are *not* the defaults — they are the first FEX settings
+    // Vessel actually changes, and both defaults trade speed for memory in a
+    // way upstream itself flags:
+    //
+    //   DISABLEL2CACHE=0   Default true, "Disables FEXCore's JIT L2 cache
+    //                      lookup. Saving memory. Can potentially introduce
+    //                      more stutters." With it on, Dispatcher.cpp:177 emits
+    //                      an unconditional branch past the entire inline L2
+    //                      probe, so **every L1 miss falls out to the C++
+    //                      FindBlock slow path**.
+    //   DYNAMICL1CACHE=0   Default true, same warning. Dynamic starts L1 at
+    //                      MIN_L1_ENTRIES (8K) instead of MAX (1M) and doubles
+    //                      at most once per one-second sample period, so a
+    //                      launch spends **up to seven seconds** with an
+    //                      undersized L1 — and shrinks again when a title goes
+    //                      quiet, paying the ramp a second time.
+    //
+    // **The cost is real and is memory, which is why this is not a free win.**
+    // `LookupCacheEntry` is 16 bytes and `MAX_L1_ENTRIES` is 1M, so a fully
+    // grown L1 is 16 MB *per guest thread*; a many-threaded game can add
+    // hundreds of megabytes of resident memory on a phone, and an OOM kill is a
+    // worse regression than a stutter. The address space is reserved either way
+    // — dynamic sizing madvises the tail away rather than not mapping it — so
+    // what changes is resident pages, not the mapping.
+    //
+    // **Measured on the device, 2026-08-10, and the honest reading is "no
+    // harm", not "a win".** Metro's title screen ran 40 fps before and 40 fps
+    // after, with PSS 226.8 MB → 228.8 MB at a comparable point: the feared
+    // memory cost did not appear, because the 16 MB ceiling bounds *touched*
+    // pages and a title screen touches few of them. But that scene cannot test
+    // the benefit either — it is GPU-bound (see the resolution probe in
+    // docs/TODO.md) with a tiny code working set, and this knob acts on block
+    // dispatch, which surfaces as stutter during loading and level streaming.
+    // Kept because the cost is measured at ~nil and upstream documents the
+    // defaults as stutter sources; **the benefit is still unmeasured**, and
+    // what would settle it is frame-time consistency across a level load, not
+    // an average on a still image.
+    environment["FEX_DISABLEL2CACHE"] = "0"
+    environment["FEX_DYNAMICL1CACHE"] = "0"
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
     environment[WINEDLLOVERRIDES_ENV] = dllOverrides(profile, manifest)
     environment["DISPLAY"] = display
