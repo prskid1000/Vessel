@@ -35,9 +35,25 @@ SYSROOT="$WORK_DIR/androidsysroot"
 # --prefix=/usr + DESTDIR=$STAGE puts the tree at $STAGE/usr, which is the payload.
 PAYLOAD="$STAGE/usr"
 
-# Deliberately no resolve_cpu_flags: CFLAGS reaches only the unix side and
-# CROSSCFLAGS all three PE architectures at once, so -mcpu=oryon-1 has nowhere
-# safe to live — it is meaningless to the i386 pass.
+# CPU tuning, and the distinction the previous comment here collapsed.
+#
+# It said "-mcpu=oryon-1 has nowhere safe to live" because CFLAGS reaches only
+# the unix side and CROSSCFLAGS all three PE architectures at once. The second
+# half is right and the flag stays out of CROSSCFLAGS for exactly that reason:
+# --enable-archs builds arm64ec, aarch64 *and* i386 PE code with one CROSSCFLAGS,
+# and -mcpu=oryon-1 is not a thing you can say to an i386 compiler.
+#
+# The first half was the error. CFLAGS reaching only the unix side is precisely
+# what makes it *safe*: that side is one target, aarch64-linux-android, built by
+# $NDK_CC for this phone and nothing else. So the flag has a home, and it is
+# this one. It tunes ntdll.so, win32u.so and winex11.drv.so.
+#
+# Rank the win honestly, because docs/OPTIMIZATION.md does: on the DXVK present
+# path the unix side is only win32u's thin Vulkan thunk, and the heavy native
+# code is Turnip, which already gets the flag from build/turnip.sh. Where this
+# earns its place is winex11.drv.so's MIT-SHM blitter — the GDI path — and
+# ntdll's syscall dispatch, which every guest thread pays for.
+resolve_cpu_flags "$NDK_CC"
 
 if [ ! -x "$SRC/configure" ]; then
   info "no configure script in the tree; running autoreconf"
@@ -252,8 +268,11 @@ CONFIGURE_ARGS=(
   --without-wayland
 
   # No -g: the debug info multiplies package size for little use on a phone.
-  # -O2 alone is valid for every --enable-archs target; a chip flag would not be.
-  CFLAGS="-O2 -I$SYSROOT/usr/include"
+  #
+  # CFLAGS carries the chip flag and CROSSCFLAGS deliberately does not — see the
+  # comment at the top of this file. CROSSCFLAGS is one string for arm64ec,
+  # aarch64 and i386 PE code; CFLAGS is one target, this phone's.
+  CFLAGS="-O2 ${VESSEL_CPU_FLAGS:-} -I$SYSROOT/usr/include"
   LDFLAGS="-L$SYSROOT/usr/lib"
   CROSSCFLAGS=-O2
 )
