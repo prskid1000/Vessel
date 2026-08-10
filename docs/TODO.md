@@ -160,8 +160,46 @@ and the two that are not share a root cause.
   of the cases that work today. *Done when:* a fullscreen game survives a round
   trip to `cmd` and back, and Maximize is a control that does something.
 
+- [x] **The white bar is gone: no top-level window has a caption any more.**
+  *Evidence, 2026-08-10, Metro 2033 Redux in a real session on a clean install.*
+  `patches/wine/0010` clears `WS_CAPTION|WS_THICKFRAME` in win32u's own
+  style-correction block, and the tree says it took:
+
+  ```
+  before:  frame 1280x720+0+0   client 1274x673+3+44
+  after:   frame 1280x720+0+0   client 1280x720+0+0
+  ```
+
+  The frame also stopped being 1286x746. Screenshotted: the game fills the
+  window edge to edge and the white strip is not there. The taskbar reads
+  *Metro Redux* with the game's own icon.
+
+- [ ] **The drag borders move and size the X frame, and the guest ignores it.**
+  Half of this works and the half that does not is the interesting half.
+  *Measured the same sitting:* the Resize toggle appears in the long-press menu,
+  the accent border draws around the window, a right-edge drag took the frame
+  `1280x720+0+0` → `1047x720+0+0` (width only), a top-strip drag took it to
+  `1047x720+0+149` (position only), and Done cleared the handles. Every one of
+  those is the X server doing exactly what it was asked.
+
+  **The picture did not change.** The client child stays `1280x720+0+0` inside
+  the resized frame and overflows it, so the composited output still fills the
+  original rectangle — confirmed by forcing a repaint, which redrew the new
+  scene at the old full size.
+
+  *This is the same root cause as the missing Maximize, and it was already
+  written down two items below: Wine runs **unmanaged** here, so it is
+  authoritative over its own geometry and does not act on a WM-initiated
+  `ConfigureNotify`.* Resizing the frame without Wine's agreement was never
+  going to move the client. **The fix is therefore the same single piece of
+  work** — enough ICCCM/EWMH that Wine treats the session as managed — and the
+  drag borders are the interface waiting for it rather than a separate feature.
+  Until then the toggle should probably not be offered, or should say what it
+  cannot do.
+
 - [~] **A white bar across the top of a fullscreen game — and it is a fixed
   height in *guest* pixels, which rules out most of the candidates.**
+  *Superseded by the two items above; kept for the measurement.*
   *Measured on the device, 2026-08-10,* by reproducing it at three different
   sizes in one sitting and converting each back to guest rows:
 
