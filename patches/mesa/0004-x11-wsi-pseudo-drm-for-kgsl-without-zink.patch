@@ -1,0 +1,29 @@
+diff --git a/meson.build b/meson.build
+index 3a63a4838a1..23a1faac9a3 100644
+--- a/meson.build
++++ b/meson.build
+@@ -429,7 +429,23 @@ elif ['windows', 'cygwin'].contains(host_machine.system())
+   with_dri_platform = 'windows'
+ elif system_has_kms_drm
+   with_dri_platform = 'drm'
+-elif host_machine.system() == 'gnu' or (freedreno_kmds.contains('kgsl') and with_gallium_zink)
++elif host_machine.system() == 'gnu' or freedreno_kmds.contains('kgsl')
++  # Vessel: 'pseudo-drm' for any KGSL build, not just one that also builds Zink.
++  #
++  # This one conditional is what decides whether Mesa's X11 WSI has a DRI3 half
++  # at all: HAVE_X11_DRM is defined for 'drm' and 'pseudo-drm' and nothing else,
++  # and every xcb_dri3_*/xcb_present_* call site sits behind it. A KGSL device
++  # is never 'drm' — there is no KMS — so without this a Vulkan-only Turnip gets
++  # 'none', the DRI3 path is compiled out, and the software path is the only one
++  # that exists. That is why this project ships MESA_VK_WSI_DEBUG=sw as a
++  # requirement rather than a debug switch, and why a present costs a full-frame
++  # CPU copy.
++  #
++  # Upstream already anticipates KGSL here; it just also requires with_gallium_zink,
++  # because Zink is the consumer it had in mind. Vessel needs the *WSI*, not
++  # gallium: Turnip is the driver and Zink is built separately by build/zink.sh.
++  # Requiring a gallium driver to get a window-system path is an accident of who
++  # asked first, not a dependency — nothing under src/vulkan/wsi/ needs Zink.
+   with_dri_platform = 'pseudo-drm'
+ else
+   # FIXME: haiku doesn't use dri, and xlib doesn't use dri, probably should

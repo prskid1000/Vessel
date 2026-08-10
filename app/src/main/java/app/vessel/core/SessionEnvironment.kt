@@ -185,7 +185,13 @@ const val TURNIP_ENABLED: Boolean = true
  * Wine from unmanaged to managed changes geometry *and* focus handling for
  * every window, not just the one being dragged.
  *
- * **Off, because on the device it bought nothing.** Tried 2026-08-10 with
+ * **On, and honestly: on by choice rather than on the evidence.** What the
+ * device showed is below — no harm found, and no benefit found either. It is
+ * enabled because it is the direction this has to go and because leaving a
+ * finished prerequisite switched off invites someone to delete it as dead code;
+ * it is not enabled because a measurement asked for it.
+ *
+ * **What was measured, 2026-08-10.** Tried with
  * everything above in place and `VESSEL_MANAGED=1` confirmed present in the
  * guest's own `/proc/<pid>/environ`, so the switch really was reaching Wine.
  * `cmd` and `notepad` mapped and drew normally — and notepad, which *does*
@@ -208,7 +214,7 @@ const val TURNIP_ENABLED: Boolean = true
  * anything while this is false. *Done when:* EWMH is advertised and a
  * resizable program follows a drag.
  */
-const val MANAGED_DESKTOP: Boolean = false
+const val MANAGED_DESKTOP: Boolean = true
 
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
