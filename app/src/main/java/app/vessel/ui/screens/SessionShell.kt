@@ -957,8 +957,18 @@ fun WindowDragBorders(
     if (viewport.scale <= 0f) return
 
     val density = LocalDensity.current
-    val grab = Vessel.metrics.s17
-    val grabPx = with(density) { grab.toPx() }
+
+    /**
+     * **A full touch target, and placed *inside* the window rather than astride
+     * its edge.** 17 dp centred on the edge was the first attempt and it was
+     * unusable on a phone: it gives 8 dp either side, well under Android's 48 dp
+     * minimum, and for a window flush against the top of the screen half of that
+     * is off-screen entirely — so the one window most likely to need moving was
+     * the hardest to grab. Inside means the whole band is always reachable, at
+     * the cost of overlapping the guest's own top rows while the mode is on,
+     * which is a trade the mode is explicitly for.
+     */
+    val grab = Vessel.metrics.touchTarget
 
     // The live rectangle, in guest pixels. Seeded from the window and then owned
     // by the gesture: the X server republishes asynchronously, so reading the
@@ -972,19 +982,31 @@ fun WindowDragBorders(
     val width = with(density) { (rect.width * viewport.scale).toDp() }
     val height = with(density) { (rect.height * viewport.scale).toDp() }
 
-    /** One edge or corner. [apply] gets the drag in guest pixels. */
+    /**
+     * One edge or corner. [apply] gets the drag in guest pixels.
+     *
+     * Drawn, not just hit-tested. An invisible handle is a handle you find by
+     * trial and error, so each band carries a translucent accent wash and the
+     * corner a stronger one — enough to aim at, transparent enough to see the
+     * program underneath while dragging it.
+     */
     @Composable
     fun handle(
         alignX: Dp,
         alignY: Dp,
         w: Dp,
         h: Dp,
+        strong: Boolean = false,
         apply: (dx: Int, dy: Int) -> WindowBounds,
     ) {
         Box(
             Modifier
                 .offset(alignX, alignY)
                 .size(w, h)
+                .background(
+                    Vessel.colors.accent.copy(alpha = if (strong) 0.45f else 0.22f),
+                    Vessel.metrics.shapeSm,
+                )
                 .pointerInput(window.id, viewport) {
                     detectDragGestures(
                         onDragEnd = {
@@ -1012,25 +1034,36 @@ fun WindowDragBorders(
                 .vRing(Vessel.colors.accent, Vessel.metrics.shapeSm),
         )
 
-        // Move — the top strip only.
-        handle(left, top - grab / 2, width, grab) { dx, dy ->
+        // **Every band sits inside its edge**, so a window flush against the
+        // screen edge still offers the whole 44 dp. The vertical bands are
+        // inset by `grab` at both ends so they cannot cover the corner, which
+        // is declared last and must win the hit test.
+        //
+        // Move — the top strip only. The body is left to the guest, so turning
+        // the mode on during a game does not take the pointer away from it.
+        handle(left, top, width, grab) { dx, dy ->
             rect.copy(x = rect.x + dx, y = rect.y + dy)
         }
-        // Resize — the other three edges.
-        handle(left, top + height - grab / 2, width, grab) { _, dy ->
+        // Resize — bottom edge.
+        handle(left, top + height - grab, width - grab, grab) { _, dy ->
             rect.copy(height = (rect.height + dy).coerceAtLeast(MIN_DRAG_PX))
         }
-        handle(left - grab / 2, top, grab, height) { dx, _ ->
-            // A left edge moves the origin and changes the width by the
-            // opposite amount, or the window would slide instead of stretch.
+        // Resize — left edge. Moves the origin and changes the width by the
+        // opposite amount, or the window would slide instead of stretch.
+        handle(left, top + grab, grab, height - grab * 2) { dx, _ ->
             val w2 = (rect.width - dx).coerceAtLeast(MIN_DRAG_PX)
             rect.copy(x = rect.x + (rect.width - w2), width = w2)
         }
-        handle(left + width - grab / 2, top, grab, height) { dx, _ ->
+        // Resize — right edge.
+        handle(left + width - grab, top + grab, grab, height - grab * 2) { dx, _ ->
             rect.copy(width = (rect.width + dx).coerceAtLeast(MIN_DRAG_PX))
         }
-        // Resize — the bottom-right corner, which is the one a thumb reaches.
-        handle(left + width - grab, top + height - grab, grab, grab) { dx, dy ->
+        // Resize — the bottom-right corner, both axes at once. Declared last so
+        // it is hit-tested first, and drawn stronger because it is the one a
+        // thumb reaches for.
+        handle(
+            left + width - grab, top + height - grab, grab, grab, strong = true,
+        ) { dx, dy ->
             rect.copy(
                 width = (rect.width + dx).coerceAtLeast(MIN_DRAG_PX),
                 height = (rect.height + dy).coerceAtLeast(MIN_DRAG_PX),

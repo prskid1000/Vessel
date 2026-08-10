@@ -32,6 +32,7 @@ import app.vessel.ui.components.VSheetHeader
 import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.shell.AppShortcut
+import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vRing
@@ -106,6 +107,7 @@ fun AppSheet(
         onSave = viewModel::save,
         onRemove = viewModel::remove,
         onLaunch = { shortcut?.let(onLaunch) },
+        onName = viewModel::setName,
         onArgs = viewModel::setArgs,
         onWorkingDir = viewModel::setWorkingDir,
         onBrowse = { onBrowse(state.containerId) },
@@ -130,6 +132,7 @@ private fun AppSheetContent(
     onSave: () -> Unit,
     onRemove: () -> Unit,
     onLaunch: () -> Unit,
+    onName: (String) -> Unit,
     onArgs: (String) -> Unit,
     onWorkingDir: (String) -> Unit,
     onBrowse: () -> Unit,
@@ -246,6 +249,22 @@ private fun AppSheetContent(
                 onClick = onImport,
             )
         } else {
+            // **Renaming was the one thing this sheet could not do.** The name
+            // is what the home tiles and the launcher show, it was derived from
+            // the filename once at add time, and after that there was no way to
+            // change it — three games called `launcher.exe` were three tiles
+            // called `launcher`. The field is first because it is the only one
+            // most people will ever touch.
+            //
+            // Blank is allowed while typing and resolved on save, not here: a
+            // field that refuses to be empty cannot be cleared and retyped, and
+            // clearing it is how you rename something.
+            VLabeledField(
+                label = "Name",
+                help = "What the tile says, on home and in the launcher.",
+            ) {
+                VTextField(state.name, onName, placeholder = GuestPath.nameOf(state.executable))
+            }
             VLabeledField(label = "Launch arguments") {
                 VTextField(state.args, onArgs, placeholder = "none")
             }
@@ -296,6 +315,7 @@ private fun AppSheetProfilePreview() {
             onSave = {},
             onRemove = {},
             onLaunch = {},
+            onName = {},
             onArgs = {},
             onWorkingDir = {},
             onBrowse = {},
@@ -314,6 +334,7 @@ private fun AppSheetAddPreview() {
             onSave = {},
             onRemove = {},
             onLaunch = {},
+            onName = {},
             onArgs = {},
             onWorkingDir = {},
             onBrowse = {},
