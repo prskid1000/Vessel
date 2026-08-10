@@ -11,6 +11,7 @@ import com.winlator.xserver.extensions.MITSHMExtension;
 import com.winlator.xserver.extensions.PresentExtension;
 import com.winlator.xserver.extensions.SyncExtension;
 import com.winlator.xserver.extensions.XComposite;
+import com.winlator.xserver.extensions.XFixesExtension;
 
 import java.nio.charset.Charset;
 import java.util.EnumMap;
@@ -222,7 +223,15 @@ public class XServer {
             new DRI3Extension(this, opcode--),
             new PresentExtension(this, opcode--),
             new SyncExtension(this, opcode--),
-            new XComposite(this, opcode--)
+            new XComposite(this, opcode--),
+            // VESSEL: XFIXES, for Mesa's DRI3 swapchain. Not optional and not
+            // cosmetic — Mesa calls xcb_xfixes_create_region per swapchain
+            // image without checking whether the server has the extension, and
+            // libxcb answers a missing extension by closing the connection
+            // client-side (XCB_CONN_CLOSED_EXT_NOTSUPPORTED) before a byte is
+            // sent. That is unfindable from this side: no request arrives, so
+            // no error can be logged. See XFixesExtension's own comment.
+            new XFixesExtension(this, opcode--)
             // VESSEL: no GLXExtension. Upstream's implementation is a thin
             // dispatcher onto libgladiorenderer, a ~5k-line GL-over-a-socket
             // translator that exists because Winlator's guest opengl32 is a

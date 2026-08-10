@@ -224,6 +224,40 @@ The modifications, in the order they were made:
    BigReq, MIT-SHM, DRI3, Present, SYNC and Composite — no XFIXES, which Mesa
    probes but guards every use of behind `has_xfixes`.
 
+20. **`XFixesExtension`, a new file, and it is why zero-copy never worked** —
+   Mesa's X11 WSI creates an XFIXES region per swapchain image on the DRI3 path
+   and does so **unguarded**, with a `has_xfixes` flag sitting right there
+   unconsulted (`wsi_common_x11.c`, `x11_image_init`). When the server does not
+   advertise XFIXES, **libxcb tears the connection down client-side** with
+   `XCB_CONN_CLOSED_EXT_NOTSUPPORTED` before sending anything — so no request
+   arrives, no protocol error exists to log, and the application just loses its
+   display. Unfindable from this side, which is why three earlier explanations
+   were wrong.
+
+   *Evidence, the probe in the retry path, before and after:*
+
+   ```
+   before  dri3: conn_err=0 then conn_err=2  -> SURFACE_LOST (-1000000000)
+   after   dri3: conn_err=0 then conn_err=0  -> got past it
+   ```
+
+   The visible symptom had been `vkCreateSwapchainKHR` failing on a NULL
+   `GetGeometry`, which was never the cause: Mesa tries the swapchain, the
+   attempt kills the connection, Mesa retries, and the retry fails at its first
+   request. The software path is unaffected because it returns from
+   `x11_image_init` one line before the region is created.
+
+   Regions only — `QueryVersion`, `CreateRegion`, `SetRegion`, `DestroyRegion`
+   — which is the whole set Mesa's swapchain touches; everything else is
+   refused through modification 17's log. Version **2.0** is reported, the
+   version regions arrived in and the lowest that satisfies Mesa's
+   `major_version >= 2`; claiming 5 or 6 would advertise cursor and
+   pointer-barrier requests that would then be refused at the first call, which
+   is the same shape of failure this file exists to remove. The rectangles are
+   stored and **not yet acted on**, because `PresentExtension.presentPixmap`
+   skips the `update` and `valid` fields and copies the whole pixmap — the ids
+   must still be real, since a client sets, reuses and destroys them.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -249,7 +283,8 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16 |
-| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
+| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20 |
+| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20 |
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
