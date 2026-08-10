@@ -75,10 +75,16 @@ data class ContainerSheetUiState(
      * [app.vessel.data.ContainerProvisioner] maps the drive while it builds the
      * prefix.
      *
-     * Not a blocker. A container without `D:` is a working container, so this
-     * offers the grant and never gates Save. And because the provisioner runs
-     * `mapSharedStorage` on *every* provision rather than once, granting it
-     * afterwards still picks the drive up on the next launch.
+     * **A blocker, for creation only.** Save is disabled while this is false on
+     * a container being created: the mapping happens once, while the prefix is
+     * built, and the rest of the product now assumes both drives — Add-a-program
+     * and the file browser are both disabled until `D:` exists, so a container
+     * created without it is one nothing can be put into.
+     *
+     * Editing an existing container is not gated. It has already been built, and
+     * because the provisioner runs `mapSharedStorage` on *every* provision
+     * rather than once, granting the permission later still picks the drive up
+     * on the next launch.
      */
     val canMapStorage: Boolean = true,
 )

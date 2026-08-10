@@ -160,7 +160,20 @@ private fun ContainerSheetContent(
                     },
                     trailing = {
                         if (state.error == null && !state.loading) {
-                            VButton("Save", onSave, style = VButtonStyle.Primary)
+                            // **Creating is blocked without storage access; editing
+                            // is not.** The permission decides whether the
+                            // provisioner can map D: while it builds the prefix,
+                            // and that only happens once — so the cost of getting
+                            // it wrong falls entirely on creation. An existing
+                            // container has already been built, and refusing to
+                            // let its name be changed over a drive would be a
+                            // gate on the wrong action.
+                            VButton(
+                                "Save",
+                                onSave,
+                                style = VButtonStyle.Primary,
+                                enabled = !state.creating || state.canMapStorage,
+                            )
                         }
                     },
                 )
@@ -195,21 +208,31 @@ private fun ContainerSheetContent(
                 }
                 state.groups.forEach { group -> ParamGroup(group, onParam) }
 
-                // **Asked for here because here is where the answer is used.**
-                // ContainerProvisioner maps the phone's storage to D: while it
-                // builds the prefix, and mapSharedStorage returns false without
-                // this grant — so a container created without it comes up with a
-                // C: and nothing else, and nothing on screen ever said why.
+                // **Asked for here because here is where the answer is used,
+                // and required rather than offered.** ContainerProvisioner maps
+                // the phone's storage to D: while it builds the prefix, and
+                // mapSharedStorage returns false without this grant — so a
+                // container created without it came up with a C: and nothing
+                // else, and nothing on screen ever said why.
                 //
-                // Offered, not enforced. Save is never gated on it: a container
-                // with only a C: drive is a working container, and the
-                // provisioner re-runs the mapping on every provision, so
-                // granting this later still brings D: back on the next launch.
+                // A container is not allowed to be created in that state. It is
+                // a one-shot decision that shapes the prefix, and the rest of
+                // the product now assumes both drives: Add-a-program and the
+                // file browser are both disabled until D: exists, so a container
+                // built without it is one you cannot put a program into.
+                //
+                // Editing is deliberately still allowed — see the Save button.
                 if (!state.canMapStorage) {
                     VCaution(
-                        "Vessel cannot see the phone's storage, so this container " +
-                            "will have no D: drive. Allow it and D: is mapped when " +
-                            "the container is built.",
+                        if (state.creating) {
+                            "Vessel needs access to the phone's storage before it " +
+                                "can build this container: without it there is no " +
+                                "D: drive, and no way to add a program."
+                        } else {
+                            "Vessel cannot see the phone's storage, so this " +
+                                "container has no D: drive. Allow it and D: is " +
+                                "mapped on the next launch."
+                        },
                     )
                     VButton(
                         "Allow storage access",
