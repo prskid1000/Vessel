@@ -150,12 +150,16 @@ object X11 {
  * X11 keysyms for the handful of keys the vendored `Keyboard.createKeyboard`
  * does not preinstall.
  *
+ * `internal` rather than private so [X11KeyCatalog] can offer these six keys
+ * carrying the correct keysym instead of transcribing the six numbers a second
+ * time — a copy that would be wrong the first time one of them changed.
+ *
  * Everything else passes keysym 0, which tells the server "the mapping you
  * already have is right" — the alternative, sending a keysym per press, makes
  * `InputDeviceManager.onKeyPress` overwrite *both* shift levels of that keycode
  * with the same value, so `Shift`+`a` would start producing `a`.
  */
-private object Keysym {
+internal object Keysym {
     const val PRINT = 0xFF61
     const val SCROLL_LOCK = 0xFF14
     const val KP_ENTER = 0xFF8D

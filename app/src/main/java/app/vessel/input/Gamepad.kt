@@ -13,6 +13,65 @@ enum class GamepadControl {
     SELECT, START, THUMB_L, THUMB_R,
     DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT,
     STICK_L_UP, STICK_L_DOWN, STICK_L_LEFT, STICK_L_RIGHT,
+    STICK_R_UP, STICK_R_DOWN, STICK_R_LEFT, STICK_R_RIGHT,
+}
+
+/** Which of the two analogue sticks a [StickRole] is about. */
+enum class Stick {
+    LEFT,
+    RIGHT,
+    ;
+
+    /** The half-axis control this stick pushed up is. */
+    val up: GamepadControl
+        get() = if (this == LEFT) GamepadControl.STICK_L_UP else GamepadControl.STICK_R_UP
+
+    val down: GamepadControl
+        get() = if (this == LEFT) GamepadControl.STICK_L_DOWN else GamepadControl.STICK_R_DOWN
+
+    val left: GamepadControl
+        get() = if (this == LEFT) GamepadControl.STICK_L_LEFT else GamepadControl.STICK_R_LEFT
+
+    val right: GamepadControl
+        get() = if (this == LEFT) GamepadControl.STICK_L_RIGHT else GamepadControl.STICK_R_RIGHT
+
+    /** Its four half-axes, in the order [GamepadTranslator.onSticks] emits them. */
+    val halfAxes: List<GamepadControl> get() = listOf(right, left, down, up)
+}
+
+/**
+ * What a whole stick does, which is a property of the stick and not of its four
+ * half-axes.
+ *
+ * There is deliberately no `Look` member on [GamepadAction]: a user able to bind
+ * "the left half of the right stick" to look would produce a translator state
+ * nobody can reason about, and the pointer has one velocity, not four.
+ */
+sealed interface StickRole {
+    /** Relative pointer motion at [GamepadConfig.lookSpeed]. Two sticks set to this sum. */
+    data object Look : StickRole
+
+    /** Four half-axis controls, thresholded at the deadzone with hysteresis. */
+    data object Keys : StickRole
+
+    /** Nothing at all. Anything the stick was holding is released. */
+    data object None : StickRole
+
+    companion object {
+        /** The stored form: the object's own name, so an unknown one degrades. */
+        fun byName(name: String): StickRole? = when (name) {
+            "Look" -> Look
+            "Keys" -> Keys
+            "None" -> None
+            else -> null
+        }
+
+        fun nameOf(role: StickRole): String = when (role) {
+            Look -> "Look"
+            Keys -> "Keys"
+            None -> "None"
+        }
+    }
 }
 
 /** What one control does in the guest. */
@@ -39,7 +98,21 @@ sealed interface GamepadAction {
 data class GamepadProfile(
     val name: String,
     val bindings: Map<GamepadControl, GamepadAction>,
+    /**
+     * What each stick as a whole does. Absent means [StickRole.None].
+     *
+     * The default reproduces the hardwiring this used to have exactly — left
+     * walks, right looks — which is the regression gate: `GamepadTest` passes
+     * unmodified, and if it does not, this refactor is wrong.
+     */
+    val sticks: Map<Stick, StickRole> = mapOf(
+        Stick.LEFT to StickRole.Keys,
+        Stick.RIGHT to StickRole.Look,
+    ),
 ) {
+    /** The role of one stick, with the same "absent is nothing" rule as [bindings]. */
+    fun roleOf(stick: Stick): StickRole = sticks[stick] ?: StickRole.None
+
     companion object {
         val Default = GamepadProfile(
             name = "Keyboard and mouse",
@@ -83,14 +156,43 @@ data class GamepadConfig(
      * down forever, and the failure looks like the guest being possessed rather
      * than like a hardware problem.
      */
-    val deadzone: Float = 0.25f,
-    /** Hysteresis: once a direction is held, it releases only below this. */
-    val releaseZone: Float = 0.18f,
-    /** Cursor pixels per second at full right-stick deflection. */
-    val lookSpeed: Float = 900f,
-    /** An analogue trigger past this counts as pressed. */
+    val deadzone: Float = DEFAULT_DEADZONE,
+    /** Cursor pixels per second at full look-stick deflection. */
+    val lookSpeed: Float = DEFAULT_LOOK_SPEED,
+    /**
+     * An analogue trigger past this counts as pressed.
+     *
+     * Not a preference and not exposed: it is where a pad's trigger stops being
+     * noise, which is a fact about pads rather than a taste.
+     */
     val triggerThreshold: Float = 0.5f,
-)
+) {
+    /**
+     * Hysteresis: once a direction is held, it releases only below this.
+     *
+     * **Derived rather than exposed.** Two independent sliders invite
+     * `releaseZone > deadzone`, and the chatter that follows is the exact
+     * failure the two-threshold design exists to prevent. The ratio reproduces
+     * the original 0.18/0.25 pair exactly.
+     */
+    val releaseZone: Float get() = deadzone * RELEASE_RATIO
+
+    companion object {
+        const val DEFAULT_DEADZONE: Float = 0.25f
+        const val DEFAULT_LOOK_SPEED: Float = 900f
+
+        /** 0.18 / 0.25. Arithmetic from the two original defaults, not a tuning result. */
+        const val RELEASE_RATIO: Float = 0.72f
+
+        /** What the deadzone slider offers. */
+        const val MIN_DEADZONE: Float = 0.10f
+        const val MAX_DEADZONE: Float = 0.40f
+
+        /** What the look-speed slider offers, in guest pixels a second. */
+        const val MIN_LOOK_SPEED: Float = 200f
+        const val MAX_LOOK_SPEED: Float = 2400f
+    }
+}
 
 /**
  * Stick and button state in, [GuestInput] out. Same contract as [PointerGestures]:
@@ -103,7 +205,11 @@ data class GamepadConfig(
  */
 class GamepadTranslator(
     var profile: GamepadProfile = GamepadProfile.Default,
-    private val config: GamepadConfig = GamepadConfig(),
+    /**
+     * A `var` so a sensitivity change lands without rebuilding the translator —
+     * rebuilding drops every held key and leaves the guest holding it forever.
+     */
+    var config: GamepadConfig = GamepadConfig(),
 ) {
 
     private val held = mutableSetOf<GamepadControl>()
@@ -137,16 +243,39 @@ class GamepadTranslator(
     /**
      * The sticks moved. [lx]/[ly]/[rx]/[ry] are −1..1 with y positive downwards,
      * which is Android's convention and the screen's.
+     *
+     * What each stick *does* is [GamepadProfile.sticks] rather than a hardwiring,
+     * which is the whole of "bind a stick to look, or to keys, or to nothing".
+     * Two sticks both set to [StickRole.Look] sum their deflections; the sum is
+     * clamped, because two sticks pushed the same way is still full speed.
      */
     fun onSticks(lx: Float, ly: Float, rx: Float, ry: Float): List<GuestInput> {
-        lookX = deaden(rx)
-        lookY = deaden(ry)
-        return buildList {
-            addAll(direction(GamepadControl.STICK_L_RIGHT, lx, positive = true))
-            addAll(direction(GamepadControl.STICK_L_LEFT, lx, positive = false))
-            addAll(direction(GamepadControl.STICK_L_DOWN, ly, positive = true))
-            addAll(direction(GamepadControl.STICK_L_UP, ly, positive = false))
+        var sumX = 0f
+        var sumY = 0f
+        val out = mutableListOf<GuestInput>()
+        for (stick in Stick.entries) {
+            val x = if (stick == Stick.LEFT) lx else rx
+            val y = if (stick == Stick.LEFT) ly else ry
+            when (profile.roleOf(stick)) {
+                StickRole.Look -> {
+                    sumX += deaden(x)
+                    sumY += deaden(y)
+                    out += releaseHalfAxes(stick)
+                }
+
+                StickRole.Keys -> {
+                    out += direction(stick.right, x, positive = true)
+                    out += direction(stick.left, x, positive = false)
+                    out += direction(stick.down, y, positive = true)
+                    out += direction(stick.up, y, positive = false)
+                }
+
+                StickRole.None -> out += releaseHalfAxes(stick)
+            }
         }
+        lookX = sumX.coerceIn(-1f, 1f)
+        lookY = sumY.coerceIn(-1f, 1f)
+        return out
     }
 
     /** An analogue trigger, 0..1. Mapped to a digital control at [GamepadConfig.triggerThreshold]. */
@@ -206,6 +335,17 @@ class GamepadTranslator(
      * deadzone chatters, and a chattering `W` in a game is a character that
      * stutters rather than walks.
      */
+    /**
+     * Let go of anything a stick that is no longer sending keys was holding.
+     *
+     * Without this, switching a stick to look while it is pushed leaves the
+     * guest holding `W` with nothing left that can ever release it.
+     */
+    private fun releaseHalfAxes(stick: Stick): List<GuestInput> {
+        if (stick.halfAxes.none { it in held }) return emptyList()
+        return stick.halfAxes.filter { it in held }.flatMap { onButton(it, false) }
+    }
+
     private fun direction(control: GamepadControl, value: Float, positive: Boolean): List<GuestInput> {
         val magnitude = if (positive) value else -value
         val on = control in held
