@@ -2,11 +2,14 @@ package app.vessel.data
 
 import app.vessel.core.LogLevel
 import app.vessel.core.LogSource
+import app.vessel.core.SessionLogLimits
 import app.vessel.core.decodeLogLine
 import app.vessel.core.encodeLogLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -14,6 +17,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 
 /**
  * The sink, exercised with synthetic input.
@@ -80,7 +85,10 @@ class SessionLogWriterTest {
     fun `a flood is rate-limited, and the file says how much it lost`() {
         val directory = temporary.newFolder("flood")
         val flood = 6_000
-        val meta = write(directory, startedAt = 1_000L) { log ->
+        // The caps this test was written against, named rather than inherited:
+        // they are the bottom rung of the ladder now, and the default is the top,
+        // where six thousand lines is not a flood at all.
+        val meta = write(directory, startedAt = 1_000L, limits = SessionLogLimits.SHIPPED) { log ->
             // Distinct every time, so dedup cannot touch it: this is the
             // wined3d draw-path failure, where two unguarded ERR sites alternate
             // at frame rate and every line differs.
@@ -125,11 +133,63 @@ class SessionLogWriterTest {
         assertEquals(-11, meta.exitCode)
     }
 
+    /**
+     * The producer channel is the one layer that used to drop in silence.
+     *
+     * Deterministic rather than "send a lot and hope": the writer's pump is
+     * launched onto a single-threaded dispatcher whose only thread is already
+     * occupied by a latch, so nothing is consumed until every line has been sent
+     * and the channel has thrown away everything past its buffer. That is the
+     * shape of the real failure — a burst arriving faster than the disk — without
+     * needing a real disk that is slow enough.
+     *
+     * The rate limiter is left at its maximum so the two counters cannot be
+     * confused for each other.
+     */
+    @Test
+    fun `lines the channel throws away are counted and admitted in the file`() {
+        val directory = temporary.newFolder("overflow")
+        val sent = 20_000
+        val executor = Executors.newSingleThreadExecutor()
+        val scope = CoroutineScope(executor.asCoroutineDispatcher() + SupervisorJob())
+        val gate = CountDownLatch(1)
+        // Occupies the only thread, so the pump cannot start.
+        scope.launch { gate.await() }
+
+        val writer = SessionLogWriter(
+            directory = directory,
+            containerId = "c1",
+            startedAt = 1_000L,
+            json = json,
+            scope = scope,
+            onChanged = {},
+            onFinished = {},
+            limits = SessionLogLimits(),
+        )
+        repeat(sent) { writer.line(LogSource.WINE, LogLevel.ERROR, "relay call $it") }
+        gate.countDown()
+        writer.close()
+
+        val meta = awaitFinished(directory, 1_000L)
+        val lines = read(directory, 1_000L)
+        assertTrue("nothing overflowed, so this test proves nothing", meta.overflowLines > 0)
+        assertTrue(
+            "the file has to admit what it never saw",
+            lines.any { it.text.startsWith("… ") && it.text.endsWith("before the sink could write them …") },
+        )
+        // Every line is accounted for: written, or dropped and counted. The one
+        // extra line in the file is the marker saying so.
+        assertEquals(sent, meta.overflowLines + meta.lines - 1)
+        assertEquals(0, meta.droppedLines)
+        executor.shutdown()
+    }
+
     /** Drive one writer to completion and hand back the sidecar it left. */
     private fun write(
         directory: File,
         startedAt: Long,
         exit: Pair<SessionExit, Int?>? = null,
+        limits: SessionLogLimits = SessionLogLimits(),
         block: (SessionLog) -> Unit,
     ): SessionLogMeta {
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -141,6 +201,7 @@ class SessionLogWriterTest {
             scope = scope,
             onChanged = {},
             onFinished = {},
+            limits = limits,
         )
         block(writer)
         if (exit == null) writer.close() else writer.finish(exit.first, exit.second)

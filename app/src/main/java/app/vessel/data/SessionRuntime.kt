@@ -513,6 +513,18 @@ class SessionRuntime @Inject constructor(
             return
         }
 
+        // **The dangerous diagnostics are spent here, before the session runs.**
+        // Writing the record back at launch rather than at teardown is what makes
+        // "one session" survive the app being killed mid-run: a `+relay` armed
+        // for this launch is already off in the stored document by the time the
+        // guest process exists, so the run after a crash gets the ordinary
+        // environment with nothing to re-disarm. This session still uses the
+        // record as it was read a line above.
+        val spentDiagnostics = profile.diagnostics.consumed()
+        if (spentDiagnostics != profile.diagnostics) {
+            runCatching { containers.save(profile.copy(diagnostics = spentDiagnostics)) }
+        }
+
         val manifest = manifests.load().getOrNull()
         val geometry = parseGeometry(text(profile, manifest, DisplayParams.RESOLUTION), native)
         val fpsLimit = parseFpsLimit(text(profile, manifest, DisplayParams.FPS_LIMIT))
@@ -528,7 +540,7 @@ class SessionRuntime @Inject constructor(
         )
 
         units = GuestUnits()
-        val log = logs.open(containerId, startedAt)
+        val log = logs.open(containerId, startedAt, profile.diagnostics.limits)
         log.header(
             listOf(
                 "container  ${profile.name}",

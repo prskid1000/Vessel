@@ -447,6 +447,18 @@ data class VMetrics(
     /** The ceiling on a param row's right-hand value column. */
     val valueMaxWidth: Dp = 140.dp,
 
+    /**
+     * The control column in a diagnostics row — a level picker beside a channel
+     * name, not under it.
+     *
+     * The container editor puts a control under its label because a sheet is a
+     * form and a form reads down one column. Diagnostics is a *list* of nine
+     * channels, and stacking a label over a full-width dropdown nine times is
+     * three screens of sheet; side by side it is one. Wide enough for
+     * `+ Warnings` and the chevron at `control` size, which is the longest stop.
+     */
+    val diagnosticControlWidth: Dp = 126.dp,
+
     /** A dialog's mono evidence block, before it scrolls. */
     val evidenceMaxHeight: Dp = 180.dp,
 

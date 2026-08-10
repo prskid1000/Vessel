@@ -259,6 +259,17 @@ fun elidedLogMarker(lines: Int): String = "… $lines lines elided …"
 fun rateLimitedLogMarker(dropped: Int): String =
     "… logging rate-limited, $dropped lines dropped …"
 
+/**
+ * Lines the producer channel threw away before the writer ever saw them.
+ *
+ * Distinct wording from [rateLimitedLogMarker] because it is a distinct failure:
+ * the rate limiter is a policy the sink chose and this is the sink falling
+ * behind, which means the *oldest* queued lines went and the gap is not where
+ * the marker is. Named "before the sink" for that reason.
+ */
+fun overflowLogMarker(dropped: Int): String =
+    "… $dropped lines dropped before the sink could write them …"
+
 /** Wine prints at most a timestamp, a pid and a tid before the level. */
 private const val MAX_PREFIX_FIELDS = 4
 

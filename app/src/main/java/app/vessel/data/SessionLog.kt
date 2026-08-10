@@ -99,6 +99,16 @@ data class SessionLogMeta(
     val elidedLines: Int = 0,
     /** Lines the rate limiter refused. */
     val droppedLines: Int = 0,
+    /**
+     * Lines the producer channel threw away before the writer saw them.
+     *
+     * Separate from [droppedLines] because it is a different fact: the rate
+     * limiter is a policy, this is the sink falling behind its own producer. It
+     * was uncounted until the log limits became adjustable, which is exactly when
+     * it started to matter — at `+relay` with the caps raised, this is the first
+     * layer to bite and it was the only one that did not say so.
+     */
+    val overflowLines: Int = 0,
     val sizeBytes: Long = 0L,
     /**
      * Whether the session recorded an ERROR at any point.

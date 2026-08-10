@@ -2,7 +2,9 @@ package app.vessel.data
 
 import app.vessel.core.LogLevel
 import app.vessel.core.LogSource
+import app.vessel.core.SessionLogLimits
 import app.vessel.core.encodeLogLine
+import app.vessel.core.overflowLogMarker
 import app.vessel.core.parseSessionLogLine
 import app.vessel.core.rateLimitedLogMarker
 import app.vessel.core.repeatedLogLine
@@ -16,6 +18,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStreamWriter
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -28,22 +31,35 @@ import java.util.concurrent.atomic.AtomicReference
  * the thread draining the session's stderr and a full buffer must never become
  * back-pressure on the process being logged.
  *
- * Three defences, applied in this order:
+ * Four layers, applied in this order:
  *
+ *  0. **The producer channel**, which drops its oldest queued line when the pump
+ *     falls behind. Counted; see [overflowed].
  *  1. **Dedup.** Consecutive identical lines collapse to one line and a count —
  *     the common explosion, one `fixme` inside a render loop.
- *  2. **Rate limit** to [RATE_LIMIT_LINES] per second, for what dedup cannot
- *     catch: two *alternating* unguarded wined3d `ERR` sites at frame rate.
- *  3. **Head + tail cap.** [HEAD_LIMIT_BYTES] from the start and two
- *     [TAIL_SEGMENT_BYTES] from the end, middle elided — truncating from either
- *     end alone throws away either the crash or why it broke.
+ *  2. **Rate limit** to [SessionLogLimits.rateLimitLines] per second, for what
+ *     dedup cannot catch: two *alternating* unguarded wined3d `ERR` sites at
+ *     frame rate.
+ *  3. **Head + tail cap.** [SessionLogLimits.headBytes] from the start and two
+ *     [SessionLogLimits.tailSegmentBytes] from the end, middle elided —
+ *     truncating from either end alone throws away either the crash or why it
+ *     broke.
  *
  * No layer ever drops silently: a log that hides its own truncation turns a gap
- * in the evidence into a claim that nothing happened.
+ * in the evidence into a claim that nothing happened. **Layer 0 did exactly that
+ * until the caps became adjustable.** `Channel(_, DROP_OLDEST)` reports success
+ * from `trySend` either way, so nothing counted what it discarded; at the old
+ * fixed caps it almost never fired, and at raised caps with `+relay` on it is the
+ * first layer to bite. It is counted now, and it says so in the file and in the
+ * sidecar.
  *
  * Nothing here throws. Every file operation is wrapped, and the first failure
  * puts the writer into a state where it accepts lines and discards them, so a
  * full disk costs the log and never the session.
+ *
+ * @param limits the three caps this session runs under, from the container's
+ *   diagnostics record. Defaulted so that a caller with no opinion still gets a
+ *   bounded log rather than an unbounded one.
  */
 internal class SessionLogWriter(
     private val directory: File,
@@ -53,6 +69,7 @@ internal class SessionLogWriter(
     scope: CoroutineScope,
     private val onChanged: () -> Unit,
     private val onFinished: (SessionLogWriter) -> Unit,
+    private val limits: SessionLogLimits = SessionLogLimits(),
 ) : SessionLog {
 
     private sealed interface Command {
@@ -60,7 +77,28 @@ internal class SessionLogWriter(
         class Header(val lines: List<String>) : Command
     }
 
-    private val commands = Channel<Command>(CHANNEL_CAPACITY, BufferOverflow.DROP_OLDEST)
+    /**
+     * Lines the channel discarded because the pump had not caught up.
+     *
+     * `AtomicInteger` because `onUndeliveredElement` runs on the *sender's*
+     * thread — the one draining the guest's stderr — while everything else in
+     * this class is the pump's. Counting rather than blocking is deliberate: the
+     * producer must never become back-pressure on the process being logged, so
+     * the choice is between losing lines quietly and losing them out loud.
+     */
+    private val overflowed = AtomicInteger(0)
+
+    /** How much of [overflowed] the file has already admitted to. */
+    private var overflowReported = 0
+
+    private val commands = Channel<Command>(
+        CHANNEL_CAPACITY,
+        BufferOverflow.DROP_OLDEST,
+        // Called for each element DROP_OLDEST throws away. Not called for
+        // anything still buffered at `close()`, which delivers what it has —
+        // only `cancel()` would, and nothing cancels this channel.
+        onUndeliveredElement = { overflowed.incrementAndGet() },
+    )
     private val closed = AtomicBoolean(false)
 
     /**
@@ -222,7 +260,7 @@ internal class SessionLogWriter(
                 write(LogSource.VESSEL, LogLevel.WARN, rateLimitedLogMarker(refused))
             }
         }
-        if (windowLines >= RATE_LIMIT_LINES) {
+        if (windowLines >= limits.rateLimitLines) {
             rateLimited++
             dropped++
             return
@@ -246,8 +284,8 @@ internal class SessionLogWriter(
         val cost = encoded.length + 1L
 
         val written = runCatching {
-            if (tail == null && headBytes + cost > HEAD_LIMIT_BYTES) startTail()
-            if (tail != null && tailBytes + cost > TAIL_SEGMENT_BYTES) rotateTail()
+            if (tail == null && headBytes + cost > limits.headBytes) startTail()
+            if (tail != null && tailBytes + cost > limits.tailSegmentBytes) rotateTail()
             val target = tail ?: head ?: return
             target.write(encoded)
             target.newLine()
@@ -299,9 +337,27 @@ internal class SessionLogWriter(
         tailLines = 0
     }
 
+    /**
+     * Write the marker for anything the channel discarded since the last one.
+     *
+     * Called when the queue drains rather than per line, which is both cheap and
+     * the right moment: overflow happens during a burst and the count is only
+     * meaningful once the burst is over. Through [write] rather than [emit], so
+     * the rate limiter cannot suppress the line that explains a drop.
+     */
+    private fun reportOverflow() {
+        if (broken) return
+        val total = overflowed.get()
+        if (total <= overflowReported) return
+        val since = total - overflowReported
+        overflowReported = total
+        write(LogSource.VESSEL, LogLevel.WARN, overflowLogMarker(since))
+    }
+
     private fun flush() {
         if (broken) return
         flushPending()
+        reportOverflow()
         runCatching {
             head?.flush()
             tail?.flush()
@@ -328,6 +384,9 @@ internal class SessionLogWriter(
         val (exit, code) = requestedExit.get() ?: (SessionExit.CRASHED to null)
         if (!broken) {
             flushPending()
+            // Last chance while the segments are still open: a burst that
+            // overflowed on the way to the exit must still be admitted.
+            reportOverflow()
             runCatching {
                 head?.flush()
                 head?.close()
@@ -377,6 +436,7 @@ internal class SessionLogWriter(
         lines = lines,
         elidedLines = elided,
         droppedLines = dropped,
+        overflowLines = overflowed.get(),
         sizeBytes = segmentsOf(directory, startedAt).sumOf { it.length() },
         hasErrors = hasErrors,
     )
@@ -394,23 +454,12 @@ internal class SessionLogWriter(
 
     private companion object {
         /**
-         * Five megabytes of head — the init story: module loads, the driver
-         * coming up, D3D device creation. Three megabytes of tail at most, which
-         * is where the crash is. Eight in total, per session.
+         * The head allowance, the retained tail and the lines-per-second ceiling
+         * used to be constants here. They are [SessionLogLimits] now, per
+         * container, because the whole point of raising a debug channel is that
+         * the run afterwards is bigger than the caps were chosen for — and the
+         * arithmetic that ties the three together is stated there.
          */
-        const val HEAD_LIMIT_BYTES = 5L * 1024 * 1024
-
-        /** Two of these are retained, so the tail settles between 1.5 and 3 MB. */
-        const val TAIL_SEGMENT_BYTES = 1536L * 1024
-
-        /**
-         * Lines per second the sink will write before it starts counting instead.
-         *
-         * Two thousand is far above anything a working session produces and far
-         * below what a failing draw call can produce, which is the gap the limit
-         * has to sit in.
-         */
-        const val RATE_LIMIT_LINES = 2000
         const val RATE_WINDOW_MS = 1000L
 
         /** Deep enough to absorb a burst, shallow enough to bound the memory. */

@@ -2,6 +2,7 @@ package app.vessel.data
 
 import android.content.Context
 import app.vessel.core.LogEntry
+import app.vessel.core.SessionLogLimits
 import app.vessel.core.decodeLogLine
 import app.vessel.core.deleteTree
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -26,10 +27,16 @@ import javax.inject.Singleton
 /**
  * Every session log on this device: writing, rotation, listing and reading.
  *
- * One file per session at `filesDir/logs/<containerId>/<startedAt>.log`, ten
- * sessions kept per container, eight megabytes each at most.
+ * One file per session at `filesDir/logs/<containerId>/<startedAt>.log`,
+ * [SessionLogLimits.SESSIONS_KEPT] sessions kept per container and
+ * [SessionLogLimits.worstCaseBytesPerSession] each at most.
  * [ContainerRepository.delete] calls [deleteAll], so logs do not outlive their
  * container.
+ *
+ * The per-session caps are the container's, not this store's: see
+ * [SessionLogLimits]. The *count* stays here and stays fixed, because ten runs is
+ * a history budget rather than a fidelity budget — it is what comparing a
+ * regression against the run that worked costs.
  *
  * Reads never load a body into a `String`: [read] takes a byte cursor and
  * returns a page, [export] and [textFor] stream. An eight megabyte log is a
@@ -82,7 +89,11 @@ class SessionLogStore @Inject constructor(
      * must be closed, or the session is recovered as [SessionExit.CRASHED] the
      * next time the list is read.
      */
-    fun open(containerId: String, startedAt: Long = System.currentTimeMillis()): SessionLog {
+    fun open(
+        containerId: String,
+        startedAt: Long = System.currentTimeMillis(),
+        limits: SessionLogLimits = SessionLogLimits(),
+    ): SessionLog {
         var stamp = startedAt
         // Two launches inside one millisecond would otherwise share a file.
         while (writers.containsKey(key(containerId, stamp))) stamp++
@@ -95,6 +106,7 @@ class SessionLogStore @Inject constructor(
             scope = scope,
             onChanged = { _revision.update { it + 1 } },
             onFinished = { writers.remove(key(containerId, it.startedAt)) },
+            limits = limits,
         )
         writers[key(containerId, stamp)] = writer
         scope.launch { prune(containerId) }
@@ -104,6 +116,20 @@ class SessionLogStore @Inject constructor(
     /** Whether a session is being written to right now by this process. */
     fun isOpen(containerId: String, startedAt: Long): Boolean =
         writers.containsKey(key(containerId, startedAt))
+
+    /**
+     * Every byte this container's logs occupy, right now.
+     *
+     * Read off the directory rather than summed from the sidecars: the sidecars
+     * are what the *writer* believed, and the number this is for — the one shown
+     * next to a control that raises the ceiling — has to be what is actually on
+     * the device, including a session whose sidecar was never written. A screen
+     * that raises a storage ceiling and does not show the storage is not
+     * finished.
+     */
+    suspend fun usageBytes(containerId: String): Long = withContext(Dispatchers.IO) {
+        directoryFor(containerId).listFiles().orEmpty().sumOf { it.length() }
+    }
 
 
     // — listing ---------------------------------------------------------------
@@ -350,8 +376,15 @@ class SessionLogStore @Inject constructor(
         const val DIRECTORY = "logs"
         const val EXPORT_DIRECTORY = "log-export"
 
-        /** Ten runs is enough to compare a regression against what worked. */
-        const val KEEP_SESSIONS = 10
+        /**
+         * Ten runs is enough to compare a regression against what worked.
+         *
+         * Taken from [SessionLogLimits] rather than restated, because the
+         * Diagnostics surface multiplies it by the per-session cap to show a
+         * worst case, and two copies of this number would let that figure be
+         * wrong without anything failing.
+         */
+        val KEEP_SESSIONS = SessionLogLimits.SESSIONS_KEPT
 
         const val INITIAL_PAGE_CAPACITY = 512
         const val MAX_SCAN_LINES = 20_000

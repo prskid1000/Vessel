@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.params.ParamSpec
 import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
@@ -81,6 +82,8 @@ fun ContainerSheet(
         onSave = viewModel::save,
         onDelete = viewModel::delete,
         onOpenLogs = { onOpenLogs(state.containerId) },
+        onDiagnostics = viewModel::setDiagnostics,
+        onDeleteLogs = viewModel::deleteLogs,
     )
 }
 
@@ -95,6 +98,8 @@ private fun ContainerSheetContent(
     onSave: () -> Unit,
     onDelete: () -> Unit,
     onOpenLogs: () -> Unit,
+    onDiagnostics: (ContainerDiagnostics) -> Unit,
+    onDeleteLogs: () -> Unit,
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -131,8 +136,22 @@ private fun ContainerSheetContent(
                 state.groups.forEach { group -> ParamGroup(group, onParam) }
 
                 // Nothing below this line changes a setting: one destructive
-                // action and one destination.
+                // action, one destination, and one section that changes what the
+                // next run *says* rather than how it runs.
+                //
+                // **Nothing below it exists on a container being created**, and
+                // Diagnostics is the reason that matters rather than a tidiness
+                // rule: a container with no prefix has no session to diagnose and
+                // no logs to raise a limit on, and the dangerous tier reaches
+                // `wineboot` — see BOOTSTRAP_SESSION_ENV — so arming it before
+                // the prefix exists would make the first launch look like a hang.
                 if (!state.creating) {
+                    VRule(verticalMargin = Vessel.metrics.s6)
+                    DiagnosticsSection(
+                        state = state.diagnostics,
+                        onChange = onDiagnostics,
+                        onDeleteLogs = onDeleteLogs,
+                    )
                     VRule(verticalMargin = Vessel.metrics.s6)
                     Row(
                         Modifier.fillMaxWidth(),
@@ -361,6 +380,8 @@ private fun ContainerSheetPreview() {
             onSave = {},
             onDelete = {},
             onOpenLogs = {},
+            onDiagnostics = {},
+            onDeleteLogs = {},
         )
     }
 }

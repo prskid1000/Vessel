@@ -3,7 +3,9 @@ package app.vessel.ui.vm
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.vessel.core.ComponentType
+import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.ContainerProfile
+import app.vessel.core.SessionLogLimits
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
@@ -12,6 +14,7 @@ import app.vessel.core.params.resolve
 import app.vessel.data.ContainerRepository
 import app.vessel.data.InstalledComponents
 import app.vessel.data.ParamManifestStore
+import app.vessel.data.SessionLogStore
 import app.vessel.ui.shell.AppRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,7 +61,46 @@ data class ContainerSheetUiState(
     val error: String? = null,
     /** One-shot: the sheet closes and this view model is done with. */
     val finished: Boolean = false,
+    val diagnostics: DiagnosticsUiState = DiagnosticsUiState(),
 )
+
+/**
+ * The Diagnostics section, with every number already worked out.
+ *
+ * The labels are composed here rather than in the composable for the reason the
+ * rest of this view model exists: a byte count and a worst case are decisions
+ * about wording and rounding, and the section should be handed the sentence
+ * rather than the arithmetic.
+ */
+data class DiagnosticsUiState(
+    val diagnostics: ContainerDiagnostics = ContainerDiagnostics(),
+    /** The container's log directory, right now — `14.2 MB`. */
+    val usageLabel: String = "0 B",
+    /** That usage against the ceiling the current limits imply, for the bar. */
+    val usageFraction: Float = 0f,
+    /** `10 sessions · 480 MB at these limits`. */
+    val ceilingLabel: String = "",
+    val sessionCount: Int = 0,
+    /** The one line the collapsed row carries: `all off`, or what is on. */
+    val summary: String = "all off",
+    /**
+     * Whether this container has never been launched.
+     *
+     * The dangerous tier's warning says something extra when it is true:
+     * `WINEDEBUG` is in `BOOTSTRAP_SESSION_ENV`, so whatever is armed also
+     * reaches `wineboot` while the prefix is being built, and a `wineboot` given
+     * too much is a hang with an empty `drive_c`.
+     */
+    val neverLaunched: Boolean = true,
+) {
+    /** True while nothing in the translators group has been moved off its default. */
+    val translatorsAreDefault: Boolean
+        get() = diagnostics.dxvkLevel == ContainerDiagnostics.DEFAULT.dxvkLevel &&
+            diagnostics.vkd3dLevel == ContainerDiagnostics.DEFAULT.vkd3dLevel &&
+            diagnostics.vkd3dShaderLevel == ContainerDiagnostics.DEFAULT.vkd3dShaderLevel &&
+            diagnostics.fexMessages == ContainerDiagnostics.DEFAULT.fexMessages &&
+            diagnostics.driverMessagesInLog == ContainerDiagnostics.DEFAULT.driverMessagesInLog
+}
 
 /**
  * The container sheet — five fields, and the manifest decides which five.
@@ -87,6 +129,7 @@ class ContainerSheetViewModel @Inject constructor(
     private val manifests: ParamManifestStore,
     private val components: InstalledComponents,
     private val registry: AppRegistry,
+    private val sessionLogs: SessionLogStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ContainerSheetUiState())
@@ -147,6 +190,7 @@ class ContainerSheetViewModel @Inject constructor(
             )
         }
         rebuild()
+        if (!creating) refreshDiagnostics()
     }
 
     // — edits ----------------------------------------------------------------
@@ -169,6 +213,40 @@ class ContainerSheetViewModel @Inject constructor(
         // A rebuild rather than a targeted update, because a manifest clamp lets
         // one param move another's ceiling.
         rebuild()
+    }
+
+    /**
+     * Replace the whole diagnostics record.
+     *
+     * One setter for the whole thing rather than one per control, because
+     * [ContainerDiagnostics] owns the invariant that ties them together — a
+     * dangerous value and its one-launch arm are set in the same copy, and a
+     * per-field setter here would be a second place able to break that.
+     *
+     * Held in the draft like every other edit: nothing reaches the container
+     * document until Save, which is what makes the sheet's Save mean the same
+     * thing for every control on it.
+     */
+    fun setDiagnostics(diagnostics: ContainerDiagnostics) {
+        val current = draft ?: return
+        draft = current.copy(diagnostics = diagnostics)
+        refreshDiagnostics()
+    }
+
+    /**
+     * Every log this container has, gone.
+     *
+     * Immediate rather than deferred to Save, and that is the same rule the
+     * sheet's Delete follows: this is an action on the device, not a setting to
+     * be committed, and an action that waited for Save would be a delete the user
+     * could cancel by swiping the sheet away.
+     */
+    fun deleteLogs() {
+        val current = draft ?: return
+        viewModelScope.launch {
+            sessionLogs.deleteAll(current.id)
+            refreshDiagnostics()
+        }
     }
 
     // — commit ---------------------------------------------------------------
@@ -241,6 +319,70 @@ class ContainerSheetViewModel @Inject constructor(
         }
 
         _state.update { it.copy(groups = groups) }
+    }
+
+    // — diagnostics ------------------------------------------------------------
+
+    /**
+     * What the log directory holds, cached between reads.
+     *
+     * Read off the disk rather than kept in the container document, because it is
+     * a fact about the device and not about the container: a log pruned by
+     * another screen, or an export the system reclaimed, would leave a stored
+     * figure wrong with nothing to correct it.
+     */
+    private var logUsageBytes = 0L
+    private var logSessionCount = 0
+
+    /** Recompose the section now, and correct its two disk-backed numbers shortly. */
+    private fun refreshDiagnostics() {
+        _state.update { it.copy(diagnostics = diagnosticsState()) }
+        val current = draft ?: return
+        viewModelScope.launch {
+            logUsageBytes = sessionLogs.usageBytes(current.id)
+            logSessionCount = sessionLogs.sessionsNow(current.id).size
+            _state.update { it.copy(diagnostics = diagnosticsState()) }
+        }
+    }
+
+    private fun diagnosticsState(): DiagnosticsUiState {
+        val profile = draft ?: return DiagnosticsUiState()
+        val diagnostics = profile.diagnostics
+        val ceiling = diagnostics.limits.worstCaseBytesPerContainer
+        return DiagnosticsUiState(
+            diagnostics = diagnostics,
+            usageLabel = sizeLabel(logUsageBytes),
+            // Against the ceiling the *current* limits imply, so raising a cap
+            // visibly shortens the bar rather than leaving it where it was. The
+            // bar's job is "how much of what you have allowed is spent".
+            usageFraction = if (ceiling > 0) (logUsageBytes.toDouble() / ceiling).toFloat() else 0f,
+            ceilingLabel = "${SessionLogLimits.SESSIONS_KEPT} sessions · " +
+                "${sizeLabel(ceiling)} at these limits",
+            sessionCount = logSessionCount,
+            summary = summaryOf(diagnostics),
+            neverLaunched = profile.lastRun == null,
+        )
+    }
+
+    /**
+     * The one line the collapsed Diagnostics row carries.
+     *
+     * A count of what is switched on, not of what has been *changed*: the log
+     * limits are deliberately not counted, because they are neither on nor off
+     * and the storage group already shows its own state. "all off" has to be the
+     * literal truth for a fresh container, which is the whole reason this row
+     * carries a state at all.
+     */
+    private fun summaryOf(diagnostics: ContainerDiagnostics): String {
+        val default = ContainerDiagnostics.DEFAULT
+        var on = diagnostics.wineChannels.size
+        if (diagnostics.dxvkLevel != default.dxvkLevel) on++
+        if (diagnostics.vkd3dLevel != default.vkd3dLevel) on++
+        if (diagnostics.vkd3dShaderLevel != default.vkd3dShaderLevel) on++
+        if (diagnostics.fexMessages != default.fexMessages) on++
+        if (diagnostics.driverMessagesInLog != default.driverMessagesInLog) on++
+        if (diagnostics.rawTerms.isNotBlank()) on++
+        return if (on == 0) "all off" else "$on on"
     }
 
     private fun toEditorParam(resolved: ResolvedParam): EditorParam {

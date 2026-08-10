@@ -33,4 +33,18 @@ data class ContainerProfile(
     /** Epoch millis, or null when the container has never been launched. */
     val lastRun: Long? = null,
     val params: Map<String, ParamValue> = emptyMap(),
+    /**
+     * The debug channels this container's next session runs with.
+     *
+     * A typed field rather than more keys in [params], and the distinction is the
+     * point: [params] is the manifest surface, and everything in it obeys the
+     * manifest's law that a setting must be explainable in one plain sentence to
+     * someone who does not know what a translator is. `VKD3D_SHADER_DEBUG` is
+     * not, which is why Diagnostics is a separate surface with its own schema —
+     * see [ContainerDiagnostics] and `docs/DIAGNOSTICS-UI.md` §1.
+     *
+     * Defaulted, so every container written before this existed reads back as
+     * "nothing switched on", which is also what it was running with.
+     */
+    val diagnostics: ContainerDiagnostics = ContainerDiagnostics(),
 )

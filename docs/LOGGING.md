@@ -1,21 +1,30 @@
 # Logging
 
-Vessel keeps one log per container session, with a **fixed** channel set and no
-picker. This document is the source of truth for that configuration: why it is
-fixed, what is in it, and the traps that make naive logging silently do nothing.
-Code that implements it (`core/SessionEnvironment.kt`, `data/SessionLogStore.kt`)
-points here rather than restating it.
+Vessel keeps one log per container session, with a **fixed** default channel set
+and no picker. This document is the source of truth for that configuration: why
+it is fixed, what is in it, and the traps that make naive logging silently do
+nothing. Code that implements it (`core/SessionEnvironment.kt`,
+`data/SessionLogStore.kt`) points here rather than restating it.
 
 Verified against Wine, DXVK, vkd3d-proton and Winlator-Ludashi source on
 2026-08-07. Line references are to those trees at that date.
 
+**"Fixed" now means "fixed until somebody asks otherwise."** The per-container
+Diagnostics surface (`core/ContainerDiagnostics.kt`,
+`ui/screens/DiagnosticsSection.kt`) can raise or lower any of the curated
+channels for one container, and `docs/DIAGNOSTICS-UI.md` is the design brief for
+it. Nothing below changes: this is still the configuration every container runs
+with until somebody switches something on, an untouched container produces this
+environment byte for byte, and everything Diagnostics writes is *appended* to the
+string below rather than substituted for it.
+
 ## The configuration
 
 ```sh
-WINEDEBUG=-all,err+all,warn+module,+winediag,+loaddll
+WINEDEBUG=-all,err+all,warn+module,+winediag,+loaddll,+debugstr
 
 DXVK_LOG_LEVEL=info
-DXVK_LOG_PATH=<container>/logs     # insurance only — see below
+DXVK_LOG_PATH=none                 # routes, does not silence — see below
 
 VKD3D_DEBUG=warn
 VKD3D_SHADER_DEBUG=warn
@@ -23,6 +32,17 @@ VKD3D_SHADER_DEBUG=warn
 
 TU_DEBUG=<existing flags>,startup
 ```
+
+`+debugstr` earns its place below, under *the guest program's own voice*; the
+block above omitted it for one cycle while the code set it and the test asserted
+it.
+
+`DXVK_LOG_PATH=none` is a correction, not a downgrade, and the measurement is at
+`core/SessionEnvironment.kt`'s assignment: pointed at the log directory, DXVK
+wrote `metro_dxgi.log` *beside* the session log and the session log got zero
+`info:` lines. On a Wine build `emitMsg` sends every line to `__wine_dbg_output`
+regardless, and `none` makes `getFileName` open nothing. So the word routes the
+output into the log rather than next to it.
 
 ## Three traps that make logging a no-op
 
@@ -179,15 +199,34 @@ This is not fixable by excluding channels — the offending sites are ordinary
 `ERR`s that matter when they fire once. It is handled at the sink, in three
 layers:
 
+0. **The producer channel**, bounded and `DROP_OLDEST`, so a burst can never
+   become back-pressure on the process being logged.
 1. **Dedup** consecutive identical lines into `line  ×N`.
 2. **Rate limit** to a few thousand lines/second with an explicit
    `… rate-limited, N dropped …` marker — catches *alternating* errors in a
    loop, which dedup cannot.
-3. **Head+tail cap** at 8 MB — keep the first ~5 MB (init: module loads, driver
-   and D3D setup) and the last ~3 MB (the crash), eliding the middle.
+3. **Head+tail cap** — keep the first part (init: module loads, driver and D3D
+   setup) and the last part (the crash), eliding the middle.
 
 Every layer announces itself. A log that hides its own truncation is worse than
 no log.
+
+**Layer 0 broke that rule until the caps became adjustable**, and it is worth
+recording why it went unnoticed: `trySend` reports success whether or not the
+channel dropped something, so nothing counted it, and at the old fixed caps it
+almost never fired. It is the *first* layer to bite once a channel is raised, so
+it counts now — `SessionLogMeta.overflowLines`, and a
+`… N lines dropped before the sink could write them …` marker in the file.
+
+The three numbers in layer 2 and 3 are per container
+(`core/ContainerDiagnostics.kt`, `SessionLogLimits`) rather than constants, and
+they default to the top of their ladders: 32 MB of head, 16 MB of retained tail,
+20 000 lines a second — 48 MB a session and 480 MB a container at ten sessions,
+against the 5 / 3 / 2 000 and 80 MB this document used to describe. **The byte
+caps and the rate limit move together**: at roughly 120 bytes a line the rate
+decides how fast the bytes are reached, so raising either alone buys nothing.
+Because that ceiling is large enough to matter, the surface that raises it shows
+the container's actual log usage and carries a *Delete all logs* action.
 
 ## Detecting a silent driver fallback
 
@@ -207,17 +246,45 @@ Two cheap signals:
 - **Assert on our side.** Log whether `ADRENOTOOLS_DRIVER_PATH` / `_HOOKS_PATH`
   / `_NAME` were set and whether the `.so` exists at that path.
 - **`TU_DEBUG=startup`.** Only Turnip honours it. Output means Turnip loaded;
-  silence means it did not. This is the ground truth.
+  silence means it did not. This is the ground truth — **and today it is ground
+  truth the product cannot see.** Mesa picks its logger at init and under Android
+  the default is logcat (`native/mesa/src/util/log.c:118-128`,
+  `__android_log_write` at `:388`), and Vessel reads no logcat, so the line lands
+  where only `adb logcat` finds it. The fix is one variable Mesa already has:
+  `MESA_LOG=file` adds the file logger and `mesa_log_file` defaults to `stderr`
+  (`log.c:64-74, 145`), which is the pipe the session log reads. Diagnostics
+  offers it as *Driver messages in the log*, off by default.
 
-## Open item: FEX
+  **Unverified end to end.** That the mechanism exists is read out of Mesa's
+  source; that Turnip's lines actually arrive in the session log has not been
+  observed on the device. What would settle it is one session with `MESA_LOG=file`
+  set and `grep -c 'TU_DEBUG='` over its log returning non-zero. Until then no
+  `TU_DEBUG` *flag* control is offered, because a switch whose output nothing can
+  read is worse than no switch.
 
-FEX's logging configuration could not be confirmed at a primary source —
-`Source/Common/Config.cpp` no longer carries `silentlog`/`outputlog`. Ludashi
-exposes 15 FEX environment variables, all tuning knobs, none for logging.
+## FEX: `SILENTLOG`, and nothing else on this platform
 
-Partial mitigation: an unsupported instruction surfaces as Wine's unconditional
-`wine: Unhandled illegal instruction`, so the *symptom* is visible even if FEX's
-own diagnosis is not. Worth resolving once a session runs.
+This was an open item — `Source/Common/Config.cpp` no longer carries
+`silentlog`/`outputlog`, and Ludashi's 15 FEX variables are all tuning knobs. It
+is answered at a primary source now.
+
+`native/fex/Source/Windows/Common/Logging.cpp:36-49` is the **entire** Windows
+logging init. It reads `SilentLog` and nothing else: when not silent it resolves
+`__wine_dbg_output` out of ntdll — the pipe the session log already reads — and
+when that does not resolve it falls back to a file under `%LOCALAPPDATA%`.
+
+Two consequences, both already in the code:
+
+- **`FEX_SILENTLOG=0` is the whole configuration.** The default hides more than
+  crashes: `FEX_HOSTFEATURES` skips a token it does not recognise with only a log
+  line, so with the default a typo in a host-feature override is invisible.
+- **`FEX_OUTPUTLOG` does nothing here.** It is a Linux/FEXServer option and is
+  never consulted on Windows. Vessel sets `stderr` as a marker of intent and no
+  control offers it, because a switch that changes nothing is worse than none.
+
+An unsupported instruction is still visible either way: it surfaces as Wine's
+unconditional `wine: Unhandled illegal instruction`, which does not go through
+the channel system at all.
 
 ## For reference: what Winlator exposes
 

@@ -557,6 +557,117 @@ class SessionEnvironmentTest {
         )
     }
 
+    // — the diagnostics merge stage ---------------------------------------------
+
+    @Test
+    fun `the diagnostics set is a strict subset of the reserved one`() {
+        // The whole safety property of the third merge stage in one assertion: a
+        // manifest param can never reach a diagnostic variable, whatever the
+        // Diagnostics surface is allowed to do with it. Strict, because a set
+        // equal to the reserved one would mean Diagnostics could write
+        // `WINEPREFIX` and `ADRENOTOOLS_DRIVER_NAME`.
+        assertTrue(DIAGNOSTIC_SESSION_ENV.all { it in RESERVED_SESSION_ENV })
+        assertTrue(DIAGNOSTIC_SESSION_ENV.size < RESERVED_SESSION_ENV.size)
+        // The two whose whole purpose is an absence and a fixed value.
+        assertFalse("VKD3D_LOG_FILE" in DIAGNOSTIC_SESSION_ENV)
+        assertFalse("MESA_VK_WSI_DEBUG" in DIAGNOSTIC_SESSION_ENV)
+    }
+
+    @Test
+    fun `a container with nothing diagnosed produces the environment above, unchanged`() {
+        // The golden map is asserted against a container carrying an *explicit*
+        // default record as well as against one carrying none, because the
+        // difference between "no diagnostics field" and "a diagnostics field at
+        // its defaults" is exactly the difference a container document saved by a
+        // newer build would introduce.
+        val bare = env(driver = turnip)
+        val explicit = sessionEnvironment(
+            container().copy(diagnostics = ContainerDiagnostics()),
+            fexManifest,
+            paths,
+            turnip,
+        )
+        assertEquals(bare, explicit)
+    }
+
+    @Test
+    fun `diagnostics replace WINEDEBUG only by appending to it`() {
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics().withWineChannel("file", WineChannelLevel.EVERYTHING),
+        )
+        val environment = sessionEnvironment(diagnosed, fexManifest, paths)
+        assertEquals("$WINEDEBUG_CHANNELS,+file", environment["WINEDEBUG"])
+        // Order is the semantics, so the prefix must still be the prefix.
+        assertEquals("-all", environment["WINEDEBUG"]!!.split(",").first())
+    }
+
+    @Test
+    fun `a manifest param still cannot set WINEDEBUG when diagnostics are on`() {
+        // The manifest stage runs before the diagnostics one and is still
+        // filtered, so a container document naming WINEDEBUG loses to both.
+        val sneaky = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "g", title = "G",
+                    params = listOf(
+                        ParamSpec(
+                            key = "wine.debug", title = "Debug", type = ParamType.ENUM,
+                            default = JsonPrimitive("-all"), env = "WINEDEBUG",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics().withWineChannel("file", WineChannelLevel.OFF),
+        )
+        assertEquals(
+            "$WINEDEBUG_CHANNELS,-file",
+            sessionEnvironment(diagnosed, sneaky, paths)["WINEDEBUG"],
+        )
+    }
+
+    @Test
+    fun `diagnostics reach the subsystems in their own words`() {
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics()
+                .withDxvkLevel(DxvkLogLevel.DEBUG)
+                .withVkd3dShaderLevel(Vkd3dLogLevel.TRACE)
+                .withFexMessages(false)
+                .withDriverMessagesInLog(true),
+        )
+        val environment = sessionEnvironment(diagnosed, fexManifest, paths)
+        assertEquals("debug", environment["DXVK_LOG_LEVEL"])
+        assertEquals("trace", environment["VKD3D_SHADER_DEBUG"])
+        // Untouched, and still its own channel.
+        assertEquals("warn", environment["VKD3D_DEBUG"])
+        assertEquals("1", environment["FEX_SILENTLOG"])
+        assertEquals("file", environment["MESA_LOG"])
+        // Still not reachable, by any path.
+        assertFalse(environment.containsKey("VKD3D_LOG_FILE"))
+        assertEquals("none", environment["DXVK_LOG_PATH"])
+    }
+
+    @Test
+    fun `a diagnostics record adds no key the fixed block did not already have`() {
+        // `MESA_LOG` is the one exception and it is the point of this assertion:
+        // everything else Diagnostics writes is a value the environment already
+        // carried, so switching a control on cannot change the shape of the map.
+        val everything = container().copy(
+            diagnostics = ContainerDiagnostics()
+                .withWineChannel("relay", WineChannelLevel.EVERYTHING)
+                .withDxvkLevel(DxvkLogLevel.TRACE)
+                .withVkd3dLevel(Vkd3dLogLevel.TRACE)
+                .withVkd3dShaderLevel(Vkd3dLogLevel.TRACE)
+                .withFexMessages(false)
+                .withDriverMessagesInLog(true),
+        )
+        val added = sessionEnvironment(everything, fexManifest, paths).keys -
+            sessionEnvironment(container(), fexManifest, paths).keys
+        assertEquals(setOf("MESA_LOG"), added)
+    }
+
     // — the prefix bootstrap's own, much smaller environment ---------------------
 
     @Test

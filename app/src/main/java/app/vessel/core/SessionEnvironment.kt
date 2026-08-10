@@ -355,6 +355,56 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "DXVK_STATE_CACHE_PATH",
     "VKD3D_SHADER_CACHE_PATH",
     "VKD3D_CONFIG",
+
+    // Which logger Mesa picks. Reserved rather than merely unset, because it is
+    // in [DIAGNOSTIC_SESSION_ENV] below and that set is required to be a subset
+    // of this one: the guarantee is that a *manifest param* can never reach a
+    // diagnostic variable, whatever the Diagnostics surface may do with it.
+    "MESA_LOG",
+)
+
+/**
+ * The variables the Diagnostics surface may write, and nothing else.
+ *
+ * **A strict subset of [RESERVED_SESSION_ENV], and that is the whole design.**
+ * The obvious move — take these out of the reserved set and declare them as
+ * manifest params — is wrong for the reason the reserved set already states for
+ * the FEX flags at the comment above: reserving is what makes "this stopped being
+ * a setting" stick, because a container document saved while it *was* a setting
+ * still carries the old value and the manifest merge would hand it back.
+ * Unreserving `WINEDEBUG` re-opens exactly that, and would let a hand-edited
+ * document bypass every ordering rule `docs/LOGGING.md` exists to enforce.
+ *
+ * So the manifest stage keeps its filter untouched and a third stage runs after
+ * it, gated on this set. Four properties fall out, and each is the answer to a
+ * way the alternatives fail:
+ *
+ *  1. No container document can reach any of these through a param, ever. The
+ *     partition is explicit rather than implied by absence.
+ *  2. The diagnostics stage *narrows*: `WINEDEBUG` is composed by
+ *     [composeWineDebug], which starts from [WINEDEBUG_CHANNELS] and appends, so
+ *     the fixed prefix cannot be deleted by anything on that screen. Same shape
+ *     as [dllOverrides], same reason.
+ *  3. **`VKD3D_LOG_FILE` and `MESA_VK_WSI_DEBUG` stay unreachable by any path**,
+ *     because they are not here. The two variables whose whole purpose is an
+ *     absence and a fixed value cannot be written by a param or by Diagnostics.
+ *  4. The set is assertable: ⊆ [RESERVED_SESSION_ENV], and an untouched record
+ *     produces an empty diagnostics map. Two assertions, and they are in
+ *     `SessionEnvironmentTest`.
+ *
+ * **`TU_DEBUG` is deliberately absent**, though `docs/DIAGNOSTICS-UI.md` §6 lists
+ * it. Nothing writes it: Turnip's output goes to logcat, which Vessel does not
+ * read, so the Turnip flag control is withheld until a device run confirms
+ * `MESA_LOG=file` lands those lines in the session log. A set member with no
+ * writer is a permission granted to nobody; it goes in with the control.
+ */
+val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
+    "WINEDEBUG",
+    "DXVK_LOG_LEVEL",
+    "VKD3D_DEBUG",
+    "VKD3D_SHADER_DEBUG",
+    "FEX_SILENTLOG",
+    "MESA_LOG",
 )
 
 /**
@@ -438,7 +488,14 @@ data class SessionPaths(
  * parsing it entirely when fd 2 is `/dev/null`; and `TU_DEBUG` always includes
  * [TU_DEBUG_STARTUP], which is the only ground truth for whether Turnip loaded.
  *
- * @param profile the container, for its manifest values.
+ * Composed in three stages, in this order: the fixed values below, then the
+ * manifest's contributions filtered against [RESERVED_SESSION_ENV], then the
+ * container's [ContainerDiagnostics] filtered against [DIAGNOSTIC_SESSION_ENV].
+ * The third stage is empty for a container nobody has diagnosed, which is what
+ * makes "a fresh container runs with exactly the environment above" true rather
+ * than merely intended.
+ *
+ * @param profile the container, for its manifest values and its diagnostics.
  * @param manifest maps a param key to the environment variable it becomes. Null
  *   produces only the fixed variables — an incomplete environment is better than
  *   a guessed one.
@@ -592,6 +649,9 @@ fun sessionEnvironment(
     // configuration**: change a TSO setting and the next run silently loads a
     // cache built under the old one. The knobs above are exactly the kind of
     // change that would do it.
+    // The fixed channel set. The diagnostics stage at the end of this function
+    // may replace it — with a string that still *starts* with this one, because
+    // [composeWineDebug] appends and never substitutes.
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
     environment[WINEDLLOVERRIDES_ENV] = dllOverrides(profile, manifest)
     environment["DISPLAY"] = display
@@ -836,6 +896,26 @@ fun sessionEnvironment(
 
     for ((key, value) in manifestEnvironment(profile, manifest)) {
         if (key !in RESERVED_SESSION_ENV) environment[key] = value
+    }
+
+    // **Stage three: diagnostics, and it is the only thing allowed past the
+    // reserved set.** See [DIAGNOSTIC_SESSION_ENV] for why this is a third stage
+    // rather than six variables taken out of the reserved one.
+    //
+    // The gate is a filter and not an assertion because a key outside the set
+    // would be a fault in this build rather than in a document — but it is
+    // checked anyway, so that adding a control and forgetting to widen the set
+    // fails as "the switch does nothing" rather than as a variable nobody
+    // intended reaching a session. `diagnosticEnvironment` is tested to produce
+    // nothing outside the set for any record.
+    //
+    // Note this can only *rewrite* keys the fixed block above already set, never
+    // append new ones in a new position: `LinkedHashMap` keeps a key's original
+    // insertion point on reassignment, so the environment's order is the same
+    // whether or not anything here is switched on.
+    for ((key, value) in diagnosticEnvironment(profile.diagnostics)) {
+        if (key !in DIAGNOSTIC_SESSION_ENV) continue
+        environment[key] = value
     }
 
     return environment
