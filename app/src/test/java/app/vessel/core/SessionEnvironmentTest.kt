@@ -359,7 +359,7 @@ class SessionEnvironmentTest {
     fun `FEX memory ordering is fixed, not a setting`() {
         val environment = env()
         assertEquals("1", environment["FEX_TSOENABLED"])
-        assertEquals("1", environment["FEX_HALFBARRIERTSOENABLED"])
+        assertEquals("0", environment["FEX_HALFBARRIERTSOENABLED"])
         assertEquals("0", environment["FEX_VECTORTSOENABLED"])
     }
 
@@ -555,7 +555,7 @@ class SessionEnvironmentTest {
                 "FEX_SILENTLOG" to "0",
                 "FEX_OUTPUTLOG" to "stderr",
                 "FEX_TSOENABLED" to "1",
-                "FEX_HALFBARRIERTSOENABLED" to "1",
+                "FEX_HALFBARRIERTSOENABLED" to "0",
                 "FEX_VECTORTSOENABLED" to "0",
                 // Not defaults: FEX ships both on the memory-frugal side and
                 // documents both as stutter sources. See the assignment.
@@ -574,7 +574,7 @@ class SessionEnvironmentTest {
                 // reader of this file should be made to notice. Deriving it from
                 // `fexCacheKey` here would assert nothing at all.
                 "FEX_APP_CACHE_LOCATION" to
-                    File(File(caches, "fex"), "431d9812d0f4").absolutePath + File.separator,
+                    File(File(caches, "fex"), "96a6dacbc994").absolutePath + File.separator,
                 "FEX_ENABLECODECACHINGWIP" to "1",
             ),
             environment,

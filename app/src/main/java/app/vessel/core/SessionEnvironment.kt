@@ -634,13 +634,10 @@ fun sessionEnvironment(
     //   TSOENABLED=1           x86 assumes Total Store Order and Arm does not
     //                          guarantee it. Off is faster and breaks any
     //                          multi-threaded program, quietly and at random.
-    //   HALFBARRIERTSOENABLED=1  Backpatches *unaligned* loads and stores to
-    //                          half-barrier atomics. The "21% cheaper"
-    //                          measurement this comment used to cite is the
-    //                          LRCPC2 result and belongs to a different knob;
-    //                          tools/tso/run.sh now measures this one properly,
-    //                          against `=0` and on unaligned traffic — the only
-    //                          traffic the backpatch touches.
+    //   HALFBARRIERTSOENABLED=0  **Measured, and the opposite of FEX's default.**
+    //                          It backpatches *unaligned* loads and stores to
+    //                          half-barrier atomics, and on this core that
+    //                          costs 3x on exactly the traffic it touches.
     //   VECTORTSOENABLED=0     Upstream calls the accurate version a "HUGE"
     //                          performance hit, and the hardware feature that
     //                          would make it cheap (FEAT_LRCPC3) is reported by
@@ -672,7 +669,39 @@ fun sessionEnvironment(
     environment["FEX_OUTPUTLOG"] = FIXED_FEX_OUTPUTLOG
 
     environment["FEX_TSOENABLED"] = "1"
-    environment["FEX_HALFBARRIERTSOENABLED"] = "1"
+
+    /*
+     * **Off, against FEX's own default, because it is measured to cost 3x here.**
+     *
+     * `tools/tso/run.sh`, twice, on the device (`ZD2232JMB9`, Oryon). Times are
+     * the best of each set, in the units tsobench prints:
+     *
+     *                                          aligned   unaligned
+     *   default (half-barrier on)                145.8       514.5
+     *   half-barrier off                         144.3       167.5
+     *
+     * 3.07x on unaligned traffic, which is the only traffic the backpatch
+     * touches, and aligned traffic does not move. **The native ARM64 control is
+     * flat across all three rows of the same run** (165-170 aligned, 183.0
+     * unaligned) — a native binary cannot be affected by a FEX knob, so a flat
+     * control is what says this is ordering and not thermals or scheduling.
+     * Both runs reproduced the figures to a tenth.
+     *
+     * This reverses what this file did before, and the reversal is the point:
+     * FEX defaults `HalfBarrierTSOEnabled` to *true*, so Vessel's previous `1`
+     * was setting what FEX already did and could never have been shown wrong by
+     * a `1`-vs-default comparison. `run.sh` compares against `=0` for exactly
+     * that reason, and `=0` won.
+     *
+     * **`TSOENABLED` above stays 1 and this does not weaken it.** That one is
+     * correctness — x86 assumes Total Store Order, Arm does not guarantee it,
+     * and turning it off breaks multi-threaded programs quietly. This knob only
+     * chooses *how* unaligned accesses are made ordered, not whether they are.
+     *
+     * If a future core or FEX version changes the answer, re-run `run.sh`; the
+     * comparison it makes is the one that can move.
+     */
+    environment["FEX_HALFBARRIERTSOENABLED"] = "0"
     environment["FEX_VECTORTSOENABLED"] = "0"
 
     // **FEX's two JIT lookup caches, both turned back on.** Unlike the three
