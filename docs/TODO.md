@@ -978,6 +978,159 @@ later ones honest come first.
   session's environment — read off the device, not asserted in a test — carries
   the ordinary `WINEDEBUG` string with the screen showing the control off.
 
+## 8. Linux mode, and whether to have one
+
+`docs/LINUX-MODE.md` is the feasibility study and carries the `file:line` for
+every claim below. The short version, and it is not the encouraging one: **PRoot
+does not solve the problem this needs solved.** An app at `targetSdk` 36 may not
+`execve` a file in `filesDir` (§ *Running downloaded native code*,
+`ARCHITECTURE.md:207-216`), the escape hatch is `/system/bin/linker64`
+(`WineLaunch.kt:5-27`), and that is **bionic's** linker, which cannot load a
+glibc ELF. PRoot is a `ptrace` supervisor that fakes `chroot`; it grants no
+permission the process did not already have, and the first thing it would do is
+exec the guest's `ld-linux-aarch64.so.1` out of app storage. So the Ubuntu
+question is not "is proot fast enough", it is "can a glibc program be started at
+all", and nothing in this repository can start one today.
+
+Nothing here is a commitment to build it. §3 of this file closed Linux support
+deliberately — *"a glibc rootfs and proot, which is a different product"* — and
+`docs/LINUX-MODE.md` § *Reasons this might be the wrong product direction*
+argues that the refusal is still correct. The items below are ordered so that the
+cheap ones answer whether the expensive ones are possible, and **the first item
+is the only one worth doing before that question has an answer.**
+
+- [ ] **Four probes, one day, no product code.** Every downstream decision hangs
+  on facts nobody here has measured, and three of the four are one command each.
+  They go in `tools/probe/` beside `mapexec.c`, which is the precedent: that
+  probe is the reason the `execmod` story is a measurement rather than a theory
+  (`ARCHITECTURE.md:239-249`).
+  1. `linker64 <rootfs>/lib/ld-linux-aarch64.so.1 --version`, as the app's uid.
+     Does bionic's linker run glibc's loader as a program? Predicted no.
+  2. `ptrace`: fork, `PTRACE_TRACEME`, one `PTRACE_SYSCALL` round trip. Termux
+     relies on this working; nobody has checked it at `targetSdk` 36 on
+     Android 16.
+  3. `grep overlay /proc/filesystems`, `unshare -Ur true`, one `mount()` call.
+     Expected to fail on all three, which is what rules out overlayfs as the
+     shared-base mechanism — and "expected" is exactly the word this file
+     distrusts.
+  4. An in-process ELF loader: `mmap` `ld-linux-aarch64.so.1` from a clean file
+     mapping, synthesise auxv, jump, print from a glibc `hello`. This is the
+     only route to Ubuntu that keeps `targetSdk` 36, and it is the one thing in
+     the whole study with no prior art in this repository. The reason it is not
+     obviously doomed is that the `execmod` measurement says a *clean* file
+     mapping reaches `RX` (`ARCHITECTURE.md:245-247`) and ELF, unlike PE, does
+     not relocate text.
+  *Done when:* four `errno`s or four successes are written into
+  `docs/LINUX-MODE.md`'s open-questions table, replacing the word "unsure" in
+  each row, and read off the device rather than reasoned about.
+
+- [-] **PRoot as the enabling mechanism.** Closed before it was started. It
+  addresses `chroot`, not W^X, and the exec problem is the whole problem. It
+  stays available as the *path-and-bind* layer once something can start a glibc
+  process, which is a different item and a much later one.
+
+- [ ] **Decide the product question before the engineering one: Ubuntu, or a
+  bionic userland?** These are not the same feature and only one of them is
+  reachable today. A Termux-shaped **bionic** userland — NDK-built busybox and
+  bash, started with `linkerArgv` exactly as `wineserver` is
+  (`SessionRuntime.kt:157-165`) — needs no new mechanism at all, and delivers no
+  `apt`, no `dpkg` and nothing from Debian's archive. Ubuntu delivers those and
+  needs probe 4 to come back green. Shipping the first while calling it the
+  second is the failure mode to avoid, and this file's own launch-type matrix is
+  the standard: `.sh` is *"never offered … `NotAProgram`, which is a different
+  statement from a refusal and is the right one"*.
+  *Done when:* one of the two is written down as the target in
+  `docs/LINUX-MODE.md`, with the other named as refused and why.
+
+- [ ] **`ContainerProfile.mode` brings back "the wrong container", and the first
+  bug is already identifiable.** `ARCHITECTURE.md:3` is titled "One kind of
+  container, no switch" and derives a real property from it: an executable can
+  never be in the wrong one, so the architecture badge is information rather than
+  a warning (`ARCHITECTURE.md:38-42`). A mode ends that. The concrete cost lands
+  immediately in `ComponentStore.adoptLatest`, which walks `ComponentType.entries`
+  and adopts the newest version of every type a container does not already
+  reference (`ComponentStore.kt:174-177`) — so the moment a `LinuxBase` type
+  exists, **every Windows container silently takes a reference to a gigabyte of
+  rootfs it will never open**, and `prune()` then correctly refuses to free it.
+  Known in advance, and therefore exactly the shape of defect this file warns
+  about: *"a rule stated for one call site and not applied to the next one"*.
+  *Done when:* adoption is mode-aware, and a test creates a Windows container
+  with a `LinuxBase` package installed and asserts `references()` shows nothing
+  holding it.
+
+- [ ] **The `.wcp` installer cannot carry a distro rootfs, and should not be
+  taught to.** `WcpInstaller` refuses hard links (`WcpInstaller.kt:434-437`),
+  device nodes and fifos (`:439-442`) and absolute symlinks (`:587-595`) — and an
+  Ubuntu root filesystem is made of all three: coreutils ships hardlinks, `/dev`
+  is device nodes, and merged-`/usr` is absolute links. Each refusal is argued
+  for in that file and each is right for the packages this project publishes, so
+  the answer is to **repack the distro tarball into a relocatable payload in a
+  build script** — drop `/dev`, rewrite absolute links relative, break hardlinks
+  into copies, record every change — rather than weaken the installer. One
+  installer, one security posture, and the mess somewhere it can be diffed.
+  *Done when:* a repacked `ubuntu-base` installs through the unmodified
+  `WcpInstaller` with nothing refused, and `dpkg --verify` inside it reports no
+  differences the repack caused.
+
+- [ ] **A shared base with per-container writable directories, and no symlink
+  farm.** Sharing must not be done by hardlinking or symlinking the base into
+  each container: a guest write through either mutates the shared inode for every
+  container, silently. The symlink version is worse still — it recreates the
+  hazard class of the worst defect this project has had (§4, the
+  `deleteRecursively` incident) at a hundred thousand files instead of four.
+  The shape that works is a read-only `components/LinuxBase/<versionCode>/` with
+  per-container writable `etc/ var/ home/ root/ usr-local/`, joined by bind
+  mounts rather than by filesystem objects. **The rule the design must hold:
+  nothing inside `containers/<id>/linux/` may be a symlink pointing outside it** —
+  Android storage reaches a Linux container through a bind, never a link, which
+  is the exact opposite of the Windows side where a drive *is* a symlink
+  (`DriveMap.kt:28-33`). The honest consequence, which has to reach the
+  interface: with `/usr` shared and read-only, **`apt install` cannot work per
+  container**, and a base image that is the package set is the version of this
+  that does not lie.
+  *Done when:* two containers run off one base, each sees its own
+  `/etc/hostname`, deleting one leaves the other and the base untouched, and a
+  test asserts the no-outward-symlink rule over a provisioned Linux container.
+
+- [ ] **A glibc guest cannot use the Turnip that ships.** `build/turnip.sh:6`
+  says what it is — a bionic ELF — and `ARCHITECTURE.md:581-584` already wrote
+  the rule down while explaining why Vortek was *not* needed: glibc code cannot
+  call bionic's Vulkan driver. Put a glibc userland in a container and the
+  problem Vortek solves occurs here. Reinventing Vortek is refused; the two real
+  options are a software renderer (right for the *first* GUI, because it
+  separates "does X work for a foreign client" from "does a glibc Turnip exist")
+  and a second Mesa built against an `aarch64-linux-gnu` sysroot. The second
+  looks *more* likely to build cleanly than the bionic ICD did: the KGSL backend
+  is gated only on the kmd option (`mesa/src/freedreno/vulkan/meson.build:130-132`),
+  `tu_knl_kgsl.cc` contains no `__ANDROID__` at all, and the three platform
+  libraries plus the hand-written `sync_wait` that the ICD needed
+  (`build/turnip.sh:206-235`) exist only because the NDK's clang defines
+  `__ANDROID__` even when meson is told `system = 'linux'` (`:166-169`).
+  *Done when:* either a glibc X client draws through the vendored X server with a
+  software renderer, or a glibc `vkcube` reports `driver_id=18` — one of the two,
+  watched on the device.
+
+- [-] **x86 Linux binaries, for now.** FEXLoader plus an x86-64 rootfs is a
+  second build target and a second rootfs, and the reason to defer it is not
+  effort: **the guest's Mesa would be emulated in the hottest loop in the stack.**
+  What makes x86 *Windows* fast here is that DXVK and vkd3d are native ARM64EC
+  and only application code is translated (`ARCHITECTURE.md:16-18`). ARM64EC is a
+  Windows ABI feature; Linux has no equivalent, so that property does not
+  transfer and only FEX host/guest thunk libraries could recover it. ARM64-native
+  is the sane first target, and the argument for it is this one rather than
+  "ARM64 is obviously first".
+
+- [ ] **The X server needs nothing, and that should be checked rather than
+  assumed.** The display seam is already compatible with a foreign client because
+  of a change made for Vessel's own reasons: the server binds `/tmp/.X11-unix/X0`
+  in the **abstract** namespace (`UnixSocketConfig.java:34-53`,
+  `SessionDisplay.kt:459-468`), which has no filesystem, so a guest with a faked
+  root — or no root at all — finds it with an unmodified libxcb and no
+  configuration. That is reasoned from the code and from how libxcb opens a
+  display; no non-Wine client has ever connected to this server.
+  *Done when:* any glibc or bionic X client that is not Wine draws a window in a
+  session and gets a taskbar button.
+
 ---
 
 ## Where things actually stand

@@ -8,7 +8,7 @@ platform is marked as one of three things: *verified here* (measured on the
 device by this project and written down), *known* (independent knowledge, high
 confidence, not measured here), or *unsure* — with the experiment that would
 settle it.** This project has been wrong three times in one day about confident,
-plausible causes (`docs/TODO.md:837-843`), so an "unknown" here is deliberate and
+plausible causes (`docs/TODO.md:1152-1158`), so an "unknown" here is deliberate and
 is worth more than a guess.
 
 ---
@@ -431,7 +431,7 @@ That last point is not rhetorical. `docs/TODO.md:651-663`:
 
 It is fixed — `app/src/main/java/app/vessel/core/DeleteTree.kt:36,48` uses
 `Files.walkFileTree`, which does not follow links — and
-`docs/TODO.md:849-853` names the general lesson: *"a rule stated for one call
+`docs/TODO.md:1164-1168` names the general lesson: *"a rule stated for one call
 site and not applied to the next one."* A symlink farm would put a hundred
 thousand new call sites' worth of links inside the very directory that gets
 deleted wholesale.
@@ -654,7 +654,7 @@ Risk not in the table because it is not a question: **`adoptLatest` will hand ev
 Windows container a reference to the rootfs the moment a new `ComponentType`
 exists** (§6.1, `ComponentStore.kt:174-177`). Known, and fixable in the same
 change that introduces the type — but only if someone remembers, which is exactly
-the failure mode `docs/TODO.md:849-853` names.
+the failure mode `docs/TODO.md:1164-1168` names.
 
 ---
 
@@ -679,7 +679,7 @@ information rather than a warning. Adding a mode brings back the question, and
 function whose whole purpose is to guess correctly on the user's behalf.
 
 **9.3 The core sentence is not finished.** `docs/TODO.md:18-21` states the goal —
-*a Windows program drew on the screen through DXVK* — and `docs/TODO.md:855-858`
+*a Windows program drew on the screen through DXVK* — and `docs/TODO.md:1170-1173`
 lists what is honestly unfinished: no D3D window, FEX asserting on large PEs,
 presentation still a CPU copy with zero-copy specified and unstarted, `ipconfig`
 printing nothing, `.msi` reaching a UI and not installing, and no sound. Linux
