@@ -88,6 +88,34 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 | 4.10 | Bluetooth **mouse** moves the cursor | `[ ]` | Needs pointer capture; not wired |
 | 4.11 | Bluetooth **controller** reaches the guest | `[ ]` | `GamepadTranslator` exists |
 
+## 4b. Input mapping
+
+Everything below was written without a device — see `docs/plans/input-mapping.md`.
+Unit tests cover the model, the catalogue and the store; **none of these rows is
+testable off the device**, and none of them is ticked.
+
+| # | Action | State | Notes |
+|---|---|---|---|
+| 4b.1 | The rail holds **five** tools in one row at 421 dp landscape, without scrolling | `[ ]` | The rail went 212 → 260 dp for this. Plan §9.2 is the open question; the arithmetic says five 44 dp targets and four 3 dp gaps need 232 dp inside the card, which 260 gives. Measured on nothing |
+| 4b.2 | Input opens a panel beside the rail; the guest stays visible to its right | `[ ]` | 260 + 560 = 820 dp of a 927 dp window |
+| 4b.3 | Pressing a control on a Bluetooth pad lights its row | `[ ]` | The live-press indicator, and the whole argument for `heldControls` on the seam. Depends on 4.11 |
+| 4b.4 | With **Learn** on, a press opens that control's picker | `[ ]` | Depends on 4b.3 |
+| 4b.5 | Rebinding a control takes effect **without relaunching** | `[ ]` | The reason the editor is in-session at all |
+| 4b.6 | Rebinding a control that is **held** does not leave the guest holding a key | `[ ]` | `setInputProfile` releases before it changes. The failure mode is a character that walks into a wall forever |
+| 4b.7 | Setting the right stick to **Keys** makes its four rows appear and bind | `[ ]` | |
+| 4b.8 | Setting a stick to **Look** moves the guest cursor | `[ ]` | Plan §9.1: **may not survive a game that grabs or warps the cursor.** Relative-mouse mode is what `WinHandler` provides for Winlator and it is not vendored. Must be measured before Phase 3's look pad is worth finishing |
+| 4b.9 | A stick at **Look** hitting the edge of the 1280×720 desktop does not wedge | `[ ]` | Same measurement as 4b.8, the other half |
+| 4b.10 | **Deadzone** at 0.40 stops a worn stick holding a key; at 0.10 the stick still reaches | `[ ]` | |
+| 4b.11 | **Look speed** at 200 and at 2400 both feel like the number says | `[ ]` | |
+| 4b.12 | **Capture** takes a key from a Bluetooth keyboard | `[ ]` | Plan §9.3. `TYPE_NULL` says it should |
+| 4b.13 | Capture from the **device's own IME** — how much of a keyboard arrives | `[ ]` | Expected to be partial: a soft keyboard has no `Esc`, `Ctrl`, `Alt`, arrows or function keys, and `ACTION_MULTIPLE` carries no keycode. If it is useless, capture degrades to hardware-only and the catalogue carries the feature |
+| 4b.14 | Six keys with no preinstalled keysym reach the guest — `Print`, `Scroll Lock`, `Numpad Enter`, both `Super`, `Menu` | `[ ]` | The server installs the keysym on first press and sends `MappingNotify`. Unit-tested that the catalogue carries the right numbers; **never watched arriving** |
+| 4b.15 | A profile edited in a session is still there after the app is force-stopped | `[ ]` | Live edits persist immediately; `input-profiles.json` under `files/datastore/` |
+| 4b.16 | A container pointed at a profile starts on it | `[ ]` | `SessionRuntime.prepare` resolves it and logs the name |
+| 4b.17 | Deleting a profile a container names: the container starts on the default and **says so** | `[ ]` | And the container document is **not** rewritten. `adb shell run-as` the two JSON files to check |
+| 4b.18 | The **first edit** on a container using the built-in default silently adopts a copy, and another container on the default is unaffected | `[ ]` | |
+| 4b.19 | The gamepad glyph in the rail and the container sheet reads as a gamepad at 18 dp | `[ ]` | Drawn in `VIcons` rather than transcribed from Phosphor — the project vendors no Phosphor asset for `game-controller`. Never rendered |
+
 ## 5. Session lifecycle
 
 | # | Action | State | Notes |
