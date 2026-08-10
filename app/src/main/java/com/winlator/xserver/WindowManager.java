@@ -3,6 +3,7 @@ package com.winlator.xserver;
 import android.util.SparseArray;
 
 import com.winlator.core.Bitmask;
+import com.winlator.renderer.GPUImage;
 import com.winlator.xconnector.XInputStream;
 import com.winlator.xserver.errors.BadIdChoice;
 import com.winlator.xserver.errors.BadMatch;
@@ -184,6 +185,7 @@ public class WindowManager extends XResourceManager {
         if (isInputOutput) {
             drawable = drawableManager.createDrawable(id, width, height, visual);
             if (drawable == null) throw new BadIdChoice(id);
+            backWithHardwareBuffer(drawable); // VESSEL
         }
 
         final Window window = new Window(id, drawable, x, y, width, height, client);
@@ -194,6 +196,46 @@ public class WindowManager extends XResourceManager {
         triggerOnCreateResourceListener(window);
         return window;
     }
+
+    // VESSEL: back a window's content with an AHardwareBuffer so compositing
+    // stops re-uploading it every frame.
+    //
+    // Texture.updateFromDrawable glTexSubImage2D's the *whole* window on every
+    // composited frame — 3.6 MB at 1280x720, sixty times a second — because the
+    // damage rectangle is computed and then collapsed into a boolean. With a
+    // GPUImage the drawable's ByteBuffer *is* the AHardwareBuffer's mapped
+    // memory and the GL texture is an EGLImageKHR over the same pages, so
+    // Mesa's xcb_put_image memcpys straight into what the compositor samples
+    // and the upload disappears.
+    //
+    // None of this machinery is new: PresentExtension and DRI3Extension already
+    // do exactly this. A plain PutImage — which is what Mesa's software WSI
+    // uses, and therefore what every window in this product actually uses —
+    // simply never triggered it.
+    //
+    // Guarded three ways, because the failure modes are silent. Tiny windows
+    // are skipped: Wine litters the tree with 1x1 message windows and an
+    // AHardwareBuffer each would be pure waste. A buffer that fails to allocate
+    // leaves the plain Texture in place rather than handing the drawable a null
+    // ByteBuffer. And the stride is the buffer's, not the width — gralloc pads
+    // rows, Drawable.getStride() already asks the GPUImage for it, and getting
+    // that wrong skews the image rather than erroring.
+    private void backWithHardwareBuffer(Drawable content) {
+        if (content == null) return;
+        if (content.width <= MIN_HARDWARE_BUFFER_EDGE || content.height <= MIN_HARDWARE_BUFFER_EDGE) return;
+
+        GPUImage image = new GPUImage(content);
+        if (image.getVirtualData() == null) {
+            // Allocation or lock failed. Say so once — a silent fallback here
+            // would look like the optimisation working and doing nothing.
+            image.destroy();
+            return;
+        }
+        content.setTexture(image);
+    }
+
+    /** Below this, a window is Wine's message-only plumbing rather than a window. */
+    private static final int MIN_HARDWARE_BUFFER_EDGE = 1;
 
     private void changeWindowGeometry(Window window, short x, short y, short width, short height) {
         boolean resized = window.getWidth() != width || window.getHeight() != height;
@@ -208,6 +250,7 @@ public class WindowManager extends XResourceManager {
             Drawable oldContent = window.getContent();
             drawableManager.removeDrawable(oldContent.id);
             Drawable newContent = drawableManager.createDrawable(oldContent.id, width, height, oldContent.visual);
+            backWithHardwareBuffer(newContent); // VESSEL: a resize makes a new drawable
             newContent.setOffscreenStorage(oldContent.isOffscreenStorage());
             newContent.setOnDrawListener(() -> triggerOnUpdateWindowContent(window));
             window.setContent(newContent);

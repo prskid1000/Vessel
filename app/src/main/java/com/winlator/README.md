@@ -170,6 +170,23 @@ The modifications, in the order they were made:
    window-manager configure. The resize path matters most — it is
    `changeWindowGeometry` that recreates the backing `Drawable` at the new size,
    and a resize that skipped it would leave the window sampling a stale buffer.
+17. **`WindowManager.backWithHardwareBuffer()`** — a window's content is backed
+   by an AHardwareBuffer, so compositing stops re-uploading it every frame.
+   `Texture.updateFromDrawable` `glTexSubImage2D`s the **whole window on every
+   composited frame** — 3.6 MB at 1280x720 — because the damage rectangle is
+   computed and then collapsed into a boolean (`Drawable.java:194-199`). With a
+   `GPUImage` the drawable's `ByteBuffer` *is* the buffer's mapped memory and the
+   GL texture is an `EGLImageKHR` over the same pages, so Mesa's
+   `xcb_put_image` writes straight into what the compositor samples and the
+   upload disappears. **None of the machinery is new** — `PresentExtension` and
+   `DRI3Extension` already do exactly this; a plain `PutImage`, which is what
+   Mesa's software WSI uses and therefore what every window here actually uses,
+   never triggered it. Applied at both places a window's content drawable is
+   made, creation and resize. Guarded: 1×1 message windows are skipped, and a
+   buffer that fails to allocate leaves the plain `Texture` rather than handing
+   the drawable a null `ByteBuffer`. The stride comes from the buffer via
+   `Drawable.getStride()`, which already asks a `GPUImage` for it — gralloc pads
+   rows, and assuming width would skew the image rather than fail.
 
 ### Every file that differs from upstream
 
@@ -195,7 +212,7 @@ fails the build.
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16 |
+| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 17 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |
