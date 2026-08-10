@@ -184,8 +184,31 @@ const val TURNIP_ENABLED: Boolean = true
  * A constant because it is not a preference, and one line to revert: flipping
  * Wine from unmanaged to managed changes geometry *and* focus handling for
  * every window, not just the one being dragged.
+ *
+ * **Off, because on the device it bought nothing.** Tried 2026-08-10 with
+ * everything above in place and `VESSEL_MANAGED=1` confirmed present in the
+ * guest's own `/proc/<pid>/environ`, so the switch really was reaching Wine.
+ * `cmd` and `notepad` mapped and drew normally — and notepad, which *does*
+ * reflow when resized, still did not follow a shell drag. The frame moved and
+ * the client stayed. That is the one thing this was for, and it did not happen.
+ *
+ * *A stronger claim was written here first and it was wrong.* One dump caught
+ * Metro's window `mapped=false` and this note said managed mode had stopped a
+ * fullscreen game appearing. The simpler explanation was already recorded in
+ * `docs/TODO.md`: **Metro minimises itself on focus loss**, and the taskbar had
+ * just been revealed over it. Nothing here is evidence that managed mode breaks
+ * a game.
+ *
+ * So it is off on "no measured benefit", not on "known harm" — a weaker and
+ * more honest reason. The half that was never built is the likely explanation
+ * for the lack of benefit: a managed Wine expects `_NET_SUPPORTING_WM_CHECK`,
+ * `_NET_SUPPORTED`, `_NET_WM_STATE` and `_NET_ACTIVE_WINDOW`, and this server
+ * advertises none of them. `patches/wine/0011` and the server's `WM_STATE` stay
+ * in place: both are correct and both are prerequisites, and neither does
+ * anything while this is false. *Done when:* EWMH is advertised and a
+ * resizable program follows a drag.
  */
-const val MANAGED_DESKTOP: Boolean = true
+const val MANAGED_DESKTOP: Boolean = false
 
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"

@@ -515,7 +515,6 @@ class SessionEnvironmentTest {
                 // +3+44 — a 3px border and a 41px caption that nothing paints and
                 // that overflows the parent once the program resizes smaller.
                 "VESSEL_BORDERLESS" to "1",
-                "VESSEL_MANAGED" to "1",
                 "DXVK_LOG_LEVEL" to "info",
                 // `none`, not the log directory: on a Wine build DXVK sends every
                 // line to `__wine_dbg_output` *and* to a file, and a path here made
