@@ -392,17 +392,19 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
  *     produces an empty diagnostics map. Two assertions, and they are in
  *     `SessionEnvironmentTest`.
  *
- * **`TU_DEBUG` is deliberately absent**, though `docs/DIAGNOSTICS-UI.md` §6 lists
- * it. Nothing writes it: Turnip's output goes to logcat, which Vessel does not
- * read, so the Turnip flag control is withheld until a device run confirms
- * `MESA_LOG=file` lands those lines in the session log. A set member with no
- * writer is a permission granted to nobody; it goes in with the control.
+ * **`TU_DEBUG` is here but its control is gated in the UI**, not in this set.
+ * Turnip's output goes to logcat, which Vessel does not read, so a Turnip flag is
+ * only useful once `MESA_LOG=file` is on — and the Diagnostics surface says so
+ * and disables the control until it is, rather than pretending the flags do not
+ * exist. `diagnosticEnvironment` clears them for the same reason, so a
+ * hand-edited document cannot reach them either.
  */
 val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     "WINEDEBUG",
     "DXVK_LOG_LEVEL",
     "VKD3D_DEBUG",
     "VKD3D_SHADER_DEBUG",
+    "TU_DEBUG",
     "FEX_SILENTLOG",
     "MESA_LOG",
 )
@@ -913,7 +915,7 @@ fun sessionEnvironment(
     // append new ones in a new position: `LinkedHashMap` keeps a key's original
     // insertion point on reassignment, so the environment's order is the same
     // whether or not anything here is switched on.
-    for ((key, value) in diagnosticEnvironment(profile.diagnostics)) {
+    for ((key, value) in diagnosticEnvironment(profile.diagnostics, tuDebugFlags(profile, manifest))) {
         if (key !in DIAGNOSTIC_SESSION_ENV) continue
         environment[key] = value
     }

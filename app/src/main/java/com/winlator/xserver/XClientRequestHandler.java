@@ -5,6 +5,8 @@ import com.winlator.xconnector.RequestHandler;
 import com.winlator.xconnector.XInputStream;
 import com.winlator.xconnector.XOutputStream;
 import com.winlator.xconnector.XStreamLock;
+import android.util.Log;
+
 import com.winlator.xserver.errors.XRequestError;
 import com.winlator.xserver.extensions.Extension;
 import com.winlator.xserver.requests.AtomRequests;
@@ -418,6 +420,27 @@ public class XClientRequestHandler implements RequestHandler {
                         client.skipRequest();
                         break;
                     default:
+                        // VESSEL: an unknown *major* opcode took the connection
+                        // down without a word.
+                        //
+                        // This is a RuntimeException, not an XRequestError, so
+                        // it bypasses the catch below and the WARN in
+                        // XRequestError.sendError — it does not become an X
+                        // error reply at all, it unwinds the request handler
+                        // and the client loses the connection. From the
+                        // client's side that is "X connection to :0 broken"
+                        // with no protocol error preceding it, which is exactly
+                        // how the first zero-copy attempt presented.
+                        //
+                        // A major opcode Vessel does not know means an
+                        // extension it never registered. The registered set is
+                        // BigReq, MIT-SHM, DRI3, Present, SYNC and Composite
+                        // (XServer.java) — notably **not XFIXES**, which Mesa's
+                        // X11 WSI uses for swapchain damage regions
+                        // (wsi_common_x11.c, xcb_xfixes_create_region).
+                        Log.w(XRequestError.PROTO_TAG, "unknown major opcode " + opcode +
+                                " (minor " + client.getRequestData() +
+                                ") — no such extension is registered; dropping the connection");
                         throw new UnsupportedOperationException("Unsupported opcode "+opcode+".");
                 }
             }

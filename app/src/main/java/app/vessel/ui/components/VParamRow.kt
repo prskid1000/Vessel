@@ -164,9 +164,24 @@ fun VDropdownField(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
     placeholder: String = "Choose…",
+    /**
+     * Set the value in mono, for a choice whose options are a *tool's own words*
+     * rather than English — `info`, `warn`, `fixme`, `5 MB`, `2 000`.
+     *
+     * Not cosmetic: those strings are what an issue thread names and what a
+     * `/proc/<pid>/environ` dump will show, and setting them in the prose face
+     * invites the reader to treat them as descriptions they may paraphrase. The
+     * menu matches the field, or the value changes typeface when it is picked.
+     */
+    valueIsMachine: Boolean = false,
+    enabled: Boolean = true,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val shape = Vessel.metrics.shapeMd
+    // Disabled is 45% opacity and never a different palette — Nocturne does not
+    // recolour a disabled control, it dims it.
+    val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
+    val valueStyle = if (valueIsMachine) Vessel.type.mono else Vessel.type.body
 
     // The menu is a separate window and sizes itself to its widest item, so left
     // alone it is narrower than the field it drops out of and its right edge
@@ -188,16 +203,21 @@ fun VDropdownField(
                 .fillMaxWidth()
                 .defaultMinSize(minHeight = fieldHeight)
                 .background(Vessel.colors.surface, shape)
-                .vRing(if (expanded) Vessel.colors.accent else Vessel.colors.divider, shape)
-                .clickable { expanded = true }
+                .vRing(
+                    (if (expanded) Vessel.colors.accent else Vessel.colors.divider)
+                        .let { it.copy(alpha = it.alpha * alpha) },
+                    shape,
+                )
+                .clickable(enabled = enabled) { expanded = true }
                 .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s6),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 selected?.let(labelFor) ?: placeholder,
-                style = Vessel.type.body,
-                color = if (selected == null) Vessel.colors.textMuted else Vessel.colors.textPrimary,
+                style = valueStyle,
+                color = (if (selected == null) Vessel.colors.textMuted else Vessel.colors.textPrimary)
+                    .let { it.copy(alpha = it.alpha * alpha) },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -205,7 +225,7 @@ fun VDropdownField(
             Icon(
                 VIcons.CaretDown,
                 contentDescription = null,
-                tint = Vessel.colors.textMuted,
+                tint = Vessel.colors.textMuted.let { it.copy(alpha = it.alpha * alpha) },
                 modifier = Modifier.size(Vessel.metrics.iconMd),
             )
         }
@@ -232,7 +252,7 @@ fun VDropdownField(
                     text = {
                         Text(
                             labelFor(option),
-                            style = Vessel.type.body,
+                            style = valueStyle,
                             color = if (isSelected) {
                                 Vessel.colors.accent
                             } else {
@@ -430,39 +450,85 @@ private fun VSlider(
     )
 }
 
-/** One line of the `multi` control: a box, a tick, and the option's label. */
+/**
+ * One line of the `multi` control: a box, a tick, and the option's label.
+ *
+ * [hint] and [help] are for the second caller this grew: a switch whose *variable
+ * name* matters as much as its label. The hint sits on the right in mono, where
+ * every other machine fact on a sheet sits; the help wraps underneath, indented
+ * past the box so it reads as belonging to the row rather than to the next one.
+ * Both default to absent, so the manifest's plain option rows are unchanged.
+ */
 @Composable
 fun VCheckRow(
     label: String,
     checked: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    hint: String? = null,
+    help: String? = null,
+    enabled: Boolean = true,
 ) {
     val shape = Vessel.metrics.shapeSm
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clickable(onClick = onToggle)
-            .padding(vertical = Vessel.metrics.s3),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
+    val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
+    fun Color.dim() = copy(alpha = this.alpha * alpha)
+
+    Column(modifier.fillMaxWidth()) {
+        Row(
             Modifier
-                .size(Vessel.metrics.iconMd)
-                .background(if (checked) Vessel.colors.accentSoft else Color.Transparent, shape)
-                .vRing(if (checked) Vessel.colors.accent else Vessel.colors.divider, shape),
-            contentAlignment = Alignment.Center,
+                .fillMaxWidth()
+                .clickable(enabled = enabled, onClick = onToggle)
+                .heightIn(min = Vessel.metrics.touchTarget)
+                .padding(vertical = Vessel.metrics.s3),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (checked) {
-                Text("✓", style = Vessel.type.monoSmall, color = Vessel.colors.accent)
+            Box(
+                Modifier
+                    .size(Vessel.metrics.iconMd)
+                    .background(
+                        if (checked) Vessel.colors.accentSoft.dim() else Color.Transparent,
+                        shape,
+                    )
+                    .vRing(
+                        if (checked) Vessel.colors.accent.dim() else Vessel.colors.divider.dim(),
+                        shape,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (checked) {
+                    Text("✓", style = Vessel.type.monoSmall, color = Vessel.colors.accent.dim())
+                }
+            }
+            Text(
+                label,
+                style = Vessel.type.body,
+                color = (if (checked) Vessel.colors.textPrimary else Vessel.colors.textLabel).dim(),
+                modifier = if (hint == null) Modifier else Modifier.weight(1f),
+            )
+            if (hint != null) {
+                Text(
+                    hint,
+                    style = Vessel.type.monoSmall,
+                    color = Vessel.colors.textMuted.dim(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
-        Text(
-            label,
-            style = Vessel.type.body,
-            color = if (checked) Vessel.colors.textPrimary else Vessel.colors.textLabel,
-        )
+        if (help != null) {
+            Text(
+                help,
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.textMuted.dim(),
+                modifier = Modifier.padding(
+                    // Past the box and its gap, so the sentence hangs under the
+                    // label rather than under the tick.
+                    start = Vessel.metrics.iconMd + Vessel.metrics.s11,
+                    bottom = Vessel.metrics.s3,
+                ),
+            )
+        }
     }
 }
 

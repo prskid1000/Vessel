@@ -593,11 +593,13 @@ class SessionEnvironmentTest {
     @Test
     fun `diagnostics replace WINEDEBUG only by appending to it`() {
         val diagnosed = container().copy(
-            diagnostics = ContainerDiagnostics().withWineChannel("file", WineChannelLevel.EVERYTHING),
+            diagnostics = ContainerDiagnostics()
+                .withChannelAdded("file")
+                .withChannelLevel("file", WineChannelLevel.EVERYTHING),
         )
         val environment = sessionEnvironment(diagnosed, fexManifest, paths)
         assertEquals("$WINEDEBUG_CHANNELS,+file", environment["WINEDEBUG"])
-        // Order is the semantics, so the prefix must still be the prefix.
+        // Order is the semantics, so the baseline must still be the baseline.
         assertEquals("-all", environment["WINEDEBUG"]!!.split(",").first())
     }
 
@@ -620,7 +622,9 @@ class SessionEnvironmentTest {
             ),
         )
         val diagnosed = container().copy(
-            diagnostics = ContainerDiagnostics().withWineChannel("file", WineChannelLevel.OFF),
+            diagnostics = ContainerDiagnostics()
+                .withChannelAdded("file")
+                .withChannelLevel("file", WineChannelLevel.OFF),
         )
         assertEquals(
             "$WINEDEBUG_CHANNELS,-file",
@@ -632,10 +636,10 @@ class SessionEnvironmentTest {
     fun `diagnostics reach the subsystems in their own words`() {
         val diagnosed = container().copy(
             diagnostics = ContainerDiagnostics()
-                .withDxvkLevel(DxvkLogLevel.DEBUG)
-                .withVkd3dShaderLevel(Vkd3dLogLevel.TRACE)
-                .withFexMessages(false)
-                .withDriverMessagesInLog(true),
+                .withSubsystemLevel("dxvk", "debug")
+                .withSubsystemLevel("vkd3d.shader", "trace")
+                .withSubsystemFlag(FEX_MESSAGES_FLAG.id, false)
+                .withSubsystemFlag(DRIVER_LOG_FLAG.id, true),
         )
         val environment = sessionEnvironment(diagnosed, fexManifest, paths)
         assertEquals("debug", environment["DXVK_LOG_LEVEL"])
@@ -656,16 +660,33 @@ class SessionEnvironmentTest {
         // carried, so switching a control on cannot change the shape of the map.
         val everything = container().copy(
             diagnostics = ContainerDiagnostics()
-                .withWineChannel("relay", WineChannelLevel.EVERYTHING)
-                .withDxvkLevel(DxvkLogLevel.TRACE)
-                .withVkd3dLevel(Vkd3dLogLevel.TRACE)
-                .withVkd3dShaderLevel(Vkd3dLogLevel.TRACE)
-                .withFexMessages(false)
-                .withDriverMessagesInLog(true),
+                .withChannelAdded("relay")
+                .withSubsystemLevel("dxvk", "trace")
+                .withSubsystemLevel("vkd3d", "trace")
+                .withSubsystemLevel("vkd3d.shader", "trace")
+                .withSubsystemFlag(FEX_MESSAGES_FLAG.id, false)
+                .withSubsystemFlag(DRIVER_LOG_FLAG.id, true)
+                .withTurnipFlag("perf", true),
         )
         val added = sessionEnvironment(everything, fexManifest, paths).keys -
             sessionEnvironment(container(), fexManifest, paths).keys
         assertEquals(setOf("MESA_LOG"), added)
+        // TU_DEBUG was already in the map, and the diagnostics stage adds to the
+        // flags rather than replacing them — `startup` stays last.
+        assertEquals("perf,startup", sessionEnvironment(everything, fexManifest, paths)["TU_DEBUG"])
+    }
+
+    @Test
+    fun `a manifest Turnip flag and a diagnostics one both survive`() {
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics()
+                .withSubsystemFlag(DRIVER_LOG_FLAG.id, true)
+                .withTurnipFlag("nolrz", true),
+        )
+        assertEquals(
+            "nolrz,sysmem,startup",
+            sessionEnvironment(diagnosed, turnipManifest("sysmem"), paths)["TU_DEBUG"],
+        )
     }
 
     // — the prefix bootstrap's own, much smaller environment ---------------------

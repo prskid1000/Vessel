@@ -1,5 +1,6 @@
 package app.vessel.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,6 +34,7 @@ import app.vessel.ui.components.VLabeledField
 import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VSheet
 import app.vessel.ui.components.VSheetHeader
+import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.VStepper
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VToggle
@@ -84,6 +86,7 @@ fun ContainerSheet(
         onOpenLogs = { onOpenLogs(state.containerId) },
         onDiagnostics = viewModel::setDiagnostics,
         onDeleteLogs = viewModel::deleteLogs,
+        onCopyDiagnostics = viewModel::copyDiagnosticsTo,
     )
 }
 
@@ -100,22 +103,55 @@ private fun ContainerSheetContent(
     onOpenLogs: () -> Unit,
     onDiagnostics: (ContainerDiagnostics) -> Unit,
     onDeleteLogs: () -> Unit,
+    onCopyDiagnostics: (String) -> Unit,
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
+
+    // **Diagnostics takes the sheet over rather than growing it.** It is more
+    // controls than the settings form above it, and a sheet holding both would be
+    // past the height `docs/DESIGN.md:298-303` already calls full. Taking over
+    // also fixes the header: while it is open the commit action is meaningless
+    // there, so Save becomes a chevron that puts the form back.
+    var diagnosticsOpen by remember { mutableStateOf(false) }
+
+    // Back closes Diagnostics before it closes the sheet. Registered inside
+    // VSheet's own handler, so it wins while it is enabled — the innermost
+    // enabled callback is the one the dispatcher runs.
+    BackHandler(enabled = diagnosticsOpen) { diagnosticsOpen = false }
 
     VSheet(
         onDismiss = onDismiss,
         header = {
-            VSheetHeader(
-                title = if (state.creating) "New container" else state.name.ifBlank { "Container" },
-                trailing = {
-                    if (state.error == null && !state.loading) {
-                        VButton("Save", onSave, style = VButtonStyle.Primary)
-                    }
-                },
-            )
+            if (diagnosticsOpen) {
+                DiagnosticsHeader(
+                    containerName = state.name.ifBlank { "Container" },
+                    onCollapse = { diagnosticsOpen = false },
+                )
+            } else {
+                VSheetHeader(
+                    title = if (state.creating) {
+                        "New container"
+                    } else {
+                        state.name.ifBlank { "Container" }
+                    },
+                    trailing = {
+                        if (state.error == null && !state.loading) {
+                            VButton("Save", onSave, style = VButtonStyle.Primary)
+                        }
+                    },
+                )
+            }
         },
     ) {
+        if (diagnosticsOpen) {
+            DiagnosticsPanel(
+                state = state.diagnostics,
+                onChange = onDiagnostics,
+                onDeleteLogs = onDeleteLogs,
+                onCopyTo = onCopyDiagnostics,
+            )
+            return@VSheet
+        }
         when {
             state.error != null -> Text(
                 state.error,
@@ -147,10 +183,19 @@ private fun ContainerSheetContent(
                 // the prefix exists would make the first launch look like a hang.
                 if (!state.creating) {
                     VRule(verticalMargin = Vessel.metrics.s6)
-                    DiagnosticsSection(
-                        state = state.diagnostics,
-                        onChange = onDiagnostics,
-                        onDeleteLogs = onDeleteLogs,
+                    VSheetRow(
+                        icon = VIcons.Info,
+                        title = "Diagnostics",
+                        help = "What the next session is asked to say about itself, on top of " +
+                            "what it already records. Nothing here changes how the program runs.",
+                        onClick = { diagnosticsOpen = true },
+                        trailing = {
+                            Text(
+                                state.diagnostics.summary,
+                                style = Vessel.type.monoSmall,
+                                color = Vessel.colors.textMuted,
+                            )
+                        },
                     )
                     VRule(verticalMargin = Vessel.metrics.s6)
                     Row(
@@ -382,6 +427,7 @@ private fun ContainerSheetPreview() {
             onOpenLogs = {},
             onDiagnostics = {},
             onDeleteLogs = {},
+            onCopyDiagnostics = {},
         )
     }
 }

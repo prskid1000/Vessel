@@ -6,6 +6,7 @@ import app.vessel.core.ComponentType
 import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.ContainerProfile
 import app.vessel.core.SessionLogLimits
+import kotlinx.coroutines.flow.first
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
@@ -86,20 +87,25 @@ data class DiagnosticsUiState(
     /**
      * Whether this container has never been launched.
      *
-     * The dangerous tier's warning says something extra when it is true:
-     * `WINEDEBUG` is in `BOOTSTRAP_SESSION_ENV`, so whatever is armed also
-     * reaches `wineboot` while the prefix is being built, and a `wineboot` given
-     * too much is a hang with an empty `drive_c`.
+     * The one-session warning says something extra when it is true: `WINEDEBUG`
+     * is in `BOOTSTRAP_SESSION_ENV`, so whatever is armed also reaches `wineboot`
+     * while the prefix is being built, and a `wineboot` given too much is a hang
+     * with an empty `drive_c` two minutes later.
      */
     val neverLaunched: Boolean = true,
+    /** The other containers this record can be copied to, as `id to name`. */
+    val otherContainers: List<Pair<String, String>> = emptyList(),
 ) {
-    /** True while nothing in the translators group has been moved off its default. */
+    /**
+     * True while nothing in the translators group has been moved off its default.
+     *
+     * Derived from the declared lists rather than from named fields, so a fourth
+     * translator or a third switch is covered without editing this.
+     */
     val translatorsAreDefault: Boolean
-        get() = diagnostics.dxvkLevel == ContainerDiagnostics.DEFAULT.dxvkLevel &&
-            diagnostics.vkd3dLevel == ContainerDiagnostics.DEFAULT.vkd3dLevel &&
-            diagnostics.vkd3dShaderLevel == ContainerDiagnostics.DEFAULT.vkd3dShaderLevel &&
-            diagnostics.fexMessages == ContainerDiagnostics.DEFAULT.fexMessages &&
-            diagnostics.driverMessagesInLog == ContainerDiagnostics.DEFAULT.driverMessagesInLog
+        get() = diagnostics.subsystemLevels.isEmpty() &&
+            diagnostics.subsystemFlags.isEmpty() &&
+            diagnostics.turnipFlags.isEmpty()
 }
 
 /**
@@ -341,9 +347,36 @@ class ContainerSheetViewModel @Inject constructor(
         viewModelScope.launch {
             logUsageBytes = sessionLogs.usageBytes(current.id)
             logSessionCount = sessionLogs.sessionsNow(current.id).size
+            copyTargets = containers.containers.first()
+                .filterNot { it.id == current.id }
+                .map { it.id to it.name }
             _state.update { it.copy(diagnostics = diagnosticsState()) }
         }
     }
+
+    /**
+     * Put this container's diagnostics on another one, now.
+     *
+     * Immediate rather than deferred to Save, like every other action that
+     * changes something outside this sheet: Save commits *this* container, and a
+     * copy that waited for it would be a change to a second container hidden
+     * behind a button that does not mention it.
+     *
+     * The record is copied as it stands, arms included — the point of copying is
+     * usually to run the same loud configuration against a second container, and
+     * that container spends its own arm on its own next launch.
+     */
+    fun copyDiagnosticsTo(containerId: String) {
+        val current = draft ?: return
+        viewModelScope.launch {
+            containers.get(containerId)?.let {
+                containers.save(it.copy(diagnostics = current.diagnostics))
+            }
+        }
+    }
+
+    /** The other containers, for *Copy to another container*. Read once at load. */
+    private var copyTargets: List<Pair<String, String>> = emptyList()
 
     private fun diagnosticsState(): DiagnosticsUiState {
         val profile = draft ?: return DiagnosticsUiState()
@@ -351,6 +384,7 @@ class ContainerSheetViewModel @Inject constructor(
         val ceiling = diagnostics.limits.worstCaseBytesPerContainer
         return DiagnosticsUiState(
             diagnostics = diagnostics,
+            otherContainers = copyTargets,
             usageLabel = sizeLabel(logUsageBytes),
             // Against the ceiling the *current* limits imply, so raising a cap
             // visibly shortens the bar rather than leaving it where it was. The
@@ -374,14 +408,10 @@ class ContainerSheetViewModel @Inject constructor(
      * carries a state at all.
      */
     private fun summaryOf(diagnostics: ContainerDiagnostics): String {
-        val default = ContainerDiagnostics.DEFAULT
-        var on = diagnostics.wineChannels.size
-        if (diagnostics.dxvkLevel != default.dxvkLevel) on++
-        if (diagnostics.vkd3dLevel != default.vkd3dLevel) on++
-        if (diagnostics.vkd3dShaderLevel != default.vkd3dShaderLevel) on++
-        if (diagnostics.fexMessages != default.fexMessages) on++
-        if (diagnostics.driverMessagesInLog != default.driverMessagesInLog) on++
-        if (diagnostics.rawTerms.isNotBlank()) on++
+        val on = diagnostics.wineChannels.size +
+            diagnostics.subsystemLevels.size +
+            diagnostics.subsystemFlags.size +
+            diagnostics.turnipFlags.size
         return if (on == 0) "all off" else "$on on"
     }
 

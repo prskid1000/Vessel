@@ -202,6 +202,28 @@ The modifications, in the order they were made:
    reports being `System.nanoTime()` against a fabricated 60 Hz interval. A
    client's fallback for each missing bit is the path it already takes today.
 
+19. **`XRequestError.sendError()` and `XClientRequestHandler`'s unknown-opcode
+   branch both say what they refused** — the server could reject a request two
+   different ways and neither left a record. `sendError` is the single choke
+   point every X error to every client passes through; it now logs the error,
+   the major opcode and the minor, because either opcode alone is ambiguous
+   (the major names the extension, allocated from -100 upward at runtime, and
+   the minor names the request within it). The second is worse and is not an X
+   error at all: an unknown *major* opcode throws `UnsupportedOperationException`,
+   a `RuntimeException` that bypasses the `XRequestError` catch entirely,
+   unwinds the request handler and drops the connection — which reaches the
+   client as *"X connection to :0 broken"* with no protocol error before it,
+   exactly how the first zero-copy attempt presented. Neither branch changes
+   behaviour; both only start speaking.
+
+   *What they then proved, which is the point of adding them:* with both in
+   place a `--wsi dri3` run logs **nothing at all**, so
+   `vkCreateSwapchainKHR -> VK_ERROR_SURFACE_LOST_KHR` is **not** this server
+   refusing anything. Worth knowing before anyone implements DRI3 `FenceFromFD`
+   on the theory that a missing request is the cause. Registered extensions are
+   BigReq, MIT-SHM, DRI3, Present, SYNC and Composite — no XFIXES, which Mesa
+   probes but guards every use of behind `has_xfixes`.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -228,6 +250,8 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
+| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
+| `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17 |
 | `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18 |

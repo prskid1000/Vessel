@@ -1,6 +1,7 @@
 package app.vessel.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,14 +23,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
+import app.vessel.ui.theme.vRing
 
 /**
  * Which of the two jobs a [VDisclosureRow] is doing.
  *
  * The distinction is hierarchy, not decoration. [Item] is a thing *in* a sheet
  * that happens to open — it reads like the fields above it. [Group] is a
- * partition *inside* something already open, so it is set in `overline` and
- * carries the hairline that says where one group's contents end.
+ * partition *inside* something already open, so it is uppercase `overline` in the
+ * muted tone, which is the kicker this product uses for every group heading.
  */
 enum class VDisclosureStyle { Item, Group }
 
@@ -38,18 +40,15 @@ enum class VDisclosureStyle { Item, Group }
  *
  * **The state text is the whole reason this is not a [VSheetRow].** A sheet row
  * offers a destination and says what tapping it will do; this one has to say what
- * is *currently true* behind it — `all off`, `7 channels`, `14.2 MB` — because a
- * collapsed group whose state is invisible is a place the user has to open to
- * find out they did not need to. That readout, in mono on the right edge, is what
- * makes four collapsed rows a summary rather than a menu.
+ * is *currently true* behind it — `7 channels`, `defaults`, `14.2 MB`, `empty` —
+ * because a collapsed group whose state is invisible is a place the user has to
+ * open to find out they did not need to. That readout, in mono on the right edge,
+ * is what makes four collapsed rows a summary rather than a menu.
  *
  * There is no expand/collapse animation on the content: `docs/DESIGN.md`'s motion
  * rule is confirmation, never decoration, and a height animation on a group that
- * can hold nine rows is the sheet resizing under a finger. The chevron turns —
+ * can hold a dozen rows is the sheet resizing under a finger. The chevron turns —
  * 150 ms, the standard duration — and the content is simply there.
- *
- * @param state the fact about what is behind this row, or null when there is
- *   nothing worth saying before it is opened.
  */
 @Composable
 fun VDisclosureRow(
@@ -79,7 +78,10 @@ fun VDisclosureRow(
             verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
         ) {
             Text(
-                title,
+                // Uppercasing happens here because Compose has no
+                // `text-transform`, which is why `overline` carries the tracking
+                // but not the case — the same reason [VSectionHeader] does it.
+                if (style == VDisclosureStyle.Group) title.uppercase() else title,
                 style = when (style) {
                     VDisclosureStyle.Item -> Vessel.type.body
                     VDisclosureStyle.Group -> Vessel.type.overline
@@ -112,77 +114,121 @@ fun VDisclosureRow(
 }
 
 /**
- * One diagnostic control: what it is called, what Wine or the translator calls
- * it, what question it answers, and the control itself beside the name.
+ * One diagnostic control: **the name the tool knows it by**, whatever needs
+ * saying under it, and the control beside the name.
  *
- * **Beside, not beneath, and that is the difference from [VParamRow].** A param
- * row is one of four fields in a form and can afford a full-width control under
- * its label. This is one of nine rows in a list, and nine stacked
- * label-over-control pairs is a sheet nobody reaches the bottom of. The control
- * column is a fixed `diagnosticControlWidth` and is aligned to its right edge, so
- * a 36 dp toggle and a 126 dp dropdown line up down the same edge — which is what
- * lets the whole group be read down it without touching anything.
+ * **The mono name is the primary line, and that is the audience showing through.**
+ * Everywhere else in this product a control is titled in plain English, because
+ * everywhere else the reader is someone with a container. Here the reader has
+ * been told by a maintainer, an issue thread or a bug report to "turn on
+ * `module`" or "set `VKD3D_SHADER_DEBUG` to `warn`", and a row titled *Missing
+ * DLLs and exports* makes them guess which one that is. The English explanation
+ * has already done its work in the picker; on the row the identifier is the thing
+ * being looked for.
  *
- * [machineName] is not garnish either: the audience for this surface has been
- * told by a maintainer or an issue thread to "turn on `module`", and a row that
- * only says *Missing DLLs and exports* makes them guess which one that is.
+ * **Beside, not beneath, unlike [VParamRow].** A param row is one of four fields
+ * in a form and can afford a full-width control under its label. This is one of
+ * a list, and stacked label-over-control pairs is a sheet nobody reaches the
+ * bottom of. The control column is a fixed `diagnosticControlWidth`, aligned to
+ * its right edge, so a checkbox hint and a dropdown line up down the same edge —
+ * which is what lets a group be read down it without touching anything.
  *
- * [help] is kept under the row rather than moved to a long-press. Everywhere else
- * in this product a control's sentence is visible — `params-manifest.json:9-12`
- * makes it the condition of a setting existing at all — and a diagnostics screen
- * is the last place to start hiding the explanation behind a gesture.
+ * @param secondary the line under the name, in the ordinary muted tone.
+ * @param caution the line under the name in the warning tone, for a property of
+ *   the thing itself rather than of the current value. Both may be present.
+ * @param trailing sits after the control — the remove cross on a channel row.
  */
 @Composable
 fun VDiagnosticRow(
-    title: String,
-    machineName: String,
-    help: String?,
+    name: String,
     modifier: Modifier = Modifier,
+    secondary: String? = null,
     caution: String? = null,
     tag: (@Composable () -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
     control: @Composable () -> Unit,
 ) {
-    Column(modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s6)) {
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = Vessel.metrics.touchTarget),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
+    Row(
+        modifier
+            .fillMaxWidth()
+            .heightIn(min = Vessel.metrics.touchTarget)
+            .padding(vertical = Vessel.metrics.s6),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
         ) {
-            Column(
-                Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(title, style = Vessel.type.body)
-                    tag?.invoke()
-                }
-                Text(machineName, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
+                Text(name, style = Vessel.type.mono)
+                tag?.invoke()
             }
-            Box(
-                Modifier.width(Vessel.metrics.diagnosticControlWidth),
-                contentAlignment = Alignment.CenterEnd,
-            ) { control() }
+            if (secondary != null) {
+                Text(secondary, style = Vessel.type.bodySmall, color = Vessel.colors.textMuted)
+            }
+            if (caution != null) {
+                Text(caution, style = Vessel.type.bodySmall, color = Vessel.colors.warn)
+            }
         }
-        if (help != null) {
-            Text(
-                help,
-                style = Vessel.type.bodySmall,
-                color = Vessel.colors.textMuted,
-                modifier = Modifier.padding(top = Vessel.metrics.s3),
-            )
-        }
-        if (caution != null) {
-            Text(
-                caution,
-                style = Vessel.type.bodySmall,
-                color = Vessel.colors.warn,
-                modifier = Modifier.padding(top = Vessel.metrics.s3),
-            )
-        }
+        Box(
+            Modifier.width(Vessel.metrics.diagnosticControlWidth),
+            contentAlignment = Alignment.CenterEnd,
+        ) { control() }
+        trailing?.invoke()
     }
+}
+
+/**
+ * A warning line: the triangle, then the sentence, both in the warning tone.
+ *
+ * The glyph is not decoration on a screen whose ordinary state is a wall of muted
+ * grey — it is the only thing that distinguishes a sentence the reader must act
+ * on from the several around it that merely explain. Top-aligned against the
+ * first line, because these wrap to two and a centred glyph beside a two-line
+ * paragraph reads as a bullet.
+ */
+@Composable
+fun VCaution(text: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s3),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            VIcons.Warning,
+            contentDescription = null,
+            tint = Vessel.colors.warn,
+            modifier = Modifier.size(Vessel.metrics.iconSm).padding(top = Vessel.metrics.hairline),
+        )
+        Text(text, style = Vessel.type.bodySmall, color = Vessel.colors.warn)
+    }
+}
+
+/**
+ * A panel of prose inside a sheet — the sentence that says what a screen is for.
+ *
+ * A ringed box rather than a bare paragraph, because the Diagnostics surface's
+ * opening line has to be read *before* the controls rather than skimmed as one
+ * more help sentence among fifteen: it is the line that stops a screen of `Off`
+ * from reading as "logging is disabled".
+ */
+@Composable
+fun VInfoBox(text: String, modifier: Modifier = Modifier) {
+    val shape = Vessel.metrics.shapeMd
+    Text(
+        text,
+        style = Vessel.type.bodySmall,
+        color = Vessel.colors.textLabel,
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Vessel.colors.surfaceRaised, shape)
+            .vRing(Vessel.colors.divider, shape)
+            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+    )
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
@@ -198,36 +244,47 @@ private fun VDisclosurePreview() {
                 expanded = false,
                 onToggle = {},
             )
-            VRule(verticalMargin = Vessel.metrics.s6)
+            VInfoBox(
+                "Vessel already records errors, missing DLLs, loaded modules and the program's " +
+                    "own messages. Everything below adds to that.",
+            )
             VDisclosureRow(
                 title = "Wine",
                 style = VDisclosureStyle.Group,
-                state = "9 channels",
+                state = "2 channels",
                 expanded = true,
                 onToggle = {},
             )
             VDiagnosticRow(
-                title = "Missing DLLs and exports",
-                machineName = "module",
-                help = "Says when a library loaded but an entry point inside it is missing, " +
-                    "which is what later crashes far from the cause.",
+                name = "d3d",
+                caution = "Unbounded above warnings — 659 per-draw error sites.",
                 control = {
                     VDropdownField(
                         options = listOf("Off", "Errors", "+ Warnings"),
                         labelFor = { it },
-                        selected = "+ Warnings",
+                        selected = "Errors",
                         onSelect = {},
                     )
                 },
+                trailing = { VIconButton(VIcons.X, "Remove d3d", {}) },
             )
             VDiagnosticRow(
-                title = "Every call between libraries",
-                machineName = "relay",
-                help = "Names every cross-DLL call as it happens.",
-                caution = "Hundreds of megabytes in seconds; it switches itself off after one " +
-                    "launch.",
-                tag = { VTag("one launch", tone = VTagTone.Neutral) },
-                control = { VToggle(checked = false, onCheckedChange = {}) },
+                name = "relay",
+                tag = { VTag("one session", tone = VTagTone.Neutral) },
+                control = {
+                    VDropdownField(
+                        options = listOf("Off", "Everything"),
+                        labelFor = { it },
+                        selected = "Off",
+                        onSelect = {},
+                        valueIsMachine = false,
+                    )
+                },
+                trailing = { VIconButton(VIcons.X, "Remove relay", {}) },
+            )
+            VCaution(
+                "A channel marked one session fills the log in seconds and slows the run; it " +
+                    "switches itself off after the next launch.",
             )
         }
     }

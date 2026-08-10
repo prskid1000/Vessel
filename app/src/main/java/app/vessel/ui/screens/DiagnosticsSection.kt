@@ -5,7 +5,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -16,171 +19,174 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.core.ContainerDiagnostics
-import app.vessel.core.DIAGNOSTIC_WINE_CHANNELS
-import app.vessel.core.DangerousControl
-import app.vessel.core.DxvkLogLevel
+import app.vessel.core.DRIVER_LOG_FLAG
+import app.vessel.core.SUBSYSTEM_FLAGS
+import app.vessel.core.SUBSYSTEM_LEVELS
 import app.vessel.core.SessionLogLimits
-import app.vessel.core.Vkd3dLogLevel
+import app.vessel.core.TURNIP_FLAGS
+import app.vessel.core.WINE_CHANNEL_CATALOGUE
 import app.vessel.core.WineChannelLevel
-import app.vessel.core.isSwitchChannel
-import app.vessel.core.rawTermsIssue
+import app.vessel.core.isChannelName
+import app.vessel.core.oneSessionWarning
+import app.vessel.core.wineChannelInfo
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
+import app.vessel.ui.components.VCaution
+import app.vessel.ui.components.VCheckRow
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VDiagnosticRow
+import app.vessel.ui.components.VDialogCard
 import app.vessel.ui.components.VDisclosureRow
 import app.vessel.ui.components.VDisclosureStyle
 import app.vessel.ui.components.VDropdownField
+import app.vessel.ui.components.VIconButton
 import app.vessel.ui.components.VIcons
+import app.vessel.ui.components.VInfoBox
 import app.vessel.ui.components.VLabeledField
 import app.vessel.ui.components.VProgressBar
 import app.vessel.ui.components.VRule
+import app.vessel.ui.components.VSheetHeader
 import app.vessel.ui.components.VTag
 import app.vessel.ui.components.VTagTone
 import app.vessel.ui.components.VTextField
-import app.vessel.ui.components.VToggle
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vRing
 import app.vessel.ui.vm.DiagnosticsUiState
 
 /**
- * Diagnostics: what this container's next session is asked to say about itself.
+ * Diagnostics: what this container's next session is asked to say about itself,
+ * **on top of what it already says**.
  *
- * **A section of the container sheet, not a pushed screen**, which is
- * `docs/DIAGNOSTICS-UI.md` §9's first open question answered. Every short thing
- * in this product is a sheet over the thing it is about, and a push would lose
- * the container behind it — but the surface is fifteen-odd controls, which is
- * longer than the sheet `docs/DESIGN.md:298-303` already calls full. Both are
- * satisfied by making it four groups that collapse to one row each, with **one
- * group open at a time**: the sheet never holds more than one group's worth of
- * rows, and the four collapsed rows carry their own state so the whole
- * configuration is legible without opening anything.
+ * **A nested sheet, not a pushed screen and not more rows in the form.** Every
+ * short thing in this product is a sheet over the thing it is about, so a push
+ * would lose the container behind it — but this is more controls than the
+ * container sheet, which `docs/DESIGN.md:298-303` already calls full. Both are
+ * satisfied by taking the sheet over: opening Diagnostics replaces the settings
+ * form with this panel and swaps the header's Save for a collapse chevron, and
+ * the three groups inside it open one at a time so the panel never holds more
+ * than one group's worth of rows. Back collapses the panel before it closes the
+ * sheet.
  *
- * **Not a manifest group, and not more rows in the container sheet.** The
- * manifest's law is that a setting must be explainable in one plain sentence to
- * someone who does not know what a translator is (`params-manifest.json:9-12`),
- * and `VKD3D_SHADER_DEBUG` is not. Diagnostics has a different audience —
- * someone whose session is already broken, who has been told what to switch on —
- * so it gets a different surface with different rules. Putting the resolution
- * picker here would be the same mistake in the other direction.
+ * **The invisible baseline is why the Wine group starts empty.**
+ * `WINEDEBUG_CHANNELS` is always on and is never drawn. Everything here is an
+ * *addition*, which is what makes *+ Add a channel* the primary affordance and
+ * what makes a per-row remove cross mean something. The banner at the top is
+ * load-bearing for the same reason: an empty screen otherwise reads as "logging
+ * is disabled", which is the opposite of true.
  *
- * **The banner at the top is load-bearing.** A screen of Off switches reads as
- * "logging is disabled", which is the opposite of true: Vessel already records
- * errors on every channel, missing DLLs, loaded modules and the program's own
- * messages, and everything here adds to that.
+ * **Nothing in this file names a channel or a variable.** The rows come from
+ * `WINE_CHANNEL_CATALOGUE`, `SUBSYSTEM_LEVELS`, `SUBSYSTEM_FLAGS` and
+ * `TURNIP_FLAGS`; adding one is a data edit. The only `when` here is over the
+ * three groups, which are the layout.
  */
 @Composable
-fun DiagnosticsSection(
+fun DiagnosticsPanel(
     state: DiagnosticsUiState,
     onChange: (ContainerDiagnostics) -> Unit,
     onDeleteLogs: () -> Unit,
+    onCopyTo: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var open by remember { mutableStateOf(false) }
     var group by remember { mutableStateOf<DiagnosticsGroup?>(null) }
 
-    // The value the user has asked for and the control that made it dangerous.
-    // Held rather than applied, so cancelling the warning leaves the record
-    // exactly as it was rather than needing an undo.
-    var pending by remember { mutableStateOf<Pair<DangerousControl, ContainerDiagnostics>?>(null) }
+    // The value the user has asked for and the warning that stands between them.
+    // Held rather than applied, so cancelling leaves the record exactly as it was
+    // rather than needing an undo.
+    var pending by remember { mutableStateOf<Pair<String, ContainerDiagnostics>?>(null) }
     var confirmingDeleteLogs by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf(false) }
 
     val diagnostics = state.diagnostics
 
     /**
      * Apply an edit, unless it arms something that fills the log in seconds.
      *
-     * The gate is *newly* dangerous rather than dangerous: moving DXVK from
-     * `debug` to `trace` is already armed and does not need asking twice, and a
-     * second dialog for the same decision is how a warning becomes a thing people
-     * tap through. See [DangerousControl].
+     * The gate is *newly* armed rather than armed: moving DXVK from `debug` to
+     * `trace` is already armed and does not need asking twice, and a second
+     * dialog for the same decision is how a warning becomes a thing people tap
+     * through.
      */
-    fun propose(next: ContainerDiagnostics) {
-        val armed = DangerousControl.entries.firstOrNull {
-            it.isDangerous(next) && !it.isDangerous(diagnostics)
-        }
-        if (armed == null) onChange(next) else pending = armed to next
+    fun propose(next: ContainerDiagnostics, detail: String?) {
+        val fresh = next.oneSessionIds() - diagnostics.oneSessionIds()
+        if (fresh.isEmpty()) onChange(next) else pending = oneSessionWarning(detail) to next
     }
 
-    Column(modifier.fillMaxWidth()) {
-        VDisclosureRow(
-            title = "Diagnostics",
-            help = "What the next session is asked to say about itself. Nothing here changes " +
-                "how the program runs.",
-            state = state.summary,
-            expanded = open,
-            onToggle = { open = !open },
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
+        VInfoBox(
+            "Vessel already records errors, missing DLLs, loaded modules and the program's own " +
+                "messages. Everything below adds to that.",
         )
 
-        if (!open) return@Column
-
-        Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-            Text(
-                "Vessel already records errors, missing DLLs, loaded modules and the program's " +
-                    "own messages. Everything below adds to that.",
-                style = Vessel.type.bodySmall,
-                color = Vessel.colors.textLabel,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Vessel.colors.surfaceRaised, Vessel.metrics.shapeMd)
-                    .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
-                    .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+        DiagnosticsGroup.entries.forEach { entry ->
+            val expanded = group == entry
+            VDisclosureRow(
+                title = entry.title,
+                style = VDisclosureStyle.Group,
+                state = entry.state(state),
+                expanded = expanded,
+                // One at a time: opening a second closes the first, which is what
+                // keeps a sheet from becoming a page.
+                onToggle = { group = if (expanded) null else entry },
             )
+            VRule(verticalMargin = Vessel.metrics.none)
+            if (!expanded) return@forEach
+            Column(Modifier.padding(top = Vessel.metrics.s6)) {
+                when (entry) {
+                    DiagnosticsGroup.WINE -> WineGroup(
+                        diagnostics = diagnostics,
+                        propose = ::propose,
+                        onAdd = { picking = true },
+                    )
 
-            DiagnosticsGroup.entries.forEach { entry ->
-                val expanded = group == entry
-                VDisclosureRow(
-                    title = entry.title,
-                    style = VDisclosureStyle.Group,
-                    state = entry.state(state),
-                    expanded = expanded,
-                    // One at a time: opening a second closes the first, which is
-                    // what keeps the sheet from becoming a page.
-                    onToggle = { group = if (expanded) null else entry },
-                )
-                VRule(verticalMargin = Vessel.metrics.none)
-                if (!expanded) return@forEach
-                Column(Modifier.padding(top = Vessel.metrics.s6)) {
-                    when (entry) {
-                        DiagnosticsGroup.WINE -> WineGroup(diagnostics, ::propose)
-                        DiagnosticsGroup.TRANSLATORS -> TranslatorGroup(diagnostics, ::propose)
-                        DiagnosticsGroup.STORAGE -> StorageGroup(
-                            state,
-                            ::propose,
-                            onDeleteLogs = { confirmingDeleteLogs = true },
-                        )
-
-                        DiagnosticsGroup.RAW -> RawGroup(diagnostics, ::propose)
-                    }
+                    DiagnosticsGroup.TRANSLATORS -> TranslatorGroup(diagnostics, ::propose, onChange)
+                    DiagnosticsGroup.STORAGE -> StorageGroup(
+                        state = state,
+                        onChange = onChange,
+                        onDeleteLogs = { confirmingDeleteLogs = true },
+                    )
                 }
             }
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(Modifier.weight(1f)) {}
-                VButton(
-                    "Reset all",
-                    { onChange(ContainerDiagnostics.DEFAULT) },
-                    style = VButtonStyle.Ghost,
-                    enabled = !diagnostics.isDefault,
-                )
-            }
         }
+
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CopyToContainer(state.otherContainers, onCopyTo)
+            Row(Modifier.weight(1f)) {}
+            VButton(
+                "Reset all",
+                { onChange(ContainerDiagnostics.DEFAULT) },
+                style = VButtonStyle.Ghost,
+                enabled = !diagnostics.isDefault,
+            )
+        }
+    }
+
+    if (picking) {
+        ChannelPicker(
+            taken = diagnostics.addedChannels,
+            onPick = { channel ->
+                picking = false
+                val next = diagnostics.withChannelAdded(channel)
+                propose(next, wineChannelInfo(channel).caution)
+            },
+            onDismiss = { picking = false },
+        )
     }
 
     val danger = pending
     if (danger != null) {
         VConfirmSheet(
-            title = danger.first.title,
+            title = "Fills the log in seconds",
             // The three concrete things, plus the one consequence a container
             // that has never run adds: WINEDEBUG is in BOOTSTRAP_SESSION_ENV, so
-            // whatever is armed here also reaches `wineboot` while the prefix is
-            // being built — and a wineboot given too much looks like a hang.
-            message = danger.first.warning + if (state.neverLaunched) {
+            // whatever is armed also reaches `wineboot` while the prefix is being
+            // built — and a wineboot given too much is a hang with an empty
+            // drive_c two minutes later.
+            message = danger.first + if (state.neverLaunched) {
                 " This container has never been launched, so the next launch also builds its " +
                     "Windows prefix with this switched on: expect it to take much longer than " +
                     "usual."
@@ -211,109 +217,130 @@ fun DiagnosticsSection(
     }
 }
 
+/** The panel's own header, which replaces the container sheet's while it is open. */
+@Composable
+fun DiagnosticsHeader(containerName: String, onCollapse: () -> Unit) {
+    VSheetHeader(
+        title = "Diagnostics",
+        // The container, in mono, because the whole hazard of a screen like this
+        // is arming a firehose on the wrong one.
+        subtitle = containerName,
+        trailing = {
+            VIconButton(
+                VIcons.CaretDown,
+                contentDescription = "Close diagnostics",
+                onClick = onCollapse,
+                tint = Vessel.colors.textMuted,
+            )
+        },
+    )
+}
+
 /**
- * The four partitions, in the order they are drawn.
+ * The three partitions, in the order they are drawn.
  *
  * Grouped by *who answers the question* rather than by variable name: Wine's own
- * channels, then the layers underneath it, then how much of the answer is kept,
- * then the escape hatch. The raw field is last on purpose — see [RawGroup].
+ * channels, then the layers underneath it, then how much of the answer is kept.
+ *
+ * There was a fourth — a raw `WINEDEBUG` field — and it went because the *Add a
+ * channel* dialog's own free-text field does the same job. See [ChannelPicker].
  */
 enum class DiagnosticsGroup(val title: String) {
     WINE("Wine"),
     TRANSLATORS("Translators and driver"),
     STORAGE("How much is kept"),
-    RAW("Raw terms"),
     ;
 
     /** The one fact worth showing while this group is closed. */
     fun state(state: DiagnosticsUiState): String = when (this) {
-        WINE -> {
-            val changed = state.diagnostics.wineChannels.size
-            if (changed == 0) "defaults" else "$changed changed"
+        WINE -> when (val n = state.diagnostics.wineChannels.size) {
+            0 -> "none added"
+            1 -> "1 channel"
+            else -> "$n channels"
         }
 
         TRANSLATORS -> if (state.translatorsAreDefault) "defaults" else "changed"
         STORAGE -> state.usageLabel
-        RAW -> if (state.diagnostics.rawTerms.isBlank()) "empty" else "set"
     }
 }
 
 /**
- * Wine's channels, one row each, with the level each runs at.
+ * The Wine channels the user has added — starting at none.
  *
- * **Two control shapes, because the channels are two different things.** Seven
- * of them are ladders: a level is a real question for a channel whose classes
- * carry different kinds of message. `relay` and `seh` are switches, and drawing
- * them as ladders would be a lie about what they contain — every `_(relay)` site
- * in ntdll is `TRACE_(relay)`, so its Errors and Warnings stops are silence, and
- * `seh`'s error tier is already on through `err+all`, so its only stop that
- * changes anything is the trace one.
- *
- * The four channels the fixed prefix already names come first and show the levels
- * they are already running at. That ordering is the hierarchy, the same rule the
- * manifest states for itself.
+ * One row shape for every channel, drawn from its catalogue entry, so a channel
+ * the catalogue has never heard of renders identically to `module`. The mono name
+ * is the row; the English description did its work in the picker and is not
+ * repeated fifteen times down a sheet.
  */
 @Composable
 private fun WineGroup(
     diagnostics: ContainerDiagnostics,
-    propose: (ContainerDiagnostics) -> Unit,
+    propose: (ContainerDiagnostics, String?) -> Unit,
+    onAdd: () -> Unit,
 ) {
     Column {
-        DIAGNOSTIC_WINE_CHANNELS.forEach { spec ->
-            val level = diagnostics.levelOf(spec.channel)
-            val switch = isSwitchChannel(spec.channel)
+        if (diagnostics.wineChannels.isEmpty()) {
+            Text(
+                "No extra channels. Vessel's own set is already running; add a channel to ask " +
+                    "the next session a louder question.",
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.textMuted,
+                modifier = Modifier.padding(bottom = Vessel.metrics.s8),
+            )
+        }
+
+        diagnostics.wineChannels.forEach { row ->
+            val info = row.info
             VDiagnosticRow(
-                title = spec.title,
-                machineName = spec.channel,
-                help = spec.help,
-                caution = spec.caution,
-                // The tag appears on the two switch channels always — they are
-                // one-launch by construction — and on any ladder that is sitting
-                // at a stop that arms it, which today is `d3d` above Errors.
-                tag = armedTag(
-                    always = switch,
-                    armed = DangerousControl.entries.any {
-                        it.id.removePrefix("wine.") == spec.channel && it.isDangerous(diagnostics)
-                    },
-                ),
+                name = row.channel,
+                caution = info.caution,
+                tag = if (info.oneSessionAt != null) {
+                    { VTag("one session", tone = VTagTone.Neutral) }
+                } else {
+                    null
+                },
                 control = {
-                    if (switch) {
-                        VToggle(
-                            checked = level == WineChannelLevel.EVERYTHING,
-                            onCheckedChange = { on ->
-                                propose(
-                                    diagnostics.withWineChannel(
-                                        spec.channel,
-                                        if (on) {
-                                            WineChannelLevel.EVERYTHING
-                                        } else {
-                                            spec.defaultLevel
-                                        },
-                                    ),
-                                )
-                            },
-                        )
-                    } else {
-                        VDropdownField(
-                            options = spec.levels.map { it.name },
-                            labelFor = { WineChannelLevel.valueOf(it).label },
-                            selected = level.name,
-                            onSelect = {
-                                propose(
-                                    diagnostics.withWineChannel(
-                                        spec.channel,
-                                        WineChannelLevel.valueOf(it),
-                                    ),
-                                )
-                            },
-                        )
-                    }
+                    VDropdownField(
+                        options = info.levels.map { it.name },
+                        labelFor = { WineChannelLevel.valueOf(it).label },
+                        selected = row.level.name,
+                        onSelect = {
+                            val level = WineChannelLevel.valueOf(it)
+                            propose(
+                                diagnostics.withChannelLevel(row.channel, level),
+                                info.caution,
+                            )
+                        },
+                    )
+                },
+                trailing = {
+                    VIconButton(
+                        VIcons.X,
+                        contentDescription = "Remove ${row.channel}",
+                        onClick = { propose(diagnostics.withChannelRemoved(row.channel), null) },
+                        tint = Vessel.colors.textMuted,
+                    )
                 },
             )
         }
+
+        if (diagnostics.wineChannels.any { it.info.oneSessionAt != null }) {
+            VCaution(
+                "A channel marked one session fills the log in seconds and slows the run; it " +
+                    "switches itself off after the next launch.",
+            )
+        }
+
+        VButton(
+            "Add a channel",
+            onAdd,
+            style = VButtonStyle.Primary,
+            icon = VIcons.Plus,
+            modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
+        )
         Text(
-            "Every change here is appended to Vessel's own channel list, so a later term wins " +
-                "and the defaults above cannot be deleted by accident.",
+            "Terms are written in the order above and appended to Vessel's own, so a channel " +
+                "added here can change its own level and nothing else.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),
@@ -328,104 +355,103 @@ private fun WineGroup(
  * out.** DXVK is one minimum severity over six names; vkd3d is a different six
  * names in a different order — `info` sits between `err` and `fixme`, so `warn`
  * already carries both — and it has two independent channels, not one. FEX is a
- * single boolean. Mesa's logger choice is another boolean. Drawing these as one
- * row type repeated four times would be a screen that lies about what it sets;
- * the wire words are shown in mono for the same reason, because they are what an
- * issue thread will name.
+ * boolean, Mesa's logger choice is another, and Turnip is a flag list with no
+ * severity in it at all. Drawing these as one row type repeated would be a screen
+ * that lies about what it sets; the wire words are in mono for the same reason,
+ * because they are what an issue thread names.
  *
- * **Turnip's flags are not here, and that is a finding rather than an omission.**
- * `TU_DEBUG` is a flag list and would have to be a multi-select — but Mesa picks
- * its logger at init and under Android the default is logcat, which Vessel does
- * not read, so every one of those flags is a switch whose output the product
- * cannot show. *Driver messages in the log* below is the fix; the flags follow it
- * once a device run confirms it works.
+ * All four come out of the declared lists, so this function contains no variable
+ * name and no channel name.
  */
 @Composable
 private fun TranslatorGroup(
     diagnostics: ContainerDiagnostics,
-    propose: (ContainerDiagnostics) -> Unit,
+    propose: (ContainerDiagnostics, String?) -> Unit,
+    onChange: (ContainerDiagnostics) -> Unit,
 ) {
     Column {
-        VDiagnosticRow(
-            title = "Direct3D 9 to 11",
-            machineName = "DXVK_LOG_LEVEL",
-            help = "How the Direct3D translator reports itself. info already names the reason a " +
-                "device was rejected, which is the usual question.",
-            tag = armedTag(always = false, armed = DangerousControl.DXVK_VERBOSE.isDangerous(diagnostics)),
-            control = {
-                VDropdownField(
-                    options = DxvkLogLevel.entries.map { it.name },
-                    labelFor = { DxvkLogLevel.valueOf(it).wire },
-                    selected = diagnostics.dxvkLevel.name,
-                    onSelect = { propose(diagnostics.withDxvkLevel(DxvkLogLevel.valueOf(it))) },
-                )
-            },
-        )
-        VDiagnosticRow(
-            title = "Direct3D 12",
-            machineName = "VKD3D_DEBUG",
-            help = "The Direct3D 12 translator's own messages.",
-            tag = armedTag(always = false, armed = DangerousControl.VKD3D_TRACE.isDangerous(diagnostics)),
-            control = {
-                VDropdownField(
-                    options = Vkd3dLogLevel.entries.map { it.name },
-                    labelFor = { Vkd3dLogLevel.valueOf(it).wire },
-                    selected = diagnostics.vkd3dLevel.name,
-                    onSelect = { propose(diagnostics.withVkd3dLevel(Vkd3dLogLevel.valueOf(it))) },
-                )
-            },
-        )
-        VDiagnosticRow(
-            title = "Direct3D 12 shader translation",
-            machineName = "VKD3D_SHADER_DEBUG",
-            help = "Shader compilation failures, which the row above does not carry — it is a " +
-                "separate channel with its own level.",
-            tag = armedTag(
-                always = false,
-                armed = DangerousControl.VKD3D_SHADER_TRACE.isDangerous(diagnostics),
-            ),
-            control = {
-                VDropdownField(
-                    options = Vkd3dLogLevel.entries.map { it.name },
-                    labelFor = { Vkd3dLogLevel.valueOf(it).wire },
-                    selected = diagnostics.vkd3dShaderLevel.name,
-                    onSelect = {
-                        propose(diagnostics.withVkd3dShaderLevel(Vkd3dLogLevel.valueOf(it)))
-                    },
-                )
-            },
-        )
+        SUBSYSTEM_LEVELS.forEach { spec ->
+            VDiagnosticRow(
+                name = spec.variable,
+                secondary = spec.title,
+                tag = if (spec.isOneSession(diagnostics.levelOf(spec))) {
+                    { VTag("one session", tone = VTagTone.Neutral) }
+                } else {
+                    null
+                },
+                control = {
+                    VDropdownField(
+                        options = spec.options,
+                        labelFor = { it },
+                        selected = diagnostics.levelOf(spec),
+                        onSelect = {
+                            propose(
+                                diagnostics.withSubsystemLevel(spec.id, it),
+                                "${spec.variable}=$it reports per call.",
+                            )
+                        },
+                        valueIsMachine = true,
+                    )
+                },
+            )
+        }
         Text(
             "Each translator keeps its own words and its own order: vkd3d puts info between err " +
                 "and fixme, and it is not renamed to match DXVK.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
-            modifier = Modifier.padding(bottom = Vessel.metrics.s6),
+            modifier = Modifier.padding(bottom = Vessel.metrics.s8),
         )
+
+        SUBSYSTEM_FLAGS.forEach { spec ->
+            VCheckRow(
+                label = spec.title,
+                hint = spec.hint,
+                help = spec.help,
+                checked = diagnostics.flagOf(spec),
+                onToggle = { onChange(diagnostics.withSubsystemFlag(spec.id, !diagnostics.flagOf(spec))) },
+            )
+        }
+
+        // **The Turnip flags are present and visibly gated rather than hidden.**
+        // The switch immediately above is the one that makes their output
+        // readable at all, and a control that simply vanishes teaches nobody
+        // that. `TU_DEBUG` is a flag list with no severity anywhere in it, so it
+        // is a set of switches and not a ladder — drawing it as a level would be
+        // a lie about what it holds. The row is a readout with no chevron,
+        // because the value is the checkboxes' and not a choice of its own.
+        val driverLogOn = diagnostics.flagOf(DRIVER_LOG_FLAG)
+        val alpha = if (driverLogOn) 1f else Vessel.colors.disabledAlpha
         VDiagnosticRow(
-            title = "x86 translator messages",
-            machineName = "FEX_SILENTLOG",
-            help = "Whether the x86 translator is allowed to speak. Off hides mistakes in its " +
-                "own configuration as well as its crashes, which is why Vessel leaves it on.",
+            name = "TU_DEBUG",
+            secondary = "Switches, not levels: " + TURNIP_FLAGS.joinToString(", ") { it.flag } + ".",
             control = {
-                VToggle(
-                    checked = diagnostics.fexMessages,
-                    onCheckedChange = { propose(diagnostics.withFexMessages(it)) },
+                Text(
+                    diagnostics.turnipFlags.joinToString(",").ifEmpty { "None" },
+                    style = Vessel.type.mono,
+                    color = Vessel.colors.textMuted.let { it.copy(alpha = it.alpha * alpha) },
                 )
             },
         )
-        VDiagnosticRow(
-            title = "Driver messages in the log",
-            machineName = "MESA_LOG",
-            help = "Without this the graphics driver writes to the Android system log, where " +
-                "Vessel cannot read it — including the one line that proves Turnip loaded.",
-            control = {
-                VToggle(
-                    checked = diagnostics.driverMessagesInLog,
-                    onCheckedChange = { propose(diagnostics.withDriverMessagesInLog(it)) },
-                )
-            },
-        )
+        TURNIP_FLAGS.forEach { flag ->
+            VCheckRow(
+                label = flag.flag,
+                help = flag.summary,
+                checked = flag.flag in diagnostics.turnipFlags,
+                enabled = driverLogOn,
+                onToggle = {
+                    onChange(
+                        diagnostics.withTurnipFlag(flag.flag, flag.flag !in diagnostics.turnipFlags),
+                    )
+                },
+            )
+        }
+        if (!driverLogOn) {
+            VCaution(
+                "Unavailable until ${DRIVER_LOG_FLAG.title} is on — without it these flags " +
+                    "produce output the product cannot read.",
+            )
+        }
     }
 }
 
@@ -434,19 +460,18 @@ private fun TranslatorGroup(
  *
  * **A screen that raises a storage ceiling has to show the storage**, so the
  * readout and *Delete all logs* sit directly under the controls that produced
- * them rather than somewhere else in the sheet. The worst case is computed from
- * the chosen values and the fixed ten-session history, so the number moves as the
+ * them rather than elsewhere in the sheet. The worst case is computed from the
+ * chosen values and the fixed ten-session history, so the number moves as the
  * dropdowns do.
  *
- * The two byte caps and the rate limit are drawn as one block with one sentence
- * because they are one decision: at roughly 120 bytes a line the rate limit
- * decides how fast the byte caps are reached, so raising either alone buys
- * nothing.
+ * The two byte caps and the rate limit carry one sentence between them because
+ * they are one decision: at roughly 120 bytes a line the rate decides how fast
+ * the byte caps are reached, so raising either alone buys nothing.
  */
 @Composable
 private fun StorageGroup(
     state: DiagnosticsUiState,
-    propose: (ContainerDiagnostics) -> Unit,
+    onChange: (ContainerDiagnostics) -> Unit,
     onDeleteLogs: () -> Unit,
 ) {
     val diagnostics = state.diagnostics
@@ -460,8 +485,9 @@ private fun StorageGroup(
                         labelFor = { megabytes(it.toLong()) },
                         selected = limits.headBytes.toString(),
                         onSelect = {
-                            propose(diagnostics.withLimits(limits.copy(headBytes = it.toLong())))
+                            onChange(diagnostics.withLimits(limits.copy(headBytes = it.toLong())))
                         },
+                        valueIsMachine = true,
                     )
                 }
             }
@@ -472,8 +498,9 @@ private fun StorageGroup(
                         labelFor = { megabytes(it.toLong()) },
                         selected = limits.tailBytes.toString(),
                         onSelect = {
-                            propose(diagnostics.withLimits(limits.copy(tailBytes = it.toLong())))
+                            onChange(diagnostics.withLimits(limits.copy(tailBytes = it.toLong())))
                         },
+                        valueIsMachine = true,
                     )
                 }
             }
@@ -482,15 +509,17 @@ private fun StorageGroup(
             label = "Lines a second before dropping",
             help = "These three move together. At about 120 bytes a line, this rate fills the " +
                 "two caps above in ${secondsToFill(limits)} seconds, so raising one without the " +
-                "others buys nothing. Every drop says so in the log.",
+                "others buys nothing. Ten sessions are kept per container either way, and every " +
+                "drop says so in the log.",
         ) {
             VDropdownField(
                 options = SessionLogLimits.RATE_LADDER.map { it.toString() },
-                labelFor = { it },
+                labelFor = { thousands(it.toInt()) },
                 selected = limits.rateLimitLines.toString(),
                 onSelect = {
-                    propose(diagnostics.withLimits(limits.copy(rateLimitLines = it.toInt())))
+                    onChange(diagnostics.withLimits(limits.copy(rateLimitLines = it.toInt())))
                 },
+                valueIsMachine = true,
             )
         }
 
@@ -540,66 +569,181 @@ private fun StorageGroup(
 }
 
 /**
- * The raw `WINEDEBUG` escape hatch, and it is last for a reason.
+ * The channel picker: the catalogue, minus what is already on screen, plus a
+ * field for anything it has never heard of.
  *
- * It is the one control here that can produce anything Wine understands,
- * including the firehoses the curated rows deliberately gate — so it sits in its
- * own group, behind its own disclosure, at the bottom of the surface, where it
- * cannot be reached by scrolling past something else. `ParamType.TEXT` in the
- * manifest calls itself "the deliberate exception, not a loophole"; this is a
- * second instance of the same exception and carries the same caveat.
+ * **This is not the 521-channel menu `docs/LOGGING.md:222-230` argues against**,
+ * and the difference is the descriptions. That objection is that choosing well
+ * among 521 requires knowing what each costs; a list where every entry says what
+ * question it answers, and marks the ones that fill a log in seconds, is the
+ * opposite thing. The free-text field is what keeps the catalogue a convenience
+ * rather than a permitted set — an expert following advice about a channel nobody
+ * anticipated types it, and gets the same row.
  *
- * Appended after every row above, so a later term wins and the fixed prefix
- * cannot be deleted. Two validations, both read out of the parser — see
- * [rawTermsIssue].
+ * **It is also the only free-text field on this surface, which is why the
+ * sentence under it is load-bearing.** A second one — a raw `WINEDEBUG` box at
+ * the foot of the screen — was here and was removed: it did the same job as this
+ * field for everything except per-program scoping, and two ways to type a channel
+ * name is two places for the answer to be. See `composeWineDebug` for the one
+ * capability that went with it, and for where it should come back if it is
+ * wanted.
  */
 @Composable
-private fun RawGroup(
-    diagnostics: ContainerDiagnostics,
-    propose: (ContainerDiagnostics) -> Unit,
+private fun ChannelPicker(
+    taken: Set<String>,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    val issue = rawTermsIssue(diagnostics.rawTerms)
-    Column {
-        VLabeledField(
-            label = "Anything else, in Wine's own terms",
-            help = "Appended after every channel above, so a later term wins and Vessel's own " +
-                "list cannot be deleted. Leave empty unless following specific advice; scope a " +
-                "loud channel to one program with program.exe:+channel.",
+    var typed by remember { mutableStateOf("") }
+    val offered = WINE_CHANNEL_CATALOGUE.filterNot { it.channel in taken }
+
+    VDialogCard(onDismiss = onDismiss) {
+        Text("Add a channel", style = Vessel.type.subtitle)
+        Column(
+            Modifier
+                .heightIn(max = Vessel.metrics.checklistMaxHeight)
+                .verticalScroll(rememberScrollState()),
         ) {
-            VTextField(
-                value = diagnostics.rawTerms,
-                onValueChange = { propose(diagnostics.withRawTerms(it)) },
-                placeholder = "metro.exe:+relay,-heap",
+            offered.forEach { info ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = Vessel.metrics.touchTarget)
+                        .padding(vertical = Vessel.metrics.s6),
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = Vessel.metrics.s3),
+                        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(info.channel, style = Vessel.type.mono)
+                        if (info.oneSessionAt != null) {
+                            VTag("one session", tone = VTagTone.Neutral)
+                        }
+                        Row(Modifier.weight(1f)) {}
+                        VButton("Add", { onPick(info.channel) }, style = VButtonStyle.Secondary)
+                    }
+                    Text(
+                        info.summary,
+                        style = Vessel.type.bodySmall,
+                        color = Vessel.colors.textMuted,
+                    )
+                    if (info.caution != null) {
+                        Text(
+                            info.caution,
+                            style = Vessel.type.bodySmall,
+                            color = Vessel.colors.warn,
+                        )
+                    }
+                }
+            }
+            if (offered.isEmpty()) {
+                Text(
+                    "Every channel Vessel knows about is already on the list. Name another one " +
+                        "below.",
+                    style = Vessel.type.bodySmall,
+                    color = Vessel.colors.textMuted,
+                )
+            }
+        }
+        val name = typed.trim()
+        VLabeledField(
+            label = "Or a channel Wine knows that is not listed",
+            help = "The list above is a convenience, not the set Wine accepts.",
+        ) {
+            VTextField(typed, { typed = it }, placeholder = "winmm")
+        }
+        // Said out loud rather than left to a greyed-out button. A name Wine
+        // would drop is the failure this whole screen exists to stop: it would
+        // add a row that looks armed and logs nothing.
+        if (name.isNotEmpty() && !isChannelName(name)) {
+            Text(
+                "One channel name: no spaces, and none of , + - : — Wine reads those as " +
+                    "structure. Fourteen characters at most, or it registers nothing.",
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.danger,
+            )
+        } else if (name.isNotEmpty() && name in taken) {
+            Text(
+                "$name is already on the list.",
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.textMuted,
             )
         }
-        if (issue != null) {
-            Text(
-                issue.message,
-                style = Vessel.type.bodySmall,
-                color = if (issue.blocking) Vessel.colors.danger else Vessel.colors.warn,
-                modifier = Modifier.padding(top = Vessel.metrics.s6),
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8, Alignment.End),
+        ) {
+            VButton("Cancel", onDismiss, style = VButtonStyle.Secondary)
+            VButton(
+                "Add",
+                { onPick(name) },
+                style = VButtonStyle.Primary,
+                enabled = isChannelName(name) && name !in taken,
             )
         }
     }
 }
 
 /**
- * The *one launch* marker, or nothing.
+ * *Copy to another container*, as a menu of the containers there are.
  *
- * A tag rather than a colour on the row: the fact is temporal — this control is
- * spent by the next launch — and a warning tone would say "this value is
- * dangerous", which is already what the confirmation and the caution line say.
- * Two ways of saying the same thing is how a warning stops being read.
+ * Diagnosing usually means comparing two containers, and re-arming a dozen
+ * controls by hand is where people give up. A menu rather than a picker sheet
+ * because the answer is one name from a short list — this product has two or
+ * three containers, not a directory of them.
  */
-private fun armedTag(always: Boolean, armed: Boolean): (@Composable () -> Unit)? =
-    if (always || armed) {
-        { VTag("one launch", tone = VTagTone.Neutral) }
-    } else {
-        null
+@Composable
+private fun CopyToContainer(targets: List<Pair<String, String>>, onCopyTo: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Column {
+        VButton(
+            "Copy to another container",
+            { open = true },
+            style = VButtonStyle.Secondary,
+            icon = VIcons.Copy,
+            enabled = targets.isNotEmpty(),
+        )
+        if (open) {
+            VDialogCard(onDismiss = { open = false }) {
+                Text("Copy diagnostics to", style = Vessel.type.subtitle)
+                Text(
+                    "The channels, levels and limits on this screen replace that container's. " +
+                        "Its own settings are not touched.",
+                    style = Vessel.type.bodySmall,
+                    color = Vessel.colors.textMuted,
+                )
+                targets.forEach { (id, name) ->
+                    VButton(
+                        name,
+                        {
+                            open = false
+                            onCopyTo(id)
+                        },
+                        style = VButtonStyle.Secondary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8, Alignment.End),
+                ) {
+                    VButton("Cancel", { open = false }, style = VButtonStyle.Ghost)
+                }
+            }
+        }
     }
+}
 
 /** A cap as the label a dropdown shows. Whole megabytes; every rung is one. */
 private fun megabytes(bytes: Long): String = "${bytes / (1024 * 1024)} MB"
+
+/** `2 000`, thin-spaced, because a four-digit rate reads as a year otherwise. */
+private fun thousands(value: Int): String =
+    value.toString().reversed().chunked(3).joinToString(" ").reversed()
 
 /**
  * How long a runaway takes to fill both caps, at the chosen rate.
@@ -618,21 +762,26 @@ private const val BYTES_PER_LINE = 120L
 
 @Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 927)
 @Composable
-private fun DiagnosticsSectionPreview() {
+private fun DiagnosticsPanelPreview() {
     VesselTheme {
         Column(Modifier.padding(Vessel.metrics.s17)) {
-            DiagnosticsSection(
+            DiagnosticsHeader("Display proof", {})
+            DiagnosticsPanel(
                 state = DiagnosticsUiState(
-                    diagnostics = ContainerDiagnostics(),
+                    diagnostics = ContainerDiagnostics()
+                        .withChannelAdded("module")
+                        .withChannelAdded("relay"),
                     usageLabel = "14.2 MB",
-                    usageFraction = 0.18f,
+                    usageFraction = 0.03f,
                     ceilingLabel = "10 sessions · 480 MB at these limits",
                     sessionCount = 4,
-                    summary = "all off",
+                    summary = "2 on",
                     neverLaunched = false,
+                    otherContainers = listOf("c2" to "Canoe test"),
                 ),
                 onChange = {},
                 onDeleteLogs = {},
+                onCopyTo = {},
             )
         }
     }
