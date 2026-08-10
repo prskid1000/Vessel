@@ -320,6 +320,21 @@ audit's; they are pointers, not independently re-verified.
   commit did not touch this file, which is how a shipped change came to look
   unstarted for a day; the ticked box waits on the measurement, not the patch.
 
+  **First numbers, 2026-08-10, and they do not support the projection.**
+  `run-x11present.sh --wsi sw --frames 300` against the 400-frame figure this
+  file already records:
+
+  | | mean | p50 | p95 |
+  |---|---|---|---|
+  | before (recorded) | 2.245 | 1.632 | 4.945 |
+  | after (`0003`) | **2.097** | **1.541** | **4.794** |
+
+  About 5–7% on mean and median and **3% on p95** — roughly 0.15 ms, not the
+  "up to 0.60 ms" this entry projected, and smallest on the statistic the patch
+  was aimed at. Read it as suggestive and not as the measurement: different
+  frame counts, a historical rather than a paired run, and one sample each.
+  A real A/B needs the patch reverted and both runs taken in one sitting.
+
 - [ ] **Drop the per-present `GetGeometry` round trip.** One request and one
   reply per frame (`wsi_common_x11.c:1854` + `:1917`), on the present thread,
   ordered behind the 3.6 MB PutImage on the same connection, and used for
@@ -401,8 +416,41 @@ audit's; they are pointers, not independently re-verified.
   direction every time: rendering into a linear image makes the GMEM resolve
   write an untiled layout, which costs more than the blit it saves.
 
-- [ ] **Zero-copy present. Specified, unstarted, and both halves proven
-  separately.** The route is DRI3 `BufferFromPixmap`: the vendored X server
+- [ ] **Zero-copy present. DRI3 now negotiates far enough to fail in one named
+  place, and the place is not where the guesses were.**
+  *Measured 2026-08-10 with `tools/gfx/run-x11present.sh`, no Wine and no FEX in
+  the process.* With `MESA_VK_WSI_DEBUG` unset the ICD loads, the instance
+  advertises `VK_KHR_xcb_surface`, the surface is created, the queue supports
+  present, and capabilities and formats both come back:
+
+  ```
+  caps extent=1280x720 minImageCount=3 maxImageCount=0 usage=0x8009f
+  formats=2 first=50
+  result=FAIL stage=vkCreateSwapchainKHR code=-1000000000
+  ```
+
+  `-1000000000` is `VK_ERROR_SURFACE_LOST_KHR`. **This is a contained failure and
+  the earlier one was not** — the previous attempt killed the session with
+  `X connection to :0 broken` and no protocol error; this returns an error code
+  and the process exits cleanly, because the probe is not a game and not inside
+  Wine. That difference is the reason this harness exists.
+
+  *What the failure is not:* not `xcb_dri3_open` and not a missing DRM fd, both
+  of which were the standing theories — neither is reached, because
+  `vkCreateSwapchainKHR` fails before any DRI3 buffer is allocated. Not the
+  shared `GetGeometry` at `wsi_common_x11.c:3201` either: the `sw` path runs
+  through the same function and passes.
+
+  *The first thing to check, and it is cheap:* the vendored `DRI3Extension`
+  advertises **1.0** and implements `QueryVersion`, `Open`, `PixmapFromBuffer`,
+  `BufferFromPixmap` and `PixmapFromBuffers` — opcodes 0, 1, 2, 3 and 7. There
+  is **no `FenceFromFD` (opcode 4)**, and Mesa's DRI3 path creates an xshmfence
+  per swapchain image. A request for an unimplemented opcode is where to look
+  first. *Done when:* the `SURFACE_LOST` is traced to a specific request, by
+  logging the X server's unhandled-opcode path during a `--wsi dri3` run.
+
+  The original specification follows and is unchanged. The route is DRI3
+  `BufferFromPixmap`: the vendored X server
   already hands back the window's AHardwareBuffer dma-buf fd over `SCM_RIGHTS`
   and `presentPixmap` already has the flip branch, and `tools/gfx/wsiprobe.c`
   proved Turnip imports that fd and binds a `TILING_LINEAR` image to it at

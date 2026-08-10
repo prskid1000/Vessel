@@ -96,19 +96,37 @@ in_app_test "test -f $HOOKS/libadrenotools.so" \
 
 component() { in_app "ls -d files/components/$1/*/ 2>/dev/null | sort | tail -1"; }
 TURNIP="$(component Turnip)"; TURNIP="${TURNIP%/}"
-WINE_DIR="$(component Wine)"; WINE_DIR="${WINE_DIR%/}"
 [ -n "$TURNIP" ] || die "no Turnip component installed in $PKG"
-[ -n "$WINE_DIR" ] || die "no Wine component installed in $PKG"
 say "driver $TURNIP"
+
+# The driver is loaded as an ICD, by absolute path, and NOT through
+# libadrenotools. That is not a preference, it is the difference between a
+# working probe and a meaningless one: libadrenotools hands back Android's
+# `libvulkan.so`, and that loader implements the window-system layer itself
+# against an ANativeWindow. It does not forward X11, so the instance comes back
+# without VK_KHR_xcb_surface and there is nothing to present to.
+#
+# Measured here first, which is how this comment came to be written:
+#     VESSEL-X11PRESENT instance_ext VK_KHR_xcb_surface=NO (14 total)
+#     VESSEL-X11PRESENT result=FAIL stage=no-xcb-surface
+# identically for `sw` and for `dri3`, because the WSI mode is a property of a
+# driver that was never reached. docs/TODO.md records the same fault as the
+# original cause of "no D3D program has drawn into a window"; the runner walked
+# straight back into it.
+#
+# `VESSEL_VK_ICD` is x11present.c's own switch for this (`x11present.c:68-84`)
+# and is the same shape patches/wine/0009 uses inside a session.
+ICD="$TURNIP/libvulkan_freedreno.so"
+in_app_test "test -f $ICD" || die "no libvulkan_freedreno.so in $TURNIP"
 
 # DRI3 is not just a code path, it is three more shared libraries. If they are
 # absent the driver falls back to the software path without saying so, and the
 # run would report a `dri3` number that is really a second `sw` number.
 for lib in libxcb-dri3.so libxcb-present.so libxcb-sync.so; do
-  if in_app_test "test -f $WINE_DIR/lib/$lib -o -f $TURNIP/$lib"; then
+  if in_app_test "test -f $TURNIP/$lib"; then
     ok "$lib"
   else
-    note "$lib not in the Wine or Turnip component — DRI3 cannot negotiate"
+    note "$lib not in the Turnip component — DRI3 cannot negotiate"
   fi
 done
 
@@ -128,14 +146,14 @@ done
 in_app_test "test -S files/containers/$CONTAINER/tmp/.X11-unix/X0" \
   && ok "X socket present" || note "no X socket node — trying the abstract name anyway"
 
-# Wine's lib dir first so there is exactly one libxcb in the process, the same
-# copy a session uses: an xcb_connection_t made by one libxcb and passed to
-# another is undefined behaviour.
+# The Turnip package alone on the path, and nothing else. It is self-contained —
+# its own libxcb, libxcb-dri3/-present/-sync, libxshmfence and libc++_shared —
+# so adding Wine's lib directory would put a *second* libxcb in the process, and
+# an xcb_connection_t made by one and passed to another is undefined behaviour.
+# One copy, and it is the one the driver was linked against.
 GUEST_ENV="cd \$PWD && export \
-LD_LIBRARY_PATH=\$PWD/$WINE_DIR/lib:\$PWD/$TURNIP:$HOOKS \
-ADRENOTOOLS_HOOKS_PATH=$HOOKS/ \
-ADRENOTOOLS_DRIVER_PATH=\$PWD/$TURNIP \
-ADRENOTOOLS_DRIVER_NAME=libvulkan_freedreno.so \
+LD_LIBRARY_PATH=\$PWD/$TURNIP \
+VESSEL_VK_ICD=\$PWD/$ICD \
 DISPLAY=:0 \
 TU_DEBUG=startup \
 MESA_LOG=file \
