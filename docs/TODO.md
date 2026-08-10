@@ -160,6 +160,16 @@ and the two that are not share a root cause.
   of the cases that work today. *Done when:* a fullscreen game survives a round
   trip to `cmd` and back, and Maximize is a control that does something.
 
+  *Amended 2026-08-10, and the amendment is the useful part.* "One piece of work
+  for both" quietly became "one piece of work for three" when the drag borders
+  were written up as sharing this cause. They do not: managed mode plus
+  `WM_STATE` was the entire fix for resize, measured on the device, with no
+  EWMH advertisement present. `WM_STATE` is also already maintained, so of the
+  three things named above only `_NET_SUPPORTING_WM_CHECK` and `_NET_SUPPORTED`
+  are actually outstanding. Whether *restore* needs them is still open —
+  `can_activate_window` reads `wm_state`, which it now has — so the next step
+  here is to test restore, not to write the advertisement.
+
 - [x] **The white bar is gone: no top-level window has a caption any more.**
   *Evidence, 2026-08-10, Metro 2033 Redux in a real session on a clean install.*
   `patches/wine/0010` clears `WS_CAPTION|WS_THICKFRAME` in win32u's own
@@ -174,28 +184,50 @@ and the two that are not share a root cause.
   window edge to edge and the white strip is not there. The taskbar reads
   *Metro Redux* with the game's own icon.
 
-- [ ] **The drag borders move and size the X frame, and the guest ignores it.**
-  Half of this works and the half that does not is the interesting half.
-  *Measured the same sitting:* the Resize toggle appears in the long-press menu,
-  the accent border draws around the window, a right-edge drag took the frame
-  `1280x720+0+0` → `1047x720+0+0` (width only), a top-strip drag took it to
-  `1047x720+0+149` (position only), and Done cleared the handles. Every one of
-  those is the X server doing exactly what it was asked.
+- [x] **The drag borders resize the guest, and no EWMH was needed to get there.**
+  *Evidence, 2026-08-10, notepad in a live session, `VESSEL_MANAGED=1` read out
+  of `/proc/2998/environ` rather than assumed.* Reveal the taskbar, long-press
+  the button, Resize, drag the right edge in, Done:
 
-  **The picture did not change.** The client child stays `1280x720+0+0` inside
-  the resized frame and overflows it, so the composited output still fills the
-  original rectangle — confirmed by forcing a repaint, which redrew the new
-  scene at the old full size.
+  ```
+  before:  id=25165825 mapped=true 684x513+298+103  kids=0
+  after:   id=25165825 mapped=true 562x513+298+103  kids=0
+  ```
 
-  *This is the same root cause as the missing Maximize, and it was already
-  written down two items below: Wine runs **unmanaged** here, so it is
-  authoritative over its own geometry and does not act on a WM-initiated
-  `ConfigureNotify`.* Resizing the frame without Wine's agreement was never
-  going to move the client. **The fix is therefore the same single piece of
-  work** — enough ICCCM/EWMH that Wine treats the session as managed — and the
-  drag borders are the interface waiting for it rather than a separate feature.
-  Until then the toggle should probably not be offered, or should say what it
-  cannot do.
+  Screenshotted with the handles cleared: the menu bar and the *Ln 1, Col 1*
+  status bar both end exactly at the new right edge, and the vertical scrollbar
+  has re-laid out. No clipping and no overflow — the Win32 client resized, which
+  is the thing that had never happened.
+
+  **The previous entry here was measured correctly and reasoned about wrongly,
+  and the wrong half is worth keeping.** It recorded the frame moving while the
+  client stayed `1280x720+0+0` and overflowed, and concluded that the fix was
+  "enough ICCCM/EWMH that Wine treats the session as managed" — one piece of
+  work shared with Maximize and with restore-from-minimised. That measurement
+  was taken with `MANAGED_DESKTOP` **off**. Turning it on is the whole fix for
+  resize: `patches/wine/0011` keeps `managed_mode` true in desktop mode, so
+  `is_window_managed()` stops returning FALSE unconditionally and a
+  `ConfigureNotify` Wine did not ask for becomes a `SetWindowPos` instead of
+  being overwritten from the desired state. `WM_STATE` (vendored mod 16) is the
+  other half of the pair and was already in.
+
+  So `_NET_SUPPORTING_WM_CHECK` / `_NET_SUPPORTED` / `_NET_ACTIVE_WINDOW` are
+  **not** a prerequisite for this, and the two items that cite "the same single
+  piece of work" should not be read as blocked on the same thing. Restore and
+  Maximize may still need the advertisement — `can_activate_window` is a
+  different code path and is untested at the time of writing — but resize does
+  not, and bundling them hid a fix that was already installed.
+
+- [ ] **Restore from minimised is still unverified, and the attempt took the
+  session down.** Minimize via the long-press menu works and is visible in the
+  tree (`mapped=false 562x513+298+103`, button retained). Tapping the button to
+  restore was not observed: the app went to the Android launcher mid-sequence
+  and came back with a new pid and no Wine processes, with an **empty crash
+  buffer** — so not a Java exception. A second probe run was using the device at
+  the same time, which is the most likely explanation and is exactly why it is
+  not being written up as a defect. *Done when:* minimise and restore are driven
+  with nothing else touching the device, and either the window comes back or
+  `can_activate_window` is shown refusing it.
 
 - [~] **A white bar across the top of a fullscreen game — and it is a fixed
   height in *guest* pixels, which rules out most of the candidates.**
@@ -279,6 +311,15 @@ audit's; they are pointers, not independently re-verified.
   shape. *Done when:* `run-presentbench.sh --wsi sw --frames 600` before and
   after, watching p95 rather than the mean.
 
+  **Written in `ca2f5b5` and still `[ ]`, which is correct rather than an
+  oversight.** `patches/mesa/0003` exists and does exactly this — a new
+  `defers_sw_blit_wait` on `wsi_swapchain`, the `WaitForFences` in
+  `wsi_common.c` skipped when it is set, and the wait moved into
+  `x11_present_to_x11_sw`. What has not happened is the *Done when*: no
+  before-and-after has been run, so the p95 this was aimed at is unknown. That
+  commit did not touch this file, which is how a shipped change came to look
+  unstarted for a day; the ticked box waits on the measurement, not the patch.
+
 - [ ] **Drop the per-present `GetGeometry` round trip.** One request and one
   reply per frame (`wsi_common_x11.c:1854` + `:1917`), on the present thread,
   ordered behind the 3.6 MB PutImage on the same connection, and used for
@@ -287,6 +328,16 @@ audit's; they are pointers, not independently re-verified.
   `patches/mesa/` patch, low risk, **win unmeasured** — it is on the present
   thread, so it may only bound that thread's rate. A `Trace` section around the
   reply would size it before the patch is written.
+
+  **Also shipped in `ca2f5b5`, and the patch is not what this entry describes.**
+  Selecting `StructureNotify` was audited and rejected as unsafe: for an Xlib
+  surface `chain->conn` is `XGetXCBConnection(dpy)` — the *application's*
+  connection — so changing the event mask on the window would clobber Wine's
+  own. `patches/mesa/0003` pipelines the reply one frame instead
+  (`sw_geom_pending` / `sw_geom_cookie`, with `xcb_discard_reply` in destroy),
+  which keeps the round trip but takes it off the critical path. Still `[ ]` for
+  the same reason as the item above: unmeasured. Leave the `Trace` suggestion
+  standing — it is now the way to find out whether this was worth doing.
 
 - [ ] **Back the window drawable with a `GPUImage` on the software path.**
   Today `Texture.updateFromDrawable` re-uploads the **whole window every frame**
