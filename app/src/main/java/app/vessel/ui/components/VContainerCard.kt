@@ -52,6 +52,15 @@ fun VContainerCard(
     onOpenAppProfile: (AppShortcut) -> Unit,
     onAddApp: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * Whether this container has somewhere to add a program *from*.
+     *
+     * False until both `C:` and `D:` exist. `D:` is the conditional one — it is
+     * the phone's storage, and it is only mapped when all-files access has been
+     * granted — so without it the picker opens on a prefix that contains no
+     * program anyone put there. See [app.vessel.ui.vm.HomeContainer.drivesReady].
+     */
+    canAddApp: Boolean = true,
     meta: String? = null,
     /**
      * Browse this container's `C:`, or null when there is nothing to browse.
@@ -133,7 +142,22 @@ fun VContainerCard(
             onOpenProfile = onOpenAppProfile,
             onAdd = onAddApp,
             modifier = Modifier.padding(end = Vessel.metrics.s3),
+            addEnabled = canAddApp,
         )
+        if (!canAddApp) {
+            // The reason, because a dimmed control with no explanation is the
+            // thing the disabled state was supposed to avoid.
+            Text(
+                "Allow storage access in this container's settings to add programs.",
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.textMuted,
+                modifier = Modifier.padding(
+                    start = Vessel.metrics.s3,
+                    end = Vessel.metrics.s3,
+                    top = Vessel.metrics.s6,
+                ),
+            )
+        }
     }
 }
 

@@ -105,7 +105,7 @@ class AndroidDrives @Inject constructor(
         if (!canMap) return false
         val shared = Environment.getExternalStorageDirectory()
         if (shared == null || !shared.isDirectory) return false
-        val mapped = DriveMap.map(prefix, SHARED_STORAGE_DRIVE, shared)
+        val mapped = DriveMap.map(prefix, DriveMap.SHARED_STORAGE_DRIVE, shared)
         if (!mapped) Log.w(TAG, "could not map ${shared.path} to D:")
         return mapped
     }
@@ -178,9 +178,6 @@ class AndroidDrives @Inject constructor(
 
     private companion object {
         const val TAG = "VesselDrives"
-
-        /** What a second drive is called on every Windows machine anyone has used. */
-        const val SHARED_STORAGE_DRIVE = 'd'
 
         /** The volume half of a tree document id for built-in storage. */
         const val PRIMARY_VOLUME = "primary"

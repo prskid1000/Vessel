@@ -142,22 +142,41 @@ fun VAddAppTile(
     onClick: () -> Unit,
     containerName: String,
     modifier: Modifier = Modifier,
+    /**
+     * False while the container has no drives to add a program *from*.
+     *
+     * Disabled rather than absent, and the distinction matters here: a tile that
+     * vanishes says the feature does not exist, while a dimmed one says not yet.
+     * The reason is printed under the grid by the card, because a control the
+     * user cannot use and cannot find out why about is the worse of the two.
+     */
+    enabled: Boolean = true,
 ) {
     Column(
         modifier
             .vRing(Vessel.colors.divider, Vessel.metrics.shapeMd)
-            .clickable(onClickLabel = "Add a program to $containerName", onClick = onClick)
+            .then(
+                if (enabled) {
+                    Modifier.clickable(
+                        onClickLabel = "Add a program to $containerName",
+                        onClick = onClick,
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .padding(horizontal = Vessel.metrics.s3, vertical = Vessel.metrics.s8),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6, Alignment.CenterVertically),
     ) {
+        val tint = if (enabled) Vessel.colors.textMuted else Vessel.colors.textTertiary
         Icon(
             VIcons.Plus,
             contentDescription = null,
             Modifier.size(Vessel.metrics.iconMd),
-            tint = Vessel.colors.textMuted,
+            tint = tint,
         )
-        Text("Add", style = Vessel.type.overline, color = Vessel.colors.textMuted)
+        Text("Add", style = Vessel.type.overline, color = tint)
     }
 }
 
@@ -179,6 +198,8 @@ fun VAppGrid(
     onAdd: () -> Unit,
     modifier: Modifier = Modifier,
     columns: Int = GRID_COLUMNS,
+    /** Passed to [VAddAppTile]; see it for why this disables rather than hides. */
+    addEnabled: Boolean = true,
 ) {
     // The Add cell is a member of the list for layout purposes, so a container
     // with three programs gets one full row rather than a row of three and an
@@ -206,6 +227,7 @@ fun VAppGrid(
                             onClick = onAdd,
                             containerName = containerName,
                             modifier = Modifier.weight(1f),
+                            enabled = addEnabled,
                         )
 
                         // A spacer, not a tile. It draws nothing and holds a

@@ -241,7 +241,13 @@ private fun HomeContent(
                     onLaunchApp = onLaunchApp,
                     onOpenAppProfile = onOpenAppProfile,
                     onAddApp = { onAddApp(row.profile.id) },
-                    onBrowseFiles = if (row.hasPrefix) {
+                    // Both gated on the same fact, and on both drives rather
+                    // than just C:. Adding a program needs somewhere to add one
+                    // *from*, and browsing a container whose only drive is the
+                    // prefix's own C: shows the reader Wine's installation and
+                    // nothing of theirs.
+                    canAddApp = row.drivesReady,
+                    onBrowseFiles = if (row.drivesReady) {
                         { onBrowseFiles(row.profile.id) }
                     } else {
                         null

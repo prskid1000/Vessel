@@ -35,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -515,4 +516,62 @@ fun VSectionHeader(text: String, modifier: Modifier = Modifier) {
         color = Vessel.colors.textMuted,
         modifier = modifier.padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s6),
     )
+}
+
+/**
+ * A [VSectionHeader] that folds what is under it away.
+ *
+ * For the case this was written for: a list where most rows are a **fixed
+ * baseline the reader cannot change**, and the few that matter are the ones
+ * they added. Showing all of it flat means scrolling past eight read-only rows
+ * to reach the one control that does anything. Deleting the baseline instead
+ * would be worse — what Vessel always sends is exactly the thing someone
+ * reading a log needs to know.
+ *
+ * So it is collapsed, not hidden, and [summary] carries the count so the header
+ * still states that the baseline exists while it is shut.
+ *
+ * **Collapsed is not the same as absent, and this is a display-only control.**
+ * Nothing here writes state; what is folded away is still sent.
+ */
+@Composable
+fun VDisclosure(
+    text: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    summary: String? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s6),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text.uppercase(),
+                style = Vessel.type.overline,
+                color = Vessel.colors.textMuted,
+            )
+            if (summary != null) {
+                Text(summary, style = Vessel.type.bodySmall, color = Vessel.colors.textMuted)
+            }
+            Row(Modifier.weight(1f)) {}
+            Icon(
+                VIcons.CaretDown,
+                // The chevron is the whole affordance, so it has to be the thing
+                // that announces the state rather than a decoration beside it.
+                contentDescription = if (expanded) "Collapse $text" else "Expand $text",
+                tint = Vessel.colors.textMuted,
+                modifier = Modifier
+                    .size(Vessel.metrics.iconSm)
+                    .rotate(if (expanded) 180f else 0f),
+            )
+        }
+        if (expanded) content()
+    }
 }

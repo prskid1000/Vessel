@@ -12,6 +12,7 @@ import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
 import app.vessel.core.params.ResolvedParam
 import app.vessel.core.params.resolve
+import app.vessel.data.AndroidDrives
 import app.vessel.data.ContainerRepository
 import app.vessel.data.InstalledComponents
 import app.vessel.data.ParamManifestStore
@@ -63,6 +64,23 @@ data class ContainerSheetUiState(
     /** One-shot: the sheet closes and this view model is done with. */
     val finished: Boolean = false,
     val diagnostics: DiagnosticsUiState = DiagnosticsUiState(),
+    /**
+     * Whether this app may map the phone's storage into the container as `D:`.
+     *
+     * False is the *interesting* state and the reason this is here at all.
+     * All-files access is a per-install grant, so a fresh install has no `D:`
+     * and nothing ever asked for it — the manifest declared the permission and
+     * left the user to find Android's settings page on their own. Creating a
+     * container is the moment the answer matters, because
+     * [app.vessel.data.ContainerProvisioner] maps the drive while it builds the
+     * prefix.
+     *
+     * Not a blocker. A container without `D:` is a working container, so this
+     * offers the grant and never gates Save. And because the provisioner runs
+     * `mapSharedStorage` on *every* provision rather than once, granting it
+     * afterwards still picks the drive up on the next launch.
+     */
+    val canMapStorage: Boolean = true,
 )
 
 /**
@@ -123,6 +141,7 @@ class ContainerSheetViewModel @Inject constructor(
     private val components: InstalledComponents,
     private val registry: AppRegistry,
     private val sessionLogs: SessionLogStore,
+    private val drives: AndroidDrives,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ContainerSheetUiState())
@@ -180,6 +199,7 @@ class ContainerSheetViewModel @Inject constructor(
                 creating = creating,
                 name = profile.name,
                 containerId = profile.id,
+                canMapStorage = drives.canMap,
             )
         }
         rebuild()
@@ -259,6 +279,17 @@ class ContainerSheetViewModel @Inject constructor(
             _state.update { it.copy(finished = true) }
         }
     }
+
+    /**
+     * Re-read the storage grant after a trip to Android's settings.
+     *
+     * The grant is a toggle on a settings page rather than a dialog, so the
+     * activity result carries nothing and whether it was given is only knowable
+     * by asking again. Same reason as
+     * [app.vessel.ui.vm.FilesViewModel.refreshAfterPermission].
+     */
+    fun refreshAfterPermission() =
+        _state.update { it.copy(canMapStorage = drives.canMap) }
 
     fun delete() {
         val current = draft ?: return

@@ -27,6 +27,7 @@ import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VDiagnosticRow
 import app.vessel.ui.components.VDialogCard
+import app.vessel.ui.components.VDisclosure
 import app.vessel.ui.components.VDropdownField
 import app.vessel.ui.components.VIconButton
 import app.vessel.ui.components.VIcons
@@ -49,11 +50,14 @@ import app.vessel.ui.vm.DiagnosticsUiState
  * container editor: group by what a setting affects, never by the subsystem
  * behind it.
  *
- * **The list starts with what Vessel already sends.** Those rows are present and
- * disabled — the screen is a truthful account of the environment rather than a
- * list of additions over something invisible. That is also why there is no
- * explanatory paragraph at the top any more: the rows say what a paragraph used
- * to claim, in a form the reader can inspect.
+ * **What Vessel already sends is present, disabled, and folded away.** Those
+ * rows are the reason there is no explanatory paragraph at the top: they say
+ * what a paragraph used to claim, in a form the reader can inspect. But they
+ * are also the majority of the list and none of them can be changed here, so
+ * flat they were eight read-only rows standing between the reader and the only
+ * control that does anything. They sit behind a collapsed disclosure instead —
+ * still a truthful account of the environment, one tap away, rather than the
+ * first thing in the way.
  *
  * **Nothing in this file names a channel or a variable.** Every row comes out of
  * `diagnosticRows`, which comes out of `LOGGABLES`. There is no `when` over a
@@ -75,6 +79,13 @@ fun DiagnosticsPanel(
     val diagnostics = state.diagnostics
     val rows = diagnosticRows(diagnostics)
 
+    /*
+     * Collapsed by default. The baseline is reference material — worth being
+     * able to read, not worth reading every time — and the reason to open this
+     * screen at all is to add a row or change one you added.
+     */
+    var baselineExpanded by remember { mutableStateOf(false) }
+
     /**
      * Apply an edit, unless it newly turns on something that costs.
      *
@@ -94,9 +105,23 @@ fun DiagnosticsPanel(
         }
     }
 
+    // Split on the one property that already distinguishes them: a baseline row
+    // cannot be removed. The fixed rows are the majority and none of them can be
+    // changed here, so flat they were eight read-only rows to scroll past before
+    // reaching the first control that does anything.
+    val (added, fixed) = rows.partition { it.removable }
+
     Column(modifier.fillMaxWidth()) {
         VSectionHeader("What to log")
-        rows.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+        VDisclosure(
+            "Always on",
+            expanded = baselineExpanded,
+            onToggle = { baselineExpanded = !baselineExpanded },
+            summary = "${fixed.size} Vessel always sends",
+        ) {
+            fixed.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+        }
+        added.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
 
         VButton(
             "Add",
@@ -106,8 +131,7 @@ fun DiagnosticsPanel(
             modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
         )
         Text(
-            "Rows without a cross are what Vessel always sends; they cannot be changed here. " +
-                "Everything below them is written after, and a later term wins.",
+            "Rows you add are written after the ones above, and a later term wins.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),

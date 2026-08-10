@@ -3,6 +3,7 @@ package app.vessel.ui.vm
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.vessel.core.DriveMap
 import app.vessel.core.ContainerProfile
 import app.vessel.core.PeArchitecture
 import app.vessel.core.params.ParamValue
@@ -46,6 +47,27 @@ data class HomeContainer(
      * out from under the app has the opposite. The directory is the fact.
      */
     val hasPrefix: Boolean,
+
+    /**
+     * Both drives a container is supposed to have are actually there.
+     *
+     * `C:` and `D:` — the prefix's own system drive, and the phone's storage.
+     * Separate from [hasPrefix], which asks only about `C:`, because the two
+     * gate different things: `C:` is enough to *browse* a container, and adding
+     * a program needs somewhere to add one *from*.
+     *
+     * **`D:` is the one that is conditional.** `ContainerProvisioner` maps it
+     * only when all-files access has been granted, so a container built without
+     * that permission comes up with a `C:` and nothing else — and the file
+     * picker then opens on a prefix containing no program anyone put there.
+     * Offering "Add" in that state is offering a control that cannot succeed.
+     *
+     * Read off `dosdevices` rather than remembered, on the rule the rest of the
+     * drive code follows: a note saying a mapping exists is not the mapping. A
+     * card that has been unmounted leaves a dangling symlink, and `exists()`
+     * follows the link, so this goes false exactly when the drive stops working.
+     */
+    val drivesReady: Boolean,
 )
 
 @Immutable
@@ -68,6 +90,17 @@ data class HomeUiState(
 
     private fun count(n: Int, noun: String) = "$n $noun${if (n == 1) "" else "s"}"
 }
+
+/**
+ * Both `C:` and `D:` resolve to something readable under [prefix].
+ *
+ * `exists()` rather than a remembered flag, and it follows the symlink: every
+ * drive is a link under `dosdevices`, so a card that has been unmounted or a
+ * mapping whose target was deleted goes false here without another line of code.
+ */
+private fun drivesReady(prefix: File): Boolean =
+    File(prefix, GuestPath.DRIVE_C).isDirectory &&
+        File(File(prefix, DriveMap.DOSDEVICES), "${DriveMap.SHARED_STORAGE_DRIVE}:").exists()
 
 /**
  * Home — the only root.
@@ -97,6 +130,7 @@ class HomeViewModel @Inject constructor(
                             paths.of(profile.id).prefix,
                             GuestPath.DRIVE_C,
                         ).isDirectory,
+                        drivesReady = drivesReady(paths.of(profile.id).prefix),
                     )
                 },
                 loaded = true,
@@ -200,5 +234,6 @@ internal val SampleHomeContainers = listOf(
             ),
         ),
         hasPrefix = true,
+        drivesReady = true,
     ),
 )

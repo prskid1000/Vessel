@@ -42,6 +42,16 @@ object DriveMap {
     /** Wine's own: the prefix's `drive_c`. */
     const val SYSTEM_DRIVE = 'c'
 
+    /**
+     * The phone's own storage, as a drive.
+     *
+     * What a second drive is called on every Windows machine anyone has used.
+     * Here rather than in [app.vessel.data.AndroidDrives], which maps it,
+     * because the home screen has to ask whether it *is* mapped and a letter
+     * spelled in two files is a letter that can disagree with itself.
+     */
+    const val SHARED_STORAGE_DRIVE = 'd'
+
     /** Wine's own: the Unix filesystem root. */
     const val ROOT_DRIVE = 'z'
 

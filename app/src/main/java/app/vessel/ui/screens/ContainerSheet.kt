@@ -7,6 +7,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,6 +30,7 @@ import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
 import app.vessel.core.params.ResolvedParam
 import app.vessel.ui.components.VButton
+import app.vessel.ui.components.VCaution
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VCheckRow
 import app.vessel.ui.components.VComponentReadout
@@ -76,6 +83,14 @@ fun ContainerSheet(
     // a callback out of the view model, so a recomposition cannot dismiss twice.
     LaunchedEffect(state.finished) { if (state.finished) onDismiss() }
 
+    val context = LocalContext.current
+    // Comes back with no result — all-files access is a settings toggle, not a
+    // dialog — so the grant is re-read on return rather than trusted from a
+    // callback. Same contract as FilesScreen's launcher.
+    val allFilesAccess = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { viewModel.refreshAfterPermission() }
+
     ContainerSheetContent(
         state = state,
         onDismiss = onDismiss,
@@ -87,6 +102,14 @@ fun ContainerSheet(
         onDiagnostics = viewModel::setDiagnostics,
         onDeleteLogs = viewModel::deleteLogs,
         onCopyDiagnostics = viewModel::copyDiagnosticsTo,
+        onGrantStorage = {
+            allFilesAccess.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.fromParts("package", context.packageName, null),
+                ),
+            )
+        },
     )
 }
 
@@ -104,6 +127,7 @@ private fun ContainerSheetContent(
     onDiagnostics: (ContainerDiagnostics) -> Unit,
     onDeleteLogs: () -> Unit,
     onCopyDiagnostics: (String) -> Unit,
+    onGrantStorage: () -> Unit,
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -170,6 +194,30 @@ private fun ContainerSheetContent(
                     VTextField(state.name, onName, placeholder = "Container")
                 }
                 state.groups.forEach { group -> ParamGroup(group, onParam) }
+
+                // **Asked for here because here is where the answer is used.**
+                // ContainerProvisioner maps the phone's storage to D: while it
+                // builds the prefix, and mapSharedStorage returns false without
+                // this grant — so a container created without it comes up with a
+                // C: and nothing else, and nothing on screen ever said why.
+                //
+                // Offered, not enforced. Save is never gated on it: a container
+                // with only a C: drive is a working container, and the
+                // provisioner re-runs the mapping on every provision, so
+                // granting this later still brings D: back on the next launch.
+                if (!state.canMapStorage) {
+                    VCaution(
+                        "Vessel cannot see the phone's storage, so this container " +
+                            "will have no D: drive. Allow it and D: is mapped when " +
+                            "the container is built.",
+                    )
+                    VButton(
+                        "Allow storage access",
+                        onGrantStorage,
+                        style = VButtonStyle.Secondary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
 
                 // Nothing below this line changes a setting: one destructive
                 // action, one destination, and one section that changes what the
@@ -285,7 +333,23 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
     val spec = param.resolved.spec
     val value = param.resolved.value
     val note = param.resolved.clampReason ?: param.componentNote
-    val help = listOfNotNull(spec.help, note).joinToString(" ").ifBlank { null }
+
+    /*
+     * **`spec.help` is deliberately not rendered, and this sheet is its only
+     * reader** — so it is now carried in the manifest and shown nowhere. That
+     * is the honest state and it is a deliberate one: the text is worth keeping
+     * as the field's documentation next to its definition, and it was not worth
+     * the three paragraphs of static prose it put under three controls whose
+     * titles already say what they do, which pushed the controls themselves off
+     * screen. The group's own help sentence is unaffected and still renders.
+     *
+     * What survives is [note] — the clamp reason and the component note — and
+     * the warning below. Those are the opposite kind of text: they are not
+     * documentation, they are *this* value's current situation ("this was
+     * lowered because the screen cannot show it"), they appear only when there
+     * is something to say, and nothing else on screen says it.
+     */
+    val help = note
 
     // A boolean is a row rather than a field: the switch *is* the control, and a
     // label above an empty box with a switch beside it reads as a broken field.
@@ -447,6 +511,7 @@ private fun ContainerSheetPreview() {
             onDiagnostics = {},
             onDeleteLogs = {},
             onCopyDiagnostics = {},
+            onGrantStorage = {},
         )
     }
 }
