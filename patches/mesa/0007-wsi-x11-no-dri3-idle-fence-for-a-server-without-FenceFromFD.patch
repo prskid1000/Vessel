@@ -1,0 +1,89 @@
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1800,7 +1800,9 @@
+        !wsi_device->x11.ignore_suboptimal)
+       options |= XCB_PRESENT_OPTION_SUBOPTIMAL;
+ 
+-   xshmfence_reset(image->shm_fence);
++   /* Vessel: guarded — there is no fence unless x11_wants_dri3_fence(). */
++   if (image->shm_fence)
++      xshmfence_reset(image->shm_fence);
+ 
+    if (!chain->base.image_info.explicit_sync) {
+       ++chain->sent_image_count;
+@@ -2669,6 +2671,39 @@
+ #endif
+ }
+ 
++/* Vessel: whether to give each DRI3 pixmap an xshmfence idle fence.
++ *
++ * Off by default here, and that is a statement about one X server rather than
++ * about DRI3. Vessel's X server does not implement DRI3 FenceFromFD (opcode 4)
++ * — and refusing a request is not free, because the fd that came with it over
++ * SCM_RIGHTS stays in the connection's ancillary-fd queue. Every later
++ * PixmapFromBuffer then pops the *previous* image's fence page instead of its
++ * own dma-buf. Measured: the second present died in the server with
++ *   signal 7 (SIGBUS), code 2 (BUS_ADRERR), fault addr <src+0x1000>
++ *   __memmove_aarch64_nt / com.winlator.xserver.Drawable.copyArea
++ *   / PresentExtension.presentPixmap
++ * — a 3686400-byte copy out of a 4096-byte xshmfence page, faulting on its
++ * second page.
++ *
++ * Skipping the fence is sound against this server specifically, and not a
++ * shortcut: PresentExtension.presentPixmap copies the pixmap synchronously,
++ * under the window's render lock, *before* it sends PresentIdleNotify. The
++ * idle event is therefore already a complete signal, which is the thing the
++ * fence exists to add for servers whose copy outlives the notification.
++ *
++ * Set VESSEL_WSI_DRI3_FENCE=1 to ask for it again — the one thing to do after
++ * the server grows FenceFromFD, so the change can be measured rather than
++ * assumed.
++ */
++static bool
++x11_wants_dri3_fence(void)
++{
++   static int want = -1;
++   if (unlikely(want < 0))
++      want = debug_get_bool_option("VESSEL_WSI_DRI3_FENCE", false) ? 1 : 0;
++   return want == 1;
++}
++
+ static VkResult
+ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
+                const VkSwapchainCreateInfoKHR *pCreateInfo,
+@@ -2820,6 +2855,16 @@
+ #endif
+ 
+ out_fence:
++   /* Vessel: see x11_wants_dri3_fence(). The chain is vk_zalloc'd, so leaving
++    * these alone would already be correct; they are written out because
++    * "no fence" is the deliberate state here and not an omission, and because
++    * XCB_NONE is what x11_present_to_x11_dri3 then passes as the idle fence. */
++   if (!x11_wants_dri3_fence()) {
++      image->shm_fence = NULL;
++      image->sync_fence = XCB_NONE;
++      return VK_SUCCESS;
++   }
++
+    fence_fd = xshmfence_alloc_shm();
+    if (fence_fd < 0)
+       goto fail_pixmap;
+@@ -2862,9 +2907,15 @@
+    xcb_void_cookie_t cookie;
+    if (!chain->base.wsi->sw || chain->has_mit_shm) {
+ #ifdef HAVE_X11_DRM
+-      cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
+-      xcb_discard_reply(chain->conn, cookie.sequence);
+-      xshmfence_unmap_shm(image->shm_fence);
++      /* Vessel: guarded — see x11_wants_dri3_fence(). Destroying fence XCB_NONE
++       * would be a BadFence on a conforming server and a refused SYNC request
++       * on this one, both for an object that was never created. */
++      if (image->sync_fence != XCB_NONE) {
++         cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
++         xcb_discard_reply(chain->conn, cookie.sequence);
++      }
++      if (image->shm_fence)
++         xshmfence_unmap_shm(image->shm_fence);
+ #endif
+ 
+       cookie = xcb_free_pixmap(chain->conn, image->pixmap);

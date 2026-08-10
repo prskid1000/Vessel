@@ -1,0 +1,236 @@
+--- a/meson.build
++++ b/meson.build
+@@ -848,6 +848,37 @@
+   endif
+ endif
+ 
++# Vessel: HAVE_WSI_DRM — "the WSI can make dma-buf images" — which is not the
++# same question as "libdrm is linkable", and conflating the two is what made
++# zero-copy present silently impossible on this device.
++#
++# src/vulkan/wsi is two halves. wsi_common_x11.c's DRI3 half is gated on
++# HAVE_X11_DRM, which 'pseudo-drm' defines (patch 0004). The image backend that
++# half calls into — wsi_common_drm.c, which owns WSI_IMAGE_TYPE_DRM — was gated
++# on dep_libdrm.found() instead. For a kgsl-only Turnip, Mesa deliberately sets
++# system_has_kms_drm = false a few hundred lines above precisely so that nothing
++# links libdrm on Android, so dep_libdrm is null_dep and that file is dropped.
++#
++# The result was not a build error. get_blit_type() and configure_image() in
++# wsi_common.c put their WSI_IMAGE_TYPE_DRM cases behind #ifdef HAVE_LIBDRM and
++# end in `default: UNREACHABLE()`; with the DRM case gone, WSI_IMAGE_TYPE_CPU is
++# the only reachable label and a release compiler is entitled to drop the switch
++# and call wsi_configure_cpu_image() unconditionally. So a DRI3 swapchain got
++# CPU-linear images: no dma-buf, no modifier, and x11_image_init then dup(-1)'d
++# its way to VK_ERROR_OUT_OF_HOST_MEMORY. Measured, before this:
++#     VESSEL-WSI image_init dma_buf_fd=-1 num_planes=1 modifier=0x0 row_pitch=5120
++#     VESSEL-WSI OOM x11_image_init:2733 errno=9 (Bad file descriptor)
++# which is field-for-field what wsi_create_cpu_linear_image_mem() leaves behind.
++#
++# wsi_common_drm.c does not actually need libdrm. It needs the drm-uapi headers,
++# which are in tree, plus drmIoctl and four drmDevice helpers — and Mesa already
++# ships stubs for those in src/util/libdrm.h for exactly this situation. So the
++# gate becomes "libdrm, or a pseudo-drm platform", and the file compiles against
++# the stubs when there is no libdrm to link.
++if dep_libdrm.found() or with_dri_platform == 'pseudo-drm'
++  pre_args += '-DHAVE_WSI_DRM'
++endif
++
+ # Then get each libdrm module
+ foreach name, d : _libdrm_checks
+   if d['enabled']
+--- a/src/util/libdrm.h
++++ b/src/util/libdrm.h
+@@ -37,8 +37,30 @@
+ #include <errno.h>
+ #include <stddef.h>
+ #include <stdint.h>
++#include <sys/ioctl.h>
+ #include <sys/types.h>
+ 
++/* Vessel: drmIoctl, which is the one libdrm entry point that does real work
++ * rather than returning "no such device". It is a restarting ioctl and nothing
++ * more, so the shim is the whole thing rather than a stub — src/util/os_drm.h
++ * already carries a byte-identical copy under the name drm_ioctl.
++ *
++ * Needed because wsi_common_drm.c issues DMA_BUF_IOCTL_{EX,IM}PORT_SYNC_FILE
++ * through it, and that file is now compiled on pseudo-drm platforms that have
++ * no libdrm at all. See HAVE_WSI_DRM in the top-level meson.build.
++ */
++static inline int
++drmIoctl(int fd, unsigned long request, void *arg)
++{
++   int ret;
++
++   do {
++      ret = ioctl(fd, request, arg);
++   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
++
++   return ret;
++}
++
+ #define DRM_NODE_PRIMARY 0
+ #define DRM_NODE_CONTROL 1
+ #define DRM_NODE_RENDER  2
+@@ -122,6 +144,15 @@
+    return -ENOENT;
+ }
+ 
++/* Vessel: drmGetDevice2() above can only fail here, so nothing can ever hold
++ * two drmDevices to compare. Answering "not equal" is the honest reading of
++ * "there are no DRM devices", and it is also the safe one: every caller uses
++ * this to decide whether two fds name the same GPU, and a false positive would
++ * have them share buffers across devices that may not be the same device.
++ */
++static inline int
++drmDevicesEqual(drmDevicePtr a, drmDevicePtr b) { return 0; }
++
+ static inline void
+ drmFreeDevice(drmDevicePtr *device) {}
+ 
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -5,7 +5,11 @@
+ links_vulkan_wsi = []
+ platform_deps = []
+ 
+-if dep_libdrm.found()
++# Vessel: also without libdrm, on a pseudo-drm platform. See HAVE_WSI_DRM in the
++# top-level meson.build: this file is the WSI_IMAGE_TYPE_DRM image backend, and
++# dropping it does not disable DRI3 — it leaves wsi_common_x11.c's DRI3 half
++# calling a switch whose only surviving case builds a CPU image.
++if dep_libdrm.found() or with_dri_platform == 'pseudo-drm'
+   files_vulkan_wsi += files('wsi_common_drm.c')
+ endif
+ 
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -317,14 +317,14 @@
+ 
+    /* can_present_on_device is a function pointer used to determine if images
+     * can be presented directly on a given device file descriptor (fd).
+-    * If HAVE_LIBDRM is defined, it will be initialized to a platform-specific
++    * If HAVE_WSI_DRM is defined, it will be initialized to a platform-specific
+     * function (wsi_device_matches_drm_fd). Otherwise, it is initialized to
+     * present_false to ensure that it always returns false, preventing potential
+     * segmentation faults from unchecked calls.
+     * Drivers for non-PCI based GPUs are expected to override this after calling
+     * wsi_device_init().
+     */
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    wsi->can_present_on_device = wsi_device_matches_drm_fd;
+ #else
+    wsi->can_present_on_device = present_false;
+@@ -408,7 +408,7 @@
+       return wsi_cpu_image_needs_buffer_blit(wsi, cpu_params) ?
+          WSI_SWAPCHAIN_BUFFER_BLIT : WSI_SWAPCHAIN_NO_BLIT;
+    }
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    case WSI_IMAGE_TYPE_DRM: {
+       const struct wsi_drm_image_params *drm_params =
+          container_of(params, const struct wsi_drm_image_params, base);
+@@ -458,7 +458,7 @@
+          container_of(params, const struct wsi_cpu_image_params, base);
+       return wsi_configure_cpu_image(chain, pCreateInfo, cpu_params, info);
+    }
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    case WSI_IMAGE_TYPE_DRM: {
+       const struct wsi_drm_image_params *drm_params =
+          container_of(params, const struct wsi_drm_image_params, base);
+@@ -572,7 +572,7 @@
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    result = wsi_drm_init_swapchain_implicit_sync(chain);
+    if (result != VK_SUCCESS)
+       goto fail;
+@@ -911,7 +911,7 @@
+    }
+ 
+    if (info->explicit_sync) {
+-#if HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+       result = wsi_create_image_explicit_sync_drm(chain, image);
+       if (result != VK_SUCCESS)
+          goto fail;
+@@ -1027,7 +1027,7 @@
+ #endif
+ 
+    if (image->explicit_sync[WSI_ES_ACQUIRE].semaphore) {
+-#if HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+       wsi_destroy_image_explicit_sync_drm(chain, image);
+ #endif
+    }
+@@ -2219,7 +2219,7 @@
+ 
+    vk_semaphore_reset_temporary(device, semaphore);
+ 
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    VkResult result = chain->image_info.explicit_sync ?
+       wsi_create_sync_for_image_syncobj(chain, image,
+                                         VK_SYNC_FEATURE_GPU_WAIT,
+@@ -2249,7 +2249,7 @@
+ 
+    vk_fence_reset_temporary(device, fence);
+ 
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    VkResult result = chain->image_info.explicit_sync ?
+       wsi_create_sync_for_image_syncobj(chain, image,
+                                         VK_SYNC_FEATURE_CPU_WAIT,
+@@ -2869,7 +2869,7 @@
+        * implicitly syncs on it.
+        */
+       if (swapchain->dma_buf_semaphore != VK_NULL_HANDLE) {
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+          assert(!swapchain->image_info.explicit_sync);
+          results[i] = wsi_signal_dma_buf_from_semaphore(swapchain, image);
+          if (results[i] != VK_SUCCESS)
+--- a/src/vulkan/wsi/wsi_common_drm.c
++++ b/src/vulkan/wsi/wsi_common_drm.c
+@@ -36,13 +36,15 @@
+ #include "drm-uapi/drm_fourcc.h"
+ #include "drm-uapi/dma-buf.h"
+ #include "util/libsync.h"
++/* Vessel: <xf86drm.h> when there is a libdrm, Mesa's own stubs when there is
++ * not. This file is compiled on pseudo-drm platforms now; see HAVE_WSI_DRM. */
++#include "util/libdrm.h"
+ 
+ #include <errno.h>
+ #include <time.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+-#include <xf86drm.h>
+ 
+ static VkResult
+ wsi_dma_buf_export_sync_file(int dma_buf_fd, int *sync_file_fd)
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -484,7 +484,7 @@
+                                                  uint64_t refresh_duration, uint64_t refresh_interval,
+                                                  int minimum_delta_for_update);
+ 
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+ VkResult
+ wsi_prepare_signal_dma_buf_from_semaphore(struct wsi_swapchain *chain,
+                                           const struct wsi_image *image);
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1612,7 +1612,7 @@
+       images[i] = &chain->images[i].base;
+ 
+    VkResult result;
+-#ifdef HAVE_LIBDRM
++#ifdef HAVE_WSI_DRM
+    result = wsi_drm_wait_for_explicit_sync_release(&chain->base,
+                                                    chain->base.image_count,
+                                                    images,

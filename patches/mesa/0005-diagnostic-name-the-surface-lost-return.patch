@@ -1,0 +1,306 @@
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -22,6 +22,11 @@
+  */
+ 
+ #include <X11/Xlib-xcb.h>
++#include <stdio.h>
++#include <errno.h>
++/* Vessel diagnostic. */
++#define VESSEL_LOST() (fprintf(stderr, "VESSEL-WSI SURFACE_LOST %s:%d\n", __func__, __LINE__), fflush(stderr), VK_ERROR_SURFACE_LOST_KHR)
++#define VESSEL_OOM() (fprintf(stderr, "VESSEL-WSI OOM %s:%d errno=%d(%s)\n", __func__, __LINE__, errno, strerror(errno)), fflush(stderr), VK_ERROR_OUT_OF_HOST_MEMORY)
+ #include <X11/xshmfence.h>
+ #define XK_MISCELLANY
+ #define XK_LATIN1
+@@ -716,7 +721,7 @@
+    struct wsi_x11_connection *wsi_conn =
+       wsi_x11_get_connection(wsi_device, conn);
+    if (!wsi_conn)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    if (!wsi_device->sw) {
+       if (!wsi_x11_check_for_dri3(wsi_conn)) {
+@@ -788,7 +793,7 @@
+ 
+    geom = xcb_get_geometry_reply(conn, geom_cookie, &err);
+    if (!geom)
+-      return VK_ERROR_SURFACE_LOST_KHR;
++      return VESSEL_LOST();
+    {
+       VkExtent2D extent = { geom->width, geom->height };
+       caps->surfaceCapabilities.currentExtent = extent;
+@@ -1044,7 +1049,7 @@
+    unsigned count;
+    VkFormat sorted_formats[ARRAY_SIZE(formats)];
+    if (!get_sorted_vk_formats(surface, wsi_device, sorted_formats, &count))
+-      return VK_ERROR_SURFACE_LOST_KHR;
++      return VESSEL_LOST();
+ 
+    for (unsigned i = 0; i < count; i++) {
+       vk_outarray_append_typed(VkSurfaceFormatKHR, &out, f) {
+@@ -1069,7 +1074,7 @@
+    unsigned count;
+    VkFormat sorted_formats[ARRAY_SIZE(formats)];
+    if (!get_sorted_vk_formats(surface, wsi_device, sorted_formats, &count))
+-      return VK_ERROR_SURFACE_LOST_KHR;
++      return VESSEL_LOST();
+ 
+    for (unsigned i = 0; i < count; i++) {
+       vk_outarray_append_typed(VkSurfaceFormat2KHR, &out, f) {
+@@ -1124,7 +1129,7 @@
+       }
+       free(geom);
+       if (!geom)
+-          return VK_ERROR_SURFACE_LOST_KHR;
++          return VESSEL_LOST();
+    }
+ 
+    return vk_outarray_status(&out);
+@@ -1145,12 +1150,12 @@
+    xcb_visualtype_t *visual =
+       get_visualtype_for_window(pCreateInfo->connection, pCreateInfo->window, &visual_depth, NULL);
+    if (!visual)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    surface = vk_alloc2(&instance->alloc, pAllocator, sizeof(struct wsi_x11_vk_surface), 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+    if (surface == NULL)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    surface->xcb.base.platform = VK_ICD_WSI_PLATFORM_XCB;
+    surface->xcb.connection = pCreateInfo->connection;
+@@ -1177,12 +1182,12 @@
+    xcb_visualtype_t *visual =
+       get_visualtype_for_window(XGetXCBConnection(pCreateInfo->dpy), pCreateInfo->window, &visual_depth, NULL);
+    if (!visual)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    surface = vk_alloc2(&instance->alloc, pAllocator, sizeof(struct wsi_x11_vk_surface), 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+    if (surface == NULL)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    surface->xlib.base.platform = VK_ICD_WSI_PLATFORM_XLIB;
+    surface->xlib.dpy = pCreateInfo->dpy;
+@@ -1505,7 +1510,7 @@
+          xcb_translate_coordinates_reply(chain->conn, cookie, NULL);
+ 
+    if (!reply) {
+-      x11_swapchain_notify_error(chain, VK_ERROR_SURFACE_LOST_KHR);
++      x11_swapchain_notify_error(chain, VESSEL_LOST());
+       goto out;
+    }
+ 
+@@ -1635,7 +1640,7 @@
+    case XCB_PRESENT_CONFIGURE_NOTIFY: {
+       xcb_present_configure_notify_event_t *config = (void *) event;
+       if (config->pixmap_flags & PresentWindowDestroyed)
+-         return VK_ERROR_SURFACE_LOST_KHR;
++         return VESSEL_LOST();
+ 
+       struct wsi_device *wsi_device = (struct wsi_device *)chain->base.wsi;
+       if (!wsi_device->x11.ignore_suboptimal) {
+@@ -1779,7 +1784,7 @@
+    struct wsi_device *wsi_device = (struct wsi_device*)chain->base.wsi;
+    struct wsi_x11_connection *wsi_conn = wsi_x11_get_connection(wsi_device, chain->conn);
+    if (!wsi_conn)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    if (present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ||
+        (present_mode == VK_PRESENT_MODE_MAILBOX_KHR &&
+@@ -1971,7 +1976,7 @@
+              chain->extent.height != geom->height)
+             result = VK_ERROR_OUT_OF_DATE_KHR;
+       } else {
+-         result = VK_ERROR_SURFACE_LOST_KHR;
++         result = VESSEL_LOST();
+       }
+       free(err);
+       free(geom);
+@@ -2380,7 +2385,7 @@
+                 * - WaitForFence workaround if applicable */
+                result = x11_handle_dri3_present_event(chain, (void *) event);
+             } else {
+-               result = VK_ERROR_SURFACE_LOST_KHR;
++               result = VESSEL_LOST();
+             }
+          }
+ 
+@@ -2709,6 +2714,22 @@
+    }
+    image->pixmap = xcb_generate_id(chain->conn);
+ 
++   /* Vessel diagnostic, and deliberately before the branch rather than inside
++    * it: which branch is taken is itself the thing worth knowing, and the
++    * fields printed here are how the swapchain's image backend was identified.
++    * image_type=1 (DRM) with dma_buf_fd>=0 is a real dma-buf; image_type=0
++    * (CPU) with dma_buf_fd=-1 and modifier=0 is wsi_create_cpu_linear_image_mem
++    * having quietly answered a DRI3 swapchain, which is what it did for as long
++    * as wsi_common_drm.c was not compiled into this driver.
++    */
++   fprintf(stderr, "VESSEL-WSI image_init image_type=%d dma_buf_fd=%d num_planes=%u "
++                   "modifier=0x%llx row_pitch=%u size=%llu dri3_modifiers=%d\n",
++           (int)chain->base.image_info.image_type,
++           image->base.dma_buf_fd, image->base.num_planes,
++           (unsigned long long)image->base.drm_modifier, image->base.row_pitches[0],
++           (unsigned long long)image->base.sizes[0], (int)chain->has_dri3_modifiers);
++   fflush(stderr);
++
+    if (image->base.drm_modifier != DRM_FORMAT_MOD_INVALID) {
+       /* If the image has a modifier, we must have DRI3 v1.2. */
+       assert(chain->has_dri3_modifiers);
+@@ -2721,7 +2742,7 @@
+             for (int j = 0; j < i; j++)
+                close(fds[j]);
+ 
+-            return VK_ERROR_OUT_OF_HOST_MEMORY;
++            return VESSEL_OOM();
+          }
+       }
+ 
+@@ -2750,7 +2771,7 @@
+       /* XCB will take ownership of the FD we pass it. */
+       int fd = os_dupfd_cloexec(image->base.dma_buf_fd);
+       if (fd == -1)
+-         return VK_ERROR_OUT_OF_HOST_MEMORY;
++         return VESSEL_OOM();
+ 
+       cookie =
+          xcb_dri3_pixmap_from_buffer_checked(chain->conn,
+@@ -2765,6 +2786,14 @@
+ 
+    error = xcb_request_check(chain->conn, cookie);
+    if (error != NULL) {
++      /* Vessel diagnostic: the pixmap request is the first thing the X server
++       * ever sees of a zero-copy swapchain, and upstream drops its error on the
++       * floor — the swapchain just fails with no cause anywhere. */
++      fprintf(stderr, "VESSEL-WSI pixmap_from_buffer refused: error_code=%u "
++                      "major=%u minor=%u seq=%u\n",
++              error->error_code, error->major_code, error->minor_code,
++              error->sequence);
++      fflush(stderr);
+       free(error);
+       goto fail_image;
+    }
+@@ -3172,7 +3201,7 @@
+    struct wsi_x11_connection *wsi_conn =
+       wsi_x11_get_connection(wsi_device, conn);
+    if (!wsi_conn)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    /* Get number of images in our swapchain. This count depends on:
+     * - requested minimal image count
+@@ -3198,7 +3227,7 @@
+    xcb_get_geometry_reply_t *geometry =
+       xcb_get_geometry_reply(conn, xcb_get_geometry(conn, window), NULL);
+    if (geometry == NULL)
+-      return VK_ERROR_SURFACE_LOST_KHR;
++      return VESSEL_LOST();
+    const uint32_t bit_depth = geometry->depth;
+    const uint16_t cur_width = geometry->width;
+    const uint16_t cur_height = geometry->height;
+@@ -3209,19 +3238,19 @@
+    chain = vk_zalloc(pAllocator, size, 8,
+                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+    if (chain == NULL)
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+ 
+    int ret = mtx_init(&chain->present_progress_mutex, mtx_plain);
+    if (ret != thrd_success) {
+       vk_free(pAllocator, chain);
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+    }
+ 
+    ret = mtx_init(&chain->thread_state_lock, mtx_plain);
+    if (ret != thrd_success) {
+       mtx_destroy(&chain->present_progress_mutex);
+       vk_free(pAllocator, chain);
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+    }
+ 
+    ret = u_cnd_monotonic_init(&chain->thread_state_cond);
+@@ -3229,7 +3258,7 @@
+       mtx_destroy(&chain->present_progress_mutex);
+       mtx_destroy(&chain->thread_state_lock);
+       vk_free(pAllocator, chain);
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+    }
+ 
+    ret = u_cnd_monotonic_init(&chain->present_progress_cond);
+@@ -3238,7 +3267,7 @@
+       mtx_destroy(&chain->thread_state_lock);
+       u_cnd_monotonic_destroy(&chain->thread_state_cond);
+       vk_free(pAllocator, chain);
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return VESSEL_OOM();
+    }
+ 
+    uint32_t present_caps = 0;
+@@ -3387,7 +3416,7 @@
+    chain->gc = xcb_generate_id(chain->conn);
+    if (!chain->gc) {
+       /* FINISHME: Choose a better error. */
+-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      result = VESSEL_OOM();
+       goto fail_register;
+    }
+ 
+@@ -3430,7 +3459,7 @@
+    ret = thrd_create(&chain->queue_manager,
+                      x11_manage_present_queue, chain);
+    if (ret != thrd_success) {
+-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      result = VESSEL_OOM();
+       goto fail_init_fifo_queue;
+    }
+ 
+@@ -3447,7 +3476,7 @@
+    ret = thrd_create(&chain->event_manager,
+                      x11_manage_event_queue, chain);
+    if (ret != thrd_success) {
+-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      result = VESSEL_OOM();
+       goto fail_init_event_queue;
+    }
+ 
+@@ -3501,17 +3530,17 @@
+    wsi = vk_alloc(alloc, sizeof(*wsi), 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+    if (!wsi) {
+-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      result = VESSEL_OOM();
+       goto fail;
+    }
+ 
+    int ret = mtx_init(&wsi->mutex, mtx_plain);
+    if (ret != thrd_success) {
+       if (ret == ENOMEM) {
+-         result = VK_ERROR_OUT_OF_HOST_MEMORY;
++         result = VESSEL_OOM();
+       } else {
+          /* FINISHME: Choose a better error. */
+-         result = VK_ERROR_OUT_OF_HOST_MEMORY;
++         result = VESSEL_OOM();
+       }
+ 
+       goto fail_alloc;
+@@ -3520,7 +3549,7 @@
+    wsi->connections = _mesa_hash_table_create(NULL, _mesa_hash_pointer,
+                                               _mesa_key_pointer_equal);
+    if (!wsi->connections) {
+-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      result = VESSEL_OOM();
+       goto fail_mutex;
+    }
+ 

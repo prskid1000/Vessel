@@ -25,11 +25,17 @@ that; the decisions that move the needle are architectural:
 - **Turnip built for Adreno gen8** — the stock Qualcomm driver lacks extensions
   DXVK 2.x requires, so this is enablement, not optimisation.
 - **Memory-ordering defaults** measured on this core, not guessed: there is no
-  hardware TSO mode to fall back on, and FEX's cheap barrier path is worth 21%.
+  hardware TSO mode to fall back on. (The "21%" this line used to quote for
+  FEX's half-barrier path was the *LRCPC2* result wearing the wrong label —
+  `tools/tso/run.sh` never toggled that variable. The knob is currently
+  unjustified rather than disproven; see `docs/TODO.md`.)
 
-`-mcpu=oryon-1` reaches Turnip, DXVK and vkd3d-proton, but deliberately not FEX
-(its JIT detects CPU features at runtime) and not Wine (one `CROSSCFLAGS` covers
-three PE architectures and is meaningless to the i386 one).
+`-mcpu=oryon-1` reaches Turnip, DXVK, vkd3d-proton and **Wine's unix side**
+(`ntdll.so`, `win32u.so`, `winex11.drv.so`). It stays out of Wine's
+`CROSSCFLAGS`, which covers arm64ec, aarch64 and i386 PE code with one string
+and is meaningless to the last of those. FEX gets `-DTUNE_CPU=oryon-1` for its
+own C++ but not `-mcpu`: its JIT detects the host CPU at runtime, so the flag
+would reach FEX's code and never the code it generates.
 
 Native components ship as `.wcp` packages published to a rolling
 [`components`](https://github.com/prskid1000/Vessel/releases/tag/components)
@@ -66,16 +72,24 @@ docker run --rm -v "$PWD:/src" -v vessel-work:/work vessel-build ./build/wine.sh
 
 ## Status
 
-**Windows programs run in windows on the phone, and take input. Nothing has
-drawn through Direct3D.**
+**Windows programs run in windows on the phone, take input, and draw through
+Direct3D. A commercial game renders in a real container.**
 
 Verified on the device on 2026-08-09, from the app's own launcher rather than a
 shell: `notepad.exe` added from the file browser, tapped on its tile with nothing
-running. The container started, the program came up with it, the window is
-centred and themed with a working title bar, the taskbar lists it with its real
-icon, and `adb shell input text` put **`VESSEL-KEYBOARD-OK`** into it at
+running. The container started, the program came up with it, the taskbar lists
+it with its real icon, and `adb shell input text` put **`VESSEL-KEYBOARD-OK`** into it at
 `Ln 1, Col 19`. Leaving the desktop and returning left the window and its text
 intact.
+
+Since then: Metro 2033 Redux renders through DXVK on Turnip inside a container,
+and a D3D11 triangle reads back correct in both bitnesses
+(`tools/device-graphics.sh --only d3d11`). Top-level windows have **no Win32
+caption** — a caption is unhittable on a phone and cost 41 unpainted rows, so
+`patches/wine/0010` strips it and the shell supplies the window controls. What is
+*not* done: presentation is still a CPU copy, zero-copy is in progress, and the
+frame is pixel-bound — a game at 1280x720 measures 20-26 fps and the same scene
+at 640x360 reaches the 60 fps cap.
 
 All three CPU paths are verified by `./tools/device-session.sh`, which checks the
 arithmetic each program produces rather than that it started:
