@@ -118,15 +118,15 @@ bench_cpu() {
   done
 
   say "cpu — best of 3 per architecture, scale $SCALE"
-  printf '  %-8s %10s %10s %10s %10s\n' arch int branch mem float
+  printf '  %-8s %10s %10s %10s %10s %10s\n' arch int int32 branch mem float
 
   # Checksums from the native run become the reference every other arch is held
   # to. Collected as one string per section rather than an associative array:
   # this has to run under whatever /bin/sh the build box has.
-  local ref_int= ref_branch= ref_mem= ref_float=
+  local ref_int= ref_int32= ref_branch= ref_mem= ref_float=
 
   for t in $ARCHES; do
-    local best_int= best_branch= best_mem= best_float= out ms cs section
+    local best_int= best_int32= best_branch= best_mem= best_float= out ms cs section
     local mismatch=
 
     for attempt in 1 2 3; do
@@ -139,6 +139,8 @@ bench_cpu() {
         case "$section" in
           int)    if [ -z "$best_int" ]    || awk "BEGIN{exit !($ms<$best_int)}";    then best_int=$ms;    fi
                   if [ "$t" = aarch64 ]; then ref_int=$cs;    elif [ "$cs" != "$ref_int" ];    then mismatch="int"; fi ;;
+          int32)  if [ -z "$best_int32" ]  || awk "BEGIN{exit !($ms<$best_int32)}";  then best_int32=$ms;  fi
+                  if [ "$t" = aarch64 ]; then ref_int32=$cs;  elif [ "$cs" != "$ref_int32" ];  then mismatch="int32"; fi ;;
           branch) if [ -z "$best_branch" ] || awk "BEGIN{exit !($ms<$best_branch)}"; then best_branch=$ms; fi
                   if [ "$t" = aarch64 ]; then ref_branch=$cs; elif [ "$cs" != "$ref_branch" ]; then mismatch="branch"; fi ;;
           mem)    if [ -z "$best_mem" ]    || awk "BEGIN{exit !($ms<$best_mem)}";    then best_mem=$ms;    fi
@@ -146,15 +148,18 @@ bench_cpu() {
           float)  if [ -z "$best_float" ]  || awk "BEGIN{exit !($ms<$best_float)}";  then best_float=$ms;  fi
                   if [ "$t" = aarch64 ]; then ref_float=$cs;  elif [ "$cs" != "$ref_float" ];  then mismatch="float"; fi ;;
         esac
-      done < <(sed -n 's/^CPUBENCH .*section=\([a-z]*\) ms=\([0-9.]*\) checksum=\([0-9]*\)$/\1 \2 \3/p' <<<"$out")
+      # `[a-z0-9]` and not `[a-z]`: `int32` has a digit in it, and with the old
+      # class the line matched nothing and was dropped in silence — a new
+      # section would simply never have appeared.
+      done < <(sed -n 's/^CPUBENCH .*section=\([a-z0-9]*\) ms=\([0-9.]*\) checksum=\([0-9]*\)$/\1 \2 \3/p' <<<"$out")
     done
 
     if [ -z "$best_int" ]; then
       printf '  %-8s %s\n' "$t" "no result — see $APP_DIR/bench.log on the device"
       continue
     fi
-    printf '  %-8s %10s %10s %10s %10s\n' "$t" "$best_int" "$best_branch" "$best_mem" "$best_float"
-    for s in int branch mem float; do
+    printf '  %-8s %10s %10s %10s %10s %10s\n' "$t" "$best_int" "$best_int32" "$best_branch" "$best_mem" "$best_float"
+    for s in int int32 branch mem float; do
       eval "record cpu.$t.$s \"\$best_$s\""
     done
 
@@ -167,7 +172,7 @@ bench_cpu() {
   # statement about the case temperature.
   say "translation cost — x86 time divided by native ARM64 time"
   for t in x86_64 i686; do
-    for s in int branch mem float; do
+    for s in int int32 branch mem float; do
       local n x
       n="$(awk -v k="cpu.aarch64.$s" '$1==k{print $2}' "$RESULTS")"
       x="$(awk -v k="cpu.$t.$s"      '$1==k{print $2}' "$RESULTS")"

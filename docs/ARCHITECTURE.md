@@ -144,9 +144,12 @@ better one by guessing. `build/targets/<target>.env` is build-time only. For
 |---|---|---|---|
 | `TU_DEBUG` | *(none forced)* | fixed | Neither rendering mode is forced — see below |
 | `TU_AUTOTUNE_ALGO` | `default` | fixed | `prefer_sysmem` available if a title corrupts |
-| `FEX_TSOENABLED` | `1` | fixed | Required for correctness; off breaks multithreaded programs quietly |
-| `FEX_HALFBARRIERTSOENABLED` | `1` | fixed | **FEX's own default — this sets what it already does.** Unmeasured here; see below |
-| `FEX_VECTORTSOENABLED` | `0` | fixed | Severe cost, and FEAT_LRCPC3 that would make it cheap is unused by FEX |
+| `FEX_TSOENABLED` | `1` | fixed | **= FEX's default.** Required for correctness; off breaks multithreaded programs quietly |
+| `FEX_HALFBARRIERTSOENABLED` | `1` | fixed | **= FEX's default.** Unmeasured here; see below |
+| `FEX_VECTORTSOENABLED` | `0` | fixed | **= FEX's default.** Severe cost, and FEAT_LRCPC3 that would make it cheap is unused by FEX |
+| `FEX_SILENTLOG` | `0` | fixed | The one FEX variable here that changes behaviour — without it a bad `FEX_HOSTFEATURES` token is silent |
+| `FEX_OUTPUTLOG` | `stderr` | fixed | **Dead on Windows.** `Source/Windows/Common/Logging.cpp` reads only `SILENTLOG`; kept as a marker |
+| `tu_override_uncached_as_cache_coherent` | `true` | fixed | Turnip driconf, set as an env var. FEX wants it and cannot deliver it — see below |
 | Wine sync | esync | fixed | The only mode that works here — README, Known limitations |
 | Resolution | `1280x720` | **container** | The single biggest performance dial on this phone |
 | Frame rate limit | `60` | **container** | Thermal headroom over a long session |
@@ -157,6 +160,28 @@ those three appear in the editor. The fixed ones are set in
 `SessionEnvironment.kt` beside `WINEESYNC` and are listed in
 `RESERVED_SESSION_ENV`, so a manifest entry cannot reintroduce them — which also
 means a container saved while they *were* switches cannot resurrect an old value.
+
+**Three of the `FEX_*` rows set FEX's own defaults, and saying so is the point.**
+`TSOEnabled` is `"Default": "true"`, `HalfBarrierTSOEnabled` `"true"`,
+`VectorTSOEnabled` `"false"`, all in
+`FEXCore/Source/Interface/Config/Config.json.in`. Vessel changes none of them.
+They stay because a reader should be able to see what the runtime is without
+knowing FEX's defaults by heart — but they must not be described as tuning, and
+a measurement quoted against one of them is a measurement of nothing. The only
+`FEX_*` variable here that changes FEX's behaviour is `SILENTLOG`.
+
+**`tu_override_uncached_as_cache_coherent` is set because FEX asks for it and
+cannot.** Emulated x86 turns guest stores into store-releases, which are
+punishing on the uncached/write-combine memory a host-visible upload allocation
+normally gets; the option makes Turnip return the cached-coherent memory type
+instead (`tu_device.cc:1816`). FEX tries to set it through
+`__wine_set_unix_env`, an ntdll export that **does not exist in Wine 11.14**, so
+its call is guarded out and the option keeps its `false` default. FEX's own
+comment suggests this exact workaround — set it in the launch script — and its
+guard is `getenv(...) == nullptr`, so doing it here also keeps the two from
+fighting if that export ever appears. Mesa picks up any driconf option from a
+same-named environment variable (`util/xmlconfig.c:424`). **Unmeasured:** it
+needs a real x86-64 D3D title, so no probe in `tools/gfx/` can attribute it.
 
 **Neither rendering mode is forced.** The widely repeated "GMEM is broken on
 Adreno 829, force `TU_DEBUG=sysmem`" is wrong: Turnip's GMEM page-fault report is

@@ -93,8 +93,12 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
   #
   # If a future llvm-mingw links it, benchmark before keeping it: FEX's
   # dispatcher is the hottest code in the project for any non-native program, so
-  # the upside is real, but 2.28x on x86-32 integer is the number to beat and it
-  # should be beaten visibly.
+  # the upside is real, and it should be beaten visibly.
+  #
+  # The bar used to be stated as "2.28x on x86-32 integer". That number is a
+  # property of cpubench's 64-bit `int` section compiled for a 32-bit target,
+  # not of translation — see docs/OPTIMIZATION.md. Use the `int32` row once it
+  # has been run; do not reinstate 2.28x as a target.
   # `if`, not `[ … ] && …`: under `set -e` a failing test as a bare statement
   # takes the whole build down, so the off-by-default path would abort here.
   if [ "${VESSEL_FEX_LTO:-0}" = 1 ]; then

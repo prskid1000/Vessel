@@ -17,12 +17,14 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
+import app.vessel.core.GuestViewport
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayRequest
 import app.vessel.core.FrameRate
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDisplayServer
 import app.vessel.core.TopLevelWindow
+import app.vessel.core.WindowBounds
 import app.vessel.core.displayNumber
 import app.vessel.core.xSocketName
 import app.vessel.input.GamepadControl
@@ -137,6 +139,9 @@ class XServerDisplay @Inject constructor(
     private val _desktopUp = MutableStateFlow(false)
     override val desktopUp: StateFlow<Boolean> = _desktopUp.asStateFlow()
 
+    private val _guestViewport = MutableStateFlow(GuestViewport())
+    override val guestViewport: StateFlow<GuestViewport> = _guestViewport.asStateFlow()
+
     /**
      * Samples [GLRenderer.compositedFrames] on a timer while a session runs.
      *
@@ -151,14 +156,36 @@ class XServerDisplay @Inject constructor(
      */
     private var sampler: Job? = null
 
-    private fun startSampling(renderer: GLRenderer, limit: Int?) {
+    private fun startSampling(renderer: GLRenderer, limit: Int?, guestWidth: Int, guestHeight: Int) {
         sampler?.cancel()
         _frameRate.value = FrameRate(limit = limit)
+        _guestViewport.value = GuestViewport(guestWidth = guestWidth, guestHeight = guestHeight)
         sampler = scope.launch {
             var previous = renderer.compositedFrames()
             var previousAt = SystemClock.elapsedRealtime()
             while (isActive) {
                 delay(SAMPLE_MS)
+
+                // **Polled on the frame-rate tick rather than pushed.** The
+                // transformation is written by the GL thread in
+                // `onSurfaceChanged` and there is no callback on it, so pushing
+                // would mean a vendored change for a value that moves only on
+                // rotation, on a resolution change and once at startup. Twice a
+                // second is late enough to see a rotation land and far cheaper
+                // than the alternative: this loop is already running and already
+                // holds the renderer.
+                val t = renderer.viewTransformation
+                if (t.aspect > 0f) {
+                    val viewport = GuestViewport(
+                        offsetX = t.viewOffsetX.toFloat(),
+                        offsetY = t.viewOffsetY.toFloat(),
+                        scale = t.aspect,
+                        guestWidth = guestWidth,
+                        guestHeight = guestHeight,
+                    )
+                    if (viewport != _guestViewport.value) _guestViewport.value = viewport
+                }
+
                 val frames = renderer.compositedFrames()
                 val at = SystemClock.elapsedRealtime()
                 val seconds = (at - previousAt) / 1000f
@@ -219,6 +246,9 @@ class XServerDisplay @Inject constructor(
 
     override fun closeWindow(id: Int): Boolean = session?.closeWindow(id) ?: false
 
+    override fun moveResizeWindow(id: Int, x: Int, y: Int, width: Int, height: Int): Boolean =
+        session?.moveResizeWindow(id, x, y, width, height) ?: false
+
     override fun killWindow(id: Int): Boolean {
         val pid = session?.processOf(id) ?: 0
         // Zero means the window set no `_NET_WM_PID`, and killing "process 0"
@@ -252,7 +282,7 @@ class XServerDisplay @Inject constructor(
                 started.onWindowsChanged = { list -> _windows.value = list }
             started.onDesktopUp = { _desktopUp.value = true }
                 _surface.value = started.view
-                startSampling(started.view.renderer, request.fpsLimit)
+                startSampling(started.view.renderer, request.fpsLimit, request.geometry.width, request.geometry.height)
                 DisplayOutcome.Started(started.environment)
             } catch (t: Throwable) {
                 // Includes the RuntimeException XConnectorEpoll throws when bind
@@ -426,6 +456,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                         focused = window.id == focused,
                         program = window.programName(),
                         minimized = window.id in minimized,
+                        bounds = window.bounds(),
                     )
                 }
             }
@@ -618,6 +649,10 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     private fun Window.isVirtualDesktop(root: Window): Boolean =
         width >= root.width && height >= root.height
 
+    /** Where the window is, in guest pixels. Parent-relative, as X reports it. */
+    private fun Window.bounds(): WindowBounds =
+        WindowBounds(x.toInt(), y.toInt(), width.toInt(), height.toInt())
+
     /** `WM_CLASS`, trimmed to a bare lowercase filename. */
     private fun Window.programName(): String =
         className.orEmpty().trim().substringAfterLast(GUEST_PATH_SEPARATOR, className.orEmpty()).lowercase()
@@ -700,6 +735,35 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         }.onFailure {
             minimized -= id
             Log.w("VesselDisplay", "could not minimise window $id", it)
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Place a window, in guest pixels, on behalf of the shell's drag borders.
+     *
+     * Clamped rather than validated: a drag can and will run past the edge of
+     * the desktop and off the top of it, and refusing the whole gesture at that
+     * point would feel like the window sticking. The minimum size is a real
+     * floor and not cosmetic — the X server throws `BadValue` below 1, and a
+     * window small enough to lose its own drag borders could never be recovered.
+     */
+    fun moveResizeWindow(id: Int, x: Int, y: Int, width: Int, height: Int): Boolean {
+        val manager = xServer.windowManager
+        val window = manager.getWindow(id) ?: return false
+        val screen = xServer.screenInfo
+        val w = width.coerceIn(MIN_WINDOW_PX, screen.width.toInt())
+        val h = height.coerceIn(MIN_WINDOW_PX, screen.height.toInt())
+        // The origin may be negative — a window part-way off the left edge is a
+        // normal thing to have dragged — but never so far that nothing is left
+        // to grab.
+        val nx = x.coerceIn(MIN_WINDOW_PX - w, screen.width - MIN_WINDOW_PX)
+        val ny = y.coerceIn(MIN_WINDOW_PX - h, screen.height - MIN_WINDOW_PX)
+        return runCatching {
+            manager.moveResizeWindow(window, nx.toShort(), ny.toShort(), w.toShort(), h.toShort())
+            publishWindows()
+            true
+        }.onFailure {
+            Log.w("VesselDisplay", "could not move/resize window $id", it)
         }.getOrDefault(false)
     }
 
@@ -911,6 +975,17 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
          * this off the X server's thread.
          */
         const val MAX_WINDOW_DEPTH = 8
+
+        /**
+         * The smallest a drag may leave a window, in guest pixels.
+         *
+         * Two jobs. The X server throws `BadValue` for a width or height below
+         * 1, so there has to be a floor at all; and a window dragged smaller
+         * than its own borders could not be grabbed again, which is a way to
+         * lose a program with no way back. 96 is comfortably larger than the
+         * border box the shell draws.
+         */
+        const val MIN_WINDOW_PX = 96
 
         /** Off unless `setprop log.tag.VesselWindows DEBUG`. See [publishWindows]. */
         const val TREE_TAG = "VesselWindows"

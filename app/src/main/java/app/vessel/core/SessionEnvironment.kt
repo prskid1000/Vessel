@@ -207,6 +207,15 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // that with a connect(2) failure per damaged region rather than an error.
     SYSVSHM_SOCKET_ENV,
     "VESSEL_VULKAN_ICD",
+    // Reserved rather than offered, because a caption is not a preference here:
+    // Vessel's taskbar is the only window control on a phone and the shell draws
+    // the move/resize borders itself. A container that turned this off would get
+    // a 41px strip nothing paints and a client that overflows its own parent.
+    "VESSEL_BORDERLESS",
+    // Not a driconf file and not a setting: it is a correctness/perf pairing
+    // with FEX's store-release behaviour, and FEX would try to set it itself if
+    // it could. See where it is assigned.
+    "tu_override_uncached_as_cache_coherent",
     "ADRENOTOOLS_DRIVER_PATH",
     "ADRENOTOOLS_HOOKS_PATH",
     "ADRENOTOOLS_DRIVER_NAME",
@@ -342,20 +351,23 @@ fun sessionEnvironment(
 
     // FEX's memory-ordering behaviour is fixed here, not offered as settings.
     //
-    // These were three switches in the container editor until it became clear
-    // that every one of them had exactly one correct value and no user could
-    // reach a better one by guessing:
+    // **All three of these are FEX's own defaults, so none of them changes
+    // anything.** Checked one by one against
+    // `FEXCore/Source/Interface/Config/Config.json.in`: `TSOEnabled` is
+    // `"Default": "true"` (:439), `HalfBarrierTSOEnabled` `"true"` (:462),
+    // `VectorTSOEnabled` `"false"` (:447). They are kept because the value
+    // being visible here is worth a line each — a reader should not have to
+    // know FEX's defaults to know what Vessel runs with — but nothing below is
+    // a choice Vessel is making at runtime, and the reasons are why the default
+    // is right rather than why we overrode it:
     //
     //   TSOENABLED=1           x86 assumes Total Store Order and Arm does not
     //                          guarantee it. Off is faster and breaks any
     //                          multi-threaded program, quietly and at random.
-    //   HALFBARRIERTSOENABLED=1  **FEX's own default.** Config.json.in gives it
-    //                          `"Default": "true"`, so this line sets what FEX
-    //                          would do unset — it is redundant, not wrong, and
-    //                          is kept only so the value is visible here rather
-    //                          than inherited silently. The "21% cheaper"
+    //   HALFBARRIERTSOENABLED=1  Backpatches *unaligned* loads and stores to
+    //                          half-barrier atomics. The "21% cheaper"
     //                          measurement this comment used to cite is the
-    //                          LRCPC2 result and belongs to a different knob.
+    //                          LRCPC2 result and belongs to a different knob;
     //                          tools/tso/run.sh now measures this one properly,
     //                          against `=0` and on unaligned traffic — the only
     //                          traffic the backpatch touches.
@@ -370,12 +382,22 @@ fun sessionEnvironment(
     // `FEX_TSOENABLED` and never `FEX_TSOEnabled`. See docs/ARCHITECTURE.md.
     // FEX's own diagnostics reach the same pipe as everything else.
     //
-    // Both defaults work against docs/LOGGING.md: SILENTLOG is true and
-    // OUTPUTLOG is "server", so nothing FEX says lands on fd 2. That hides more
-    // than crash messages — FEX_HOSTFEATURES parsing skips tokens it does not
-    // recognise with only a log line to say so, so with the default a typo in a
-    // host-feature override is completely invisible. Same failure shape as the
-    // WINEDEBUG traps that document already catalogues.
+    // SILENTLOG defaults to true, and that hides more than crash messages:
+    // FEX_HOSTFEATURES parsing skips tokens it does not recognise with only a
+    // log line to say so, so with the default a typo in a host-feature override
+    // is completely invisible. Same failure shape as the WINEDEBUG traps
+    // docs/LOGGING.md already catalogues. Turning it off is the whole fix —
+    // FEX then binds ntdll's `__wine_dbg_output`, which is the pipe the session
+    // log already reads.
+    //
+    // **OUTPUTLOG does nothing on Windows and is kept only as a marker.**
+    // `Source/Windows/Common/Logging.cpp` is the entire Windows logging init
+    // and it reads `SILENTLOG` and nothing else; if not silent it resolves
+    // `__wine_dbg_output` and otherwise falls back to a file under LOCALAPPDATA.
+    // `OUTPUTLOG` is a Linux/FEXServer option and is never consulted here. The
+    // comment that used to sit above these two lines explained the log routing
+    // in terms of `OUTPUTLOG` being `"server"` — the right conclusion reached
+    // through a mechanism that does not exist on this platform.
     environment["FEX_SILENTLOG"] = "0"
     environment["FEX_OUTPUTLOG"] = "stderr"
 
@@ -385,6 +407,21 @@ fun sessionEnvironment(
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
     environment[WINEDLLOVERRIDES_ENV] = dllOverrides(profile, manifest)
     environment["DISPLAY"] = display
+
+    // **No Win32 caption on any top-level window.** `patches/wine/0010` reads
+    // this and clears `WS_CAPTION|WS_THICKFRAME` in win32u's own style-correction
+    // block — which is where it has to happen, because that block *adds*
+    // `WS_CAPTION` to every non-popup top-level and would otherwise put back
+    // whatever a program left off.
+    //
+    // Measured before it was written, on the device: a 1280x720 game window had
+    // a 1274x673 client at +3+44. That is a 3px border and a 41px caption; the
+    // caption is 6% of a 720-row display, nothing paints it so it shows white,
+    // and when the program resized to 640x480 the client kept the +44 and hung
+    // 44 rows off the bottom of its own parent. The taskbar already carries
+    // minimise, close and force-close, and move/resize is a toggle in the same
+    // menu, so removing the frame takes nothing away.
+    environment["VESSEL_BORDERLESS"] = "1"
 
     environment["DXVK_LOG_LEVEL"] = "info"
 
@@ -507,6 +544,31 @@ fun sessionEnvironment(
     // `__builtin_unreachable()`, and the probe measured 12.8 ms a frame there —
     // a number produced by undefined behaviour, not by a slow path.
     environment["MESA_VK_WSI_DEBUG"] = "sw"
+
+    // **FEX asks Turnip for this and cannot deliver it here, so Vessel does.**
+    //
+    // x86 emulation turns guest stores into store-releases, and those are
+    // punishing on uncached/write-combine memory — which is what a host-visible
+    // upload or staging allocation usually lands in. The option makes Turnip
+    // hand back the cached-coherent memory type instead
+    // (`tu_device.cc:1816-1819`, guarded by `has_cached_non_coherent_memory`;
+    // declared in `tu_drirc_gen.py:96`, default false).
+    //
+    // FEX tries to set it itself and silently fails on this Wine.
+    // `Source/Windows/Common/EnvironmentVariablesHandling.cpp` resolves
+    // `__wine_set_unix_env` out of ntdll and guards on `Sym &&` — and that
+    // export **does not exist in Wine 11.14**, so the branch never runs and the
+    // option keeps its `false` default. FEX's own comment calls the mechanism
+    // "may also not be long-term viable" and suggests exactly this workaround:
+    // set the variable in the launch script. Its check is
+    // `getenv(...) == nullptr`, so setting it here is also what stops FEX
+    // fighting us if that export ever returns.
+    //
+    // A plain env var works because Mesa checks one per driconf option name and
+    // lets it override the built-in default (`util/xmlconfig.c:424-438`).
+    // **Unmeasured** — it needs an x86-64 D3D title, so it cannot be attributed
+    // by `presentbench`, which runs no guest x86 at all.
+    environment["tu_override_uncached_as_cache_coherent"] = "true"
 
     // Setting these three is what makes win32u open the adrenotools handle
     // instead of `dlopen`ing the platform loader, and for one cycle they were

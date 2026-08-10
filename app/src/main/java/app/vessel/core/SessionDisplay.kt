@@ -111,7 +111,56 @@ data class TopLevelWindow(
      * became the only way back. Wine's desktop has no taskbar of its own.
      */
     val minimized: Boolean = false,
+
+    /**
+     * Where the window is, in **guest** pixels, relative to the desktop.
+     *
+     * Guest pixels and not view pixels, because the view's scale and letterbox
+     * change with rotation and with `display.resolution` while this does not.
+     * Anything drawing on top of a window converts through
+     * [SessionDisplayServer.guestViewport], which is the one place that
+     * mapping lives.
+     */
+    val bounds: WindowBounds = WindowBounds(),
 )
+
+/** A window rectangle in guest pixels. */
+data class WindowBounds(
+    val x: Int = 0,
+    val y: Int = 0,
+    val width: Int = 0,
+    val height: Int = 0,
+)
+
+/**
+ * How guest pixels land on the surface, so the shell can draw over a window.
+ *
+ * The X server renders the guest's [guestWidth] x [guestHeight] desktop into the
+ * view scaled by [scale] and letterboxed by [offsetX]/[offsetY] — so a guest
+ * point is `offset + guest * scale`, and that is the whole conversion. Published
+ * rather than recomputed because the aspect fit is the renderer's decision
+ * (`ViewTransformation.update`), and a second implementation of it in the UI
+ * would be wrong the first time either dimension changed.
+ *
+ * All four are view pixels. [scale] is uniform: the fit preserves aspect.
+ */
+data class GuestViewport(
+    val offsetX: Float = 0f,
+    val offsetY: Float = 0f,
+    val scale: Float = 1f,
+    val guestWidth: Int = 0,
+    val guestHeight: Int = 0,
+) {
+    /** A guest x in view pixels. */
+    fun viewX(guestX: Int): Float = offsetX + guestX * scale
+
+    /** A guest y in view pixels. */
+    fun viewY(guestY: Int): Float = offsetY + guestY * scale
+
+    /** A view distance back in guest pixels, for turning a drag into a resize. */
+    fun toGuest(viewDistance: Float): Int =
+        if (scale > 0f) (viewDistance / scale).toInt() else 0
+}
 
 /** How [SessionDisplayServer.start] went. Modelled on `BootstrapOutcome`. */
 sealed interface DisplayOutcome {
@@ -293,6 +342,33 @@ interface SessionDisplayServer {
     fun killWindow(id: Int): Boolean
 
     /**
+     * Move and resize a window, in guest pixels.
+     *
+     * **The shell's own window management, because the guest's was removed.**
+     * `patches/wine/0010` strips `WS_CAPTION` and `WS_THICKFRAME` from every
+     * top-level window, so there is no caption to drag and no sizing border to
+     * pull — which is the point on a phone, where both are far too small to hit
+     * and the caption alone cost 41 rows nothing ever painted. The shell puts
+     * temporary drag borders on screen instead and calls this.
+     *
+     * Both the move and the resize are applied together because they are one
+     * gesture: dragging a corner changes origin and size at once, and doing it
+     * in two calls would show the window in a position it was never in.
+     *
+     * False for an id the server does not have — the same ordinary race
+     * [focusWindow] tolerates.
+     */
+    fun moveResizeWindow(id: Int, x: Int, y: Int, width: Int, height: Int): Boolean
+
+    /**
+     * How guest pixels currently map onto the surface. See [GuestViewport].
+     *
+     * Changes on rotation, on a resolution change, and once at startup when the
+     * surface first gets a size, so it is a flow rather than a getter.
+     */
+    val guestViewport: StateFlow<GuestViewport>
+
+    /**
      * Raise the IME over the guest's output.
      *
      * There is no hardware keyboard on a phone, and a Windows desktop with no
@@ -344,6 +420,14 @@ interface SessionDisplayServer {
         override fun closeWindow(id: Int): Boolean = false
 
         override fun killWindow(id: Int): Boolean = false
+
+        override fun moveResizeWindow(id: Int, x: Int, y: Int, width: Int, height: Int) = false
+
+        // Headless: nothing is rendered, so there is no mapping to publish. The
+        // default is the identity rather than a zero scale, which would make any
+        // caller that divided by it produce infinities instead of nothing.
+        override val guestViewport: StateFlow<GuestViewport> =
+            MutableStateFlow(GuestViewport()).asStateFlow()
 
         override fun showKeyboard() = Unit
 

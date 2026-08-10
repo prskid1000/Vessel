@@ -21,6 +21,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import app.vessel.core.DisplayGeometry
+import app.vessel.core.GuestViewport
 import app.vessel.data.SessionPhase
 import app.vessel.data.SessionState
 import app.vessel.ui.components.VButton
@@ -276,6 +277,7 @@ fun VesselApp(
             val surface by session.surface.collectAsStateWithLifecycle()
             val pointerMode by session.pointerMode.collectAsStateWithLifecycle()
             val windows by session.windows.collectAsStateWithLifecycle(emptyList())
+            val viewport by session.viewport.collectAsStateWithLifecycle(GuestViewport())
             val shortcuts by session.shortcuts.collectAsStateWithLifecycle(emptyList())
             val terminals by session.terminalProfiles.collectAsStateWithLifecycle(emptyList())
             // Collected here rather than inside the taskbar: the readout ticks
@@ -306,6 +308,8 @@ fun VesselApp(
                 onMinimizeWindow = session::minimizeWindow,
                 onCloseWindow = session::closeWindow,
                 onKillWindow = session::killWindow,
+                onMoveResizeWindow = session::moveResizeWindow,
+                viewport = viewport,
                 terminals = terminals,
                 onTerminal = session::openTerminal,
             )

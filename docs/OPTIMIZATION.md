@@ -249,10 +249,34 @@ Wine process start (`cmd /c exit`, best of five): **197 ms**.
 **What this says.** ARM64EC plus FEX costs about **9% on integer throughput** and
 nothing at all on memory — the `mem` row landing on 0.99× is the benchmark
 validating itself, since a memory-bound loop should be almost
-translation-independent and it is. Float costs 23%. x86-32 through WoW64 is a
-different story: **2.28× on integer**, so the 32-bit path is roughly twice as
-expensive as the 64-bit one and that gap, not the 64-bit one, is where
-translation work would pay off.
+translation-independent and it is. Float costs 23%.
+
+**The "2.28× for x86-32" that used to be claimed here was the benchmark, not
+WoW64.** `bench_int` is written entirely in `unsigned long long`, so on i686
+clang synthesises every 64×64 multiply from three 32-bit multiplies and every
+64-bit shift from a `shld`/`shr` pair: the i686 build executes several times the
+guest instructions per iteration for identical work. 560.6/244.1 is that
+lowering, measured against *native ARM64*.
+
+The control was in the same baseline the whole time and nobody read it:
+`x86_64 float 403.2` and `i686 float 403.2`, **bit-identical**, both scalar
+SSE2. And `branch` and `mem` are *faster* on i686 than on x86-64 and than on
+native ARM64 (154.4 vs 191.3 vs 233.6; 107.8 vs 140.1 vs 139.3). Identical guest
+work costs the same through WoW64 as through ARM64EC — there is no measurable
+steady-state 32-bit tax on compute, and the paragraph that pointed future
+translation work at "the 32-bit path" was aiming at a compiler artefact. It made
+exactly the mistake the `branch` paragraph below warns about, three lines later.
+
+`cpubench.c` now carries an `int32` section — the same LCG in 32-bit operands,
+which a 32-bit target lowers one to one — so the honest number has somewhere to
+appear. **It has not been run yet**; until it is, the x86-32 integer cost is
+unknown rather than 2.28×.
+
+Real WoW64 costs do exist and they are per-syscall, not per-instruction: every
+guest syscall takes `UnlockJITContext`/`LockJITContext` — a CAS on the TEB
+control word each way — plus Wine's 32→64 pointer marshalling. That shows up in
+launch time and in syscall-heavy code, which `cpubench` deliberately contains
+none of.
 
 **The `branch` row does not mean x86 is faster than native, and must not be
 quoted that way.** It is reproducible to the millisecond, so it is not noise —

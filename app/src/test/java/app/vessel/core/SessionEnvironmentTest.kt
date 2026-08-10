@@ -510,6 +510,11 @@ class SessionEnvironmentTest {
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
+                // No Win32 caption on any top-level window. Measured before the
+                // patch existed: a 1280x720 game window had a 1274x673 client at
+                // +3+44 — a 3px border and a 41px caption that nothing paints and
+                // that overflows the parent once the program resizes smaller.
+                "VESSEL_BORDERLESS" to "1",
                 "DXVK_LOG_LEVEL" to "info",
                 // `none`, not the log directory: on a Wine build DXVK sends every
                 // line to `__wine_dbg_output` *and* to a file, and a path here made
@@ -531,6 +536,11 @@ class SessionEnvironmentTest {
                 // on the median — tools/gfx/x11present.c, 400 frames, three runs
                 // each. The reasoning at the assignment says why.
                 "MESA_VK_WSI_DEBUG" to "sw",
+                // A Turnip driconf option delivered as an env var, because FEX
+                // asks Turnip for it through `__wine_set_unix_env` and that
+                // export does not exist in Wine 11.14, so FEX's own attempt is
+                // guarded out and the option keeps its `false` default.
+                "tu_override_uncached_as_cache_coherent" to "true",
                 "VESSEL_VULKAN_ICD" to File(turnip.driverDir, turnip.libraryName).absolutePath,
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,

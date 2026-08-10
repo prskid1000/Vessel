@@ -126,6 +126,15 @@ object VIcons {
     /** `monitor` — the desktop a container starts. */
     val Monitor: ImageVector by lazy { glyph("phosphor.monitor", MONITOR) }
 
+    /**
+     * `corners-out` — the taskbar menu's move/resize toggle.
+     *
+     * Four corner brackets, which is literally what the toggle puts on screen:
+     * the guest has no caption to drag since `patches/wine/0010`, so the shell
+     * draws its own handles at the corners and edges instead.
+     */
+    val CornersOut: ImageVector by lazy { glyph("phosphor.cornersOut", CORNERS_OUT) }
+
     /** `info` — an empty state that is reporting rather than inviting. */
     val Info: ImageVector by lazy { glyph("phosphor.info", INFO) }
 
@@ -277,6 +286,11 @@ private const val HAND_POINTING =
         "2,0,0,1,54,121.61a11.88,11.88,0,0,1,6-1.6,12,12,0,0,1,10.41,6,1.76,1.76,0,0,0,.14.23l18.67,3" +
         "0A8,8,0,0,0,104,152V44a12,12,0,0,1,24,0v68a8,8,0,0,0,16,0V100a12,12,0,0,1,24,0v20a8,8,0,0,0,1" +
         "6,0v-4a12,12,0,0,1,24,0Z"
+
+private const val CORNERS_OUT =
+    "M216,48V88a8,8,0,0,1-16,0V56H168a8,8,0,0,1,0-16h40A8,8,0,0,1,216,48ZM88,200H56V168a8,8,0,0,0-16," +
+        "0v40a8,8,0,0,0,8,8H88a8,8,0,0,0,0-16Zm120-40a8,8,0,0,0-8,8v32H168a8,8,0,0,0,0,16h40a8,8,0,0," +
+        "0,8-8V168A8,8,0,0,0,208,160ZM88,40H48a8,8,0,0,0-8,8V88a8,8,0,0,0,16,0V56H88a8,8,0,0,0,0-16Z"
 
 private const val MONITOR =
     "M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm" +

@@ -129,6 +129,21 @@ class SessionViewModel @Inject constructor(
         viewModelScope.launch { shell.kill(id) }
     }
 
+    /**
+     * Move and resize a window, in guest pixels — what a drag border does.
+     *
+     * Fire and forget, like every other window action here. A drag emits one of
+     * these per frame it moves, and awaiting each would either serialise the
+     * gesture behind the X server or need a queue; the server applies them in
+     * order and publishes the result, which is what the borders follow.
+     */
+    fun moveResizeWindow(id: Int, x: Int, y: Int, width: Int, height: Int) {
+        viewModelScope.launch { shell.moveResize(id, x, y, width, height) }
+    }
+
+    /** How guest pixels land on the surface. The borders are positioned by this. */
+    val viewport = shell.viewport
+
     val state: StateFlow<SessionState> = runtime.state
 
     /**

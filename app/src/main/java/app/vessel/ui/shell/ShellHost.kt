@@ -1,6 +1,8 @@
 package app.vessel.ui.shell
 
 import androidx.compose.runtime.Immutable
+import app.vessel.core.GuestViewport
+import app.vessel.core.WindowBounds
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,6 +24,8 @@ data class GuestWindow(
     val program: String = "",
     /** Hidden by the taskbar's Minimize, and still listed so it can come back. */
     val minimized: Boolean = false,
+    /** Where it is, in guest pixels. What the drag borders are drawn around. */
+    val bounds: WindowBounds = WindowBounds(),
 ) {
     /** The tile letter, on the same reasoning as [AppShortcut.initial]. */
     val initial: String get() = title.trim().firstOrNull()?.uppercase() ?: "?"
@@ -93,6 +97,23 @@ interface ShellHost {
     suspend fun kill(windowId: Int): Boolean
 
     /**
+     * Move and resize a window, in guest pixels — the drag borders' one effect.
+     *
+     * Exists because `patches/wine/0010` removes the caption and the sizing
+     * border from every top-level window, so the guest offers no way to do this
+     * and the shell has to. False for a window that has since gone.
+     */
+    suspend fun moveResize(windowId: Int, x: Int, y: Int, width: Int, height: Int): Boolean
+
+    /**
+     * How guest pixels land on the surface, so the borders can be drawn on top.
+     *
+     * A flow because it changes on rotation and on a resolution change, and
+     * borders left at the old mapping would sit beside the window they belong to.
+     */
+    val viewport: Flow<GuestViewport>
+
+    /**
      * Start [shortcut] inside the session that is already running.
      *
      * This is the launcher's whole purpose and the single most important thing
@@ -153,6 +174,14 @@ class UnavailableShellHost @Inject constructor() : ShellHost {
     override suspend fun close(windowId: Int): Boolean = false
 
     override suspend fun kill(windowId: Int): Boolean = false
+
+    override suspend fun moveResize(windowId: Int, x: Int, y: Int, width: Int, height: Int) = false
+
+    // Nothing is rendered, so there is no mapping. The identity rather than a
+    // zero scale, so a caller that divides by it gets nothing rather than an
+    // infinity.
+    override val viewport: Flow<GuestViewport> =
+        MutableStateFlow(GuestViewport()).asStateFlow()
 
     override suspend fun launch(shortcut: AppShortcut): String = unavailableReason
 

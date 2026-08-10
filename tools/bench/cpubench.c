@@ -79,6 +79,35 @@ static unsigned long long bench_int(unsigned iterations)
     return a ^ b;
 }
 
+/* The same LCG shape as bench_int, in 32-bit arithmetic.
+ *
+ * **This section exists because `int` cannot be compared across bitnesses and
+ * was being compared anyway.** Every operand in bench_int is 64-bit, so on i686
+ * clang has to synthesize each 64x64 multiply from three 32-bit multiplies and
+ * each 64-bit shift from a shld/shr pair: the i686 build runs several times the
+ * guest instructions per iteration for identical work. The "x86-32 costs 2.28x"
+ * headline is that lowering — 560.6/244.1 against *native ARM64* — and not a
+ * WoW64 or FEX tax.
+ *
+ * The control was already sitting in the same baseline and nobody read it:
+ * `x86_64 float 403.2` and `i686 float 403.2`, bit-identical, both scalar SSE2.
+ * `branch` and `mem` are *faster* on i686 than on x86-64 and than on native
+ * ARM64. Identical guest work costs the same through WoW64 as through ARM64EC.
+ *
+ * So this row is the honest x86-32 translation number: 32-bit operands, which
+ * a 32-bit target lowers one-to-one. */
+static unsigned long long bench_int32(unsigned iterations)
+{
+    unsigned a = 0x85a308d3u, b = 0x03707344u;
+    for (unsigned i = 0; i < iterations; i++) {
+        a = a * 1664525u + 1013904223u;
+        b ^= a >> 13;
+        b = b * 0x9e3779b9u;
+        a += b >> 7;
+    }
+    return ((unsigned long long)a << 32) | b;
+}
+
 static unsigned long long bench_branch(const unsigned *data, unsigned n, unsigned rounds)
 {
     unsigned long long acc = 0;
@@ -155,6 +184,13 @@ int main(int argc, char **argv)
     t0 = now_ms(); c = bench_int(40000000u * scale);              t1 = now_ms();
     sink ^= c;
     printf("CPUBENCH bits=%d scale=%u section=int ms=%.1f checksum=%llu\n",
+           bits, scale, t1 - t0, c);
+
+    /* Directly after int, so the two are adjacent in every result file and the
+       comparison that matters is impossible to miss. */
+    t0 = now_ms(); c = bench_int32(40000000u * scale);            t1 = now_ms();
+    sink ^= c;
+    printf("CPUBENCH bits=%d scale=%u section=int32 ms=%.1f checksum=%llu\n",
            bits, scale, t1 - t0, c);
 
     t0 = now_ms(); c = bench_branch(buf, 1u << 20, 120u * scale); t1 = now_ms();

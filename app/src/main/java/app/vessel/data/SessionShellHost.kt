@@ -1,5 +1,6 @@
 package app.vessel.data
 
+import app.vessel.core.GuestViewport
 import app.vessel.core.SessionDisplayServer
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestPath
@@ -42,9 +43,12 @@ class SessionShellHost @Inject constructor(
                     focused = it.focused,
                     program = it.program,
                     minimized = it.minimized,
+                    bounds = it.bounds,
                 )
             }
         }
+
+    override val viewport: Flow<GuestViewport> = display.guestViewport
 
     override val available: Boolean = true
 
@@ -57,6 +61,9 @@ class SessionShellHost @Inject constructor(
     override suspend fun close(windowId: Int): Boolean = display.closeWindow(windowId)
 
     override suspend fun kill(windowId: Int): Boolean = display.killWindow(windowId)
+
+    override suspend fun moveResize(windowId: Int, x: Int, y: Int, width: Int, height: Int): Boolean =
+        display.moveResizeWindow(windowId, x, y, width, height)
 
     /**
      * Start [shortcut] in the session that is already running.

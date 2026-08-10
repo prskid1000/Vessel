@@ -239,6 +239,32 @@ public class WindowManager extends XResourceManager {
         triggerOnChangeWindowZOrder(window);
     }
 
+    // VESSEL: window-manager-initiated move and resize, for the shell's drag
+    // borders. Every existing way into changeWindowGeometry arrives from a
+    // client request with an XInputStream to parse, and that method is private,
+    // so there was no way for the *server side* to place a window at all.
+    //
+    // Vessel needs one because patches/wine/0010 strips WS_CAPTION and
+    // WS_THICKFRAME from every top-level window: on a phone a caption is too
+    // small to hit and cost 41 unpainted rows, so the shell draws temporary drag
+    // borders instead and calls this. It is deliberately the same shape as the
+    // non-redirect branch of configureWindow below — geometry, then
+    // ConfigureNotify to the window and to its parent — because a client must
+    // not be able to tell a shell drag from an ordinary WM configure.
+    public void moveResizeWindow(Window window, short x, short y, short width, short height) {
+        if (width <= 0 || height <= 0) return;
+
+        Window parent = window.getParent();
+        if (parent == null) return;
+
+        changeWindowGeometry(window, x, y, width, height);
+
+        boolean overrideRedirect = window.attributes.isOverrideRedirect();
+        Window previousSibling = window.previousSibling();
+        window.sendEvent(Event.STRUCTURE_NOTIFY, new ConfigureNotify(window, window, previousSibling, x, y, width, height, window.getBorderWidth(), overrideRedirect));
+        parent.sendEvent(Event.SUBSTRUCTURE_NOTIFY, new ConfigureNotify(parent, window, previousSibling, x, y, width, height, window.getBorderWidth(), overrideRedirect));
+    }
+
     public void configureWindow(Window window, Bitmask valueMask, XInputStream inputStream) throws XRequestError {
         short x = window.getX();
         short y = window.getY();

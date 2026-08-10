@@ -155,6 +155,21 @@ The modifications, in the order they were made:
    ClientMessage from the window manager is not selected for by any event mask.
    `winex11.drv` turns it into `WM_CLOSE`, so the program still gets its "save
    changes?" dialog — which is the whole reason to ask rather than kill.
+16. **`WindowManager.moveResizeWindow()`** — the server had no way to place a
+   window from its own side. `changeWindowGeometry` is private and every route
+   to it starts from a client request with an `XInputStream` to parse, so a
+   window manager written above this tree could focus, map and unmap a window
+   but never move or size one. Vessel needs it because
+   `patches/wine/0010` strips `WS_CAPTION` and `WS_THICKFRAME` from every
+   top-level window — a caption is unhittable on a phone and cost 41 rows that
+   nothing painted — so the shell offers temporary drag borders from the taskbar
+   menu instead, and those have to be able to move the window they are drawn
+   around. Deliberately the same shape as the non-redirect branch of
+   `configureWindow`: change the geometry, then `ConfigureNotify` to the window
+   and to its parent, so a client cannot tell a shell drag from an ordinary
+   window-manager configure. The resize path matters most — it is
+   `changeWindowGeometry` that recreates the backing `Drawable` at the new size,
+   and a resize that skipped it would leave the window sampling a stale buffer.
 
 ### Every file that differs from upstream
 
@@ -180,6 +195,7 @@ fails the build.
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |

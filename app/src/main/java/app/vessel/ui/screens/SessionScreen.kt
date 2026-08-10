@@ -53,6 +53,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.FrameRate
+import app.vessel.core.GuestViewport
 import app.vessel.core.SessionDiagnosis
 import app.vessel.data.ProvisionStatus
 import app.vessel.data.ProvisionStep
@@ -385,6 +386,10 @@ fun SessionDesktop(
     onMinimizeWindow: (Int) -> Unit,
     onCloseWindow: (Int) -> Unit,
     onKillWindow: (Int) -> Unit,
+    /** Move and resize, in guest pixels — what a drag border does. */
+    onMoveResizeWindow: (id: Int, x: Int, y: Int, width: Int, height: Int) -> Unit = { _, _, _, _, _ -> },
+    /** How guest pixels land on the surface, so the borders can be placed. */
+    viewport: GuestViewport = GuestViewport(),
     windows: List<GuestWindow> = emptyList(),
     /** Composited frames per second, for the taskbar's readout. */
     frameRate: FrameRate = FrameRate(),
@@ -410,6 +415,14 @@ fun SessionDesktop(
 
     /** The window whose actions are showing, or null. Held here, not in the bar. */
     var windowMenu by remember { mutableStateOf<GuestWindow?>(null) }
+
+    /**
+     * The window wearing drag borders, or null. An id and not the window itself,
+     * so the borders follow the live list as it is republished — a window whose
+     * geometry the server has just changed must redraw its handles at the new
+     * place, and holding the object would pin them to the old one.
+     */
+    var resizingWindowId by remember { mutableStateOf<Int?>(null) }
 
     // The taskbar puts itself away. An overlay over a fullscreen game that stays
     // up is an overlay covering the game, and there is no z-order that fixes it.
@@ -569,6 +582,25 @@ fun SessionDesktop(
             }
         }
 
+        // **Above the guest and below the taskbar.** A handle the taskbar covered
+        // would be unreachable for exactly the window docked under it, and the
+        // borders have to be over the surface or they would be composited behind
+        // the thing they are framing.
+        resizingWindowId?.let { id ->
+            val target = windows.firstOrNull { it.id == id && !it.minimized }
+            // Gone, or minimised out from under the mode: drop it rather than
+            // leaving handles floating over nothing.
+            if (target == null) {
+                LaunchedEffect(id) { resizingWindowId = null }
+            } else {
+                WindowDragBorders(
+                    window = target,
+                    viewport = viewport,
+                    onMoveResize = { x, y, w, h -> onMoveResizeWindow(id, x, y, w, h) },
+                )
+            }
+        }
+
         Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
             TaskbarTransition(visible = taskbarOpen) {
                 SessionTaskbar(
@@ -638,6 +670,16 @@ fun SessionDesktop(
                         windowMenu = null
                         onKillWindow(target.id)
                     },
+                    // **The panel closes and the borders stay.** Leaving it up
+                    // would cover the window being dragged with the menu that
+                    // started the drag. Tapping the same button again is how it
+                    // ends, which is why the menu remembers the mode rather than
+                    // the borders owning it.
+                    onResize = {
+                        resizingWindowId = if (resizingWindowId == target.id) null else target.id
+                        windowMenu = null
+                    },
+                    resizing = resizingWindowId == target.id,
                 )
             }
         }

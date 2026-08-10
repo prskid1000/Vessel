@@ -1,0 +1,68 @@
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 924990e8d4f..d0441c05207 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -24,6 +24,7 @@
+ #endif
+ 
+ #include <assert.h>
++#include <stdlib.h>
+ 
+ #include "ntstatus.h"
+ #include "ntgdi_private.h"
+@@ -39,6 +40,22 @@ WINE_DEFAULT_DEBUG_CHANNEL(win);
+ 
+ static const struct ratio no_dpi;
+ 
++/* Vessel: VESSEL_BORDERLESS=1 removes the non-client frame from every top-level
++ * window. Read once — this cannot change within a process, and the answer is
++ * needed on the window-creation path. Unset, every branch guarded by it is a
++ * no-op and Wine's framing is exactly upstream's. */
++static BOOL vessel_borderless_windows(void)
++{
++    static int cached = -1;
++
++    if (cached == -1)
++    {
++        const char *value = getenv( "VESSEL_BORDERLESS" );
++        cached = value && value[0] == '1';
++    }
++    return cached;
++}
++
+ static void *client_objects[MAX_USER_HANDLES];
+ 
+ #define SWP_AGG_NOGEOMETRYCHANGE \
+@@ -5926,6 +5943,32 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
+         if (!(win->dwStyle & WS_POPUP)) win->dwStyle |= WS_CAPTION;
+     }
+ 
++    /* Vessel: no non-client frame on a phone.
++     *
++     * Has to be here and not in the caller: the block directly above *adds*
++     * WS_CAPTION to every top-level window that is not WS_POPUP, so a program
++     * asking for no caption is given one anyway and clearing the bit before
++     * NtUserCreateWindowEx would not survive.
++     *
++     * The frame is not free. A 1280x720 window gets a 1274x673 client at
++     * +3+44 — a 3px border and a 41px caption — so the caption is 6% of a 720
++     * row display, it is drawn by nobody and shows as a white strip, and when
++     * a program later resizes to 640x480 the client keeps the +44 offset and
++     * overflows the bottom of its own parent. Vessel's taskbar already carries
++     * minimise, close and force-close, and move/resize is a toggle in that same
++     * menu, so nothing here is the only way to reach a window.
++     *
++     * WS_CAPTION is WS_BORDER|WS_DLGFRAME, so clearing it clears both. The
++     * ex-style edges are cleared through cs so the WS_EX_WINDOWEDGE rule below
++     * cannot put one back. */
++    if (vessel_borderless_windows() && !(win->dwStyle & WS_CHILD))
++    {
++        win->dwStyle &= ~(WS_CAPTION | WS_THICKFRAME);
++        cs.style &= ~(WS_CAPTION | WS_THICKFRAME);
++        cs.dwExStyle &= ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE |
++                          WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE);
++    }
++
+     win->dwExStyle = cs.dwExStyle;
+     /* WS_EX_WINDOWEDGE depends on some other styles */
+     if ((win->dwStyle & (WS_DLGFRAME | WS_THICKFRAME)) &&

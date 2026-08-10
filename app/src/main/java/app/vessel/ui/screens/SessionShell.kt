@@ -10,6 +10,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,12 +53,16 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import app.vessel.core.FrameRate
+import app.vessel.core.GuestViewport
 import app.vessel.core.PeArchitecture
+import app.vessel.core.WindowBounds
 import app.vessel.ui.components.VAppGrid
 import app.vessel.ui.components.VAppIcon
 import app.vessel.ui.components.VButtonStyle
@@ -458,6 +466,8 @@ fun WindowActionsPanel(
     onMinimize: () -> Unit,
     onClose: () -> Unit,
     onKill: () -> Unit,
+    onResize: () -> Unit,
+    resizing: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val shape = Vessel.metrics.shapeLg
@@ -500,6 +510,20 @@ fun WindowActionsPanel(
                 label = if (window.minimized) "Restore" else "Minimize",
                 onClick = onMinimize,
             )
+            // **The only way to move or size a window.** `patches/wine/0010`
+            // removes the caption and the sizing border from every top-level
+            // window — both are unhittable on a phone, and the caption alone
+            // cost 41 rows nothing painted — so this puts handles on screen for
+            // as long as they are wanted and takes them away again. Hidden
+            // while the window is minimised, where there is nothing to drag.
+            if (!window.minimized) {
+                WindowAction(
+                    icon = VIcons.CornersOut,
+                    label = if (resizing) "Done" else "Resize",
+                    tint = if (resizing) Vessel.colors.accent else Vessel.colors.textPrimary,
+                    onClick = onResize,
+                )
+            }
             WindowAction(icon = VIcons.X, label = "Close", onClick = onClose)
             // Destructive, and drawn as such. Offered unconditionally rather
             // than only after Close fails, because the case it exists for is a
@@ -901,3 +925,126 @@ private fun SessionLauncherPreview() {
         )
     }
 }
+
+/**
+ * Temporary drag handles around one guest window.
+ *
+ * **The whole of window management in this product, and it is deliberately not
+ * always on.** `patches/wine/0010` strips `WS_CAPTION` and `WS_THICKFRAME` from
+ * every top-level window, because on a phone a Win32 caption is far too small
+ * to hit and the one measured here cost 41 of 720 rows to a strip nothing ever
+ * painted. That leaves nothing to grab — so the taskbar menu turns these on for
+ * as long as they are wanted, and off again from the same button.
+ *
+ * The mapping: [viewport] converts guest pixels to view pixels, and it is the
+ * renderer's own fit rather than a second copy of it. Everything below is drawn
+ * in view pixels and every drag is converted back before it is sent, so the
+ * handles stay the same physical size whatever the desktop resolution is —
+ * a handle that scaled with the guest would be untouchable at 640x360.
+ *
+ * **The top edge moves, the other three and the corners resize.** The body is
+ * left alone entirely: turning this on mid-game must not take the pointer away
+ * from the game, and a mode that swallowed the whole window would do exactly
+ * that.
+ */
+@Composable
+fun WindowDragBorders(
+    window: GuestWindow,
+    viewport: GuestViewport,
+    onMoveResize: (x: Int, y: Int, width: Int, height: Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (viewport.scale <= 0f) return
+
+    val density = LocalDensity.current
+    val grab = Vessel.metrics.s17
+    val grabPx = with(density) { grab.toPx() }
+
+    // The live rectangle, in guest pixels. Seeded from the window and then owned
+    // by the gesture: the X server republishes asynchronously, so reading the
+    // window back every frame would make the handles stutter a frame behind the
+    // finger. It resyncs whenever the window really changes underneath.
+    var rect by remember(window.id) { mutableStateOf(window.bounds) }
+    LaunchedEffect(window.bounds) { rect = window.bounds }
+
+    val left = with(density) { viewport.viewX(rect.x).toDp() }
+    val top = with(density) { viewport.viewY(rect.y).toDp() }
+    val width = with(density) { (rect.width * viewport.scale).toDp() }
+    val height = with(density) { (rect.height * viewport.scale).toDp() }
+
+    /** One edge or corner. [apply] gets the drag in guest pixels. */
+    @Composable
+    fun handle(
+        alignX: Dp,
+        alignY: Dp,
+        w: Dp,
+        h: Dp,
+        apply: (dx: Int, dy: Int) -> WindowBounds,
+    ) {
+        Box(
+            Modifier
+                .offset(alignX, alignY)
+                .size(w, h)
+                .pointerInput(window.id, viewport) {
+                    detectDragGestures(
+                        onDragEnd = {
+                            // The authoritative call. Every move during the drag
+                            // already went out, so this is the one that matters
+                            // only if the last frame was coalesced away.
+                            onMoveResize(rect.x, rect.y, rect.width, rect.height)
+                        },
+                    ) { change, drag ->
+                        change.consume()
+                        rect = apply(viewport.toGuest(drag.x), viewport.toGuest(drag.y))
+                        onMoveResize(rect.x, rect.y, rect.width, rect.height)
+                    }
+                },
+        )
+    }
+
+    Box(modifier.fillMaxSize()) {
+        // The frame itself: an accent outline so it is obvious which window is
+        // in the mode, and obvious that the mode is on at all.
+        Box(
+            Modifier
+                .offset(left, top)
+                .size(width, height)
+                .vRing(Vessel.colors.accent, Vessel.metrics.shapeSm),
+        )
+
+        // Move — the top strip only.
+        handle(left, top - grab / 2, width, grab) { dx, dy ->
+            rect.copy(x = rect.x + dx, y = rect.y + dy)
+        }
+        // Resize — the other three edges.
+        handle(left, top + height - grab / 2, width, grab) { _, dy ->
+            rect.copy(height = (rect.height + dy).coerceAtLeast(MIN_DRAG_PX))
+        }
+        handle(left - grab / 2, top, grab, height) { dx, _ ->
+            // A left edge moves the origin and changes the width by the
+            // opposite amount, or the window would slide instead of stretch.
+            val w2 = (rect.width - dx).coerceAtLeast(MIN_DRAG_PX)
+            rect.copy(x = rect.x + (rect.width - w2), width = w2)
+        }
+        handle(left + width - grab / 2, top, grab, height) { dx, _ ->
+            rect.copy(width = (rect.width + dx).coerceAtLeast(MIN_DRAG_PX))
+        }
+        // Resize — the bottom-right corner, which is the one a thumb reaches.
+        handle(left + width - grab, top + height - grab, grab, grab) { dx, dy ->
+            rect.copy(
+                width = (rect.width + dx).coerceAtLeast(MIN_DRAG_PX),
+                height = (rect.height + dy).coerceAtLeast(MIN_DRAG_PX),
+            )
+        }
+    }
+}
+
+/**
+ * The smallest a drag may leave a window, in guest pixels.
+ *
+ * Mirrors `XServerDisplay.MIN_WINDOW_PX`, which is the one that is enforced —
+ * this is here so the handles stop moving at the same place the server stops
+ * accepting, rather than the rectangle running on under a window that has
+ * stopped shrinking.
+ */
+private const val MIN_DRAG_PX = 96
