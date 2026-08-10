@@ -449,6 +449,20 @@ fun sessionEnvironment(
     // defaults as stutter sources; **the benefit is still unmeasured**, and
     // what would settle it is frame-time consistency across a level load, not
     // an average on a still image.
+    //
+    // **A second measurement, on a CPU-bound scene, also found nothing.** The
+    // intro video is software-decoded and is the one part of a Metro launch
+    // that is translation-bound rather than pixel-bound, so it should be where
+    // block dispatch shows. Same build, same container, same scene: 10 fps with
+    // these on, 12 fps with them at FEX's defaults — no gain, and the small
+    // difference is noise between two points of the same video.
+    //
+    // *Worth recording because it nearly became a false result.* An earlier
+    // reading of 2 fps on the same intro, taken before the clean reinstall,
+    // made this look like a 5x win. It was not: that number came from a
+    // different install with the older Wine, and what improved was the rebuild,
+    // not these knobs. The pair above is the only comparison that holds one
+    // variable.
     environment["FEX_DISABLEL2CACHE"] = "0"
     environment["FEX_DYNAMICL1CACHE"] = "0"
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
