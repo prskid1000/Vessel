@@ -464,30 +464,161 @@ audit's; they are pointers, not independently re-verified.
      before it sends `PresentIdleNotify`, so the idle event is already a
      complete signal. `VESSEL_WSI_DRI3_FENCE=1` turns the request back on.
 
-  *What is left on this, and neither piece is a DRI3 problem:*
+  *What is left on this, and none of the three pieces is a DRI3 problem:*
 
-  - **The server does not implement `FenceFromFD`, which is a DRI3 1.0
-    request** — so it is non-conformant at the version it advertises, and any
-    other DRI3 client will walk into the same fd-queue shift. It needs the
-    fence mapped and triggered through the client's shared page;
-    `SyncExtension` tracks fences as a `SparseBooleanArray` and never touches
-    a page, while `PresentExtension.presentPixmap` already calls
-    `syncExtension.setTriggered(idleFence)` at exactly the right moment. Do
+  - [~] **`FenceFromFD`, a DRI3 1.0 request the server did not implement** — so
+    it was non-conformant at the version it advertises, and any other DRI3
+    client would walk into the same fd-queue shift.
+
+    **Written 2026-08-10, compiles, and not measured on the device.**
+    `DRI3Extension.fenceFromFD` (opcode 4), backed by a new
+    `com.winlator.xserver.XShmFence` over a new
+    `cpp/winlator/src/xshmfence.c`, with `SyncExtension` keeping the client's
+    page per fence and reading it rather than its own boolean. Vendored items
+    23 and 24. The layout was **read out of libxshmfence 1.3.3** — the version
+    `native/pins.env` pins — and not guessed: `struct xshmfence` is one
+    `int32_t` at offset 0, `ftruncate`d to four bytes, and its value is
+    three-state (`0` untriggered, `-1` untriggered-with-a-waiter, `1`
+    triggered) rather than boolean. The trigger is C and not a
+    `ByteBuffer.putInt` because a store without `FUTEX_WAKE` loses a waiter
+    that is already inside the syscall, and `VarHandle`'s compare-and-set is
+    API 33 against `minSdk 31`. Verified so far only that all five JNI entry
+    points are exported by the freshly built `libwinlator.so`.
+
+    *Done when:* `VESSEL_WSI_DRI3_FENCE=1 tools/gfx/run-x11present.sh --wsi
+    dri3` passes and its mean/p50/p95 are put beside the 0.602/0.505/1.837
+    above. If the fence costs nothing, `patches/mesa/0007` can be deleted. Do
     not bump `DRI3Extension.MINOR_VERSION` to 2 — see vendored item 21 for why
     that is the wrong lever and buys nothing.
-  - **A second `--wsi dri3` run against a live session fails with
-    `BadIdChoice`.** The server hands every new client the same resource-ID
-    base and does not reclaim a disconnected client's pixmaps, and
-    `tools/gfx/x11present.c` exits without destroying its swapchain, so
-    `xcb_free_pixmap` is never even sent. Alternate runs collide on their own
-    predecessor's pixmap XIDs. A real guest destroys its swapchain, so this is
-    mostly a harness artefact — but a crashed guest would leak the same way.
+
+  - [~] **A second `--wsi dri3` run against a live session fails with
+    `BadIdChoice`.** The cause is now read rather than inferred:
+    `DRI3Extension.pixmapFromFd` never called `registerAsOwnerOfResource`, so a
+    swapchain's pixmaps were owned by nobody and `XClient.freeResources()` did
+    not free them — while `ResourceIDs.free()` returns a departing client's id
+    base to a sorted set whose `get()` takes the smallest, so the next
+    connection is handed the same base and regenerates the same XIDs.
+
+    **Written 2026-08-10, compiles, and not measured.** The registration is
+    added, and with it a general `Extension.freeClientResources(XClient)` fanned
+    out by `XServer` from `XClient.freeResources()` — because SYNC's fences,
+    Present's `SelectInput` contexts and XFIXES' regions leak the same way and
+    are not `XResource`s. Present's is the worst of the three and is a *hang*
+    rather than an error: a stale context makes the next client's `SelectInput`
+    throw `BadMatch`, Mesa issues it unchecked, and the swapchain then runs
+    against an event id the server never associated with it, so no idle notify
+    ever arrives. Vendored item 24. `tools/gfx/x11present.c` now destroys its
+    swapchain and flushes before disconnecting, so the default sw-then-dri3
+    invocation stops relying on the server-side reclamation it is also testing.
+
+    *Done when:* `run-x11present.sh` with its default arguments passes twice in
+    a row against one session, and a third run started after killing the probe
+    mid-flight also passes — that last one is the crashed-guest case the server
+    fix exists for.
+
+  - [ ] **The last copy: a flip branch in `PresentExtension`.** Specified
+    below, not started. It is the most invasive of the three and it is
+    **blocked on the fence above being real**, for a reason that is structural
+    rather than schedule: see the specification.
 
   *Kept from the original specification, still true:* the server's
   `pixmapFromBuffer` mmaps the client's fd on the CPU, gralloc returns a tight
   linear buffer for `GPU_COLOR_OUTPUT` alone so there is no UBWC problem, and
   `VK_EXT_external_memory_host` is absent so Mesa's MIT-SHM path was never
   reachable.
+
+### Specification: the flip branch in `PresentExtension`
+
+*Written 2026-08-10 after reading the compositor, and deliberately stopping at
+a specification.* This is the last copy in the present path and it is the most
+invasive change of the three; landing it half-done would break every window in
+the session and not only the one presenting. Everything below that is a
+measured fact says so; everything else is marked as inference.
+
+**What the copy actually is, and what it is not.** `presentPixmap` calls
+`content.copyArea(...)`, which is one 3.6 MB `memmove` out of the mmapped
+dma-buf into the window `Drawable`'s buffer. That is the *whole* remaining copy:
+the second one people expect — the compositor re-uploading the window every
+frame — **is already gone for any window Present touches**, because
+`PresentExtension.selectInput` converts the window's content texture to a
+`GPUImage` and `GPUImage.updateFromDrawable()` is a no-op over an
+`EGLImageKHR` on the AHardwareBuffer (`GPUImage.java:38-49`). So the flip buys
+exactly one CPU memcpy per present and nothing else. **How much that is worth
+is unmeasured** — the DRI3 mean of 0.602 ms is a client-side round trip and
+`presentPixmap` runs after `vkQueuePresentKHR` has returned, so an unknown
+fraction of the copy is already off the measured path. *Measure it before
+building it:* time `content.copyArea` inside `presentPixmap` and log the mean.
+That is ten lines and it decides whether the rest of this is worth doing.
+
+**The one gate that decides whether it is possible at all.** A flip means the
+window samples the presented image, so the app's EGL context has to be able to
+make a texture out of a Turnip dma-buf. Today the server only ever *CPU-maps*
+that fd. Two candidate routes, and **neither has been tried**:
+
+  - `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)`, which needs
+    `EGL_EXT_image_dma_buf_import` in the app's EGL. Android's EGL usually does
+    not expose it, preferring AHardwareBuffer; whether Adreno's does here is a
+    one-line `eglQueryString(EGL_EXTENSIONS)` away.
+  - `AHardwareBuffer_createFromHandle`, wrapping the fd back into an AHWB and
+    reusing the `GPUImage` path unchanged. Not a public NDK symbol — the same
+    class of hazard as `AHardwareBuffer_getNativeHandle`, which
+    `cpp/winlator/src/gpu_image.c` already declares by hand.
+
+  *Do this probe first.* If both routes fail, the flip is impossible as
+  described and the entry should be closed as won't-do, not carried.
+
+**Why it cannot land before `FenceFromFD` works.** `patches/mesa/0007`'s
+justification is that "`presentPixmap` copies synchronously, under the window's
+render lock, before it sends `PresentIdleNotify`, so the idle event is already
+a complete signal". **A flip destroys exactly that property.** After a flip the
+presented image is still being sampled by the compositor, so the server must
+not report it idle until the pixmap has stopped being the window's texture
+*and* the GL frame that sampled it has completed. That is the case an idle
+fence exists for, and it is the reason item 1 is a hard dependency and not a
+sequencing preference.
+
+**The shape of the change.**
+
+  1. **Swap the `Texture`, never the `Drawable`.** `GLRenderer` caches
+     `RenderableWindow.content` as a `final Drawable` and only rebuilds that
+     list in `updateScene()` — on map, unmap, z-order and resize
+     (`GLRenderer.java:466`). So `window.setContent(pixmap.drawable)` would need
+     an `updateScene()` per present, on the GL thread, taking
+     `WINDOW_MANAGER` + `DRAWABLE_MANAGER`. It would also change the identity of
+     `content.renderLock`, which `renderWindowDrawable` synchronizes on. Set the
+     window `Drawable`'s *texture* instead: `renderWindowDrawable` re-reads
+     `drawable.getTexture()` every frame, so that is picked up with no scene
+     rebuild and no lock-identity change.
+  2. **A flip is conditional and the fallback must stay.** Only when the pixmap
+     matches the window drawable exactly — width, height, depth, and stride, and
+     `xOff == yOff == 0` — and the request carries no `valid`/`update` region
+     narrowing it. Anything else copies, as today. This is what
+     `present_check_flip` does upstream and it is not optional: the geometry
+     stops matching on the first resize.
+  3. **Unflip on any drawing to the window.** With the texture flipped, the
+     window's `Drawable.getData()` still points at the old buffer, so core
+     `PutImage`/`CopyArea`/`GetImage` on that window would read and write pixels
+     nobody is showing. Either repoint `data` at the pixmap's mapping too, or
+     revert to the window's own buffer the moment anything draws into it.
+  4. **Lifetime.** The window has to hold a reference to the flipped pixmap
+     until the next present replaces it, and `freePixmap` on a currently
+     flipped pixmap has to unflip first — otherwise `DrawableManager.
+     removeDrawable` destroys a texture the compositor is about to bind. The
+     `contextGeneration` rule of vendored item 13 applies to whatever texture
+     object is created here.
+  5. **`Mode.FLIP`.** `PresentCompleteNotify` should say `FLIP` when it flipped;
+     the enum already has it and `sendCompleteNotify` currently hardcodes
+     `Mode.COPY`. No `PresentQueryCapabilities` bit changes — the four bits are
+     async/fence/UST/tearing and none of them is "can flip".
+  6. **Resize.** `changeWindowGeometry` reallocates the window's backing
+     `Drawable`; anything flipped onto the old one has to be dropped there.
+
+*Done when:* `run-x11present.sh --wsi dri3` passes with the flip taken (proved
+by a counter, not by the absence of a crash), its mean is compared against the
+copy path in the same sitting, and a session survives a resize and a
+minimise/restore of a presenting window. **If the EGL probe in the gate above
+comes back negative, stop and close this — the specification is the deliverable
+in that case.**
 
 - [ ] **FEX asserts inside a container. The assert is real; "any large PE" is
   not the discriminator.**

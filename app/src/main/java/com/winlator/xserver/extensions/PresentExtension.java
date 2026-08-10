@@ -220,6 +220,37 @@ public class PresentExtension extends Extension {
         }
     }
 
+    /**
+     * VESSEL: drops the event contexts a disconnecting client registered.
+     *
+     * <p>An event id is a client-generated XID like any other, and
+     * {@code ResourceIDs.free()} hands a departing client's id base straight to
+     * the next connection — so a leftover context is not a slow leak, it is the
+     * next client's first {@code SelectInput} failing. That request finds the
+     * stale entry, sees {@code event.client != client}, and throws
+     * {@code BadMatch}; Mesa issues it unchecked, so the swapchain is built
+     * against an event id the server has never associated with it and every
+     * {@code PresentCompleteNotify} and {@code PresentIdleNotify} is delivered
+     * to a dead connection. The client then waits for an idle image forever.
+     *
+     * <p>Each entry also pins a {@link Window} and an {@link XClient} for the
+     * life of the session, which is the ordinary leak underneath the collision.
+     */
+    @Override
+    public void freeClientResources(XClient client) {
+        synchronized (events) {
+            // Collected then removed — SparseArray.removeAt() only tombstones
+            // and the next accessor compacts, so mutating inside the walk is a
+            // correctness argument nobody should have to re-derive.
+            int[] owned = new int[events.size()];
+            int count = 0;
+            for (int i = 0; i < events.size(); i++) {
+                if (events.valueAt(i).client == client) owned[count++] = events.keyAt(i);
+            }
+            for (int i = 0; i < count; i++) events.remove(owned[i]);
+        }
+    }
+
     @Override
     public void handleRequest(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
         int opcode = client.getRequestData();

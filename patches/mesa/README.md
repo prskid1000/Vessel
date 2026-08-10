@@ -177,6 +177,26 @@ to do after the server grows `FenceFromFD`, so the change gets measured rather
 than assumed; **delete this file** if the measurement says the fence costs
 nothing.
 
+**Update 2026-08-10: the server now implements `FenceFromFD`, and this file
+still stands because nothing has been measured with it.** `DRI3Extension`
+opcode 4 maps the client's page through a new `XShmFence` and
+`SyncExtension` triggers it from `PresentExtension.presentPixmap` — vendored
+items 23 and 24, layout read out of libxshmfence 1.3.3 rather than guessed. It
+compiles and its JNI symbols are in the built `libwinlator.so`; it has not run
+on the device. So the default stays off, and the next step is exactly the one
+this paragraph has been asking for: one `VESSEL_WSI_DRI3_FENCE=1
+tools/gfx/run-x11present.sh --wsi dri3`, its numbers beside the table above,
+and then either this file goes or it gains a reason to stay.
+
+*One thing that changes the disposal criterion, and it is not about cost.* The
+argument above — "the idle event is already a complete signal, because
+`presentPixmap` copies synchronously before sending it" — is true only while
+`presentPixmap` **copies**. The flip branch specified in `docs/TODO.md` removes
+that copy, and with it the reason a missing fence is safe. So even a
+zero-cost measurement does not make this file deletable in a world where the
+flip lands; it makes the *fence* mandatory. Delete this patch only after the
+fence is measured working, not merely measured cheap.
+
 ## Considered and not taken
 
 **DiskDVD `A8XX-Y` branch** — carries explicit `is_a829` branches

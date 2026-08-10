@@ -407,7 +407,46 @@ int main(int argc, char **argv)
            WIDTH, HEIGHT, FRAMES, total / FRAMES, samples[FRAMES / 2],
            samples[(int)(FRAMES * 0.95)], lo, hi, 1000.0 / (total / FRAMES));
 
-    /* Left standing on purpose: tearing the swapchain down is a separate code
-     * path with its own failure modes, and the numbers above are the point. */
+    /* --- teardown -----------------------------------------------------------
+     *
+     * This used to end at `return 0` with a comment saying the swapchain was
+     * left standing on purpose. It was not free: `vkDestroySwapchainKHR` is
+     * what sends `xcb_free_pixmap` for each DRI3 image, `xcb_sync_destroy_fence`
+     * for each idle fence and `xcb_present_select_input(NO_EVENT)` for the
+     * event context (`wsi_common_x11.c:x11_swapchain_destroy`). Exiting without
+     * it left every one of those XIDs live in the server, and because
+     * `ResourceIDs.free()` hands a departing client's id base back to the next
+     * connection, the *next* run generated the same ids and collided with its
+     * own predecessor — `BadIdChoice`, on alternate runs, which is what made
+     * the default `run-x11present.sh` invocation (sw then dri3) unreliable.
+     *
+     * The server no longer depends on this happening — a client's resources are
+     * reclaimed on disconnect, which is what a crashed guest needs — but a
+     * probe that leaks the thing it is measuring is a bad instrument either way.
+     *
+     * The `fail()` paths above still exit without any of this, deliberately: a
+     * probe that dies mid-swapchain is exactly the crashed-guest case, and it
+     * should be the server's cleanup that covers it and not the client's
+     * politeness. If a run that failed leaves the next one broken, the server
+     * side is what regressed.
+     */
+    DPA(vkQueueWaitIdle)(queue);
+    DPA(vkDestroySemaphore)(device, rendered, NULL);
+    DPA(vkDestroySemaphore)(device, acquired, NULL);
+    DPA(vkDestroyCommandPool)(device, pool, NULL);
+    DPA(vkDestroySwapchainKHR)(device, swapchain, NULL);
+    DPA(vkDestroyDevice)(device, NULL);
+    IPA(vkDestroySurfaceKHR)(instance, surface, NULL);
+    IPA(vkDestroyInstance)(instance, NULL);
+    free(samples);
+
+    /* Mesa's teardown writes onto *this* connection (an xcb surface's
+     * `chain->conn` is the application's own), and it does not flush — it
+     * discards replies rather than waiting for them. Without the flush the
+     * free-pixmap requests sit in the output buffer and die with the process,
+     * which is the leak this whole block exists to close. */
+    xcb_destroy_window(conn, window);
+    xcb_flush(conn);
+    xcb_disconnect(conn);
     return 0;
 }

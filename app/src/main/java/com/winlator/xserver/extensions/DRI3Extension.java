@@ -199,32 +199,113 @@ public class DRI3Extension extends Extension {
         byte depth = inputStream.readByte();
         inputStream.skip(11);
 
-        Window window = xServer.windowManager.getWindow(windowId);
-        if (window == null) throw new BadWindow(windowId);
-
-        Pixmap pixmap = xServer.pixmapManager.getPixmap(pixmapId);
-        if (pixmap != null) throw new BadIdChoice(pixmapId);
-
+        // VESSEL: pop before validating — see pixmapFromBuffer.
         int fd = inputStream.getAncillaryFd();
-        long size = (long)stride * height;
-        pixmapFromFd(client, pixmapId, width, height, stride, offset, depth, fd, size);
-    }
-
-    private void pixmapFromFd(XClient client, int pixmapId, short width, short height, int stride, int offset, byte depth, int fd, long size)  throws IOException, XRequestError {
         try {
-            ByteBuffer buffer = SysVSharedMemory.mapSHMSegment(fd, size, offset, true);
-            if (buffer == null) throw new BadAlloc();
+            Window window = xServer.windowManager.getWindow(windowId);
+            if (window == null) throw new BadWindow(windowId);
 
-            short totalWidth = (short)(stride / 4);
-            Drawable drawable = xServer.drawableManager.createDrawable(pixmapId, totalWidth, height, depth);
-            drawable.setData(buffer);
-            drawable.setTexture(null);
-            drawable.setOnDestroyListener(onDestroyDrawableListener);
-            xServer.pixmapManager.createPixmap(drawable);
+            Pixmap pixmap = xServer.pixmapManager.getPixmap(pixmapId);
+            if (pixmap != null) throw new BadIdChoice(pixmapId);
+
+            long size = (long)stride * height;
+            pixmapFromFd(client, pixmapId, width, height, stride, offset, depth, fd, size);
         }
         finally {
             XConnectorEpoll.closeFd(fd);
         }
+    }
+
+    /**
+     * VESSEL: {@code FenceFromFD}, DRI3 opcode 4 — a **1.0** request, so
+     * refusing it made this server non-conformant at the version it advertises.
+     *
+     * <p>Refusing it was also actively destructive, and that is the part worth
+     * keeping. The request arrives with a file descriptor over
+     * {@code SCM_RIGHTS}, and an error reply never consumes it:
+     * {@code XInputStream} keeps one ancillary-fd queue per connection and
+     * {@link XInputStream#getAncillaryFd()} pops its head, so one unconsumed fd
+     * shifts the queue for the rest of the session. The next
+     * {@code PixmapFromBuffer} was then handed the previous image's 4-byte
+     * fence object — mapped as a whole page — in place of its 3686400-byte
+     * dma-buf, and the second present took the app down with
+     * {@code signal 7 (SIGBUS), code 2 (BUS_ADRERR)} inside
+     * {@code Drawable.copyArea}, faulting exactly one page into the source.
+     * {@code patches/mesa/0007} is the workaround that stopped Mesa asking;
+     * {@code VESSEL_WSI_DRI3_FENCE=1} turns the request back on.
+     *
+     * <p>Implementing it is two things. The fence has to be <em>mapped and
+     * triggered through the client's shared page</em>, which is
+     * {@link com.winlator.xserver.XShmFence} and
+     * {@link SyncExtension#createFenceFromFd}; and something has to trigger it
+     * at the right moment, which {@code PresentExtension.presentPixmap} already
+     * did — it calls {@code syncExtension.setTriggered(idleFence)} before it
+     * sends {@code PresentIdleNotify}, under the window's render lock and after
+     * the copy.
+     *
+     * <p>The wire body is 12 bytes: {@code drawable}, {@code fence},
+     * {@code initially_triggered} and three of padding (dri3proto, and
+     * {@code xcb_dri3_fence_from_fd_request_t} field for field).
+     */
+    private void fenceFromFD(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        int drawableId = inputStream.readInt();
+        int fenceId = inputStream.readInt();
+        boolean initiallyTriggered = inputStream.readByte() != 0;
+        inputStream.skip(3);
+
+        // The whole point of this method: the fd is consumed on every path,
+        // including the ones that throw.
+        int fd = inputStream.getAncillaryFd();
+        try {
+            if (fd < 0) throw new BadAlloc();
+
+            Drawable drawable = xServer.drawableManager.getDrawable(drawableId);
+            if (drawable == null) throw new BadDrawable(drawableId);
+
+            if (!client.isValidResourceId(fenceId)) throw new BadIdChoice(fenceId);
+
+            if (syncExtension == null) syncExtension = (SyncExtension)xServer.getExtensionByName("SYNC");
+            if (syncExtension == null) throw new BadImplementation();
+
+            syncExtension.createFenceFromFd(client, fenceId, fd, initiallyTriggered);
+        }
+        finally {
+            // The mapping outlives the descriptor, exactly as in pixmapFromFd.
+            XConnectorEpoll.closeFd(fd);
+        }
+    }
+
+    private void pixmapFromFd(XClient client, int pixmapId, short width, short height, int stride, int offset, byte depth, int fd, long size)  throws IOException, XRequestError {
+        ByteBuffer buffer = SysVSharedMemory.mapSHMSegment(fd, size, offset, true);
+        if (buffer == null) throw new BadAlloc();
+
+        short totalWidth = (short)(stride / 4);
+        Drawable drawable = xServer.drawableManager.createDrawable(pixmapId, totalWidth, height, depth);
+        // VESSEL: createDrawable answers null when the id is already a drawable,
+        // and upstream dereferences it — an NPE out of the request thread, which
+        // XClientRequestHandler turns into a dropped connection rather than an X
+        // error. It happens whenever a pixmap id outlives its pixmap, which the
+        // ownership registration below is what stops.
+        if (drawable == null) {
+            SysVSharedMemory.unmapSHMSegment(buffer, size);
+            throw new BadIdChoice(pixmapId);
+        }
+        drawable.setData(buffer);
+        drawable.setTexture(null);
+        drawable.setOnDestroyListener(onDestroyDrawableListener);
+        Pixmap pixmap = xServer.pixmapManager.createPixmap(drawable);
+        if (pixmap == null) throw new BadIdChoice(pixmapId);
+        // VESSEL: the pixmap belongs to the client that asked for it, so that
+        // XClient.freeResources() frees it when the connection goes.
+        //
+        // Upstream's own PixmapRequests.createPixmap does this and this method
+        // did not, which is the whole of the "second --wsi dri3 run fails with
+        // BadIdChoice" defect: a DRI3 swapchain's pixmaps outlived their client,
+        // ResourceIDs handed the same id base to the next connection, and the
+        // next run's first PixmapFromBuffer collided with its predecessor's.
+        // Runs alternated pass and fail. A crashed guest leaks identically, so
+        // this is not only a harness problem.
+        client.registerAsOwnerOfResource(pixmap);
     }
 
     @Override
@@ -249,6 +330,11 @@ public class DRI3Extension extends Extension {
                     bufferFromPixmap(client, inputStream, outputStream);
                 }
                 break;
+            case ClientOpcodes.FENCE_FROM_FD: // VESSEL
+                try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
+                    fenceFromFD(client, inputStream, outputStream);
+                }
+                break;
             case ClientOpcodes.PIXMAP_FROM_BUFFERS:
                 try (XLock lock = xServer.lock(XServer.Lockable.WINDOW_MANAGER, XServer.Lockable.PIXMAP_MANAGER, XServer.Lockable.DRAWABLE_MANAGER)) {
                     pixmapFromBuffers(client, inputStream, outputStream);
@@ -269,29 +355,24 @@ public class DRI3Extension extends Extension {
                 // formats all come back good, and nothing anywhere said why —
                 // see docs/TODO.md, "Zero-copy present".
                 //
-                // VESSEL: what FenceFromFD(4) turned out to be, since the note
-                // above named it as a candidate for that SURFACE_LOST and it
-                // was not. The cause there was a missing XFIXES; but refusing
-                // FenceFromFD is a real defect of its own, and a worse-behaved
-                // one than a returned error. **The request arrives with an fd
-                // over SCM_RIGHTS, and refusing it never consumes that fd.**
+                // VESSEL: FenceFromFD(4) used to arrive here, and what it did
+                // on the way out is why this branch is dangerous rather than
+                // merely unhelpful. **A request arriving with an fd over
+                // SCM_RIGHTS leaves that fd behind when it is refused.**
                 // XInputStream keeps one ancillary-fd queue per connection and
                 // getAncillaryFd() pops its head, so an unconsumed fd shifts
-                // the queue permanently: the next PixmapFromBuffer is handed
-                // the *previous* image's 4096-byte xshmfence page in place of
-                // its 3686400-byte dma-buf. Measured — the second present took
-                // the server down with SIGBUS/BUS_ADRERR in
-                // Drawable.copyArea, faulting one page into the source.
+                // the queue permanently: the next PixmapFromBuffer was handed
+                // the previous image's fence page in place of its 3686400-byte
+                // dma-buf, and the second present took the server down with
+                // SIGBUS/BUS_ADRERR in Drawable.copyArea, faulting one page
+                // into the source.
                 //
-                // FenceFromFD is a DRI3 **1.0** request, so this server is not
-                // conformant at the version it advertises. Two things are
-                // needed to implement it and neither is in this file: the
-                // fence must be mapped and triggered through the client's
-                // shared page (SyncExtension tracks fences as a boolean and
-                // never touches the page), and PresentExtension already calls
-                // syncExtension.setTriggered(idleFence) at the right moment.
-                // Until then Mesa is told not to ask — patches/mesa/0007, off
-                // by default, VESSEL_WSI_DRI3_FENCE=1 to re-measure after.
+                // FenceFromFD is implemented now (see fenceFromFD), but the
+                // hazard is a property of this branch and not of that request:
+                // **any** future DRI3 request that carries an fd will do the
+                // same thing if it is refused here. Of the opcodes named below,
+                // ImportSyncobj(10) is one. A refusal that has to stay a
+                // refusal should still pop the fd first.
                 //
                 // Deliberately WARN and not DEBUG: an unimplemented request is
                 // always a defect in this server or a genuine version

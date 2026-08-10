@@ -82,6 +82,18 @@ public class XFixesExtension extends Extension {
     /** Region id to its rectangles, four shorts each: x, y, width, height. */
     private final SparseArray<short[]> regions = new SparseArray<>();
 
+    /**
+     * VESSEL: which client made each region, so {@link #freeClientResources}
+     * can drop them. Mesa destroys its regions in {@code x11_image_finish}, so
+     * an orderly teardown never needs this — a crashed guest does, and every
+     * region it left behind would otherwise sit here for the life of the
+     * session. Also the map is written from more than one thread now
+     * ({@code setMultithreadedClients(true)}), hence the synchronization added
+     * with it; the reads and writes were unguarded before and only got away
+     * with it because one client uses XFIXES.
+     */
+    private final SparseArray<XClient> regionOwners = new SparseArray<>();
+
     private static abstract class ClientOpcodes {
         private static final byte QUERY_VERSION = 0;
         private static final byte CREATE_REGION = 5;
@@ -133,26 +145,56 @@ public class XFixesExtension extends Extension {
     private void createRegion(XClient client, XInputStream inputStream) throws IOException, XRequestError {
         int regionId = inputStream.readInt();
         if (regionId == 0) throw new BadValue(regionId);
-        regions.put(regionId, readRectangles(client, inputStream));
+        // VESSEL: the monitor is held across readRectangles, which is cheap —
+        // XInputStream reads out of a buffer the epoll thread has already
+        // filled, so nothing here waits on a socket.
+        synchronized (regions) {
+            regions.put(regionId, readRectangles(client, inputStream));
+            regionOwners.put(regionId, client); // VESSEL
+        }
     }
 
     private void setRegion(XClient client, XInputStream inputStream) throws IOException, XRequestError {
         int regionId = inputStream.readInt();
         // Mesa only ever sets a region it created, so an unknown id is a real
         // protocol error rather than something to tolerate quietly.
-        if (regions.indexOfKey(regionId) < 0) throw new BadValue(regionId);
-        regions.put(regionId, readRectangles(client, inputStream));
+        synchronized (regions) {
+            if (regions.indexOfKey(regionId) < 0) throw new BadValue(regionId);
+            regions.put(regionId, readRectangles(client, inputStream));
+        }
     }
 
     private void destroyRegion(XInputStream inputStream) throws IOException, XRequestError {
         int regionId = inputStream.readInt();
-        if (regions.indexOfKey(regionId) < 0) throw new BadValue(regionId);
-        regions.remove(regionId);
+        synchronized (regions) {
+            if (regions.indexOfKey(regionId) < 0) throw new BadValue(regionId);
+            regions.remove(regionId);
+            regionOwners.remove(regionId); // VESSEL
+        }
     }
 
     /** The rectangles of a region, or null. For {@code PresentPixmap} damage. */
     public short[] getRegion(int regionId) {
-        return regions.get(regionId);
+        synchronized (regions) {
+            return regions.get(regionId);
+        }
+    }
+
+    /** VESSEL: see {@link #regionOwners}. */
+    @Override
+    public void freeClientResources(XClient client) {
+        synchronized (regions) {
+            // Collected then removed; see SyncExtension.freeClientResources.
+            int[] owned = new int[regionOwners.size()];
+            int count = 0;
+            for (int i = 0; i < regionOwners.size(); i++) {
+                if (regionOwners.valueAt(i) == client) owned[count++] = regionOwners.keyAt(i);
+            }
+            for (int i = 0; i < count; i++) {
+                regions.remove(owned[i]);
+                regionOwners.remove(owned[i]);
+            }
+        }
     }
 
     @Override

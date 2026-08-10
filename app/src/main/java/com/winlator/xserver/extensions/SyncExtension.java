@@ -121,11 +121,18 @@ public class SyncExtension extends Extension {
     @Override
     public void freeClientResources(XClient client) {
         synchronized (fences) {
-            for (int i = fenceInfos.size() - 1; i >= 0; i--) {
-                if (fenceInfos.valueAt(i).owner != client) continue;
-                int id = fenceInfos.keyAt(i);
-                unmapFence(id);
-                fences.delete(id);
+            // Collected first and removed after, rather than deleting inside the
+            // walk: SparseArray.delete() only tombstones, and the next keyAt()
+            // compacts. Backwards iteration happens to survive that, and
+            // depending on it is not worth the reader's time.
+            int[] owned = new int[fenceInfos.size()];
+            int count = 0;
+            for (int i = 0; i < fenceInfos.size(); i++) {
+                if (fenceInfos.valueAt(i).owner == client) owned[count++] = fenceInfos.keyAt(i);
+            }
+            for (int i = 0; i < count; i++) {
+                unmapFence(owned[i]);
+                fences.delete(owned[i]);
             }
         }
     }

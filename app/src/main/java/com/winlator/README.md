@@ -397,6 +397,109 @@ The modifications, in the order they were made:
    cursor and window materials already rely on a lone attribute landing at 0, and
    a third program that only *probably* does would turn that into an assumption.
 
+23. **`DRI3Extension.fenceFromFD()`, and the two new files it needs —
+   `XShmFence` and `cpp/winlator/src/xshmfence.c`.** `FenceFromFD` is DRI3
+   opcode **4**, a **1.0** request, and this tree advertises 1.0 and did not
+   implement it. That is a conformance defect on its own, and a destructive one
+   rather than a returned error: the request arrives with a file descriptor over
+   `SCM_RIGHTS`, and refusing it never consumes that fd. `XInputStream` keeps one
+   ancillary-fd queue per connection and `getAncillaryFd()` pops its head, so one
+   unconsumed fd shifts the queue for the rest of the session — the next
+   `PixmapFromBuffer` was handed the previous image's 4-byte fence object,
+   mapped as a whole page, in place of its 3686400-byte dma-buf. Measured: the
+   second present took the app down with `signal 7 (SIGBUS), code 2
+   (BUS_ADRERR)` inside `Drawable.copyArea`, faulting exactly one page into the
+   source.
+
+   *What an implementation needs, and where each half lives.* The fence has to
+   be **mapped and triggered through the client's shared page**, because that
+   page is the state and not a mirror of it: Mesa calls `xshmfence_reset()` on
+   its own mapping immediately before every `PresentPixmap`
+   (`wsi_common_x11.c:1804`) and never tells the server, so a boolean kept on
+   this side is stale from the first frame. The other half already existed —
+   `PresentExtension.presentPixmap` calls `syncExtension.setTriggered(idleFence)`
+   after the copy, under the window's render lock, before it sends
+   `PresentIdleNotify`.
+
+   *The layout was read, not guessed*, out of libxshmfence 1.3.3 — the version
+   `native/pins.env` pins and `build/x11-sysroot.sh` builds — because getting it
+   wrong corrupts another process's memory rather than producing a wrong answer
+   here. `struct xshmfence` is **one `int32_t` at offset 0**; `xshmfence_alloc_shm`
+   `ftruncate`s the fd to exactly `sizeof(struct xshmfence)`, and only the
+   *mapping* rounds up to a page, which is why the stray-fd copy above faulted
+   one page in rather than immediately. The word is three-valued and not
+   boolean: `0` untriggered with no waiter, `-1` untriggered with a waiter inside
+   `FUTEX_WAIT`, `1` triggered. The four operations are transcribed from
+   `xshmfence_futex.c` in `cpp/winlator/src/xshmfence.c`, which is C and not a
+   `ByteBuffer.putInt` for two reasons: a store without `FUTEX_WAKE` loses a
+   waiter that is already asleep, and `VarHandle`'s compare-and-set is API 33
+   against this module's `minSdk 31`.
+
+   `SyncExtension` gains a `FenceInfo` beside its `SparseBooleanArray` holding
+   the page and the owning client; every read and write goes to the page when
+   there is one and to the boolean when there is not, so a fence made by plain
+   SYNC `CreateFence` behaves exactly as upstream. `fenceFromFD` pops the fd
+   *before* any validation can throw, and `pixmapFromBuffer` and
+   `pixmapFromBuffers` were changed to do the same — a `BadWindow` or
+   `BadIdChoice` from either of those would have shifted the queue just as
+   surely as the refusal did. `pixmapFromFd` also stops dereferencing a null
+   `createDrawable` result, which upstream turns into an NPE out of the request
+   thread and therefore a dropped connection rather than an X error.
+
+   **Written and compiled; not measured.** Nothing exercises this path yet:
+   `patches/mesa/0007` still stops Mesa asking for an idle fence, and it takes
+   `VESSEL_WSI_DRI3_FENCE=1` to turn the request back on. Until
+   `tools/gfx/run-x11present.sh --wsi dri3` has been run with that set, whether
+   the fence costs anything is unknown, and so is whether this implementation is
+   correct on the device. `DRI3Extension.MINOR_VERSION` stays at 0 — see item 21
+   for why 1.2 is the wrong lever; what changed is only that 1.0 is now an honest
+   claim rather than an overstatement.
+
+24. **Per-client resource reclamation for the extensions —
+   `Extension.freeClientResources()`, `XServer.freeClientExtensionResources()`,
+   `XClient.freeResources()`, and the three extensions that implement it
+   (`SyncExtension`, `PresentExtension`, `XFixesExtension`) — plus the missing
+   `registerAsOwnerOfResource` in `DRI3Extension`.**
+
+   `XClient.freeResources()` frees windows, pixmaps, graphics contexts and
+   cursors, and it frees exactly those that were registered through
+   `registerAsOwnerOfResource`. **`DRI3Extension.pixmapFromFd` never registered
+   anything**, so a DRI3 swapchain's pixmaps outlived their client. That is not
+   a slow leak: `ResourceIDs.free()` returns a departing client's id base to a
+   sorted set and `get()` takes the smallest, so the *next* connection is handed
+   the same base, generates the same XIDs, and collides with its own
+   predecessor. Measured as alternating pass and fail on a second
+   `tools/gfx/run-x11present.sh --wsi dri3` run against one live session,
+   reported as `BadIdChoice`.
+
+   The extensions have the same problem one layer up and no mechanism at all for
+   it, so `Extension` gains a no-op `freeClientResources(XClient)` that `XServer`
+   fans out and `XClient.freeResources()` calls — ordered deliberately *before*
+   `resourceIDs.free(resourceIDBase)`, so no id can be reissued while a stale one
+   is still registered. Three extensions had something to release:
+
+   - **SYNC** — fences, which upstream never removes even on `DestroyFence`
+     failure paths. With item 23 in place these also own an mmap, so leaking one
+     leaks a mapping as well as an id.
+   - **Present** — the `SelectInput` event contexts. This one is worse than a
+     collision: a stale entry makes the next client's `SelectInput` throw
+     `BadMatch` (`event.client != client`), Mesa issues that request unchecked,
+     and the swapchain then runs with an event id the server never associated
+     with it — so every `PresentCompleteNotify` and `PresentIdleNotify` goes to a
+     dead connection and the client waits for an idle image forever. A hang, not
+     an error.
+   - **XFIXES** — the regions. Mesa destroys its own in `x11_image_finish`, so
+     this only matters for a guest that crashed; the map is now also
+     `synchronized`, which it should have been from the start given
+     `setMultithreadedClients(true)`.
+
+   *The harness leaked too and has been fixed separately* —
+   `tools/gfx/x11present.c` returned without destroying its swapchain, so
+   `xcb_free_pixmap` was never even sent — but the server-side fix is the one
+   that matters, because a crashed guest leaks identically and cannot be asked
+   to be polite. **Written and compiled; not measured.** Nothing has yet run two
+   `--wsi dri3` passes against one session to see the `BadIdChoice` gone.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -423,15 +526,20 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21 |
-| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20 |
-| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20 |
+| `app/src/main/java/com/winlator/xserver/XClient.java` | 24 |
+| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24 |
+| `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
+| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24 |
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21 |
-| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18 |
-| `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |
+| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
+| `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
+| `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |
 
 ## Integration points
 
