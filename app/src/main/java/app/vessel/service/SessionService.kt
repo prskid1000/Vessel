@@ -5,6 +5,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -109,6 +112,7 @@ class SessionService : Service() {
                 val width = intent.getIntExtra(EXTRA_WIDTH, 0)
                 val height = intent.getIntExtra(EXTRA_HEIGHT, 0)
                 val native = if (width > 0 && height > 0) DisplayGeometry(width, height) else null
+                requestAudioFocus()
                 runtime.start(containerId, native)
             }
         }
@@ -116,8 +120,63 @@ class SessionService : Service() {
     }
 
     override fun onDestroy() {
+        abandonAudioFocus()
         scope.cancel()
         super.onDestroy()
+    }
+
+    /**
+     * Ask for audio focus for as long as a session is running.
+     *
+     * **This is not politeness, it is the difference between audible and
+     * silent.** Measured 2026-08-10: the guest opens an AAudio stream, writes a
+     * full buffer into it and the stream reports `AAUDIO_STREAM_STATE_STARTED`,
+     * but `getFramesRead()` never advances and AudioFlinger's own dump shows the
+     * track with `Active: no` and a server position of zero — it never pulled a
+     * frame. Nothing in the app had ever called [AudioManager.requestAudioFocus],
+     * and this device runs Android's playback hardening, which was observed in
+     * `dumpsys audio` muting other packages by name.
+     *
+     * `USAGE_GAME` rather than `USAGE_MEDIA`: a session is interactive, and the
+     * distinction is what tells the platform this should duck a podcast rather
+     * than queue behind it. The guest's own stream is `USAGE_MEDIA` because
+     * that is what `wineoss.drv` opens; the focus request is about the app.
+     *
+     * Deliberately no [AudioManager.OnAudioFocusChangeListener] behaviour beyond
+     * holding the request. Pausing a Windows program on focus loss is not
+     * something this layer can do — there is no pause to send — and ducking
+     * would mean attenuating in the driver, which contradicts the rule that
+     * Wine outputs at full scale and Android owns the volume.
+     */
+    private val audioManager: AudioManager? by lazy {
+        ContextCompat.getSystemService(this, AudioManager::class.java)
+    }
+
+    private var audioFocus: AudioFocusRequest? = null
+
+    private fun requestAudioFocus() {
+        val manager = audioManager ?: return
+        if (audioFocus != null) return
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN)
+                    .build(),
+            )
+            // The guest cannot be paused, so a transient loss it cannot act on
+            // would leave the user with a silent game and no way to recover it.
+            .setWillPauseWhenDucked(false)
+            .setOnAudioFocusChangeListener {}
+            .build()
+        audioFocus = request
+        manager.requestAudioFocus(request)
+    }
+
+    private fun abandonAudioFocus() {
+        val manager = audioManager ?: return
+        audioFocus?.let { manager.abandonAudioFocusRequest(it) }
+        audioFocus = null
     }
 
     private fun notify(containerName: String, phase: SessionPhase) {
