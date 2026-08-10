@@ -291,7 +291,29 @@ class ComponentSetup @Inject constructor(
             return
         }
 
-        val wanted = listing.packages.filter { it.isDownloadable && !store.layout.isInstalled(it.type, it.versionCode) }
+        /*
+         * **Download what is an upgrade, not what is merely absent.**
+         *
+         * This filtered on `!isInstalled(type, versionCode)` — the *exact*
+         * version — so any catalogue entry whose precise code was missing came
+         * down even when a newer build of the same type was already installed.
+         * Measured on a fresh install: the app bundles the ICD build of Turnip
+         * (260301) and deliberately not the HAL build beside it (260300, see
+         * `bundledPackages` in app/build.gradle.kts), and setup then downloaded
+         * the HAL anyway — 15 MB for a driver `adoptLatest` can never choose,
+         * because it takes the highest version code. The same rule would have
+         * fetched an obsolete 84 MB Wine 10.13 next to the bundled 11.14.
+         *
+         * Highest installed code per type, and an entry is wanted only if it
+         * beats it. Equality is not an upgrade, which also keeps the old
+         * exact-match behaviour for the case it was right about.
+         */
+        val newestInstalled = store.installed()
+            .groupBy { it.type }
+            .mapValues { (_, versions) -> versions.maxOf { it.version.versionCode } }
+        val wanted = listing.packages.filter {
+            it.isDownloadable && it.versionCode > (newestInstalled[it.type] ?: Int.MIN_VALUE)
+        }
         if (wanted.isEmpty()) {
             _state.update {
                 it.copy(
