@@ -482,14 +482,37 @@ audit's; they are pointers, not independently re-verified.
     triggered) rather than boolean. The trigger is C and not a
     `ByteBuffer.putInt` because a store without `FUTEX_WAKE` loses a waiter
     that is already inside the syscall, and `VarHandle`'s compare-and-set is
-    API 33 against `minSdk 31`. Verified so far only that all five JNI entry
-    points are exported by the freshly built `libwinlator.so`.
+    API 33 against `minSdk 31`.
 
-    *Done when:* `VESSEL_WSI_DRI3_FENCE=1 tools/gfx/run-x11present.sh --wsi
-    dri3` passes and its mean/p50/p95 are put beside the 0.602/0.505/1.837
-    above. If the fence costs nothing, `patches/mesa/0007` can be deleted. Do
-    not bump `DRI3Extension.MINOR_VERSION` to 2 — see vendored item 21 for why
-    that is the wrong lever and buys nothing.
+    **Measured on the device 2026-08-10, and the fence is free.** Same live
+    session, same 300 frames, back to back:
+
+    | | mean | p50 | p95 | max |
+    |---|---|---|---|---|
+    | fence off | 0.555 ms | 0.483 ms | 1.662 ms | 1.933 ms |
+    | fence on | 0.565 ms | 0.487 ms | 1.667 ms | 1.877 ms |
+
+    +0.010 ms on the mean, which is inside the spread of four fence-off runs
+    taken the same hour (0.534, 0.553, 0.555, 0.558).
+
+    **It was proved to be running, not assumed.** A run that skips the fence
+    and a run that serves it both print `result=PASS`, so the pass says
+    nothing; `DRI3Extension.fenceFromFD` therefore logs each fence it serves,
+    and the count is **0 with the flag unset and exactly 3 with it set** — one
+    per swapchain image — with no `VesselXProto` error on either. That log line
+    is why the number above can be read as the fence's cost rather than as the
+    cost of Mesa quietly not asking.
+
+    Do not bump `DRI3Extension.MINOR_VERSION` to 2 — see vendored item 21 for
+    why that is the wrong lever and buys nothing.
+
+    *What is left:* `patches/mesa/0007` can now be deleted, which needs a
+    Turnip rebuild and a re-run of the pair above. Note it is **not** merely
+    dead weight to be tidied away: 0007's justification is that
+    `presentPixmap` copies synchronously, and the flip branch below would
+    destroy exactly that property — so if the flip is ever built, the fence
+    stops being optional. Deleting 0007 makes the fence the default for every
+    app, and only `x11present` has exercised it; a Wine title has not.
 
   - [~] **A second `--wsi dri3` run against a live session fails with
     `BadIdChoice`.** The cause is now read rather than inferred:
@@ -511,10 +534,16 @@ audit's; they are pointers, not independently re-verified.
     swapchain and flushes before disconnecting, so the default sw-then-dri3
     invocation stops relying on the server-side reclamation it is also testing.
 
-    *Done when:* `run-x11present.sh` with its default arguments passes twice in
-    a row against one session, and a third run started after killing the probe
-    mid-flight also passes — that last one is the crashed-guest case the server
-    fix exists for.
+    **Confirmed fixed on the device 2026-08-10.** Six probe clients in
+    succession against one live session — `sw`, then `dri3`, then four more
+    `dri3` runs — every one `result=PASS`, where the second used to die with
+    `BadIdChoice`. No `VesselXProto` line on any of them.
+
+    *What is left:* the crashed-guest case. Every client above exited cleanly
+    through the new teardown in `x11present.c`, so what has been proved is that
+    reclamation works when the client asks for it — not that it works when the
+    client is killed mid-present, which is the case the server-side fix exists
+    for. *Done when:* a probe killed mid-flight is followed by a passing run.
 
   - [ ] **The last copy: a flip branch in `PresentExtension`.** Specified
     below, not started. It is the most invasive of the three and it is

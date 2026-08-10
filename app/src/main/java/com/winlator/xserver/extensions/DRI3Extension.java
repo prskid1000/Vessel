@@ -268,6 +268,13 @@ public class DRI3Extension extends Extension {
             if (syncExtension == null) throw new BadImplementation();
 
             syncExtension.createFenceFromFd(client, fenceId, fd, initiallyTriggered);
+
+            // Three per swapchain, not one per frame, so this is not a hot path
+            // — and without it there is no way to tell a fence that was served
+            // from one the client never asked for. Both look like a run that
+            // passed. Measuring the fence's cost means knowing which happened.
+            Log.d(XRequestError.PROTO_TAG, "DRI3 FenceFromFD served fence 0x"
+                    + Integer.toHexString(fenceId) + " triggered=" + initiallyTriggered);
         }
         finally {
             // The mapping outlives the descriptor, exactly as in pixmapFromFd.

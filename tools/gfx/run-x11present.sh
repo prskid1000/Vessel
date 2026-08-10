@@ -160,6 +160,17 @@ MESA_LOG=file \
 MESA_LOG_LEVEL=debug \
 MESA_SHADER_CACHE_DIR=\$PWD/$APP_DIR/cache"
 
+# Forwarded, not invented here: patches/mesa/0007 turns the DRI3 idle fence off
+# by default and reads this to turn it back on (`wsi_common_x11.c:2703`). It has
+# to cross into the guest environment explicitly, because `run-as sh -c` starts
+# a fresh shell and inherits nothing from this script's caller. Documented in
+# docs/TODO.md as `VESSEL_WSI_DRI3_FENCE=1 tools/gfx/run-x11present.sh --wsi
+# dri3`, which is only true if the variable is passed through — so it is.
+if [ -n "${VESSEL_WSI_DRI3_FENCE:-}" ]; then
+  GUEST_ENV="$GUEST_ENV VESSEL_WSI_DRI3_FENCE=$VESSEL_WSI_DRI3_FENCE"
+  note "VESSEL_WSI_DRI3_FENCE=$VESSEL_WSI_DRI3_FENCE — asking for the idle fence"
+fi
+
 RESULTS=""
 for wsi in $WSI_MODES; do
   if [ "$wsi" = dri3 ]; then
