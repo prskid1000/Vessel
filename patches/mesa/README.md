@@ -154,48 +154,44 @@ the dma-buf into the window drawable. Removing that last one is a flip branch in
 **Upstreamable in shape**, though upstream would want the `HAVE_LIBDRM` →
 `HAVE_WSI_DRM` rename argued on its own. If it lands, this file goes.
 
-## 0007-wsi-x11-no-dri3-idle-fence-for-a-server-without-FenceFromFD.patch
+## 0007 — deleted 2026-08-10, because the fence was measured
 
-For **turnip**. A statement about **one X server**, not about DRI3.
+There used to be a patch here called
+`0007-wsi-x11-no-dri3-idle-fence-for-a-server-without-FenceFromFD.patch`. It
+stopped Mesa asking for a DRI3 idle fence, because Vessel's X server did not
+implement `FenceFromFD` (opcode 4) and *refusing* the request was not free: the
+fd that arrived with it over `SCM_RIGHTS` stayed in the connection's
+ancillary-fd queue, so every later `PixmapFromBuffer` popped the previous
+image's 4096-byte fence page instead of its own dma-buf, and the second present
+killed the server with `SIGBUS`/`BUS_ADRERR` in `Drawable.copyArea`.
 
-Vessel's X server does not implement DRI3 `FenceFromFD` (opcode 4), and
-refusing a request is not free: the fd that arrived with it over `SCM_RIGHTS`
-stays in the connection's ancillary-fd queue, so every later
-`PixmapFromBuffer` pops the *previous* image's 4096-byte fence page instead of
-its own dma-buf. The second present killed the server with
-`SIGBUS`/`BUS_ADRERR` in `Drawable.copyArea` — a 3686400-byte copy out of a
-4096-byte page.
+The server implements `FenceFromFD` now (vendored items 23 and 24), so the
+patch was measured and then removed. Same live session, same 300 frames, back
+to back:
 
-Skipping the fence is sound against this server specifically, and is not a
-shortcut: `PresentExtension.presentPixmap` copies synchronously, under the
-window's render lock, *before* it sends `PresentIdleNotify`, so the idle event
-is already a complete signal — which is the thing a fence exists to add for
-servers whose copy outlives the notification.
+| | mean | p50 | p95 | max |
+|---|---|---|---|---|
+| fence off | 0.555 ms | 0.483 ms | 1.662 ms | 1.933 ms |
+| fence on | 0.565 ms | 0.487 ms | 1.667 ms | 1.877 ms |
 
-**`VESSEL_WSI_DRI3_FENCE=1` turns the request back on.** That is the one thing
-to do after the server grows `FenceFromFD`, so the change gets measured rather
-than assumed; **delete this file** if the measurement says the fence costs
-nothing.
+\+0.010 ms, inside the spread of four fence-off runs from the same hour
+(0.534, 0.553, 0.555, 0.558). With the patch gone and no environment variable
+set at all, a run is `result=PASS` at mean 0.560 ms and the server serves three
+fences, one per swapchain image.
 
-**Update 2026-08-10: the server now implements `FenceFromFD`, and this file
-still stands because nothing has been measured with it.** `DRI3Extension`
-opcode 4 maps the client's page through a new `XShmFence` and
-`SyncExtension` triggers it from `PresentExtension.presentPixmap` — vendored
-items 23 and 24, layout read out of libxshmfence 1.3.3 rather than guessed. It
-compiles and its JNI symbols are in the built `libwinlator.so`; it has not run
-on the device. So the default stays off, and the next step is exactly the one
-this paragraph has been asking for: one `VESSEL_WSI_DRI3_FENCE=1
-tools/gfx/run-x11present.sh --wsi dri3`, its numbers beside the table above,
-and then either this file goes or it gains a reason to stay.
+**The count is the part that matters.** A run that asks for the fence and a run
+that does not both print `result=PASS`, so the pass proves nothing;
+`DRI3Extension.fenceFromFD` logs each fence it serves, and the count was 0 with
+the flag unset and exactly 3 with it set, with no protocol error either way.
+Without that line the table above could just as easily have been the cost of
+Mesa quietly not asking.
 
-*One thing that changes the disposal criterion, and it is not about cost.* The
-argument above — "the idle event is already a complete signal, because
-`presentPixmap` copies synchronously before sending it" — is true only while
-`presentPixmap` **copies**. The flip branch specified in `docs/TODO.md` removes
-that copy, and with it the reason a missing fence is safe. So even a
-zero-cost measurement does not make this file deletable in a world where the
-flip lands; it makes the *fence* mandatory. Delete this patch only after the
-fence is measured working, not merely measured cheap.
+Deleting the patch also removes a trap that was written down here before it
+could be sprung: the old justification was "the idle event is already a
+complete signal, because `presentPixmap` copies synchronously before sending
+it", which is true only while `presentPixmap` **copies**. The flip branch
+specified in `docs/TODO.md` would remove that copy. With the fence now the
+default, the flip no longer has a missing-fence hazard to walk into.
 
 ## Considered and not taken
 

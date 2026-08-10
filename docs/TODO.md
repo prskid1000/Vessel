@@ -297,6 +297,38 @@ audit's; they are pointers, not independently re-verified.
   frame counts, a historical rather than a paired run, and one sample each.
   A real A/B needs the patch reverted and both runs taken in one sitting.
 
+  **The real A/B was run on 2026-08-10 and found nothing. Treat the table above
+  as withdrawn.** Two Turnip ICDs were built from the same tree differing only
+  in `0003` (and in `0005`, which would not apply without it — 32 `fprintf`s on
+  error returns, so not a second real variable), swapped on the device by
+  overwriting `libvulkan_freedreno.so` and verified by sha256, two runs each:
+
+  | | mean | p50 | p95 |
+  |---|---|---|---|
+  | with `0003`, `sw` | 2.057 / 2.027 | 1.499 / 1.525 | 4.595 / 4.478 |
+  | without, `sw` | 2.483 / 2.055 | 2.113 / 1.452 | 5.422 / 4.826 |
+  | with `0003`, `sw,noshm` | 2.113 / 2.280 | 1.540 / 1.664 | 4.734 / 5.080 |
+  | without, `sw,noshm` | 2.490 / 1.901 | 2.018 / 1.486 | 5.992 / 4.475 |
+
+  The run-to-run spread inside one build (1.901 to 2.490 ms without the patch)
+  is larger than any gap between builds. **`0003` is not measurable with this
+  harness**, in either direction. The patch stays, because there is no evidence
+  to remove it — not because there is evidence to keep it.
+
+  *Two things learned that cost runs, so that the next person does not repeat
+  them.* First, `--wsi dri3` cannot see this patch **at all**: every hunk is
+  inside `x11_present_to_x11_sw` or guarded by `wsi->sw`, so a dri3 A/B is
+  guaranteed to be a null result and the first one taken was exactly that.
+  Second, `defers_sw_blit_wait` is set to `wsi->sw && !chain->has_mit_shm`, and
+  the vendored server *does* register MIT-SHM (`XServer.java:230`), so even in
+  `sw` the patch may never arm — hence the `sw,noshm` rows, which force the
+  path live. They are no less noisy.
+
+  *Done when:* a harness whose own variance is below ~5% exists. Until then this
+  is unanswerable rather than unanswered, and it is worth remembering what the
+  answer would buy: present costs 0.5 ms on the DRI3 path while Metro renders a
+  frame every 80–125 ms, so 0.15 ms of present is under 0.2% of a frame.
+
 - [ ] **Drop the per-present `GetGeometry` round trip.** One request and one
   reply per frame (`wsi_common_x11.c:1854` + `:1917`), on the present thread,
   ordered behind the 3.6 MB PutImage on the same connection, and used for
@@ -506,13 +538,15 @@ audit's; they are pointers, not independently re-verified.
     Do not bump `DRI3Extension.MINOR_VERSION` to 2 — see vendored item 21 for
     why that is the wrong lever and buys nothing.
 
-    *What is left:* `patches/mesa/0007` can now be deleted, which needs a
-    Turnip rebuild and a re-run of the pair above. Note it is **not** merely
-    dead weight to be tidied away: 0007's justification is that
-    `presentPixmap` copies synchronously, and the flip branch below would
-    destroy exactly that property — so if the flip is ever built, the fence
-    stops being optional. Deleting 0007 makes the fence the default for every
-    app, and only `x11present` has exercised it; a Wine title has not.
+    **`patches/mesa/0007` is deleted.** Turnip was rebuilt without it and
+    installed on the device; with no environment variable set at all a run is
+    `result=PASS` at mean 0.560 ms and the server serves three fences. The
+    fence is the default now, which also removes the hazard the flip branch
+    would otherwise have walked into — 0007's safety argument depended on
+    `presentPixmap` copying synchronously, and the flip removes that copy.
+
+    *What is left:* only `x11present` has exercised the fence. A Wine title has
+    not, and the code runs for every app now.
 
   - [~] **A second `--wsi dri3` run against a live session fails with
     `BadIdChoice`.** The cause is now read rather than inferred:
@@ -539,11 +573,14 @@ audit's; they are pointers, not independently re-verified.
     `dri3` runs — every one `result=PASS`, where the second used to die with
     `BadIdChoice`. No `VesselXProto` line on any of them.
 
-    *What is left:* the crashed-guest case. Every client above exited cleanly
-    through the new teardown in `x11present.c`, so what has been proved is that
-    reclamation works when the client asks for it — not that it works when the
-    client is killed mid-present, which is the case the server-side fix exists
-    for. *Done when:* a probe killed mid-flight is followed by a passing run.
+    **The crashed-guest case is confirmed too.** A probe was started with
+    `--frames=200000`, allowed to get past `first_frame_ms=1.99` — so it was
+    inside the present loop, holding a swapchain's three DRI3 pixmaps, a SYNC
+    fence each and a Present event context — and then `kill -9`'d. The next
+    client connected and ran to `result=PASS` at mean 0.560 ms with **no
+    `VesselXProto` line of any kind**. That is the case the reclamation was
+    written for: nothing asked the server to free those resources, and it freed
+    them anyway.
 
   - [ ] **The last copy: a flip branch in `PresentExtension`.** Specified
     below, not started. It is the most invasive of the three and it is
@@ -1024,15 +1061,27 @@ components.
   own tooling. Nothing third-party, so this is a taste decision and not a gate.
 - [ ] **A README that is true.** Whatever the state is on the day, said plainly.
 
-## 7. Diagnostics: the channels are fixed and there is no way to ask louder
+## 7. Diagnostics: there is a way to ask louder, and three claims about it are unverified
 
 `docs/DIAGNOSTICS-UI.md` is the design brief and carries the evidence for every
-claim below. The short version: `WINEDEBUG` is one string chosen once for a
-session that is behaving (`core/SessionEnvironment.kt:18`), and when a session
-misbehaves the only way to ask a different question is to rebuild the app. The
-work is a separate Diagnostics surface off the container view — not more rows in
-the container sheet, which `params-manifest.json:9-16` and `docs/DESIGN.md:301`
-both rule out for good reasons.
+claim below. The problem this section opened on: `WINEDEBUG` was one string
+chosen once for a session that is behaving (`core/SessionEnvironment.kt:19`), and
+when a session misbehaved the only way to ask a different question was to rebuild
+the app. The answer was a Diagnostics surface off the container view — not more
+rows in the container sheet, which `params-manifest.json:9-16` and
+`docs/DESIGN.md:301` both rule out for good reasons.
+
+**Five of the eight are closed; the three that are not need the device.** The
+surface is built (`core/ContainerDiagnostics.kt`, `ui/screens/DiagnosticsSection.kt`,
+`ui/vm/ContainerSheetViewModel.kt`) and 78 unit tests across
+`ContainerDiagnosticsTest` (36), `SessionEnvironmentTest` (42) hold it to
+`docs/LOGGING.md`. What no test can settle is whether the environment those
+controls compose is the environment a real session receives, and whether the
+output they turn on arrives anywhere a person can read it. Each remaining item
+says which measurement would close it.
+
+Reviewed against the code on 2026-08-10; the statuses below are what the tree
+says, not what the section said when it was written.
 
 Ordered so that each item is independently shippable and the ones that make the
 later ones honest come first.
