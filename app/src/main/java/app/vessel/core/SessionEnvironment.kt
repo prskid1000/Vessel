@@ -349,8 +349,16 @@ fun sessionEnvironment(
     //   TSOENABLED=1           x86 assumes Total Store Order and Arm does not
     //                          guarantee it. Off is faster and breaks any
     //                          multi-threaded program, quietly and at random.
-    //   HALFBARRIERTSOENABLED=1  Measured on this device: the cheap path costs
-    //                          21% less than the alternative (tools/tso/run.sh).
+    //   HALFBARRIERTSOENABLED=1  **FEX's own default.** Config.json.in gives it
+    //                          `"Default": "true"`, so this line sets what FEX
+    //                          would do unset — it is redundant, not wrong, and
+    //                          is kept only so the value is visible here rather
+    //                          than inherited silently. The "21% cheaper"
+    //                          measurement this comment used to cite is the
+    //                          LRCPC2 result and belongs to a different knob.
+    //                          tools/tso/run.sh now measures this one properly,
+    //                          against `=0` and on unaligned traffic — the only
+    //                          traffic the backpatch touches.
     //   VECTORTSOENABLED=0     Upstream calls the accurate version a "HUGE"
     //                          performance hit, and the hardware feature that
     //                          would make it cheap (FEAT_LRCPC3) is reported by

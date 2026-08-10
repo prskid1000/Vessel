@@ -88,6 +88,19 @@ Turning it off costs 21%, and the native control moved 0.2 ms — so that is the
 ordering path and not thermals. Oryon does not have the erratum, FEX is right to
 leave it enabled, and Vessel should not touch it.
 
+**That 21% is LRCPC2's and nothing else's.** It was quoted for a second time
+against `FEX_HALFBARRIERTSOENABLED`, in this document's settings table and in
+`SessionEnvironment.kt`, where it was never measured. Two things were wrong with
+that. FEX defaults `HalfBarrierTSOEnabled` to *true*
+(`FEXCore/Source/Interface/Config/Config.json.in:462`), so Vessel's `=1` sets
+what FEX already does and a `1`-versus-default comparison cannot move at all.
+And the harness could not have measured it either way: `tsobench.c`'s loop was
+single-byte accesses, every one of them naturally aligned, while the backpatch
+this knob controls only ever fires on *unaligned* loads and stores. The
+benchmark now has a second, deliberately misaligned phase and `run.sh` compares
+`=0` against the default, which is the only pair with two sides. Until that runs
+the knob has no number, and the table says so.
+
 The same numbers say something else worth keeping: on this memory-ordering-bound
 loop, translated x86-64 is within 4% of native ARM64. That is a workload chosen
 to isolate barriers rather than a general claim about emulation speed, but it is
@@ -132,7 +145,7 @@ better one by guessing. `build/targets/<target>.env` is build-time only. For
 | `TU_DEBUG` | *(none forced)* | fixed | Neither rendering mode is forced — see below |
 | `TU_AUTOTUNE_ALGO` | `default` | fixed | `prefer_sysmem` available if a title corrupts |
 | `FEX_TSOENABLED` | `1` | fixed | Required for correctness; off breaks multithreaded programs quietly |
-| `FEX_HALFBARRIERTSOENABLED` | `1` | fixed | Measured 21% cheaper than the alternative on this core |
+| `FEX_HALFBARRIERTSOENABLED` | `1` | fixed | **FEX's own default — this sets what it already does.** Unmeasured here; see below |
 | `FEX_VECTORTSOENABLED` | `0` | fixed | Severe cost, and FEAT_LRCPC3 that would make it cheap is unused by FEX |
 | Wine sync | esync | fixed | The only mode that works here — README, Known limitations |
 | Resolution | `1280x720` | **container** | The single biggest performance dial on this phone |

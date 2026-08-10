@@ -235,12 +235,24 @@ audit's; they are pointers, not independently re-verified.
 - [ ] **Measure the shader cache, cold against warm.** `docs/OPTIMIZATION.md:31`
   calls pipeline recompilation "the single largest avoidable cost in the whole
   stack". It was fixed (`SessionEnvironment.kt:430-433`) and explicitly left
-  **Unmeasured** (`:61-63`), and `tools/device-bench.sh:212-217` still refuses to
-  measure it because "the D3D probes are blocked at instance creation because no
-  X server is serving DISPLAY in the headless harness". **That refusal is
-  stale** — `run-presentbench.sh` runs a D3D11 swapchain against the app's own X
-  server. One hour: run it twice with `caches/dxvk` wiped in between. This is the
-  measurement, not a precursor to one.
+  **Unmeasured** (`:61-63`).
+
+  *This entry previously said the job was one hour of running
+  `run-presentbench.sh` twice with `caches/dxvk` wiped between, because
+  `device-bench.sh`'s refusal cited a headless harness with no DISPLAY. Half of
+  that was right.* The refusal's **reason** was indeed stale — a D3D11 swapchain
+  does now run against the app's own X server. But `presentbench.c` draws one
+  `ClearRenderTargetView` and no shaders **on purpose**, so that its number is
+  the present path; wiping the cache around it times DXVK's internal blit
+  pipeline, not an application's shader set. The refusal in `device-bench.sh`
+  has been rewritten to say that instead, so the next person does not rediscover
+  it.
+
+  What is actually needed is a shader-heavy workload: either a probe that
+  compiles many distinct pipelines, or — better, and needing no new code — a
+  real title timed launch-to-first-frame with `caches/dxvk` wiped between runs.
+  Metro is already installed and is the obvious subject. *Done when:* two
+  launch-to-first-frame times, cold and warm, from the same title.
 
 - [ ] **`FEX_HALFBARRIERTSOENABLED=1` is an unmeasured setting wearing a measured
   number.** `docs/ARCHITECTURE.md:135` and `SessionEnvironment.kt:352-353` both

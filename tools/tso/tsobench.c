@@ -25,6 +25,24 @@
  * Build x86-64 (the point is that FEX translates it) and ARM64 as the control:
  * the ARM64 build runs natively, so its time should not move at all between the
  * two runs. If it does, the measurement is noise and not a result.
+ *
+ * ---
+ *
+ * There are two timed phases, because there are two knobs and each is blind to
+ * the other's workload.
+ *
+ *   ms=            aligned byte traffic. This is the LRCPC2 question, and the
+ *                  number the 289.3/348.8 result in docs/ARCHITECTURE.md came
+ *                  from — the field name is kept so that comparison still holds.
+ *   ms_unaligned=  deliberately misaligned 64-bit traffic. This is the
+ *                  FEX_HALFBARRIERTSOENABLED question.
+ *
+ * **The second phase exists because the first cannot answer the second.**
+ * `HalfBarrierTSOEnabled` backpatches *unaligned* loads and stores to
+ * half-barrier atomics, and every access in the aligned phase is a single byte
+ * — which is naturally aligned by definition. Run against phase one alone the
+ * knob is a no-op, and two identical numbers would read as "measured, makes no
+ * difference" when the truth is "never exercised".
  */
 
 #include <stdio.h>
@@ -37,16 +55,25 @@
 #define BUF_BYTES (64u * 1024u)
 #define ITERATIONS 4000u
 
+/* One byte, so every 64-bit access in the second phase is misaligned and one in
+ * two of them also straddles a 16-byte boundary — the case FEX's backpatch and
+ * its split-lock handling both care about. Eight times the passes because each
+ * step moves eight times the bytes, which keeps the two phases roughly equal in
+ * duration and therefore equally readable. */
+#define UNALIGNED_OFFSET 1u
+#define UNALIGNED_ITERATIONS (ITERATIONS * 8u)
+
 int main(int argc, char **argv)
 {
     /* volatile so the compiler cannot hoist, vectorise or eliminate the traffic.
      * Every one of these accesses has to survive into the x86 instruction stream
      * for FEX to have something to translate. */
     volatile unsigned char *buf = malloc(BUF_BYTES);
-    LARGE_INTEGER freq, start, end;
+    volatile unsigned long long *wide;
+    LARGE_INTEGER freq, start, mid, end;
     unsigned long long sum = 0;
-    unsigned int iter, i;
-    double ms;
+    unsigned int iter, i, wide_count;
+    double ms, ms_unaligned;
 
     if (!buf) return 1;
     for (i = 0; i < BUF_BYTES; i++) buf[i] = (unsigned char)i;
@@ -65,13 +92,30 @@ int main(int argc, char **argv)
         }
     }
 
+    QueryPerformanceCounter(&mid);
+
+    /* Phase two. The cast is deliberately to an odd address: both x86-64 and
+     * AArch64 permit unaligned ordinary loads and stores, and an unaligned one
+     * is the only kind FEX backpatches. */
+    wide = (volatile unsigned long long *)(buf + UNALIGNED_OFFSET);
+    wide_count = (BUF_BYTES - UNALIGNED_OFFSET) / (unsigned int)sizeof(unsigned long long);
+
+    for (iter = 0; iter < UNALIGNED_ITERATIONS; iter++) {
+        for (i = 0; i < wide_count; i++) {
+            sum += wide[i];
+            wide[i] = sum >> 3;
+        }
+    }
+
     QueryPerformanceCounter(&end);
-    ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    ms = (double)(mid.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    ms_unaligned = (double)(end.QuadPart - mid.QuadPart) * 1000.0 / (double)freq.QuadPart;
 
     /* The checksum is printed so a run that was optimised away, or that faulted
-     * partway, cannot be mistaken for a fast one. */
-    printf("TSOBENCH bits=%d ms=%.1f checksum=%llu\n",
-           (int)(sizeof(void *) * 8), ms, sum);
+     * partway, cannot be mistaken for a fast one. It covers both phases, so a
+     * silently skipped second phase shows up here too. */
+    printf("TSOBENCH bits=%d ms=%.1f ms_unaligned=%.1f checksum=%llu\n",
+           (int)(sizeof(void *) * 8), ms, ms_unaligned, sum);
     fflush(stdout);
     free((void *)buf);
     (void)argc; (void)argv;

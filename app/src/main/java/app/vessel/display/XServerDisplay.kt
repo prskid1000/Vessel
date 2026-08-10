@@ -39,6 +39,7 @@ import app.vessel.input.X11
 import app.vessel.input.X11KeyMap
 import app.vessel.input.buttons
 import app.vessel.input.toPixel
+import com.winlator.core.Bitmask
 import com.winlator.renderer.GLRenderer
 import com.winlator.renderer.ViewTransformation
 import com.winlator.sysvshm.SysVSHMConnectionHandler
@@ -48,6 +49,7 @@ import com.winlator.widget.XServerView
 import com.winlator.xconnector.UnixSocketConfig
 import com.winlator.xconnector.XConnectorEpoll
 import com.winlator.xserver.Atom
+import com.winlator.xserver.Decoration
 import com.winlator.xserver.Pointer
 import com.winlator.xserver.Property
 import com.winlator.xserver.SHMSegmentManager
@@ -452,6 +454,20 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         }
     }
 
+    /**
+     * **Geometry is `WxH+X+Y`, and the offsets are the point.** Size alone could
+     * not distinguish the two explanations for a bar across the top of a
+     * fullscreen game: a client correctly filling a window that is itself
+     * positioned too low, and a client offset down *inside* a correctly placed
+     * parent. Those want opposite fixes and the dump could not tell them apart.
+     * X's own notation is used because the numbers are parent-relative, which is
+     * the thing to remember when reading a nested tree.
+     *
+     * `deco` is the `_MOTIF_WM_HINTS` mask by name. A fullscreen window carrying
+     * `TITLE` is a caption Wine intends to draw, which is the difference between
+     * a Vessel bug and a Wine window style — and no amount of staring at sizes
+     * would have said which.
+     */
     private fun dumpTree(window: Window, depth: Int) {
         if (depth > MAX_WINDOW_DEPTH) return
         for (child in window.children) {
@@ -459,11 +475,31 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                 TREE_TAG,
                 "  ".repeat(depth + 1) +
                     "id=${child.id} mapped=${child.attributes.isMapped} " +
-                    "${child.width}x${child.height} name='${child.name}' " +
-                    "class='${child.className}' kids=${child.children.size}",
+                    "${child.width}x${child.height}" +
+                    "${child.x.withSign()}${child.y.withSign()} " +
+                    "border=${child.borderWidth} name='${child.name}' " +
+                    "class='${child.className}' deco=${child.decorations.names()} " +
+                    "kids=${child.children.size}",
             )
             dumpTree(child, depth + 1)
         }
+    }
+
+    /** X geometry always signs the offsets, so `+0` and `-8` both read as one. */
+    private fun Short.withSign(): String = if (this < 0) "$this" else "+$this"
+
+    /**
+     * The set bits by name. Falls back to hex for anything outside [Decoration]
+     * rather than dropping it: the mask comes from a client-set property, so a
+     * bit this enum does not know about is a fact about the client and is
+     * exactly the kind of thing worth seeing in a dump.
+     */
+    private fun Bitmask.names(): String {
+        if (isEmpty) return "none"
+        val known = Decoration.entries.filter { isSet(it.flag()) }
+        val unknown = bits and Decoration.entries.fold(0) { acc, d -> acc or d.flag() }.inv()
+        val parts = known.map { it.name } + if (unknown != 0) listOf("0x%x".format(unknown)) else emptyList()
+        return parts.joinToString("|")
     }
 
     /**

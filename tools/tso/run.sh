@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
-# Measure whether FEX's LRCPC2 TSO path is a win or a loss on Oryon.
+# Measure FEX's two TSO knobs on Oryon: the LRCPC2 host feature, and the
+# half-barrier backpatch.
 #
 #   ./tools/tso/run.sh
 #
-# Runs tsobench.c on the phone twice per architecture — once with FEX's default
-# host feature detection, once with FEX_HOSTFEATURES=disablelrcpc2 — and prints
-# both times. See tsobench.c for why this question is open.
+# Runs tsobench.c on the phone several times per architecture and prints the
+# best of each set. See tsobench.c for why these questions are open.
 #
-# Read the result like this:
+# Read the LRCPC2 result like this:
 #   x86-64 slower with the flag  -> LDAPUR is fine here, leave FEX alone
 #   x86-64 faster with the flag  -> LDAPUR is over-ordered on this core, and
 #                                   Vessel should be setting the flag
 #   ARM64 time moves at all      -> the measurement is noise; the flag cannot
 #                                   affect a native binary, so a difference there
 #                                   means thermals or scheduling, not ordering
+#
+# **The half-barrier pair is deliberately `=0` against the default, not `=1`.**
+# FEX defaults `HalfBarrierTSOEnabled` to *true*
+# (FEXCore/Source/Interface/Config/Config.json.in), so Vessel's
+# `FEX_HALFBARRIERTSOENABLED=1` sets what FEX already does and a `1`-vs-default
+# pair could not move by construction. Turning it off is the only comparison
+# that has two sides. Read it the other way round from the above: if `=0` is
+# slower, the backpatch is earning its keep and the default is right — which
+# also means Vessel's explicit `1` is redundant rather than wrong.
 #
 # Requires a prefix already built by tools/device-session.sh, which is also where
 # the environment and the two-pass wineboot are explained.
@@ -75,25 +84,41 @@ WINE="/system/bin/linker64 \$PWD/bin"
 # Three runs a side, because a phone throttles and a single pair of numbers is a
 # coin toss. The best of each set is reported: the fastest run is the one least
 # disturbed by whatever else the device was doing.
+#
+# The two phases are minimised **independently**. They are separate measurements
+# that happen to share a process, so tying them to the same attempt would let
+# noise in one bury a result in the other.
 run_set() {
-  local arch="$1" flag="$2" label="$3" best="" out
+  local arch="$1" flag="$2" label="$3" best_a="" best_u="" out ms mu
   for attempt in 1 2 3; do
     out="$(in_app_bg "$ENV_PREFIX $flag && timeout 300 $WINE/wine \$PWD/tsobench-$arch.exe" \
       "$APP_DIR/tso.log" || true)"
-    local ms
+    # `ms=` cannot match inside `ms_unaligned=`, so the first pattern stays
+    # unambiguous and the recorded aligned numbers remain comparable.
     ms="$(grep -o 'ms=[0-9.]*' <<<"$out" | head -1 | cut -d= -f2)"
-    [ -n "$ms" ] || { printf '  %-28s FAILED: %s\n' "$label" "$(tail -1 <<<"$out")"; return; }
-    if [ -z "$best" ] || awk "BEGIN{exit !($ms < $best)}"; then best="$ms"; fi
+    mu="$(grep -o 'ms_unaligned=[0-9.]*' <<<"$out" | head -1 | cut -d= -f2)"
+    [ -n "$ms" ] && [ -n "$mu" ] \
+      || { printf '  %-38s FAILED: %s\n' "$label" "$(tail -1 <<<"$out")"; return; }
+    if [ -z "$best_a" ] || awk "BEGIN{exit !($ms < $best_a)}"; then best_a="$ms"; fi
+    if [ -z "$best_u" ] || awk "BEGIN{exit !($mu < $best_u)}"; then best_u="$mu"; fi
   done
-  printf '  %-28s %8s ms\n' "$label" "$best"
+  printf '  %-38s %9s %11s\n' "$label" "$best_a" "$best_u"
 }
 
-say "x86-64 (translated by FEX — the case under test)"
-run_set x86_64 "" "default (LRCPC2 on)"
-run_set x86_64 "FEX_HOSTFEATURES=disablelrcpc2" "disablelrcpc2"
+# Which column answers which question: LRCPC2 acts on the aligned phase, the
+# half-barrier backpatch only on the unaligned one.
+header() { printf '  %-38s %9s %11s\n' '' 'aligned' 'unaligned'; }
 
-say "ARM64 (native — the control, both numbers should match)"
+say "x86-64 (translated by FEX — the case under test)"
+header
+run_set x86_64 "" "default (LRCPC2 on, half-barrier on)"
+run_set x86_64 "FEX_HOSTFEATURES=disablelrcpc2" "disablelrcpc2"
+run_set x86_64 "FEX_HALFBARRIERTSOENABLED=0" "halfbarriertso off"
+
+say "ARM64 (native — the control, all three rows should match)"
+header
 run_set aarch64 "" "default"
 run_set aarch64 "FEX_HOSTFEATURES=disablelrcpc2" "disablelrcpc2"
+run_set aarch64 "FEX_HALFBARRIERTSOENABLED=0" "halfbarriertso off"
 
 say "done"

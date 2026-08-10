@@ -204,17 +204,31 @@ bench_startup() {
 # --- graphics -----------------------------------------------------------------
 bench_graphics() {
   say "graphics — shader cache, cold versus warm"
-  # Honest refusal rather than a number that means nothing. Every D3D probe is
-  # currently BLOCKED at instance creation: Vulkan does not advertise
-  # VK_KHR_win32_surface, which Wine only offers when a display driver is
-  # loaded, and tools/device-graphics.sh runs headless. Timing a path that
-  # refuses to start would produce a stable, meaningless, reproducible number —
-  # the worst kind.
-  warn "not measurable yet: the D3D probes are blocked at instance creation"
-  warn "because no X server is serving DISPLAY in the headless harness."
-  warn "This becomes measurable when the probes run under the app's own display"
-  warn "server; until then, run ./tools/device-graphics.sh to see the block."
-  record graphics.status blocked-on-display-path
+  # Still an honest refusal, but **the old reason expired and the new one is
+  # different**. The old text said the D3D probes cannot start because nothing
+  # serves DISPLAY in a headless harness. That has been false since
+  # tools/gfx/run-presentbench.sh, which deep-links the app and runs a real
+  # D3D11 swapchain against the X server the app is hosting.
+  #
+  # What blocks it now is the workload, not the display. presentbench.c is built
+  # to draw as little as possible — one ClearRenderTargetView, no shaders of its
+  # own — precisely so its number is the present path. Wiping caches/dxvk and
+  # running it twice would therefore time the compile of DXVK's internal blit
+  # pipeline and nothing else: a handful of pipelines, when the cost being
+  # chased is an application's whole shader set. That is a stable, meaningless,
+  # reproducible number — the worst kind, and the same trap the previous refusal
+  # was written to avoid.
+  #
+  # Lifting this needs a shader-heavy workload, which is one of:
+  #   - a probe that compiles many distinct pipelines, cold and warm; or
+  #   - a real title, timed launch-to-first-frame with caches/dxvk wiped between.
+  # The second is the number anyone actually cares about and needs no new code —
+  # only a session, which is why it is not in this headless script.
+  warn "not measurable here: presentbench draws no shaders by design, so a"
+  warn "cold-vs-warm run of it would time DXVK's blit pipeline, not a shader set."
+  warn "Needs a shader-heavy workload — a many-pipeline probe, or a real title"
+  warn "timed launch-to-first-frame with caches/dxvk wiped between runs."
+  record graphics.status blocked-on-shader-workload
 }
 
 case "$ONLY" in
