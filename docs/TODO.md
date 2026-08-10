@@ -160,30 +160,66 @@ and the two that are not share a root cause.
   of the cases that work today. *Done when:* a fullscreen game survives a round
   trip to `cmd` and back, and Maximize is a control that does something.
 
-- [ ] **A white bar across the top of a fullscreen game.** Roughly 36 of the 720
-  guest rows, which is suspiciously a Win32 caption height, and the game's parent
-  window and its client child are both `1280x720` — consistent with the client
-  being offset down by a caption and its bottom rows clipped. **Unproven**, and
-  it cannot be proven from the tooling as it stands: `dumpTree` prints size but
-  not **x/y**. Add those (and the decoration mask) to the `VesselWindows` dump
-  first; it is one line and the answer probably falls out of it.
+- [~] **A white bar across the top of a fullscreen game — and it is a fixed
+  height in *guest* pixels, which rules out most of the candidates.**
+  *Measured on the device, 2026-08-10,* by reproducing it at three different
+  sizes in one sitting and converting each back to guest rows:
 
-- [ ] **4 FPS in Metro, and nothing measured says where it goes.** The FPS
-  readout said 4 with the game rendering. The present path is **2.245 ms**, so at
-  a 250 ms frame it is ~1% — *the present path is not the bottleneck and neither
-  zero-copy nor anything else in the present chain should be started before this
-  is attributed.* Suspects in order: the game is x86-64 so FEX is on the hot
-  path; GPU render cost at 1280x720 on a phone; the full-window texture upload
-  per composited frame. See the present-path audit below.
+  | Desktop | Window | Bar, in guest rows |
+  |---|---|---|
+  | 1280x720 | fullscreen | ~38 of 720 |
+  | 640x360 | fullscreen | ~42 of 360 |
+  | 1280x720 | windowed, ~640 wide | ~43 |
 
-  **Do this first, it costs two minutes and no code.** Set the container's
-  `display.resolution` to 640x360 and relaunch. If the rate scales with the pixel
-  count the frame is **GPU-bound**; if it barely moves it is **CPU/FEX-bound**.
-  That one result deletes half of the list below. `docs/ARCHITECTURE.md` already
-  calls resolution the single biggest performance dial here, so it is a fix as
-  well as a probe. Establish what the game does at its own lowest preset in the
-  same sitting — Metro Redux is a 2014 PC title and 4 FPS at max settings on an
-  Adreno 829 is not self-evidently a defect in the stack.
+  **~40 guest pixels every time**, independent of both the desktop resolution
+  and the window size. That is the signature of a fixed-height decoration and
+  not of anything proportional: a scaling artefact, a letterbox miscalculation
+  or an off-by-one in the blit would all have moved with the geometry, and none
+  of them did. A Win32 caption is ~30–40 px. The bar also spans exactly the
+  window's width and sits *above* the rendered content, with the content pushed
+  down — which is the "client offset down inside a correct parent" case rather
+  than "window placed too low".
+
+  Still `[~]` because the mechanism is inferred from geometry rather than read
+  out. `dumpTree` now prints `WxH+X+Y` and the `_MOTIF_WM_HINTS` mask by name,
+  so the confirming evidence is one `setprop log.tag.VesselWindows DEBUG` away:
+  *Done when:* a dump shows the client child at a `+Y` of ~40 inside its parent,
+  and says whether the parent carries `TITLE`. If it does, this is a Wine window
+  style and the fix is on the Wine side, not in the compositor.
+
+- [x] **The frame is pixel-bound, and "4 FPS in Metro" was never a property of
+  the stack.** *Measured on the device, 2026-08-10, Metro 2033 Redux in a real
+  session.* The resolution probe was run and it answered cleanly:
+
+  | Render size | Scene | FPS |
+  |---|---|---|
+  | 1280x720 | title screen | **20–26** |
+  | 1280x720 | intro video | **2** |
+  | 640x360 | main menu | **60** (at the container's `fpsLimit`, so ≥60) |
+  | ~640 wide, windowed | title screen | **56** |
+
+  Quarter the pixels and the rate goes to the cap. **GPU/pixel-bound, not
+  CPU/FEX-bound** — which retires the "the game is x86-64 so FEX is on the hot
+  path" suspicion for this title, and matches `docs/ARCHITECTURE.md` already
+  calling resolution the single biggest dial on this phone.
+
+  *The 4 FPS figure was a sampling accident.* The readout is a live number and
+  the earlier reading was taken while something slow was on screen. The intro
+  video measures 2 FPS — it is CPU-decoded and blitted, so it is the one part of
+  a Metro launch that resolution does **not** help — and loading screens are
+  lower still. The rendered scenes were never that slow.
+
+  The last row was unplanned and is the cleanest evidence of the four: after the
+  640x360 run Metro saved that resolution as its own, so the next 1280x720
+  session opened it *windowed at ~640 wide* — the game re-ran the experiment on
+  itself, same desktop, same session, and landed at 56. Note this as a side
+  effect: **Metro's own graphics setting was changed by this probe** and wants
+  resetting in its Options menu if 720p is wanted back.
+
+  *What this deletes:* the present-path work below stays deprioritised, but for
+  a better reason than before. At 2.245 ms against a 40 ms frame it is ~6%, not
+  ~1% — real, but still not the thing to fix first. What it promotes is anything
+  that reduces pixels or GPU work per pixel.
 
 ## Cheap wins, queued behind attributing the frame
 
