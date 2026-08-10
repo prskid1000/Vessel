@@ -464,6 +464,19 @@ private fun TaskbarWindow(
 fun WindowActionsPanel(
     window: GuestWindow,
     onMinimize: () -> Unit,
+    /**
+     * Bring a hidden window back — **a different call from [onMinimize], and the
+     * bug that made this a parameter.**
+     *
+     * The button below already said *Restore* when the window was hidden and
+     * still called [onMinimize], which reaches `XServerDisplay.minimizeWindow`
+     * and returns false at its `if (!window.attributes.isMapped)` guard: a
+     * minimised window is by definition unmapped, so Restore did nothing, said
+     * nothing, and looked like the window was gone for good. Tapping the
+     * taskbar *icon* worked the whole time because that path calls `focus`,
+     * which remaps. One label, two verbs.
+     */
+    onRestore: () -> Unit,
     onClose: () -> Unit,
     onKill: () -> Unit,
     onResize: () -> Unit,
@@ -504,11 +517,14 @@ fun WindowActionsPanel(
 
         Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
             // Non-destructive first and Restore rather than Minimize when the
-            // window is already hidden: one button, saying what it will do.
+            // window is already hidden: one button, saying what it will do —
+            // and now *doing* what it says. The action has to switch with the
+            // label, or the button is a lie in exactly the state a user reaches
+            // it in most: they opened this panel to get the window back.
             WindowAction(
                 icon = if (window.minimized) VIcons.ArrowClockwise else VIcons.CaretDown,
                 label = if (window.minimized) "Restore" else "Minimize",
-                onClick = onMinimize,
+                onClick = if (window.minimized) onRestore else onMinimize,
             )
             // **The only way to move or size a window.** `patches/wine/0010`
             // removes the caption and the sizing border from every top-level

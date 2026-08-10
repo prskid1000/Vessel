@@ -592,14 +592,10 @@ class SessionEnvironmentTest {
 
     @Test
     fun `diagnostics replace WINEDEBUG only by appending to it`() {
-        val diagnosed = container().copy(
-            diagnostics = ContainerDiagnostics()
-                .withChannelAdded("file")
-                .withChannelLevel("file", WineChannelLevel.EVERYTHING),
-        )
+        val diagnosed = container().copy(diagnostics = wineRow("file", "EVERYTHING"))
         val environment = sessionEnvironment(diagnosed, fexManifest, paths)
         assertEquals("$WINEDEBUG_CHANNELS,+file", environment["WINEDEBUG"])
-        // Order is the semantics, so the baseline must still be the baseline.
+        // Order is the semantics, so the prefix must still be the prefix.
         assertEquals("-all", environment["WINEDEBUG"]!!.split(",").first())
     }
 
@@ -621,11 +617,7 @@ class SessionEnvironmentTest {
                 ),
             ),
         )
-        val diagnosed = container().copy(
-            diagnostics = ContainerDiagnostics()
-                .withChannelAdded("file")
-                .withChannelLevel("file", WineChannelLevel.OFF),
-        )
+        val diagnosed = container().copy(diagnostics = wineRow("file", "OFF"))
         assertEquals(
             "$WINEDEBUG_CHANNELS,-file",
             sessionEnvironment(diagnosed, sneaky, paths)["WINEDEBUG"],
@@ -633,13 +625,36 @@ class SessionEnvironmentTest {
     }
 
     @Test
+    fun `every fixed row states the value the session actually carries`() {
+        // The inventory is only worth drawing if it is true. Each read-only row
+        // names a variable or a Wine channel the fixed block sets, and this is
+        // the assertion that the screen and the environment cannot drift apart.
+        val environment = env(driver = turnip)
+        assertEquals(FIXED_DXVK_LOG_LEVEL, environment["DXVK_LOG_LEVEL"])
+        assertEquals(FIXED_DXVK_LOG_PATH, environment["DXVK_LOG_PATH"])
+        assertEquals(FIXED_VKD3D_DEBUG, environment["VKD3D_DEBUG"])
+        assertEquals(FIXED_VKD3D_SHADER_DEBUG, environment["VKD3D_SHADER_DEBUG"])
+        assertEquals(FIXED_FEX_SILENTLOG, environment["FEX_SILENTLOG"])
+        assertEquals(FIXED_FEX_OUTPUTLOG, environment["FEX_OUTPUTLOG"])
+        assertEquals(TU_DEBUG_STARTUP, environment["TU_DEBUG"])
+        // The one whose fixed value is an absence, and whose row says "not set".
+        assertEquals("", FIXED_MESA_LOG)
+        assertFalse(environment.containsKey("MESA_LOG"))
+        // And the Wine rows are the prefix, term for term.
+        assertEquals(
+            environment["WINEDEBUG"],
+            BASELINE_WINE_TERMS.flatMap { it.second }.joinToString(","),
+        )
+    }
+
+    @Test
     fun `diagnostics reach the subsystems in their own words`() {
         val diagnosed = container().copy(
             diagnostics = ContainerDiagnostics()
-                .withSubsystemLevel("dxvk", "debug")
-                .withSubsystemLevel("vkd3d.shader", "trace")
-                .withSubsystemFlag(FEX_MESSAGES_FLAG.id, false)
-                .withSubsystemFlag(DRIVER_LOG_FLAG.id, true),
+                .withRowAdded().withRowNamed(0, "DXVK_LOG_LEVEL").withRowLevel(0, "debug")
+                .withRowAdded().withRowNamed(1, "VKD3D_SHADER_DEBUG").withRowLevel(1, "trace")
+                .withRowAdded().withRowNamed(2, "FEX_SILENTLOG").withRowLevel(2, "1")
+                .withRowAdded().withRowNamed(3, "MESA_LOG").withRowLevel(3, "file"),
         )
         val environment = sessionEnvironment(diagnosed, fexManifest, paths)
         assertEquals("debug", environment["DXVK_LOG_LEVEL"])
@@ -657,16 +672,14 @@ class SessionEnvironmentTest {
     fun `a diagnostics record adds no key the fixed block did not already have`() {
         // `MESA_LOG` is the one exception and it is the point of this assertion:
         // everything else Diagnostics writes is a value the environment already
-        // carried, so switching a control on cannot change the shape of the map.
+        // carried, so switching a row on cannot change the shape of the map.
         val everything = container().copy(
             diagnostics = ContainerDiagnostics()
-                .withChannelAdded("relay")
-                .withSubsystemLevel("dxvk", "trace")
-                .withSubsystemLevel("vkd3d", "trace")
-                .withSubsystemLevel("vkd3d.shader", "trace")
-                .withSubsystemFlag(FEX_MESSAGES_FLAG.id, false)
-                .withSubsystemFlag(DRIVER_LOG_FLAG.id, true)
-                .withTurnipFlag("perf", true),
+                .withRowAdded().withRowNamed(0, "relay")
+                .withRowAdded().withRowNamed(1, "DXVK_LOG_LEVEL").withRowLevel(1, "trace")
+                .withRowAdded().withRowNamed(2, "VKD3D_DEBUG").withRowLevel(2, "trace")
+                .withRowAdded().withRowNamed(3, "MESA_LOG").withRowLevel(3, "file")
+                .withRowAdded().withRowNamed(4, "perf"),
         )
         val added = sessionEnvironment(everything, fexManifest, paths).keys -
             sessionEnvironment(container(), fexManifest, paths).keys
@@ -680,14 +693,20 @@ class SessionEnvironmentTest {
     fun `a manifest Turnip flag and a diagnostics one both survive`() {
         val diagnosed = container().copy(
             diagnostics = ContainerDiagnostics()
-                .withSubsystemFlag(DRIVER_LOG_FLAG.id, true)
-                .withTurnipFlag("nolrz", true),
+                .withRowAdded().withRowNamed(0, "MESA_LOG").withRowLevel(0, "file")
+                .withRowAdded().withRowNamed(1, "nolrz"),
         )
         assertEquals(
             "nolrz,sysmem,startup",
             sessionEnvironment(diagnosed, turnipManifest("sysmem"), paths)["TU_DEBUG"],
         )
     }
+
+    /** One diagnostics row, named and levelled. */
+    private fun wineRow(channel: String, level: String) = ContainerDiagnostics()
+        .withRowAdded()
+        .withRowNamed(0, channel)
+        .withRowLevel(0, level)
 
     // — the prefix bootstrap's own, much smaller environment ---------------------
 

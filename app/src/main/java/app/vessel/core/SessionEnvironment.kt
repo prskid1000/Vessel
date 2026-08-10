@@ -565,8 +565,8 @@ fun sessionEnvironment(
     // comment that used to sit above these two lines explained the log routing
     // in terms of `OUTPUTLOG` being `"server"` — the right conclusion reached
     // through a mechanism that does not exist on this platform.
-    environment["FEX_SILENTLOG"] = "0"
-    environment["FEX_OUTPUTLOG"] = "stderr"
+    environment["FEX_SILENTLOG"] = FIXED_FEX_SILENTLOG
+    environment["FEX_OUTPUTLOG"] = FIXED_FEX_OUTPUTLOG
 
     environment["FEX_TSOENABLED"] = "1"
     environment["FEX_HALFBARRIERTSOENABLED"] = "1"
@@ -677,7 +677,7 @@ fun sessionEnvironment(
     // the client instead of stopping at the frame.
     if (MANAGED_DESKTOP) environment["VESSEL_MANAGED"] = "1"
 
-    environment["DXVK_LOG_LEVEL"] = "info"
+    environment["DXVK_LOG_LEVEL"] = FIXED_DXVK_LOG_LEVEL
 
     // **`none`, so DXVK's output lands in the session log instead of beside it.**
     //
@@ -700,10 +700,10 @@ fun sessionEnvironment(
     // reserved to guarantee its *absence*, because setting it makes vkd3d open a
     // file **instead of** resolving `__wine_dbg_output`. Same mistake, same fix,
     // and the two layers now behave the same way.
-    environment["DXVK_LOG_PATH"] = "none"
+    environment["DXVK_LOG_PATH"] = FIXED_DXVK_LOG_PATH
 
-    environment["VKD3D_DEBUG"] = "warn"
-    environment["VKD3D_SHADER_DEBUG"] = "warn"
+    environment["VKD3D_DEBUG"] = FIXED_VKD3D_DEBUG
+    environment["VKD3D_SHADER_DEBUG"] = FIXED_VKD3D_SHADER_DEBUG
 
     // Ray tracing is not reachable here, so stop games from trying.
     //

@@ -82,8 +82,6 @@ data class DiagnosticsUiState(
     /** `10 sessions · 480 MB at these limits`. */
     val ceilingLabel: String = "",
     val sessionCount: Int = 0,
-    /** The one line the collapsed row carries: `all off`, or what is on. */
-    val summary: String = "all off",
     /**
      * Whether this container has never been launched.
      *
@@ -95,18 +93,7 @@ data class DiagnosticsUiState(
     val neverLaunched: Boolean = true,
     /** The other containers this record can be copied to, as `id to name`. */
     val otherContainers: List<Pair<String, String>> = emptyList(),
-) {
-    /**
-     * True while nothing in the translators group has been moved off its default.
-     *
-     * Derived from the declared lists rather than from named fields, so a fourth
-     * translator or a third switch is covered without editing this.
-     */
-    val translatorsAreDefault: Boolean
-        get() = diagnostics.subsystemLevels.isEmpty() &&
-            diagnostics.subsystemFlags.isEmpty() &&
-            diagnostics.turnipFlags.isEmpty()
-}
+)
 
 /**
  * The container sheet — five fields, and the manifest decides which five.
@@ -393,26 +380,8 @@ class ContainerSheetViewModel @Inject constructor(
             ceilingLabel = "${SessionLogLimits.SESSIONS_KEPT} sessions · " +
                 "${sizeLabel(ceiling)} at these limits",
             sessionCount = logSessionCount,
-            summary = summaryOf(diagnostics),
             neverLaunched = profile.lastRun == null,
         )
-    }
-
-    /**
-     * The one line the collapsed Diagnostics row carries.
-     *
-     * A count of what is switched on, not of what has been *changed*: the log
-     * limits are deliberately not counted, because they are neither on nor off
-     * and the storage group already shows its own state. "all off" has to be the
-     * literal truth for a fresh container, which is the whole reason this row
-     * carries a state at all.
-     */
-    private fun summaryOf(diagnostics: ContainerDiagnostics): String {
-        val on = diagnostics.wineChannels.size +
-            diagnostics.subsystemLevels.size +
-            diagnostics.subsystemFlags.size +
-            diagnostics.turnipFlags.size
-        return if (on == 0) "all off" else "$on on"
     }
 
     private fun toEditorParam(resolved: ResolvedParam): EditorParam {

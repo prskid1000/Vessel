@@ -20,10 +20,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -40,13 +41,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
+import app.vessel.ui.theme.vElevation
 import app.vessel.ui.theme.vRing
 import kotlin.math.roundToInt
 
@@ -230,39 +237,201 @@ fun VDropdownField(
             )
         }
 
-        DropdownMenu(
+        VMenuSurface(
             expanded = expanded,
-            onDismissRequest = { expanded = false },
-            // The menu is its own window, outside the app's surface, so it has
-            // to be told the palette or it arrives in Material's default tone.
-            containerColor = Vessel.colors.surfaceRaised,
-            shape = shape,
-            // Three items, then scroll. The resolution ladder is fourteen rungs
-            // and an unbounded menu grows until it is the whole screen, which
-            // buries the row it belongs to and gives no sense of where the
-            // current value sits in the range. DropdownMenu already scrolls; all
-            // it needs is a ceiling.
-            modifier = Modifier
-                .width(fieldWidth)
-                .heightIn(max = Vessel.metrics.menuMaxHeight),
+            onDismiss = { expanded = false },
+            width = fieldWidth,
         ) {
             options.forEach { option ->
-                val isSelected = option == selected
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            labelFor(option),
-                            style = valueStyle,
-                            color = if (isSelected) {
-                                Vessel.colors.accent
-                            } else {
-                                Vessel.colors.textPrimary
-                            },
-                        )
-                    },
+                VMenuOption(
+                    label = labelFor(option),
+                    style = valueStyle,
+                    selected = option == selected,
                     onClick = {
                         expanded = false
-                        if (!isSelected) onSelect(option)
+                        if (option != selected) onSelect(option)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The one menu surface, shared by every field that drops one.
+ *
+ * **This replaced Material's `DropdownMenu`, which was the wrong system.** That
+ * component brings a tonal-elevation container colour, its own corner radius, its
+ * own vertical padding and a drop shadow — so a field with a 8 dp radius and a
+ * hairline ring opened a rounder, greyer, shadowed panel that did not line up
+ * with it. `VOverflowMenu` had already been built out of a `Popup` for exactly
+ * that reason; this is the same chrome, so the two menus in the product are one
+ * thing: `VElev.md`'s ring over `surface`, `shapeMd`, and the spacing scale.
+ *
+ * Anchored to the field rather than centred on the window: the popup is placed at
+ * the anchor's top-start and dropped by the field's own height, and given the
+ * field's measured [width], so its edges are the field's edges. That vertical
+ * line is the one every control on a sheet shares.
+ *
+ * @param width the anchor's measured width. Zero until the first layout pass,
+ *   which is harmless because the menu cannot be open before then.
+ */
+@Composable
+fun VMenuSurface(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    width: Dp,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (!expanded) return
+    val shape = Vessel.metrics.shapeMd
+    val drop = with(LocalDensity.current) { Vessel.metrics.controlHeight.roundToPx() }
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(0, drop),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier
+                .width(width)
+                // Bounded, then it scrolls. The resolution ladder is fourteen
+                // rungs and an unbounded menu grows until it is the whole screen,
+                // which buries the row it belongs to.
+                .heightIn(max = Vessel.metrics.menuMaxHeight)
+                .vElevation(VElev.md, shape)
+                .background(Vessel.colors.surface, shape)
+                .vRing(VElev.md.ring, shape)
+                .verticalScroll(rememberScrollState())
+                .padding(vertical = Vessel.metrics.s6),
+            content = content,
+        )
+    }
+}
+
+/** One line of a [VMenuSurface]: the label, accent when it is the current value. */
+@Composable
+fun VMenuOption(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    style: TextStyle = Vessel.type.body,
+) {
+    Text(
+        label,
+        style = style,
+        color = if (selected) Vessel.colors.accent else Vessel.colors.textPrimary,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .heightIn(min = Vessel.metrics.touchTarget)
+            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s8),
+    )
+}
+
+/**
+ * A field that is both a text input and a menu — type a value, or pick one.
+ *
+ * **The one control that would otherwise have been a modal.** A dialog whose only
+ * job is "choose from this list, or type something else" is a second surface for
+ * an answer that fits in the row it belongs to; as a combo the choice happens
+ * where the result appears, and the same control covers the expert who knows the
+ * name and the reader who is browsing.
+ *
+ * The chevron opens the menu; the text stays editable while it is open, so a
+ * partial name filters nothing and the suggestions remain the whole list. That is
+ * deliberate — the list is short enough to read, and a filtering combo that
+ * silently empties itself on a typo is worse than one that does not filter.
+ */
+@Composable
+fun VComboField(
+    value: String,
+    options: List<String>,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    placeholder: String? = null,
+    enabled: Boolean = true,
+    isError: Boolean = false,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val shape = Vessel.metrics.shapeMd
+    val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
+
+    val zeroWidth = Vessel.metrics.none
+    var fieldWidth by remember { mutableStateOf(zeroWidth) }
+    val density = LocalDensity.current
+
+    val ring = when {
+        isError -> Vessel.colors.danger
+        focused || expanded -> Vessel.colors.accent
+        else -> Vessel.colors.divider
+    }
+
+    Box(
+        modifier
+            .fillMaxWidth()
+            .onSizeChanged { fieldWidth = with(density) { it.width.toDp() } },
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = fieldHeight)
+                .background(Vessel.colors.surface, shape)
+                .vRing(ring.copy(alpha = ring.alpha * alpha), shape)
+                .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s6),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (value.isEmpty() && placeholder != null) {
+                    Text(
+                        placeholder,
+                        style = Vessel.type.mono,
+                        color = Vessel.colors.textMuted.let { it.copy(alpha = it.alpha * alpha) },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    enabled = enabled,
+                    singleLine = true,
+                    // Mono, because what goes in here is a channel or a variable
+                    // — a name the tool knows, not prose.
+                    textStyle = Vessel.type.mono.copy(
+                        color = Vessel.colors.textPrimary.let { it.copy(alpha = it.alpha * alpha) },
+                    ),
+                    cursorBrush = SolidColor(Vessel.colors.accent),
+                    interactionSource = interaction,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Icon(
+                VIcons.CaretDown,
+                contentDescription = "Choose",
+                tint = Vessel.colors.textMuted.let { it.copy(alpha = it.alpha * alpha) },
+                modifier = Modifier
+                    .size(Vessel.metrics.iconMd)
+                    .clickable(enabled = enabled) { expanded = true },
+            )
+        }
+
+        VMenuSurface(expanded = expanded, onDismiss = { expanded = false }, width = fieldWidth) {
+            options.forEach { option ->
+                VMenuOption(
+                    label = option,
+                    style = Vessel.type.mono,
+                    selected = option == value,
+                    onClick = {
+                        expanded = false
+                        if (option != value) onValueChange(option)
                     },
                 )
             }

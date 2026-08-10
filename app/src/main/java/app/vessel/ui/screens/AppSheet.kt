@@ -206,7 +206,13 @@ private fun AppSheetContent(
                 // The field is a readout, so the way to fill it lives on it. The
                 // two rows below are the same two routes written out; this is the
                 // one a user reaches for first.
-                if (state.creating) {
+                // **Only once there is something to browse.** The prefix is
+                // built by the first session, not by saving the container, so a
+                // container that has never run has no `C:` — the browser would
+                // open on nothing and say "This folder is empty", which reads as
+                // a broken browser rather than a container that has not started
+                // yet. The row below says which it is; this shortcut just goes.
+                if (state.creating && state.hasPrefix) {
                     VIconButton(VIcons.Folder, "Browse this container's drives", onBrowse)
                 }
             }
@@ -238,9 +244,19 @@ private fun AppSheetContent(
             VSheetRow(
                 icon = VIcons.Folder,
                 title = "Browse this container's drives",
-                help = "Opens the file browser to pick the file. Add it from there and it " +
-                    "lands back here.",
+                // Disabled rather than hidden, and it names the missing thing.
+                // A route that vanishes teaches nobody why; one that is greyed
+                // and says "launch it once" is the whole instruction.
+                help = if (state.hasPrefix) {
+                    "Opens the file browser to pick the file. Add it from there and it " +
+                        "lands back here."
+                } else {
+                    "This container has no C: drive yet — it is created the first time the " +
+                        "container is launched. Import from Android storage instead, or " +
+                        "launch it once."
+                },
                 onClick = onBrowse,
+                enabled = state.hasPrefix,
             )
             VSheetRow(
                 icon = VIcons.Import,

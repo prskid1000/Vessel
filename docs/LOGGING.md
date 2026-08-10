@@ -9,14 +9,23 @@ nothing. Code that implements it (`core/SessionEnvironment.kt`,
 Verified against Wine, DXVK, vkd3d-proton and Winlator-Ludashi source on
 2026-08-07. Line references are to those trees at that date.
 
-**"Fixed" now means "fixed until somebody asks otherwise."** The per-container
-Diagnostics surface (`core/ContainerDiagnostics.kt`,
-`ui/screens/DiagnosticsSection.kt`) can raise or lower any of the curated
-channels for one container, and `docs/DIAGNOSTICS-UI.md` is the design brief for
-it. Nothing below changes: this is still the configuration every container runs
-with until somebody switches something on, an untouched container produces this
-environment byte for byte, and everything Diagnostics writes is *appended* to the
-string below rather than substituted for it.
+**The configuration below is not a setting, and the Diagnostics surface shows it
+anyway.** `core/ContainerDiagnostics.kt` declares every term here as a read-only
+row, so `ui/screens/DiagnosticsSection.kt` is a truthful inventory of what a
+session is sent rather than a list of additions over something invisible. Those
+rows cannot be edited and have no remove cross; a test asserts that the terms
+they display concatenate to the string below character for character, and another
+that each fixed variable's displayed value is what the session actually carries.
+
+The *behaviour* is unchanged. An untouched container produces this environment
+byte for byte, which `SessionEnvironmentTest` asserts; nothing here is reachable
+by a manifest param; and every row a user adds is *appended*, so the parser's
+left-to-right rule is what lets them override one channel without being able to
+delete the rest. `loaddll` at `Errors` writes `-loaddll,err+loaddll` after the
+prefix and quiets that channel alone. The one exception is `all`, which is shown
+and never offered: `+all` is every class on every channel and a second `-all`
+would erase the prefix, so neither direction is something a row may do.
+`docs/DIAGNOSTICS-UI.md` is the design brief for that surface.
 
 ## The configuration
 

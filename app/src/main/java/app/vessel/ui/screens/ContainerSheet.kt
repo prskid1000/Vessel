@@ -34,7 +34,6 @@ import app.vessel.ui.components.VLabeledField
 import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VSheet
 import app.vessel.ui.components.VSheetHeader
-import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.VStepper
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VToggle
@@ -183,21 +182,6 @@ private fun ContainerSheetContent(
                 // the prefix exists would make the first launch look like a hang.
                 if (!state.creating) {
                     VRule(verticalMargin = Vessel.metrics.s6)
-                    VSheetRow(
-                        icon = VIcons.Info,
-                        title = "Diagnostics",
-                        help = "What the next session is asked to say about itself, on top of " +
-                            "what it already records. Nothing here changes how the program runs.",
-                        onClick = { diagnosticsOpen = true },
-                        trailing = {
-                            Text(
-                                state.diagnostics.summary,
-                                style = Vessel.type.monoSmall,
-                                color = Vessel.colors.textMuted,
-                            )
-                        },
-                    )
-                    VRule(verticalMargin = Vessel.metrics.s6)
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
@@ -210,6 +194,16 @@ private fun ContainerSheetContent(
                             icon = VIcons.Trash,
                         )
                         Row(Modifier.weight(1f)) {}
+                        // The pairing reads correctly and is why Diagnostics is a
+                        // button of the same weight rather than a row above them:
+                        // Session logs is what the last run said, Diagnostics is
+                        // what the next one will be asked to say.
+                        VButton(
+                            "Diagnostics",
+                            { diagnosticsOpen = true },
+                            style = VButtonStyle.Secondary,
+                            icon = VIcons.Info,
+                        )
                         VButton(
                             "Session logs",
                             onOpenLogs,

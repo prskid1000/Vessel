@@ -3,188 +3,125 @@ package app.vessel.core
 import kotlinx.serialization.Serializable
 
 /**
- * What a container's next session is asked to say **in addition to** what it
- * already says.
+ * What this container's next session is asked to log.
  *
- * **The baseline is invisible and is not a setting.** [WINEDEBUG_CHANNELS] —
- * `-all,err+all,warn+module,+winediag,+loaddll,+debugstr` — is always on, is
- * never drawn as a row, and cannot be reached from this screen except by naming
- * one of its channels deliberately. It is the configuration `docs/LOGGING.md`
- * argues for, it is correct for a session that is behaving, and a screen that
- * drew it as seven pre-populated dropdowns would be inviting people to break it
- * while telling them nothing they did not already have.
+ * **One row shape for everything, and the differences are data.** A Wine debug
+ * channel, `DXVK_LOG_LEVEL`, the FEX logging switch, a Turnip flag and a term
+ * out of the fixed prefix are all the same record — `(name, level)` —
+ * rendered by one composable. What differs between them is declared in
+ * [LOGGABLES]: which ladder the level dropdown offers and in whose vocabulary,
+ * whether the row can be edited, whether it is spent after one launch, whether it
+ * carries a caution, and **how it composes into an environment variable**.
  *
- * So an empty record is the whole of a fresh container: no rows, no environment,
- * nothing switched on. **Everything here is an addition**, which is also what
- * makes a per-row remove button meaningful — every row is something the user put
- * there.
+ * That last one is the part that would otherwise become a `when` over a type, so
+ * it is polymorphic instead: [Emit] carries the strategy and the composer is a
+ * fold with no branch in it. Adding a loggable thing is one entry in [LOGGABLES]
+ * and no change to any composable, any `when`, or any test that is not about that
+ * entry. **No name declared here appears as a literal anywhere in the UI layer.**
+ *
+ * **The fixed prefix is shown, not hidden.** Every term Vessel always sends —
+ * `-all,err+all`, `warn+module`, `+winediag`, `+loaddll`, `+debugstr`,
+ * `DXVK_LOG_PATH=none`, `FEX_OUTPUTLOG=stderr`, `TU_DEBUG=startup` — is a
+ * [Loggable] with a [Loggable.fixedLevel], so the screen is a truthful inventory
+ * of what is being sent rather than a list of additions over an invisible
+ * baseline. Their *behaviour* is unchanged: they are still not settings, still
+ * always on, and still unreachable by a manifest param. Only their visibility
+ * changed.
+ *
+ * **A read-only row and an `Off` row are not the same thing and must not look
+ * alike.** A read-only row shows its real value — never `Off` — with its controls
+ * at the disabled opacity and no remove cross; an `Off` row is a live control the
+ * user set to silence, and composes as `-chan`. [fixedRowsNeverReadOff] is the
+ * property that keeps the first half of that true, and it is asserted.
  *
  * **A separate schema from `assets/params-manifest.json`, on purpose.** The
  * manifest's law is that a setting must be explainable in one plain sentence to
  * someone who does not know what a translator is (`params-manifest.json:9-12`).
- * `VKD3D_SHADER_DEBUG` is not, and that law is what has kept the container sheet
- * at three controls while the environment grew to thirty-odd variables.
- * Diagnostics has a different audience — someone whose session is already broken,
- * who has been told what to switch on — so it gets a different surface, a
- * different schema and different rules. See `docs/DIAGNOSTICS-UI.md` §1.
- *
- * **Nothing in here is keyed by a hardcoded name.** The Wine channels, the
- * translator levels and the two logger switches are all declared as data —
- * [WINE_CHANNEL_CATALOGUE], [SUBSYSTEM_LEVELS], [SUBSYSTEM_FLAGS] — and rendered
- * generically, so adding a channel or a level is an edit to a list and never a
- * new composable or a new `when` branch.
+ * `VKD3D_SHADER_DEBUG` is not. Diagnostics has a different audience — someone
+ * whose session is already broken — so it gets a different surface, a different
+ * schema and different rules. See `docs/DIAGNOSTICS-UI.md` §1.
  */
 @Serializable
 data class ContainerDiagnostics(
     /**
-     * The Wine channels the user has added, in the order they added them.
+     * The rows the user added, in the order they added them.
      *
-     * A list rather than a map: the rows are a thing the user built, and their
-     * order is theirs. It is also the order the terms are written in, which
-     * matters — Wine parses left to right.
+     * A list rather than a map: the rows are a thing the user built, their order
+     * is theirs, and it is also the order terms are written in — which matters,
+     * because Wine parses left to right. Addressed by index everywhere, because a
+     * name is editable and may be empty or duplicated while it is being typed.
      */
-    val wineChannels: List<WineChannelSetting> = emptyList(),
-    /**
-     * Per-subsystem levels, keyed by [SubsystemLevel.id]. Sparse: an absent id is
-     * at [SubsystemLevel.default], which is what the fixed environment already
-     * sets, so an absent id contributes nothing.
-     */
-    val subsystemLevels: Map<String, String> = emptyMap(),
-    /** Per-subsystem switches, keyed by [SubsystemFlag.id]. Sparse, same rule. */
-    val subsystemFlags: Map<String, Boolean> = emptyMap(),
-    /**
-     * Turnip flags, from [TURNIP_FLAGS].
-     *
-     * Cleared by [inForce] whenever [DRIVER_LOG_FLAG] is off, because without it
-     * the driver writes to the Android system log and every one of these is a
-     * switch whose output the product cannot read.
-     */
-    val turnipFlags: List<String> = emptyList(),
+    val rows: List<DiagnosticSetting> = emptyList(),
     val limits: SessionLogLimits = SessionLogLimits(),
-    /**
-     * The controls armed for exactly one launch, by [oneSessionId].
-     *
-     * A set rather than a per-control boolean, because "armed" is a fact about
-     * the *next session* and not about the value: `+relay` is a legitimate thing
-     * to ask for once and never a thing to leave switched on. [consumed] is
-     * called by the launcher at the moment a session's environment is composed,
-     * so an app killed mid-run comes back with the control already off rather
-     * than armed for a second, unasked-for firehose.
-     *
-     * `docs/DIAGNOSTICS-UI.md` §7 proposes storing the `startedAt` of the session
-     * each control was armed for. **This is a deliberate simplification holding
-     * the same guarantee**: disarming at launch rather than recognising a stale
-     * stamp at the next launch gives "in force for exactly one session" without
-     * putting a clock inside a pure function, and it cannot leave a document
-     * holding a stamp for a session that never happened.
-     */
-    val armed: Set<String> = emptySet(),
 ) {
-    /** True when nothing has been added, which is what a fresh container is. */
+    /** True when the user has added nothing, which is what a fresh container is. */
     val isDefault: Boolean get() = this == DEFAULT
 
-    fun levelOf(spec: SubsystemLevel): String = subsystemLevels[spec.id] ?: spec.default
-
-    fun flagOf(spec: SubsystemFlag): Boolean = subsystemFlags[spec.id] ?: spec.default
-
-    /** The channels already on screen, so the picker can offer the rest. */
-    val addedChannels: Set<String> get() = wineChannels.map { it.channel }.toSet()
-
     /**
-     * The record with every one-session value that is *not* armed put back.
+     * The record with anything its gate forbids removed.
      *
-     * The setters below keep [armed] and the values in step, so this normally
-     * changes nothing. It exists because a hand-edited or half-migrated document
-     * must not be able to leave `+relay` permanently on: every read path starts
-     * here, so an unarmed firehose is unreachable rather than merely unlikely.
-     *
-     * It is also where the Turnip gate is enforced, for the same reason — a flag
-     * whose output nothing can read must not be reachable by editing a file.
+     * Every read path starts here, so a hand-edited or half-migrated document
+     * cannot arrange for a switch whose output nothing can read — see
+     * [Loggable.gate].
      */
-    fun inForce(): ContainerDiagnostics {
-        val channels = wineChannels.filterNot { it.isOneSession && it.armId !in armed }
-        val levels = subsystemLevels.filterNot { (id, value) ->
-            val spec = subsystemLevel(id) ?: return@filterNot true
-            spec.isOneSession(value) && spec.armId !in armed
-        }
-        val turnip = if (flagOf(DRIVER_LOG_FLAG)) turnipFlags else emptyList()
-        return copy(wineChannels = channels, subsystemLevels = levels, turnipFlags = turnip)
-    }
+    fun inForce(): ContainerDiagnostics = copy(rows = rows.filter { it.isAllowed(this) })
 
     /**
      * The record to store once this session has taken its copy.
      *
-     * Every armed control spends its one launch here: the arm is dropped and the
-     * value goes with it, so the *next* session gets the ordinary environment
-     * whatever happens to this one.
+     * Every row loud enough to be one-session spends its one launch
+     * here and is gone. Writing this back at launch rather than at teardown is
+     * what makes "one session" survive the app being killed mid-run: the row is
+     * already gone from the stored document by the time the guest process exists,
+     * so the run after a crash gets the ordinary environment.
      */
-    fun consumed(): ContainerDiagnostics = copy(armed = emptySet()).inForce()
+    fun consumed(): ContainerDiagnostics =
+        copy(rows = rows.filterNot { it.isOneSession })
 
-    // — edits, which are the only writers of [armed] --------------------------
+    // — edits, all addressed by row index -------------------------------------
 
-    /** Add a channel at the level its catalogue entry suggests, or do nothing. */
-    fun withChannelAdded(channel: String): ContainerDiagnostics {
-        val name = channel.trim()
-        if (!isChannelName(name) || name in addedChannels) return this
-        val info = wineChannelInfo(name)
-        return copy(
-            wineChannels = wineChannels + WineChannelSetting(name, info.addAt),
-        ).rearmed()
-    }
+    /** Append an empty row, which contributes nothing until it is named. */
+    fun withRowAdded(): ContainerDiagnostics = copy(rows = rows + DiagnosticSetting())
 
-    fun withChannelLevel(channel: String, level: WineChannelLevel): ContainerDiagnostics = copy(
-        wineChannels = wineChannels.map {
-            if (it.channel == channel) it.copy(level = level) else it
-        },
-    ).rearmed()
+    fun withRowRemoved(index: Int): ContainerDiagnostics =
+        if (index !in rows.indices) this else copy(rows = rows.filterIndexed { i, _ -> i != index })
 
     /**
-     * Take a row away.
+     * Rename a row, and reset its level to what that thing wants.
      *
-     * The channel goes back to whatever the invisible baseline gives it, which
-     * for the four channels [WINEDEBUG_CHANNELS] names is their fixed value and
-     * for everything else is the `err+all` floor. **Removing is not silencing** —
-     * that is what the `Off` stop is for, and the distinction is real: `Off`
-     * writes `-chan` and stops even errors.
+     * Resetting rather than keeping the old value is the only coherent choice: a
+     * level is a word in one subsystem's vocabulary, and carrying `+ Warnings`
+     * over to `DXVK_LOG_LEVEL` would leave a row holding a value its own ladder
+     * does not contain.
      */
-    fun withChannelRemoved(channel: String): ContainerDiagnostics =
-        copy(wineChannels = wineChannels.filterNot { it.channel == channel }).rearmed()
-
-    fun withSubsystemLevel(id: String, value: String): ContainerDiagnostics {
-        val spec = subsystemLevel(id) ?: return this
-        val next = if (value == spec.default) subsystemLevels - id else subsystemLevels + (id to value)
-        return copy(subsystemLevels = next).rearmed()
+    fun withRowNamed(index: Int, name: String): ContainerDiagnostics {
+        if (index !in rows.indices) return this
+        val loggable = loggableFor(name)
+        return copy(
+            rows = rows.mapIndexed { i, row ->
+                if (i != index) {
+                    row
+                } else {
+                    DiagnosticSetting(name, loggable.addAt)
+                }
+            },
+        )
     }
 
-    fun withSubsystemFlag(id: String, on: Boolean): ContainerDiagnostics {
-        val spec = subsystemFlag(id) ?: return this
-        val next = if (on == spec.default) subsystemFlags - id else subsystemFlags + (id to on)
-        return copy(subsystemFlags = next).inForce()
+    fun withRowLevel(index: Int, level: String): ContainerDiagnostics = mapRow(index) {
+        it.copy(level = level)
     }
-
-    fun withTurnipFlag(flag: String, on: Boolean): ContainerDiagnostics = copy(
-        // Catalogue order, not click order: the value becomes a comma-joined
-        // string, and a stable order makes two containers with the same flags
-        // compare equal.
-        turnipFlags = TURNIP_FLAGS.map { it.flag }
-            .filter { if (it == flag) on else it in turnipFlags },
-    )
 
     fun withLimits(limits: SessionLogLimits): ContainerDiagnostics = copy(limits = limits)
 
-    /**
-     * Re-derive [armed] from the values.
-     *
-     * Doing it here rather than at each call site is what makes it impossible to
-     * add a loud channel to the catalogue and forget to arm it: the
-     * `oneSessionAt` field on the entry is the whole declaration.
-     */
-    private fun rearmed(): ContainerDiagnostics = copy(armed = oneSessionIds())
+    private fun mapRow(index: Int, block: (DiagnosticSetting) -> DiagnosticSetting) =
+        if (index !in rows.indices) this
+        else copy(rows = rows.mapIndexed { i, row -> if (i == index) block(row) else row })
 
-    /** Every control whose current value is loud enough to need arming. */
-    fun oneSessionIds(): Set<String> = buildSet {
-        wineChannels.filter { it.isOneSession }.forEach { add(it.armId) }
-        SUBSYSTEM_LEVELS.filter { it.isOneSession(levelOf(it)) }.forEach { add(it.armId) }
+    /** The current value of [id], as a row or as its declared baseline. */
+    internal fun valueOf(id: String): String {
+        val declared = LOGGABLES.firstOrNull { it.id == id } ?: return ""
+        return rows.lastOrNull { loggableFor(it.name).id == id }?.level ?: declared.baseline
     }
 
     companion object {
@@ -192,56 +129,700 @@ data class ContainerDiagnostics(
     }
 }
 
-/** One Wine channel the user has added, and the level they set it to. */
+/** One row the user added: what to log, how loudly, and for how long. */
 @Serializable
-data class WineChannelSetting(val channel: String, val level: WineChannelLevel) {
-    val info: WineChannelInfo get() = wineChannelInfo(channel)
+data class DiagnosticSetting(
+    /**
+     * What is being logged — a declared [Loggable.name], or anything the user
+     * typed. Empty on a row that has just been added and not yet named.
+     */
+    val name: String = "",
+    /** A stop from that thing's own ladder. */
+    val level: String = "",
+) {
+    /**
+     * Whether this row is loud enough to be spent after one launch.
+     *
+     * A property of the level and not of the thing: `DXVK_LOG_LEVEL` at `warn` is
+     * ordinary and at `trace` is a firehose, and the row has to tell them apart.
+     */
+    val isOneSession: Boolean get() = loggableFor(name).isOneSession(level)
 
-    /** The id [ContainerDiagnostics.armed] holds while this row is armed. */
-    val armId: String get() = oneSessionId("wine", channel)
-
-    /** Whether this row is currently loud enough to be spent after one launch. */
-    val isOneSession: Boolean
-        get() = info.oneSessionAt?.let { level.ordinal >= it.ordinal } == true
+    /** False while the row's gate is unmet, which is when it must contribute nothing. */
+    fun isAllowed(diagnostics: ContainerDiagnostics): Boolean {
+        val loggable = loggableFor(name)
+        if (!loggable.isRealValue(level)) return false
+        val gate = loggable.gate ?: return true
+        val gated = LOGGABLES.firstOrNull { it.id == gate } ?: return true
+        return diagnostics.valueOf(gate) != gated.baseline
+    }
 }
 
-/** `wine:relay`, `level:dxvk` — a stable key for one armable control. */
-fun oneSessionId(kind: String, name: String): String = "$kind:$name"
+// — the declaration -----------------------------------------------------------
 
 /**
- * The five stops a Wine channel can run at, and the only ladder in this file
- * that is a simplification rather than a translation.
+ * How one loggable thing turns into environment.
+ *
+ * Polymorphic rather than a sealed class with a `when` over it, because the whole
+ * point of the row model is that adding a thing is a data edit: a `when` in the
+ * composer is a second place every new entry would have to be remembered in.
+ * There are three strategies and there are only three because there are only
+ * three shapes of variable in this stack — a term list, a scalar, and a
+ * comma-joined set.
+ */
+sealed interface Emit {
+    fun apply(value: String, out: EmittedEnvironment)
+
+    /**
+     * A channel inside `WINEDEBUG`, written as the terms that force exactly
+     * [value].
+     *
+     * **Not one term per stop, and that is a fact about the parser rather than a
+     * style.** `add_option` (`native/wine/dlls/ntdll/unix/debug.c:88-123`) creates
+     * a channel it has not seen with `flags = (default_flags & ~clear) | set` —
+     * `default_flags` *as of that moment* — and modifies one it has seen with the
+     * same expression against the existing flags. Two consequences: a lone
+     * `fixme+x` on a fresh channel gives ERR|FIXME and **skips WARN**, and a
+     * `+`-only term can never *lower* a channel, so `warn+loaddll` cannot quiet a
+     * `loaddll` the fixed prefix already set to all four classes. So a stop is
+     * written as a `-chan` reset followed by one `class+chan` per class it wants.
+     */
+    data class WineChannel(val channel: String) : Emit {
+        override fun apply(value: String, out: EmittedEnvironment) {
+            val level = WineChannelLevel.entries.firstOrNull { it.name == value } ?: return
+            out.wineTerms += wineChannelTerms(channel, level)
+        }
+    }
+
+    /**
+     * A scalar variable, written when [value] differs from what the fixed block
+     * already sets.
+     *
+     * [baseline] is that fixed value, so a row sitting where the environment
+     * already is contributes nothing — which is what keeps a default record's
+     * map empty.
+     */
+    data class Variable(val variable: String, val baseline: String) : Emit {
+        override fun apply(value: String, out: EmittedEnvironment) {
+            if (value != baseline) out.variables[variable] = value
+        }
+    }
+
+    /** One member of a comma-joined list variable, present when [value] is [ON]. */
+    data class ListMember(val variable: String, val flag: String) : Emit {
+        override fun apply(value: String, out: EmittedEnvironment) {
+            if (value == ON) out.lists.getOrPut(variable) { ArrayList() } += flag
+        }
+    }
+
+    /**
+     * Sent by the fixed block, reported here and not composed.
+     *
+     * A row with this strategy exists so the screen can say what is being sent;
+     * writing the same value again would put it in the map for a container nobody
+     * has touched.
+     */
+    data object Fixed : Emit {
+        override fun apply(value: String, out: EmittedEnvironment) = Unit
+    }
+
+    companion object {
+        /** The `on` stop of a two-stop ladder. */
+        const val ON: String = "on"
+        const val OFF: String = "off"
+    }
+}
+
+/** The three shapes of variable, being filled in. */
+class EmittedEnvironment {
+    val wineTerms: MutableList<String> = ArrayList()
+    val variables: MutableMap<String, String> = LinkedHashMap()
+    val lists: MutableMap<String, MutableList<String>> = LinkedHashMap()
+}
+
+/**
+ * One thing that can be logged, and everything the screen and the composer need
+ * to know about it.
+ *
+ * @param name column one, and the name a user types to reach it. For a Wine
+ *   channel it is the channel; for a variable it is the variable; for a member of
+ *   a list variable it is the member — which is the same relationship in all
+ *   three cases, a name inside something.
+ * @param secondary the line under the name, in the muted tone.
+ * @param caution the line under the name in the warning tone. A property of the
+ *   thing, shown whenever the row exists — a channel does not stop being
+ *   expensive because somebody set it to `Off`.
+ * @param levels the ladder, **in that subsystem's own vocabulary and order**.
+ *   vkd3d's `none, err, info, fixme, warn, trace` is not normalised to DXVK's.
+ * @param labels display names for [levels] where the wire value is not
+ *   presentable — an unset variable, or an on/off pair.
+ * @param baseline what the environment already holds for this thing. A row at the
+ *   baseline contributes nothing.
+ * @param fixedLevel non-null makes the row read-only, and is what it displays.
+ *   Must never be a stop that reads `Off`; see [fixedRowsNeverReadOff].
+ * @param addAt the stop a freshly named row takes — the one that answers the
+ *   question the entry poses, which is not always the loudest.
+ * @param oneSessionFrom the first entry in [levels] loud enough to be spent after
+ *   one launch — that stop and everything after it in the list. Null for a thing
+ *   that is bounded at every stop. A property of the *level*, not of the thing:
+ *   `DXVK_LOG_LEVEL` at `warn` is ordinary and at `trace` is a firehose.
+ * @param gate the [id] of another entry that must be off its baseline before this
+ *   one does anything. A gated row is drawn disabled *with* its caution and its
+ *   remove cross, which is what distinguishes it from a fixed one.
+ * @param levelIsMachine set the value in mono, for a ladder whose stops are a
+ *   tool's own words rather than English.
+ */
+data class Loggable(
+    val name: String,
+    val emit: Emit,
+    val levels: List<String>,
+    val baseline: String,
+    val secondary: String? = null,
+    val caution: String? = null,
+    val labels: Map<String, String> = emptyMap(),
+    val fixedLevel: String? = null,
+    val addAt: String = baseline,
+    val oneSessionFrom: String? = null,
+    val gate: String? = null,
+    val levelIsMachine: Boolean = false,
+) {
+    /** Stable across renames of the display text; used by [gate] and by tests. */
+    val id: String get() = name
+
+    /** Gets a read-only row at the head of the list, saying what is already sent. */
+    val isFixed: Boolean get() = fixedLevel != null
+
+    /**
+     * Whether the user may add a row for this.
+     *
+     * Not the inverse of [isFixed]: the four Wine channels the prefix names are
+     * both — shown read-only *and* addable, because adding one is how you quiet
+     * or raise something already on. Only a thing with nothing to compose
+     * ([Emit.Fixed]) is unaddable, because a row for it could not do anything.
+     */
+    val isAddable: Boolean get() = emit !is Emit.Fixed
+
+    fun label(level: String): String = labels[level] ?: level
+
+    /** Whether [level] is a stop this thing actually has. */
+    fun isRealValue(level: String): Boolean = level in levels
+
+    /** Whether [level] is at or past the stop that makes this a one-launch row. */
+    fun isOneSession(level: String): Boolean {
+        val from = oneSessionFrom ?: return false
+        val at = levels.indexOf(level)
+        return at >= 0 && at >= levels.indexOf(from)
+    }
+}
+
+/** The Wine class ladder as level wire values, for [wineLevels]. */
+private val WINE_LEVELS: List<String> = WineChannelLevel.entries.map { it.name }
+private val WINE_LEVEL_LABELS: Map<String, String> =
+    WineChannelLevel.entries.associate { it.name to it.label }
+
+/** The ladder for a Wine channel, optionally truncated. */
+private fun wineLevels(max: WineChannelLevel = WineChannelLevel.EVERYTHING): List<String> =
+    WINE_LEVELS.take(max.ordinal + 1)
+
+/** A two-stop ladder, for a switch. */
+private val ON_OFF: List<String> = listOf(Emit.OFF, Emit.ON)
+private val ON_OFF_LABELS: Map<String, String> = mapOf(Emit.OFF to "Off", Emit.ON to "On")
+
+private fun wineChannel(
+    channel: String,
+    secondary: String,
+    caution: String? = null,
+    max: WineChannelLevel = WineChannelLevel.EVERYTHING,
+    addAt: WineChannelLevel = WineChannelLevel.WARNINGS,
+    fixed: WineChannelLevel? = null,
+    oneSessionFrom: WineChannelLevel? = null,
+    addable: Boolean = true,
+) = Loggable(
+    name = channel,
+    // A real strategy even when the row is fixed. `fixedLevel` makes the
+    // *inventory* row read-only; it must not stop the user adding their own row
+    // for the same channel and overriding it, which is the whole reason the
+    // parser reads left to right and a later term wins. `addable = false` is for
+    // the one pseudo-channel where that is not true — see `all`.
+    emit = if (addable) Emit.WineChannel(channel) else Emit.Fixed,
+    levels = wineLevels(max),
+    labels = WINE_LEVEL_LABELS,
+    // Every channel Vessel does not name inherits ERR from `err+all`, which is
+    // why `Off` is a real action on a channel nobody has switched on.
+    baseline = WineChannelLevel.ERRORS.name,
+    secondary = secondary,
+    caution = caution,
+    fixedLevel = fixed?.name,
+    addAt = addAt.name,
+    oneSessionFrom = oneSessionFrom?.name,
+)
+
+/**
+ * Everything that can appear as a row, in the order the screen draws it.
+ *
+ * The fixed entries come first, because they are what is already happening and
+ * the rest of the list is read against them.
+ *
+ * **Curated, not complete.** `docs/LOGGING.md:222-230` is explicit about why the
+ * Winlator lineage's flat list of all 521 Wine channels is worse than nothing:
+ * choosing well among 521 requires knowing what each costs, and a user who
+ * chooses correctly can still get nothing. The rule here is that every entry
+ * answers a question somebody has actually had — and the name column takes typed
+ * text, so being conservative costs an expert one keystroke rather than a
+ * capability.
+ */
+val LOGGABLES: List<Loggable> = listOf(
+    // — what the fixed prefix already sends, shown and not editable ------------
+    wineChannel(
+        channel = "all",
+        secondary = "Every channel, including ones nothing names.",
+        // `-all,err+all` is exactly the ERRORS stop's own term pair, which is
+        // what lets one row stand for both terms honestly.
+        fixed = WineChannelLevel.ERRORS,
+        // **Shown, never addable.** `all` is not a channel, it is the parser's
+        // word for `default_flags`, and neither direction is a diagnostic action:
+        // `+all` is every class on every channel — a firehose beyond `relay` —
+        // and a second `-all` after the prefix erases every term before it,
+        // which is the exact hazard `docs/LOGGING.md:51-55` exists to prevent.
+        // Leaving it out of the name column is what makes that unreachable
+        // rather than merely discouraged.
+        addable = false,
+    ),
+    wineChannel(
+        channel = "module",
+        secondary = "A library loaded but an entry point inside it is missing.",
+        // docs/LOGGING.md:76-95 is an argument about the WARN tier specifically:
+        // the three `WARN(` sites in loader.c that say "the DLL loaded but an
+        // export is missing" are what `err+all` and `+loaddll` both miss.
+        fixed = WineChannelLevel.WARNINGS,
+    ),
+    wineChannel(
+        channel = "winediag",
+        secondary = "Wine's report on its own health, and which renderer it chose.",
+        fixed = WineChannelLevel.EVERYTHING,
+    ),
+    wineChannel(
+        channel = "loaddll",
+        secondary = "Every DLL the program successfully loaded.",
+        fixed = WineChannelLevel.EVERYTHING,
+    ),
+    wineChannel(
+        channel = "debugstr",
+        secondary = "What the program itself chose to print.",
+        fixed = WineChannelLevel.EVERYTHING,
+    ),
+    Loggable(
+        name = "DXVK_LOG_PATH",
+        emit = Emit.Fixed,
+        levels = listOf(FIXED_DXVK_LOG_PATH),
+        baseline = FIXED_DXVK_LOG_PATH,
+        fixedLevel = FIXED_DXVK_LOG_PATH,
+        secondary = "Keeps the Direct3D translator's output in this log instead of beside it.",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = "FEX_OUTPUTLOG",
+        emit = Emit.Fixed,
+        levels = listOf(FIXED_FEX_OUTPUTLOG),
+        baseline = FIXED_FEX_OUTPUTLOG,
+        fixedLevel = FIXED_FEX_OUTPUTLOG,
+        // Source/Windows/Common/Logging.cpp:36-49 is the whole Windows logging
+        // init and reads SILENTLOG and nothing else. Shown rather than hidden so
+        // nobody re-adds it as a control.
+        secondary = "Set as a marker; it does nothing on this platform.",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = TU_DEBUG_STARTUP,
+        emit = Emit.Fixed,
+        levels = listOf(Emit.ON),
+        labels = ON_OFF_LABELS,
+        baseline = Emit.ON,
+        fixedLevel = Emit.ON,
+        secondary = "TU_DEBUG — the only ground truth that Turnip loaded at all.",
+    ),
+
+    // — the translators and the driver, in their own vocabularies --------------
+    Loggable(
+        name = "DXVK_LOG_LEVEL",
+        emit = Emit.Variable("DXVK_LOG_LEVEL", FIXED_DXVK_LOG_LEVEL),
+        // native/dxvk/src/util/log/log.cpp:146-152, a minimum severity filtered
+        // as `level >= m_minLevel`, listed quietest first.
+        levels = listOf("none", "error", "warn", "info", "debug", "trace"),
+        baseline = FIXED_DXVK_LOG_LEVEL,
+        secondary = "Direct3D 9 to 11 translator. info already names why a device was rejected.",
+        caution = "debug and trace report per draw call.",
+        addAt = "debug",
+        oneSessionFrom = "debug",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = "VKD3D_DEBUG",
+        emit = Emit.Variable("VKD3D_DEBUG", FIXED_VKD3D_DEBUG),
+        // native/vkd3d/libs/vkd3d-common/debug.c:38-47. `info` sits between `err`
+        // and `fixme`, so `warn` already carries both. Not normalised to DXVK's.
+        levels = listOf("none", "err", "info", "fixme", "warn", "trace"),
+        baseline = FIXED_VKD3D_DEBUG,
+        secondary = "Direct3D 12 translator's own messages.",
+        caution = "trace reports every Direct3D 12 call.",
+        addAt = "trace",
+        oneSessionFrom = "trace",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = "VKD3D_SHADER_DEBUG",
+        emit = Emit.Variable("VKD3D_SHADER_DEBUG", FIXED_VKD3D_SHADER_DEBUG),
+        levels = listOf("none", "err", "info", "fixme", "warn", "trace"),
+        baseline = FIXED_VKD3D_SHADER_DEBUG,
+        secondary = "Shader compilation failures, which the row above does not carry.",
+        caution = "trace is the per-shader firehose.",
+        addAt = "trace",
+        oneSessionFrom = "trace",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = "FEX_SILENTLOG",
+        emit = Emit.Variable("FEX_SILENTLOG", FIXED_FEX_SILENTLOG),
+        levels = listOf("0", "1"),
+        labels = mapOf("0" to "0  speaks", "1" to "1  silent"),
+        baseline = FIXED_FEX_SILENTLOG,
+        secondary = "Whether the x86 translator may report. Silent hides its own " +
+            "configuration mistakes as well as its crashes.",
+        addAt = "1",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = MESA_LOG_VAR,
+        emit = Emit.Variable(MESA_LOG_VAR, FIXED_MESA_LOG),
+        levels = listOf(FIXED_MESA_LOG, "file"),
+        labels = mapOf(FIXED_MESA_LOG to "not set"),
+        baseline = FIXED_MESA_LOG,
+        // native/mesa/src/util/log.c:118-128 — under Android the default logger
+        // is logcat, which this app does not read. `file` adds the file logger
+        // and `mesa_log_file` defaults to stderr (log.c:64-74, 145), the pipe the
+        // session log reads. Unverified end to end; see docs/LOGGING.md.
+        secondary = "Without this the graphics driver writes to the Android system log, " +
+            "where Vessel cannot read it.",
+        addAt = "file",
+        levelIsMachine = true,
+    ),
+
+    // — Turnip flags, each a member of TU_DEBUG and gated on the driver logger --
+    turnipFlag("perf", "Says why a frame was slow."),
+    turnipFlag("nolrz", "Turns off low-resolution depth, to see whether it is the cause."),
+    turnipFlag("noubwc", "Turns off bandwidth compression, to see whether it is the cause."),
+
+    // — Wine channels worth suggesting -----------------------------------------
+    wineChannel(
+        channel = "d3d",
+        secondary = "Wine's own Direct3D, which only runs when a program falls off DXVK.",
+        // docs/LOGGING.md:164-170 — wined3d has 659 `ERR(` sites with only 19
+        // `once` guards and owns per-draw paths, so its WARN tier is unbounded in
+        // a way `module`'s is not. Stubs and traces above it are not a stop worth
+        // offering at all.
+        caution = "Unbounded above warnings — 659 per-draw error sites.",
+        max = WineChannelLevel.WARNINGS,
+        addAt = WineChannelLevel.WARNINGS,
+        oneSessionFrom = WineChannelLevel.WARNINGS,
+    ),
+    wineChannel("vulkan", "How Wine found and opened the graphics driver."),
+    wineChannel("file", "Every file the program opens, and every one it fails to open."),
+    wineChannel("reg", "Every registry key the program reads or writes."),
+    wineChannel(
+        channel = "heap",
+        secondary = "Every heap allocation and free.",
+        caution = "One line per allocation; a game makes thousands a frame.",
+        oneSessionFrom = WineChannelLevel.WARNINGS,
+    ),
+    wineChannel(
+        channel = "sync",
+        secondary = "Every wait, signal and lock the program takes.",
+        caution = "Fires on every synchronisation primitive, including idle ones.",
+        oneSessionFrom = WineChannelLevel.WARNINGS,
+    ),
+    wineChannel(
+        channel = "msg",
+        secondary = "Every window message the program receives.",
+        caution = "Includes mouse movement, so it fires whenever the screen is touched.",
+        oneSessionFrom = WineChannelLevel.WARNINGS,
+    ),
+    wineChannel(
+        channel = "relay",
+        secondary = "Names every call between libraries as it happens.",
+        caution = "Hundreds of megabytes in seconds.",
+        // Only the trace tier exists: every `_(relay)` site in ntdll is
+        // `TRACE_(relay)`, so the lower stops are silence rather than a quieter
+        // version of this.
+        addAt = WineChannelLevel.EVERYTHING,
+        oneSessionFrom = WineChannelLevel.EVERYTHING,
+    ),
+    wineChannel(
+        channel = "seh",
+        secondary = "Every exception raised, handled or not — and C++ and .NET are all of them.",
+        // ntdll has 7 ERR, 3 WARN and 13 TRACE sites here, and the ERR tier is
+        // already on through `err+all`. docs/LOGGING.md:121-134: crashes print
+        // regardless of WINEDEBUG.
+        caution = "A register dump per exception, and crashes are reported without it.",
+        addAt = WineChannelLevel.EVERYTHING,
+        oneSessionFrom = WineChannelLevel.EVERYTHING,
+    ),
+)
+
+private fun turnipFlag(flag: String, secondary: String) = Loggable(
+    name = flag,
+    emit = Emit.ListMember("TU_DEBUG", flag),
+    levels = ON_OFF,
+    labels = ON_OFF_LABELS,
+    baseline = Emit.OFF,
+    secondary = "TU_DEBUG — $secondary",
+    addAt = Emit.ON,
+    // TU_DEBUG is a flag list with no severity in it, so it is a switch and not a
+    // ladder; and every one of them is unreadable until Mesa's file logger is on.
+    gate = MESA_LOG_VAR,
+    caution = "Unavailable until $MESA_LOG_VAR is set — without it these produce output " +
+        "the product cannot read.",
+)
+
+/** The one variable another entry's [Loggable.gate] names. */
+private const val MESA_LOG_VAR = "MESA_LOG"
+
+/**
+ * The declared entry for [name], or one synthesised for a Wine channel nobody
+ * anticipated.
+ *
+ * Never null, because the name column takes typed text and the row that results
+ * has to draw. An unknown name gets the full Wine ladder, no caution and
+ * no one-launch stop — the honest position, since nothing is known about what it
+ * costs.
+ */
+fun loggableFor(name: String): Loggable =
+    LOGGABLES.firstOrNull { it.name == name }
+        ?: wineChannel(name, "A Wine debug channel this build has no description for.")
+
+/** The entries the name column offers, which is everything that can compose. */
+val ADDABLE_LOGGABLES: List<Loggable> = LOGGABLES.filter { it.isAddable }
+
+/**
+ * Whether [name] is something Wine's parser would read as a channel.
+ *
+ * The name column takes typed text, so the check lives here rather than in a
+ * composable. `parse_options` splits on `,` and reads `+`, `-` and `:` as
+ * structure (`native/wine/dlls/ntdll/unix/debug.c:126-145`), so a name containing
+ * one is not one channel — pasting `+relay,-heap` would compose `-+relay` as a
+ * channel name. The length cap is the more interesting half: `add_option` returns
+ * early on `strlen(name) >= sizeof(debug_options[0].name)` and says nothing, so a
+ * name one character too long is a row that does exactly nothing.
+ *
+ * A declared entry is exempt: `DXVK_LOG_LEVEL` is a variable, not a channel, and
+ * is never written into `WINEDEBUG`.
+ */
+fun isLoggableName(name: String): Boolean =
+    LOGGABLES.any { it.name == name } ||
+        (
+            name.isNotEmpty() &&
+                name.length <= MAX_CHANNEL_NAME &&
+                name.none { it.isWhitespace() || it in CHANNEL_NAME_STRUCTURE }
+            )
+
+/**
+ * Fourteen: `struct __wine_debug_channel` is `char name[15]`
+ * (`native/wine/include/wine/debug.h:56-60`) and `add_option` rejects a name whose
+ * length reaches that, so fourteen characters is the longest Wine will register.
+ */
+private const val MAX_CHANNEL_NAME = 14
+
+private const val CHANNEL_NAME_STRUCTURE = ",+-:"
+
+// Two parser hazards a free-text `WINEDEBUG` field would have to guard, recorded
+// because the reason this file does not guard them is a property of the composer
+// rather than an oversight.
+//
+//  - `WINEDEBUG=help` kills the process: `init_options` compares the *whole*
+//    variable against "help" and calls `debug_usage()`, which writes a usage
+//    block to fd 2 and exit(1) (`debug.c:183-193, 213`). Unreachable from a
+//    screen that only appends to a non-empty prefix, and `help` typed as a
+//    channel name composes as `-help,err+help,…` and never as the bare word.
+//  - A later `-all` erases every term before it, because parsing is left to right
+//    and `default_flags` is rewritten in place. [isLoggableName] refuses `-`, so
+//    no row can produce one.
+//
+// **Per-program scoping is the one thing no row can express.** Wine accepts
+// `process:class+channel`, matching the token before the `:` against `argv[1]`'s
+// basename (`debug.c:140-145`), and `metro.exe:+relay` is the difference between
+// a usable log and a full disk. If it is wanted, it belongs as a fourth column on
+// the row — a program name written as `$program:` in front of each term — and not
+// as a free-text `WINEDEBUG` box, which is what used to carry it.
+
+// — the fixed values, named once so the rows cannot drift from the environment --
+
+/**
+ * What `sessionEnvironment` already sets for each thing that has a row.
+ *
+ * Declared here and consumed there, so the inventory the screen draws and the
+ * environment the session gets cannot disagree. `SessionEnvironmentTest` asserts
+ * that every fixed row's displayed value is what the session actually carries.
+ */
+const val FIXED_DXVK_LOG_LEVEL: String = "info"
+const val FIXED_DXVK_LOG_PATH: String = "none"
+const val FIXED_VKD3D_DEBUG: String = "warn"
+const val FIXED_VKD3D_SHADER_DEBUG: String = "warn"
+const val FIXED_FEX_SILENTLOG: String = "0"
+const val FIXED_FEX_OUTPUTLOG: String = "stderr"
+
+/** Unset: Mesa then picks its Android default, which is logcat. */
+const val FIXED_MESA_LOG: String = ""
+
+/**
+ * The five Wine rows above, as the exact terms [WINEDEBUG_CHANNELS] is made of.
+ *
+ * Display cannot be derived from the constant by a generic composer — the fixed
+ * prefix writes `warn+module` where a row would write `-module,err+module,
+ * warn+module`, which is the same three flags in fewer terms — so the terms are
+ * declared beside the rows and `ContainerDiagnosticsTest` asserts they
+ * concatenate back to the constant character for character. That is what stops
+ * the screen claiming something the session does not send.
+ */
+val BASELINE_WINE_TERMS: List<Pair<String, List<String>>> = listOf(
+    "all" to listOf("-all", "err+all"),
+    "module" to listOf("warn+module"),
+    "winediag" to listOf("+winediag"),
+    "loaddll" to listOf("+loaddll"),
+    "debugstr" to listOf("+debugstr"),
+)
+
+// — the display list ----------------------------------------------------------
+
+/** One row, resolved: what to draw, and whether each column may be touched. */
+data class DiagnosticRow(
+    /** The row's index in [ContainerDiagnostics.rows], or -1 for a fixed row. */
+    val index: Int,
+    val name: String,
+    val secondary: String?,
+    val caution: String?,
+    /** The level ladder's wire values, in this thing's own order. */
+    val levels: List<String>,
+    val levelLabels: Map<String, String>,
+    val level: String,
+    val levelIsMachine: Boolean,
+    /** True when this row is loud enough to remove itself after one launch. */
+    val oneSession: Boolean,
+    /**
+     * Whether the *name* may be typed or picked.
+     *
+     * **Separate from [levelEditable], and the defect that separated them:** they
+     * were one flag, and a freshly added row has no name yet — so the row came
+     * back with its name column disabled and the user could never name it. Add
+     * produced a dead row, permanently greyed. The two columns answer different
+     * questions — "is this row mine to define" and "is there a level worth
+     * choosing right now" — and a row waiting to be named is exactly where they
+     * differ.
+     */
+    val nameEditable: Boolean,
+    /** False for a fixed row, for an unnamed one, and for one whose gate is unmet. */
+    val levelEditable: Boolean,
+    /** False only for a fixed row. A gated row keeps its cross. */
+    val removable: Boolean,
+    /** True when the name is typed and Wine would not register it. */
+    val nameIsInvalid: Boolean,
+)
+
+/**
+ * The screen's list: what is already being sent, then what the user added.
+ *
+ * The fixed rows are not in [ContainerDiagnostics.rows] — they are the
+ * declaration — so a fresh container's record is still empty and the golden
+ * environment is still byte-identical. They are prepended here because the list
+ * is an inventory and the inventory starts with what is already true.
+ *
+ * A user row for something the fixed prefix also names is *not* merged with it:
+ * both are drawn, in order, because both are sent and the later one wins. Hiding
+ * the fixed row would make the screen lie about the string.
+ */
+fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
+    val fixed = LOGGABLES.filter { it.isFixed }.map { loggable ->
+        DiagnosticRow(
+            index = -1,
+            name = loggable.name,
+            secondary = loggable.secondary,
+            caution = loggable.caution,
+            levels = listOf(loggable.fixedLevel.orEmpty()),
+            levelLabels = loggable.labels,
+            level = loggable.fixedLevel.orEmpty(),
+            levelIsMachine = loggable.levelIsMachine,
+            // These are sent every session, by definition.
+            oneSession = false,
+            nameEditable = false,
+            levelEditable = false,
+            removable = false,
+            nameIsInvalid = false,
+        )
+    }
+
+    val added = diagnostics.rows.mapIndexed { index, row ->
+        val loggable = loggableFor(row.name)
+        DiagnosticRow(
+            index = index,
+            name = row.name,
+            secondary = if (row.name.isEmpty()) null else loggable.secondary,
+            caution = if (row.name.isEmpty()) null else loggable.caution,
+            levels = loggable.levels,
+            levelLabels = loggable.labels,
+            level = row.level,
+            levelIsMachine = loggable.levelIsMachine,
+            oneSession = row.isOneSession,
+            // Always: this row is the user's, so its name is theirs to set even
+            // when — especially when — it is still empty.
+            nameEditable = true,
+            // A gated row keeps its name and its cross and loses its level,
+            // which is what tells it apart from a fixed one; that, and the
+            // caution saying what is missing.
+            levelEditable = row.name.isNotEmpty() && row.isAllowed(diagnostics),
+            removable = true,
+            nameIsInvalid = row.name.isNotEmpty() && !isLoggableName(row.name),
+        )
+    }
+
+    return fixed + added
+}
+
+/**
+ * No fixed row displays `Off`.
+ *
+ * The property that keeps "greyed out" from reading as "switched off". A fixed
+ * row is disabled because the user may not change it, and it shows its real
+ * value; an `Off` row is a live control somebody set to silence, and composes as
+ * `-chan`. If a genuinely-absent fixed value ever needs a row, it needs different
+ * copy — `not set`, as `MESA_LOG` uses — and not the `Off` stop.
+ */
+fun fixedRowsNeverReadOff(): Boolean = LOGGABLES.filter { it.isFixed }.none {
+    it.label(it.fixedLevel.orEmpty()).equals(WineChannelLevel.OFF.label, ignoreCase = true)
+}
+
+// — composition ---------------------------------------------------------------
+
+/**
+ * The five stops a Wine channel can run at, and the only ladder here that is a
+ * simplification rather than a translation.
  *
  * Wine's model is four independent class bits — `fixme`, `err`, `warn`, `trace`
  * (`native/wine/dlls/ntdll/unix/debug.c:65`) — so a ladder cannot express `err`
- * without `warn`, or `trace` without `fixme`. It is used anyway because the
- * combinations it cannot reach are not ones anybody has asked for — and there is
- * now no escape hatch behind it, so that is a claim this ladder has to keep
- * rather than one the raw field used to cover. See `docs/DIAGNOSTICS-UI.md` §9,
- * decision 2; if a real `err`-without-`warn` case turns up, the honest answer is
- * a sixth stop or a class checkbox set, not a text field.
- *
- * `trace` is folded into [EVERYTHING] rather than given a stop of its own: a
- * channel's trace tier is where every firehose lives, and offering it as "one
- * more notch" is how a ladder makes a 500 MB log look like an increment.
+ * without `warn`. It is used anyway because the combinations it cannot reach are
+ * not ones anybody has asked for; if a real one turns up, the honest answer is a
+ * class checkbox set, not a free-text field. `trace` is folded into [EVERYTHING]
+ * rather than given a stop of its own: a channel's trace tier is where every
+ * firehose lives, and offering it as one more notch is how a ladder makes a
+ * 500 MB log look like an increment.
  */
 @Serializable
 enum class WineChannelLevel(val label: String) {
     /** `-chan` — silenced, below even the `err+all` floor every channel inherits. */
     OFF("Off"),
-
-    /** ERR only, which is the floor `err+all` already gives every channel. */
     ERRORS("Errors"),
-
     WARNINGS("+ Warnings"),
     STUBS("+ Stubs"),
     EVERYTHING("Everything"),
     ;
 
-    /**
-     * Wine's class names for this stop, lowest first. Empty for [OFF] and
-     * [EVERYTHING], which are written with the bare `-chan` and `+chan` forms.
-     */
     internal val classes: List<String>
         get() = when (this) {
             OFF, EVERYTHING -> emptyList()
@@ -251,331 +832,87 @@ enum class WineChannelLevel(val label: String) {
         }
 }
 
-/**
- * One entry in the channel catalogue: everything the UI needs to draw a channel
- * it has never heard of.
- *
- * The catalogue is **a convenience, not the permitted set** — the picker accepts
- * any name Wine would — so every field here has a defensible fallback and
- * [wineChannelInfo] returns a synthesised entry for anything unknown.
- *
- * @param summary one line, for the picker. The row itself shows only the channel
- *   name: the audience has been told to "turn on `module`", and by the time a row
- *   exists they have already read this.
- * @param caution a property of the channel, shown on its row in the warning tone
- *   whenever present. Data rather than an `if (name == …)` in the composable.
- * @param maxLevel the top of this channel's ladder. Only `d3d` narrows it.
- * @param addAt the level the picker adds it at — the stop that answers the
- *   question the summary poses, which is not always the loudest one.
- * @param oneSessionAt the level at and above which this channel is spent after
- *   one launch. Null for channels that are bounded at every stop.
- */
-data class WineChannelInfo(
-    val channel: String,
-    val summary: String,
-    val caution: String? = null,
-    val maxLevel: WineChannelLevel = WineChannelLevel.EVERYTHING,
-    val addAt: WineChannelLevel = WineChannelLevel.WARNINGS,
-    val oneSessionAt: WineChannelLevel? = null,
-) {
-    /** The stops this row offers, which is the ladder truncated at [maxLevel]. */
-    val levels: List<WineChannelLevel>
-        get() = WineChannelLevel.entries.filter { it.ordinal <= maxLevel.ordinal }
+/** The terms that force `channel` to exactly [level]. See [Emit.WineChannel]. */
+internal fun wineChannelTerms(channel: String, level: WineChannelLevel): List<String> = when (level) {
+    WineChannelLevel.OFF -> listOf("-$channel")
+    WineChannelLevel.EVERYTHING -> listOf("+$channel")
+    else -> listOf("-$channel") + level.classes.map { "$it+$channel" }
 }
 
 /**
- * The channels worth suggesting, with the question each answers.
+ * `WINEDEBUG`: the fixed prefix, then whatever the rows add.
  *
- * **Not a channel picker over all 521.** `docs/LOGGING.md:222-230` is explicit
- * about why the Winlator lineage's flat list of every channel Wine has is worse
- * than nothing: choosing well among 521 requires knowing what each costs, and a
- * user who chooses correctly can still get nothing. The rule here is that every
- * entry answers a question somebody has actually had — and because the picker
- * also takes a typed name, being conservative in this list costs an expert one
- * extra keystroke rather than a capability.
- *
- * The first four are the channels the invisible baseline already sets. They are
- * listed so that someone who wants to *change* one — quiet `loaddll`, raise
- * `module` to stubs — can find it, not because they need switching on.
+ * **Never a value handed over whole.** This starts from [WINEDEBUG_CHANNELS] and
+ * appends, the shape `dllOverrides` already uses and for the same stated reason:
+ * Wine parses left to right and a later term wins, so a user can add without
+ * being able to delete the defaults by accident. An empty record returns the
+ * constant byte for byte.
  */
-val WINE_CHANNEL_CATALOGUE: List<WineChannelInfo> = listOf(
-    WineChannelInfo(
-        channel = "module",
-        summary = "Says when a library loaded but an entry point inside it is missing, which " +
-            "is what later crashes far from the cause.",
-        // The whole argument in docs/LOGGING.md:76-95 is about the WARN tier
-        // specifically: the three `WARN(` sites in loader.c that say "the DLL
-        // loaded but an export is missing" are what `err+all` and `+loaddll`
-        // both miss. Already on at this level; here so it can be raised.
-        addAt = WineChannelLevel.WARNINGS,
-    ),
-    WineChannelInfo(
-        channel = "loaddll",
-        summary = "Every DLL the program successfully loaded. Already on; add it here to quiet " +
-            "it down.",
-        addAt = WineChannelLevel.EVERYTHING,
-    ),
-    WineChannelInfo(
-        channel = "winediag",
-        summary = "Wine's report on its own health: no Vulkan library, no display driver, " +
-            "broken .NET, and which renderer it chose. Already on.",
-        addAt = WineChannelLevel.EVERYTHING,
-    ),
-    WineChannelInfo(
-        channel = "debugstr",
-        summary = "What the program itself chose to print — often the only reason a game gives " +
-            "for quitting. Already on.",
-        addAt = WineChannelLevel.EVERYTHING,
-    ),
-    WineChannelInfo(
-        channel = "d3d",
-        summary = "Wine's own Direct3D, which only runs when a program falls back off DXVK.",
-        // docs/LOGGING.md:164-170 — wined3d has 659 `ERR(` sites with only 19
-        // `once` guards and owns per-draw paths, so its WARN tier is unbounded
-        // in a way `module`'s is not. Stubs and traces above it are not a stop
-        // worth drawing; they are the raw field's problem.
-        caution = "Unbounded above warnings — 659 per-draw error sites.",
-        maxLevel = WineChannelLevel.WARNINGS,
-        addAt = WineChannelLevel.ERRORS,
-        oneSessionAt = WineChannelLevel.WARNINGS,
-    ),
-    WineChannelInfo(
-        channel = "vulkan",
-        summary = "How Wine found and opened the graphics driver.",
-    ),
-    WineChannelInfo(
-        channel = "file",
-        summary = "Every file the program opens, and every one it fails to open.",
-    ),
-    WineChannelInfo(
-        channel = "reg",
-        summary = "Every registry key the program reads or writes.",
-    ),
-    WineChannelInfo(
-        channel = "heap",
-        summary = "Every heap allocation and free.",
-        caution = "One line per allocation; a game makes thousands a frame.",
-        oneSessionAt = WineChannelLevel.WARNINGS,
-    ),
-    WineChannelInfo(
-        channel = "sync",
-        summary = "Every wait, signal and lock the program takes.",
-        caution = "Fires on every synchronisation primitive, including the idle ones.",
-        oneSessionAt = WineChannelLevel.WARNINGS,
-    ),
-    WineChannelInfo(
-        channel = "msg",
-        summary = "Every window message the program receives.",
-        caution = "Includes mouse movement, so it fires whenever the screen is touched.",
-        oneSessionAt = WineChannelLevel.WARNINGS,
-    ),
-    WineChannelInfo(
-        channel = "relay",
-        summary = "Names every call between libraries as it happens.",
-        caution = "Hundreds of megabytes in seconds.",
-        // Only the trace tier exists: every `_(relay)` site in ntdll is
-        // `TRACE_(relay)`, so the lower stops are silence rather than a
-        // quieter version of this.
-        addAt = WineChannelLevel.EVERYTHING,
-        oneSessionAt = WineChannelLevel.EVERYTHING,
-    ),
-    WineChannelInfo(
-        channel = "seh",
-        summary = "Every exception the program raises, handled or not — and C++ and .NET " +
-            "exceptions are all of them.",
-        // ntdll has 7 ERR, 3 WARN and 13 TRACE sites on this channel, and the
-        // ERR tier is already on through `err+all`; the trace tier is the one
-        // that changes anything, and it is a register dump per exception.
-        // docs/LOGGING.md:121-134: crashes print regardless of WINEDEBUG.
-        caution = "A register dump per exception, and crashes are already reported without it.",
-        addAt = WineChannelLevel.EVERYTHING,
-        oneSessionAt = WineChannelLevel.EVERYTHING,
-    ),
-)
+fun composeWineDebug(diagnostics: ContainerDiagnostics): String =
+    (WINEDEBUG_CHANNELS.split(",") + emitted(diagnostics).wineTerms).joinToString(",")
 
 /**
- * The catalogue entry for [channel], or one synthesised for a name nobody
- * anticipated.
+ * The environment Diagnostics contributes, which is **empty for an untouched
+ * container**.
  *
- * Never null, because the picker accepts a typed name and the row that results
- * has to draw. An unknown channel gets the full ladder, no caution and no
- * one-session arm — the honest position, since nothing is known about what it
- * costs. It is added at warnings for the same reason the ladder exists: that is
- * the stop that carries information without carrying a trace tier.
+ * Only differences from the fixed values appear. That is not an optimisation: it
+ * is what makes "a fresh container produces exactly today's environment" a
+ * property of one line rather than of a careful reading, and it is asserted in
+ * `SessionEnvironmentTest`.
+ *
+ * Every key here is in `DIAGNOSTIC_SESSION_ENV`, and the merge stage that applies
+ * this map checks that rather than trusting it — see `SessionEnvironment.kt`.
+ *
+ * @param turnipBaseFlags what the rest of the environment has already composed
+ *   for `TU_DEBUG`, ending in `startup`. Passed in rather than rebuilt, because
+ *   the manifest can contribute flags too and this stage adds to them.
  */
-fun wineChannelInfo(channel: String): WineChannelInfo =
-    WINE_CHANNEL_CATALOGUE.firstOrNull { it.channel == channel }
-        ?: WineChannelInfo(channel = channel, summary = "A Wine debug channel this build does " +
-            "not have a description for.")
+fun diagnosticEnvironment(
+    diagnostics: ContainerDiagnostics,
+    turnipBaseFlags: List<String> = listOf(TU_DEBUG_STARTUP),
+): Map<String, String> {
+    val out = LinkedHashMap<String, String>()
+    val emitted = emitted(diagnostics)
+
+    if (emitted.wineTerms.isNotEmpty()) {
+        out["WINEDEBUG"] = (WINEDEBUG_CHANNELS.split(",") + emitted.wineTerms).joinToString(",")
+    }
+    out.putAll(emitted.variables)
+    for ((variable, members) in emitted.lists) {
+        if (members.isEmpty()) continue
+        // The added flags first and the base last, so `startup` stays where it is:
+        // it is the ground truth for whether Turnip loaded and nothing may
+        // displace it.
+        out[variable] = (members + turnipBaseFlags).distinct().joinToString(",")
+    }
+    return out
+}
+
+/** Every row's contribution, folded. There is no branch here on what a row is. */
+private fun emitted(diagnostics: ContainerDiagnostics): EmittedEnvironment {
+    val out = EmittedEnvironment()
+    diagnostics.inForce().rows.forEach { row ->
+        loggableFor(row.name).emit.apply(row.level, out)
+    }
+    return out
+}
 
 /**
- * A translator's own level control: its variable, its words, and its order.
+ * The copy the confirmation shows before a row that costs something is added.
  *
- * Declared rather than written out three times, so a fourth translator is a list
- * entry. What is *not* shared is the vocabulary: [options] is each tool's own
- * list in each tool's own order, read out of its source, and the UI prints those
- * words in mono without renaming them.
- *
- * @param default the value the fixed environment already sets, so an entry equal
- *   to it contributes nothing.
- * @param oneSessionFrom the first [options] entry that is loud enough to be spent
- *   after one launch; that entry and everything after it in the list.
+ * Composed from the entry's own caution rather than written per control, so a new
+ * expensive thing gets a correct warning by being added to [LOGGABLES]. It says
+ * the concrete things — the log fills, the session slows — and, when the row is
+ * one-session, names the mechanism, because naming it is what stops the dialog
+ * reading as a scary-sounding thing people learn to dismiss.
  */
-data class SubsystemLevel(
-    val id: String,
-    val variable: String,
-    val title: String,
-    val help: String,
-    val options: List<String>,
-    val default: String,
-    val oneSessionFrom: String? = null,
-) {
-    val armId: String get() = oneSessionId("level", id)
-
-    fun isOneSession(value: String): Boolean {
-        val from = oneSessionFrom ?: return false
-        return options.indexOf(value) >= options.indexOf(from)
+fun costWarning(caution: String?, oneSession: Boolean): String = buildString {
+    if (!caution.isNullOrBlank()) append(caution).append(' ')
+    append("The log will hit its cap sooner and the session will run slower.")
+    if (oneSession) {
+        append(" It removes itself after the next launch.")
     }
 }
-
-/**
- * The three translator levels, each in its own vocabulary.
- *
- * **DXVK's order and vkd3d's order are different and are not normalised.**
- * DXVK's `DXVK_LOG_LEVEL` is a minimum severity over
- * `trace, debug, info, warn, error, none` (`native/dxvk/src/util/log/log.cpp:146-152`,
- * filtered as `level >= m_minLevel`), listed here quietest-first. vkd3d's is
- * `none, err, info, fixme, warn, trace`
- * (`native/vkd3d/libs/vkd3d-common/debug.c:38-47`, emission
- * `if (get_level(channel) < level) return`) — **`info` sits between `err` and
- * `fixme`**, so `warn` already carries both. Two adjacent six-stop pickers whose
- * stops read differently is correct; a shared "warn is quieter than info" ladder
- * would be a screen that lies about what it sets.
- *
- * vkd3d is two independent channels with two variables, not one with a mode.
- */
-val SUBSYSTEM_LEVELS: List<SubsystemLevel> = listOf(
-    SubsystemLevel(
-        id = "dxvk",
-        variable = "DXVK_LOG_LEVEL",
-        title = "Direct3D 9 to 11 translator",
-        help = "info already names the reason a device was rejected, which is the usual question.",
-        options = listOf("none", "error", "warn", "info", "debug", "trace"),
-        default = "info",
-        // Both report per draw call.
-        oneSessionFrom = "debug",
-    ),
-    SubsystemLevel(
-        id = "vkd3d",
-        variable = "VKD3D_DEBUG",
-        title = "Direct3D 12 translator",
-        help = "The Direct3D 12 translator's own messages.",
-        options = listOf("none", "err", "info", "fixme", "warn", "trace"),
-        default = "warn",
-        oneSessionFrom = "trace",
-    ),
-    SubsystemLevel(
-        id = "vkd3d.shader",
-        variable = "VKD3D_SHADER_DEBUG",
-        title = "Direct3D 12 shader translation",
-        help = "Shader compilation failures, which the row above does not carry — it is a " +
-            "separate channel with its own level.",
-        options = listOf("none", "err", "info", "fixme", "warn", "trace"),
-        default = "warn",
-        // docs/LOGGING.md:163 — the per-shader firehose.
-        oneSessionFrom = "trace",
-    ),
-)
-
-fun subsystemLevel(id: String): SubsystemLevel? = SUBSYSTEM_LEVELS.firstOrNull { it.id == id }
-
-/**
- * A logger switch: one boolean, one variable, and what each state writes.
- *
- * [whenOn] and [whenOff] are nullable because the interesting state is usually
- * only one of them — the other is what the fixed environment already sets, and
- * writing it again would be a value in the map that changes nothing.
- *
- * @param hint the variable, shown in mono on the right of the row. It is the
- *   name an issue thread will use.
- */
-data class SubsystemFlag(
-    val id: String,
-    val title: String,
-    val hint: String,
-    val help: String? = null,
-    val default: Boolean,
-    val variable: String,
-    val whenOn: String? = null,
-    val whenOff: String? = null,
-) {
-    /** What this switch contributes at [on], or null for "nothing to say". */
-    fun valueAt(on: Boolean): String? = if (on) whenOn else whenOff
-}
-
-/** `FEX_SILENTLOG` inverted — the control asks whether FEX may speak. */
-val FEX_MESSAGES_FLAG: SubsystemFlag = SubsystemFlag(
-    id = "fex",
-    title = "FEX messages",
-    hint = "x86 translator",
-    help = "Off hides mistakes in the translator's own configuration as well as its crashes, " +
-        "which is why Vessel leaves it on.",
-    default = true,
-    variable = "FEX_SILENTLOG",
-    // On is FEX's non-default and is what the fixed environment already sets, so
-    // only the off state has anything to write.
-    whenOff = "1",
-)
-
-/**
- * `MESA_LOG=file`, which is the only thing that puts the graphics driver's output
- * where Vessel can read it.
- *
- * Mesa picks its logger at init and under Android the default is logcat
- * (`native/mesa/src/util/log.c:118-128`, `__android_log_write` at `:388`), which
- * this app does not read. `file` adds the file logger and `mesa_log_file`
- * defaults to `stderr` (`log.c:64-74, 145`) — the pipe the session log reads.
- *
- * **Unverified end to end.** The mechanism is read out of Mesa's source; that
- * Turnip's lines actually arrive in the session log has not been observed on the
- * device. What would settle it is one session with this on and
- * `grep -c 'TU_DEBUG='` over the log returning non-zero. Until then it is the
- * gate on [TURNIP_FLAGS] rather than a thing they can be used without.
- */
-val DRIVER_LOG_FLAG: SubsystemFlag = SubsystemFlag(
-    id = "mesaLog",
-    title = "Driver messages in the log",
-    hint = "MESA_LOG",
-    help = "Without this the graphics driver writes to the Android system log, where Vessel " +
-        "cannot read it — including the one line that proves Turnip loaded.",
-    default = false,
-    variable = "MESA_LOG",
-    whenOn = "file",
-)
-
-val SUBSYSTEM_FLAGS: List<SubsystemFlag> = listOf(FEX_MESSAGES_FLAG, DRIVER_LOG_FLAG)
-
-fun subsystemFlag(id: String): SubsystemFlag? = SUBSYSTEM_FLAGS.firstOrNull { it.id == id }
-
-/**
- * One Turnip flag worth offering, out of the 42 in
- * `native/mesa/src/freedreno/vulkan/tu_util.cc:21-61`.
- *
- * `TU_DEBUG` is a flag list and not a level — there is no severity anywhere in
- * that table — so this is a multi-select and drawing it as a ladder would be a
- * lie. The rest of the 42 are Mesa-developer flags and belong to the raw field,
- * not to a curated list.
- *
- * `startup` is not here: it is appended unconditionally by [tuDebugFlags] and is
- * the only ground truth for whether Turnip loaded, so it is not a choice.
- */
-data class TurnipFlag(val flag: String, val summary: String)
-
-val TURNIP_FLAGS: List<TurnipFlag> = listOf(
-    TurnipFlag("perf", "Says why a frame was slow."),
-    TurnipFlag("nolrz", "Turns off low-resolution depth, to see whether it is the cause."),
-    TurnipFlag("noubwc", "Turns off bandwidth compression, to see whether it is the cause."),
-)
 
 /**
  * The three caps a session's log is written under.
@@ -590,16 +927,13 @@ val TURNIP_FLAGS: List<TurnipFlag> = listOf(
  * **At roughly 120 bytes a line, [rateLimitLines] lines a second fills
  * [headBytes] + [tailBytes] in `(head + tail) / (rate × 120)` seconds.** At the
  * old 2 000 / 5 MB / 3 MB that was about 35 seconds; at the defaults below it is
- * about 20. **So the byte caps and the rate limit move together or not at all** —
- * raising the bytes alone buys a longer window at the same fidelity, and raising
- * the rate alone reaches the cap sooner.
+ * about 20. **So the byte caps and the rate limit move together or not at all.**
  *
  * **The defaults are the maximum of each ladder**, which is the requirement this
  * work was given, and it is a real cost: [worstCaseBytesPerContainer] is 480 MB
  * against the 80 MB these numbers used to imply. That is too much to spend
- * silently, so the Diagnostics surface shows the container's actual usage beside
- * these controls and carries a *Delete all logs* action. A screen that raises a
- * storage ceiling and does not show the storage is not finished.
+ * silently, so the surface shows the container's actual usage beside these
+ * controls and carries a *Delete all logs* action.
  *
  * Sessions kept per container is deliberately **not** here. It is a history
  * budget rather than a fidelity budget — a diagnostician compares a bad run
@@ -607,30 +941,17 @@ val TURNIP_FLAGS: List<TurnipFlag> = listOf(
  */
 @Serializable
 data class SessionLogLimits(
-    /**
-     * The head allowance: the init story — module loads, the driver coming up,
-     * D3D device creation.
-     */
     val headBytes: Long = HEAD_LADDER.last(),
     /**
-     * The retained tail *in total*, which is where the crash is.
-     *
-     * Named for what it holds rather than for the field it sets: the writer keeps
-     * two segments and rotates between them, so the retained tail sawtooths
-     * between half of this and all of it. Halving here is what keeps that
-     * implementation detail out of the label.
+     * The retained tail *in total*, named for what it holds rather than for the
+     * field it sets: the writer keeps two segments and rotates between them, so
+     * the retained tail sawtooths between half of this and all of it.
      */
     val tailBytes: Long = TAIL_LADDER.last(),
-    /** Lines a second the sink writes before it starts counting instead. */
     val rateLimitLines: Int = RATE_LADDER.last(),
 ) {
-    /** One tail segment. Two are retained; see [tailBytes]. */
     val tailSegmentBytes: Long get() = tailBytes / 2
-
-    /** The most one session can occupy on disk. */
     val worstCaseBytesPerSession: Long get() = headBytes + tailBytes
-
-    /** …and the most a container can, at [SESSIONS_KEPT] of them. */
     val worstCaseBytesPerContainer: Long get() = worstCaseBytesPerSession * SESSIONS_KEPT
 
     companion object {
@@ -656,176 +977,3 @@ data class SessionLogLimits(
         )
     }
 }
-
-// — composition ---------------------------------------------------------------
-
-/**
- * `WINEDEBUG`: the invisible baseline, then whatever has been added.
- *
- * **Never a value handed over whole.** This starts from [WINEDEBUG_CHANNELS] and
- * appends, which is the shape `dllOverrides` already uses and for the same stated
- * reason: Wine parses left to right and a later term wins, so a user can add
- * without being able to delete the defaults by accident.
- *
- * **The per-channel terms are not one term per stop, and that is a fact about the
- * parser rather than a style.** `add_option`
- * (`native/wine/dlls/ntdll/unix/debug.c:88-123`) creates a channel it has not
- * seen with `flags = (default_flags & ~clear) | set` — `default_flags` *as of
- * that moment* — and modifies one it has seen with the same expression against
- * the existing flags. Two consequences:
- *
- *  - A lone `fixme+x` on a fresh channel gives ERR|FIXME and **skips WARN**,
- *    because inheritance is from `default_flags` and not from the stop below.
- *  - A `+`-only term can never *lower* a channel, so `warn+loaddll` cannot quiet
- *    a `loaddll` the baseline already set to all four classes.
- *
- * So a stop is written as a `-chan` reset followed by one `class+chan` per class
- * it wants: `-d3d,err+d3d,warn+d3d`. That is exact for every channel whether or
- * not the baseline already named it, which the ladder in
- * `docs/DIAGNOSTICS-UI.md` §4 is not — that table is right only for channels the
- * baseline does not mention.
- *
- * An empty record returns [WINEDEBUG_CHANNELS] byte for byte.
- *
- * **Per-program scoping is the one thing this cannot express, and it is a gap
- * rather than a decision against it.** Wine's parser accepts
- * `process:class+channel` and matches the token before the `:` against
- * `argv[1]`'s basename, case-insensitively (`debug.c:140-145`), so
- * `metro.exe:+relay` is a legal way to point a firehose at one executable — the
- * difference between a usable log and a full disk. A free-text `WINEDEBUG` field
- * used to sit at the bottom of the Diagnostics screen and could express it; it
- * was removed because it duplicated the *Add a channel* dialog's own free-text
- * field for everything else it could do. Silencing something the baseline
- * switched on survives as the `Off` stop, which composes as `-chan`.
- *
- * **If scoping is wanted back, it belongs on the channel row — a `program`
- * alongside [WineChannelSetting.level], written as `$program:` in front of each
- * term — and not as a second free-text box.** A row that says which executable it
- * applies to is a thing the user can see and remove; a text field that happens to
- * contain a colon is not.
- */
-fun composeWineDebug(diagnostics: ContainerDiagnostics): String {
-    val record = diagnostics.inForce()
-    val terms = ArrayList<String>()
-    terms += WINEDEBUG_CHANNELS.split(",")
-
-    record.wineChannels.forEach { terms += wineChannelTerms(it.channel, it.level) }
-
-    return terms.joinToString(",")
-}
-
-/**
- * Whether [name] is something Wine's parser would read as a channel.
- *
- * The *Add a channel* dialog takes a typed name and is now the only way into this
- * list that the catalogue does not control, so the check lives here rather than
- * in the composable. `parse_options` splits on `,` and reads `+`, `-` and `:` as
- * structure (`native/wine/dlls/ntdll/unix/debug.c:126-145`), so a name containing
- * one of those is not one channel — it is several terms in a trench coat, and
- * pasting `+relay,-heap` into the field would compose `-+relay` and `-heap` as
- * channel names.
- *
- * The length cap is the same one Wine applies and is the more interesting half:
- * `add_option` returns early on `strlen(name) >= sizeof(debug_options[0].name)`
- * and says nothing, so a name one character too long is a row on this screen that
- * does exactly nothing. Refusing it here is the difference between "that is not a
- * channel" and a switch that silently is not there.
- */
-fun isChannelName(name: String): Boolean =
-    name.isNotEmpty() &&
-        name.length <= MAX_CHANNEL_NAME &&
-        name.none { it.isWhitespace() || it in CHANNEL_NAME_STRUCTURE }
-
-/**
- * Fourteen: `struct __wine_debug_channel` is `char name[15]`
- * (`native/wine/include/wine/debug.h:56-60`) and `add_option` rejects a name
- * whose length reaches that, so fourteen characters is the longest Wine will
- * register.
- */
-private const val MAX_CHANNEL_NAME = 14
-
-private const val CHANNEL_NAME_STRUCTURE = ",+-:"
-
-/** The terms that force `channel` to exactly [level]. See [composeWineDebug]. */
-internal fun wineChannelTerms(channel: String, level: WineChannelLevel): List<String> = when (level) {
-    WineChannelLevel.OFF -> listOf("-$channel")
-    WineChannelLevel.EVERYTHING -> listOf("+$channel")
-    else -> listOf("-$channel") + level.classes.map { "$it+$channel" }
-}
-
-/**
- * The environment Diagnostics contributes, which is **empty for an untouched
- * container**.
- *
- * Only differences from the fixed values appear. That is not an optimisation: it
- * is what makes "a fresh container produces exactly today's environment" a
- * property of one line rather than of a careful reading, and it is asserted in
- * `SessionEnvironmentTest`.
- *
- * Every key here is in `DIAGNOSTIC_SESSION_ENV`, and the merge stage that applies
- * this map checks that rather than trusting it — see `SessionEnvironment.kt`.
- *
- * @param turnipBaseFlags what the rest of the environment has already composed
- *   for `TU_DEBUG`, ending in `startup`. Passed in rather than rebuilt, because
- *   the manifest can contribute flags too and this stage must add to them rather
- *   than replace them.
- */
-fun diagnosticEnvironment(
-    diagnostics: ContainerDiagnostics,
-    turnipBaseFlags: List<String> = listOf(TU_DEBUG_STARTUP),
-): Map<String, String> {
-    val record = diagnostics.inForce()
-    val out = LinkedHashMap<String, String>()
-
-    val wineDebug = composeWineDebug(record)
-    if (wineDebug != WINEDEBUG_CHANNELS) out["WINEDEBUG"] = wineDebug
-
-    for (spec in SUBSYSTEM_LEVELS) {
-        val value = record.levelOf(spec)
-        if (value != spec.default) out[spec.variable] = value
-    }
-
-    for (spec in SUBSYSTEM_FLAGS) {
-        val on = record.flagOf(spec)
-        if (on == spec.default) continue
-        spec.valueAt(on)?.let { out[spec.variable] = it }
-    }
-
-    if (record.turnipFlags.isNotEmpty()) {
-        // Ahead of `startup`, which stays last: the flag list is read left to
-        // right and `startup` is the one term nothing may displace.
-        out["TU_DEBUG"] = (record.turnipFlags + turnipBaseFlags).distinct().joinToString(",")
-    }
-
-    return out
-}
-
-/**
- * The copy the confirmation shows before a one-session control is armed.
- *
- * Composed from the catalogue entry rather than written per control, so a new
- * loud channel gets a correct warning by being added to a list. It says the three
- * concrete things — the log fills in seconds, the session gets slower, and the
- * setting turns itself off — because naming the mechanism is what stops the
- * dialog reading as a scary-sounding thing people learn to dismiss.
- */
-fun oneSessionWarning(detail: String?): String = buildString {
-    if (!detail.isNullOrBlank()) append(detail).append(' ')
-    append("The log will hit its cap in seconds and the session will run much slower. ")
-    append("It switches itself off after the next launch.")
-}
-
-// Two parser hazards a free-text `WINEDEBUG` field has to guard, recorded here
-// because the reason this file no longer guards them is a property of the
-// composer rather than an oversight — and a future free-text field would need
-// both back.
-//
-//  - `WINEDEBUG=help` kills the process. `init_options` compares the *whole*
-//    variable against "help" and calls `debug_usage()`, which writes a usage
-//    block to fd 2 and exit(1) (`debug.c:183-193, 213`). Unreachable from a
-//    screen that only ever appends to a non-empty baseline; and `help` typed as
-//    a channel name is legal, composing as `-help,err+help,…` and never as the
-//    bare word.
-//  - A later `-all` erases every term before it, because parsing is left to
-//    right and `default_flags` is rewritten in place. `isChannelName` refuses
-//    `-`, so no row can produce one.

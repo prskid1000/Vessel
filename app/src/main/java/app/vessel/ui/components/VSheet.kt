@@ -306,14 +306,6 @@ fun VSheetRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    /**
-     * The state of whatever is behind this row, on the right edge.
-     *
-     * For a destination that is also a *configuration* — Diagnostics — the row
-     * has to say what is currently switched on there, or it is a door the user
-     * must open to find out they did not need to.
-     */
-    trailing: (@Composable () -> Unit)? = null,
 ) {
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Row(
@@ -344,7 +336,6 @@ fun VSheetRow(
                 )
             }
         }
-        trailing?.invoke()
     }
 }
 

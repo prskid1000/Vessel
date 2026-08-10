@@ -662,6 +662,14 @@ fun SessionDesktop(
                         windowMenu = null
                         onMinimizeWindow(target.id)
                     },
+                    // The same call the taskbar icon makes, which is the one
+                    // that was already working: `focus` remaps a minimised
+                    // window before raising it. Wiring Restore to `minimize`
+                    // was the whole of the bug.
+                    onRestore = {
+                        windowMenu = null
+                        onFocusWindow(target.id)
+                    },
                     onClose = {
                         windowMenu = null
                         onCloseWindow(target.id)

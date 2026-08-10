@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.vessel.core.DriveMap
 import app.vessel.core.PeArchitecture
 import app.vessel.data.ContainerPaths
 import app.vessel.data.ContainerRepository
@@ -62,6 +63,18 @@ data class AppSheetUiState(
      * executable, and disabling Save there would make the sheet read-only.
      */
     val alreadyAdded: String? = null,
+    /**
+     * Whether this container has been launched at least once.
+     *
+     * Read as "does `drive_c` exist", which is the same question
+     * `HomeViewModel.hasPrefix` asks and for the same reason: the prefix is
+     * built by the first session, not by saving the container, so a container
+     * that has only ever been created has no `C:` to browse. Browsing one is
+     * not an error anybody can act on — the file browser opens on nothing and
+     * says "This folder is empty", which reads as a bug in the browser rather
+     * than as a container that has not run yet.
+     */
+    val hasPrefix: Boolean = false,
 ) {
     /**
      * Add stays disabled until a runnable file has been chosen — and stays
@@ -158,9 +171,18 @@ class AppSheetViewModel @Inject constructor(
         _state.value = AppSheetUiState(loading = false, creating = true, containerId = containerId)
 
         // The name is a read, so it stays asynchronous. It only fills a subtitle.
+        // The prefix check rides with it: one `isDirectory` stat, off the main
+        // thread, and it decides whether the two browse routes are offered.
         viewModelScope.launch {
             val name = containers.get(containerId)?.name.orEmpty()
-            _state.update { if (it.containerId == containerId) it.copy(containerName = name) else it }
+            val prefix = hasPrefix(containerId)
+            _state.update {
+                if (it.containerId == containerId) {
+                    it.copy(containerName = name, hasPrefix = prefix)
+                } else {
+                    it
+                }
+            }
         }
     }
 
@@ -182,6 +204,20 @@ class AppSheetViewModel @Inject constructor(
     fun acknowledgeFinished() {
         _state.update { if (it.finished) it.copy(finished = false) else it }
     }
+
+    /**
+     * Whether the container's `C:` exists yet.
+     *
+     * `drive_c` and not the prefix directory: `ContainerProvisioner` makes the
+     * layout when the container is created, so the prefix is there long before
+     * `wineboot` has put anything in it. `drive_c` is what the first session
+     * creates, which is the line between "nothing to browse" and "something to
+     * browse" — the same test `HomeViewModel` uses for the card's Files button.
+     */
+    private suspend fun hasPrefix(containerId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            File(paths.of(containerId).prefix, DriveMap.DRIVE_C).isDirectory
+        }
 
     /** Open the profile of a program that already exists. */
     fun openExisting(shortcut: AppShortcut) {
