@@ -32,8 +32,8 @@
         {
           "key": "display.resolution",
           "title": "Resolution",
-          "help": "Lower is much faster, and it is the biggest dial on this phone: a game at 1280 x 720 measured 20-26 fps and the same scene at 640 x 360 hit the 60 fps cap. Halving each side quarters the pixels. The top of the list is the screen's own size.",
-          "type": "enum",
+          "help": "Lower is much faster, and it is the biggest dial on this phone: a game at 1280 x 720 measured 20-26 fps and the same scene at 640 x 360 hit the 60 fps cap. Halving each side quarters the pixels. Pick a size or type any WxH.",
+          "type": "enumOrText",
           "options": [
             "640x360",
             "640x480",

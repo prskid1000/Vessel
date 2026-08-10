@@ -28,6 +28,7 @@ import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VCheckRow
 import app.vessel.ui.components.VComponentReadout
 import app.vessel.ui.components.VConfirmSheet
+import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VDropdownField
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
@@ -269,7 +270,8 @@ private fun ParamGroup(group: EditorGroup, onParam: (String, ParamValue) -> Unit
 }
 
 /** A short closed choice, which is what can sit in half a sheet's width. */
-private fun EditorParam.pairs(): Boolean = resolved.spec.type == ParamType.ENUM
+private fun EditorParam.pairs(): Boolean =
+    resolved.spec.type == ParamType.ENUM || resolved.spec.type == ParamType.ENUM_OR_TEXT
 
 /**
  * One composable per param *type*, and that is the entire dispatch.
@@ -326,6 +328,29 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
                 selected = (value as? ParamValue.Text)?.value,
                 onSelect = { onParam(spec.key, ParamValue.Text(it)) },
             )
+
+            // VESSEL note: the presets plus anything the setting's parser takes.
+            // `display.resolution` is the case this exists for — parseGeometry
+            // has always accepted any WxH, so the closed list was narrowing the
+            // product below what the code supports.
+            ParamType.ENUM_OR_TEXT -> {
+                val current = (value as? ParamValue.Text)?.value.orEmpty()
+                VComboField(
+                    value = spec.label(current).takeIf { it != current && current in spec.options } ?: current,
+                    options = spec.options.map(spec::label),
+                    onValueChange = { typed ->
+                        // A label came back if they picked; a raw value if they
+                        // typed. Map labels home so the document never stores
+                        // "1280 x 720  (720p)".
+                        val wire = spec.options.firstOrNull { spec.label(it) == typed } ?: typed
+                        onParam(spec.key, ParamValue.Text(wire))
+                    },
+                    placeholder = "1280x720",
+                    isError = current.isNotBlank() &&
+                        current !in spec.options &&
+                        !Regex("""^\s*\d{1,5}\s*[xX]\s*\d{1,5}\s*$""").matches(current),
+                )
+            }
 
             ParamType.TEXT -> VTextField(
                 value = (value as? ParamValue.Text)?.value.orEmpty(),

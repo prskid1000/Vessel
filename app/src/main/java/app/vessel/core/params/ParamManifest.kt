@@ -60,7 +60,7 @@ data class ParamGroup(
 )
 
 /**
- * The five kinds of control the editor knows how to draw.
+ * The six kinds of control the editor knows how to draw.
  *
  * Adding a sixth is the one manifest change that also needs UI, and that is the
  * intended boundary: a new *type* is a new interaction, a new *param* is not.
@@ -78,6 +78,22 @@ enum class ParamType {
      * loophole to reach for when writing options is tedious.
      */
     @SerialName("text") TEXT,
+
+    /**
+     * A closed list the user may also type past: the presets are the answer
+     * almost every time, and the field accepts anything the setting's parser
+     * accepts.
+     *
+     * Added for `display.resolution`. Its option list is 19 sizes and cannot be
+     * complete — `parseGeometry` has always accepted any `WxH`, so the enum was
+     * narrowing the product below what the code supports, and resolution is the
+     * single biggest performance dial on this phone. That is the bar for
+     * reaching for this type: **the underlying setting genuinely accepts values
+     * that cannot be enumerated, and the presets are a convenience rather than
+     * the permitted set.** It is not [TEXT] with a menu bolted on, and it is not
+     * an excuse to stop writing options.
+     */
+    @SerialName("enumOrText") ENUM_OR_TEXT,
 
     @SerialName("bool") BOOL,
     @SerialName("int") INT,
@@ -148,7 +164,7 @@ data class ParamSpec(
         return when (type) {
             ParamType.BOOL -> raw.jsonPrimitive.booleanOrNull?.let(ParamValue::Flag)
             ParamType.INT -> raw.jsonPrimitive.intOrNull?.let(ParamValue::Count)
-            ParamType.ENUM, ParamType.TEXT, ParamType.COMPONENT ->
+            ParamType.ENUM, ParamType.ENUM_OR_TEXT, ParamType.TEXT, ParamType.COMPONENT ->
                 ParamValue.Text(raw.jsonPrimitive.content)
             ParamType.MULTI -> ParamValue.Choices(raw.jsonArray.map { it.jsonPrimitive.content })
         }
@@ -160,7 +176,7 @@ data class ParamSpec(
         val triggerValue = when (type) {
             ParamType.BOOL -> trigger.jsonPrimitive.booleanOrNull?.let(ParamValue::Flag)
             ParamType.INT -> trigger.jsonPrimitive.intOrNull?.let(ParamValue::Count)
-            ParamType.ENUM, ParamType.TEXT, ParamType.COMPONENT ->
+            ParamType.ENUM, ParamType.ENUM_OR_TEXT, ParamType.TEXT, ParamType.COMPONENT ->
                 ParamValue.Text(trigger.jsonPrimitive.content)
             ParamType.MULTI -> ParamValue.Choices(trigger.jsonArray.map { it.jsonPrimitive.content })
         }
