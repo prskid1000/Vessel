@@ -60,6 +60,8 @@ import app.vessel.data.ProvisionStep
 import app.vessel.data.SessionMetricsState
 import app.vessel.data.SessionPhase
 import app.vessel.data.SessionState
+import app.vessel.input.GamepadControl
+import app.vessel.input.InputProfile
 import app.vessel.input.PointerMode
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
@@ -382,6 +384,12 @@ fun SessionDesktop(
     onTogglePointerMode: () -> Unit,
     onShowKeyboard: () -> Unit,
     onLaunchApp: (AppShortcut) -> Unit,
+    /** The bindings this session is running, for the Input panel. */
+    inputProfile: InputProfile = InputProfile.Default,
+    /** Which pad controls are down right now - the panel's live-press rows. */
+    heldControls: Set<GamepadControl> = emptySet(),
+    /** Persist and push a change. There is no draft: see [InputPanel]. */
+    onInputProfile: (InputProfile) -> Unit = {},
     onFocusWindow: (Int) -> Unit,
     onMinimizeWindow: (Int) -> Unit,
     onCloseWindow: (Int) -> Unit,
@@ -412,6 +420,15 @@ fun SessionDesktop(
     var launcherOpen by remember { mutableStateOf(false) }
     var launcherQuery by remember { mutableStateOf("") }
     var confirmingStop by remember { mutableStateOf(false) }
+
+    /**
+     * Whether the Input panel is beside the rail.
+     *
+     * Held here rather than in the rail so the panel can be laid out as the
+     * rail's neighbour in the same Row, which is what puts it beside the tool
+     * that opened it instead of on top of it.
+     */
+    var inputOpen by remember { mutableStateOf(false) }
 
     /** The window whose actions are showing, or null. Held here, not in the bar. */
     var windowMenu by remember { mutableStateOf<GuestWindow?>(null) }
@@ -444,10 +461,16 @@ fun SessionDesktop(
     // unconditionally, which made Back a trap: every press reopened it and
     // nothing could ever leave a running session. Leaving does not stop the
     // container — the foreground service owns it, not this composable.
-    BackHandler(enabled = railOpen || taskbarOpen || launcherOpen || windowMenu != null) {
+    BackHandler(
+        enabled = railOpen || taskbarOpen || launcherOpen || windowMenu != null || inputOpen,
+    ) {
         when {
             windowMenu != null -> windowMenu = null
             launcherOpen -> launcherOpen = false
+            // Before the rail, because it is the layer on top of it. A Back that
+            // closed the rail and left the panel floating beside nothing would be
+            // peeling the wrong one.
+            inputOpen -> inputOpen = false
             taskbarOpen -> taskbarOpen = false
             else -> railOpen = false
         }
@@ -462,7 +485,9 @@ fun SessionDesktop(
         // hit-tests from the top down, so a full-size scrim declared last covers
         // the rail it is a scrim *for*: every button tap landed on it and closed
         // the rail instead of firing. It looked like four dead buttons.
-        if (railOpen || launcherOpen) {
+        // Not while the Input panel is up: a scrim that closed the rail on any
+        // touch would close the panel every time a finger missed a 44 dp chip.
+        if ((railOpen || launcherOpen) && !inputOpen) {
             // Invisible on purpose — the guest's output stays fully readable
             // while either is open.
             Box(
@@ -488,12 +513,30 @@ fun SessionDesktop(
                     state = state,
                     pointerMode = pointerMode,
                     metrics = metrics,
+                    inputOpen = inputOpen,
                     onStop = { confirmingStop = true },
                     onTogglePause = onTogglePause,
                     onTogglePointerMode = onTogglePointerMode,
                     onShowKeyboard = onShowKeyboard,
+                    onOpenInput = { inputOpen = !inputOpen },
                     onOpenFiles = onOpenFiles,
                     onOpenLogs = onOpenLogs,
+                )
+            }
+
+            // Beside the rail, not over it. The rail is what opened it and the two
+            // read as one surface; a panel over the rail would hide the tool that
+            // toggles it.
+            AnimatedVisibility(
+                visible = railOpen && inputOpen,
+                enter = expandHorizontally(tween(Vessel.metrics.durationStandardMs)),
+                exit = shrinkHorizontally(tween(Vessel.metrics.durationStandardMs)),
+            ) {
+                InputPanel(
+                    profile = inputProfile,
+                    held = heldControls,
+                    onProfile = onInputProfile,
+                    onClose = { inputOpen = false },
                 )
             }
 
@@ -730,10 +773,12 @@ private fun SessionRail(
     state: SessionState,
     pointerMode: PointerMode,
     metrics: Flow<SessionMetricsState>?,
+    inputOpen: Boolean,
     onStop: () -> Unit,
     onTogglePause: () -> Unit,
     onTogglePointerMode: () -> Unit,
     onShowKeyboard: () -> Unit,
+    onOpenInput: () -> Unit,
     onOpenFiles: () -> Unit,
     onOpenLogs: () -> Unit,
 ) {
@@ -768,8 +813,10 @@ private fun SessionRail(
 
         RailActions(
             pointerMode = pointerMode,
+            inputOpen = inputOpen,
             onTogglePointerMode = onTogglePointerMode,
             onShowKeyboard = onShowKeyboard,
+            onOpenInput = onOpenInput,
             onOpenFiles = onOpenFiles,
             onOpenLogs = onOpenLogs,
         )
@@ -862,8 +909,10 @@ private fun RailTransport(state: SessionState, onTogglePause: () -> Unit, onStop
 @Composable
 private fun RailActions(
     pointerMode: PointerMode,
+    inputOpen: Boolean,
     onTogglePointerMode: () -> Unit,
     onShowKeyboard: () -> Unit,
+    onOpenInput: () -> Unit,
     onOpenFiles: () -> Unit,
     onOpenLogs: () -> Unit,
 ) {
@@ -886,6 +935,16 @@ private fun RailActions(
         RailAction(
             VIcons.Keyboard, "Keys", "Show the on-screen keyboard",
             onShowKeyboard, Modifier.weight(1f),
+        )
+        RailAction(
+            icon = VIcons.Gamepad,
+            caption = "Input",
+            // Names the device in the user's hands, never what the guest sees.
+            // Vessel ships no XInput and a Windows game cannot see a controller.
+            contentDescription = "Bindings for a controller and the touch overlay",
+            onClick = onOpenInput,
+            modifier = Modifier.weight(1f),
+            style = if (inputOpen) VButtonStyle.Primary else VButtonStyle.Secondary,
         )
         RailAction(
             VIcons.Folder, "Files", "Browse this container's C: drive",
@@ -913,6 +972,8 @@ private fun RailAction(
     contentDescription: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Primary while the tool's own panel is open, so the row says which one is. */
+    style: VButtonStyle = VButtonStyle.Secondary,
 ) {
     Column(
         modifier,
@@ -923,6 +984,7 @@ private fun RailAction(
             icon = icon,
             contentDescription = contentDescription,
             onClick = onClick,
+            style = style,
             size = Vessel.metrics.touchTarget,
         )
         Text(

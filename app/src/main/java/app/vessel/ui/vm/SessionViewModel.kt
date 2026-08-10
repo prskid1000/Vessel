@@ -8,11 +8,14 @@ import app.vessel.core.DisplayGeometry
 import app.vessel.core.FrameRate
 import app.vessel.core.SessionDisplayServer
 import app.vessel.data.ContainerRepository
+import app.vessel.data.InputProfileRepository
 import app.vessel.data.SessionMetricsRecorder
 import app.vessel.data.SessionMetricsState
 import app.vessel.data.SessionPhase
 import app.vessel.data.SessionRuntime
 import app.vessel.data.SessionState
+import app.vessel.input.GamepadControl
+import app.vessel.input.InputProfile
 import app.vessel.input.PointerMode
 import app.vessel.service.SessionService
 import app.vessel.ui.shell.AppRegistry
@@ -27,8 +30,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -59,6 +64,7 @@ class SessionViewModel @Inject constructor(
     private val containers: ContainerRepository,
     private val display: SessionDisplayServer,
     private val shell: ShellHost,
+    private val inputProfiles: InputProfileRepository,
     registry: AppRegistry,
     recorder: SessionMetricsRecorder,
 ) : ViewModel() {
@@ -191,6 +197,59 @@ class SessionViewModel @Inject constructor(
      * sample rate, which on this screen is the difference that matters.
      */
     val metrics: Flow<SessionMetricsState> = recorder.watched()
+
+    /** The binding table the running session is on, for the Input panel. */
+    val inputProfile: StateFlow<InputProfile> = display.inputProfile
+
+    /**
+     * Which pad controls are physically down, for the panel's live-press rows.
+     *
+     * Straight through from the display server for the same reason [surface] is:
+     * the view owns the translator, and a second copy here would be a copy to
+     * keep in step with a thing that changes at a stick's report rate.
+     */
+    val heldControls: StateFlow<Set<GamepadControl>> = display.heldControls
+
+    /**
+     * Change the bindings, now, and remember it.
+     *
+     * **Persist and push, with no Save.** The whole argument for editing bindings
+     * from inside a session is that the change is visible the moment it is made,
+     * so a draft would defeat the feature. The push releases every held control
+     * first — see [SessionDisplayServer.setInputProfile].
+     *
+     * **Editing the built-in default adopts it.** The default is a constant and is
+     * never written to disk, which is what keeps an untouched container's bytes
+     * unchanged; so the first edit copies it into a real profile, points this
+     * container at the copy and continues. The name is unchanged, so nothing about
+     * it appears to move — and every *other* container still on the default is
+     * left exactly as it was, which is the behaviour a shared default has to have.
+     */
+    fun setInputProfile(next: InputProfile) {
+        viewModelScope.launch {
+            var profile = next
+            if (profile.isBuiltInDefault) {
+                profile = profile.copy(
+                    id = UUID.randomUUID().toString(),
+                    name = inputProfiles.nextName(
+                        profile.name,
+                        inputProfiles.profiles.first().map { it.name },
+                    ),
+                )
+                state.value.containerId?.let { id ->
+                    containers.get(id)?.let { container ->
+                        containers.save(
+                            container.copy(
+                                input = container.input.copy(profileId = profile.id),
+                            ),
+                        )
+                    }
+                }
+            }
+            inputProfiles.save(profile)
+            display.setInputProfile(profile)
+        }
+    }
 
     fun togglePointerMode() = display.setPointerMode(pointerMode.value.toggled())
 

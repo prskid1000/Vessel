@@ -338,11 +338,28 @@ data class VMetrics(
      * widest thing in it, the rail would breathe in and out by a few pixels every
      * second as the digits changed, over a desktop somebody is trying to read.
      *
-     * 212 dp leaves ~184 dp inside the card, which is what the four-column tool
-     * row needs at a 44 dp target, and gives each sparkline a box wide enough that
-     * a 60-sample window is more than two pixels a sample.
+     * 212 dp left ~184 dp inside the card, which is what a four-column tool row
+     * needed at a 44 dp target, and gave each sparkline a box wide enough that a
+     * 60-sample window is more than two pixels a sample.
+     *
+     * **260 since Input became the fifth tool.** Five 44 dp targets and four 3 dp
+     * gaps need 232 dp inside the card, so nothing shrinks and nothing wraps: the
+     * row still holds in one line and the rail still holds in one screen without
+     * scrolling. It costs 48 dp of a landscape window — 28% of it instead of 23%
+     * — which is the trade DESIGN.md's "the margin is one design change wide"
+     * was describing, spent on the change it was saved for.
      */
-    val railWidth: Dp = 212.dp,
+    val railWidth: Dp = 260.dp,
+
+    /**
+     * The Input panel, opened beside the rail rather than over it.
+     *
+     * The same 560 dp as [launcherWidth], and for the same reason: it is the
+     * widest a panel can be on a 927 dp landscape window while leaving the guest
+     * readable beside it. The pad diagram and the binding list sit side by side
+     * inside it, which is what keeps Learn working while a key is being chosen.
+     */
+    val inputPanelWidth: Dp = 560.dp,
 
     /** The visible accent mark of the closed rail's edge handle. */
     val railHandle: Dp = 4.dp,

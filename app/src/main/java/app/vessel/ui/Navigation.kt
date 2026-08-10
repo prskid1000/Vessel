@@ -286,10 +286,18 @@ fun VesselApp(
             // sample. Hoisting it means the taskbar takes a value and only the
             // readout's own draw is invalidated.
             val frameRate by session.frameRate.collectAsStateWithLifecycle()
+            val inputProfile by session.inputProfile.collectAsStateWithLifecycle()
+            // The pad's held set changes at a stick's report rate. Collected here
+            // for the same reason `frameRate` is: the panel takes a value, so only
+            // the rows that light are invalidated rather than the desktop.
+            val heldControls by session.heldControls.collectAsStateWithLifecycle()
             SessionDesktop(
                 state = state,
                 surface = surface,
                 pointerMode = pointerMode,
+                inputProfile = inputProfile,
+                heldControls = heldControls,
+                onInputProfile = session::setInputProfile,
                 windows = windows,
                 frameRate = frameRate,
                 shortcuts = shortcuts,
