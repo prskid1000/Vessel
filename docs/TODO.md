@@ -111,10 +111,25 @@ and the two that are not share a root cause.
   with nothing else touching the device, and either the window comes back or
   `can_activate_window` is shown refusing it.
 
-- [~] **The white region on resize: cause found and measured, fix written and
-  not yet built.** *2026-08-10.* Three explanations were wrong before this one —
-  a Win32 caption, a compositor coverage gap, and a missing X `Expose` — and this
-  one is not a fourth guess: it is a trace diff taken on the device.
+- [x] **The white region on resize — fixed, and confirmed on the device.**
+  *2026-08-10.* `patches/wine/0012` built into `wine-11.14-canoe.wcp`, installed,
+  and watched: a border drag now repaints the newly exposed area immediately,
+  with no minimise/restore. Confirmed by the reporter, who is the person who
+  found the symptom and the only one who had been able to reproduce it reliably.
+
+  **A pass here cannot be a stale-binary artefact, which is why one report is
+  enough.** The pre-patch code *cannot* produce this behaviour:
+  `expose_window_surface` intersects the exposed rectangle with the
+  **pre-resize** `surface->rect`, so the new strip is clipped away before
+  anything is flushed, and `window_update_client_config` refused before the
+  Win32 window could be resized at all. There is no path by which the old
+  binary repaints on a drag. Seeing the repaint is therefore proof the new one
+  is running — the failure mode of a stale component is "still broken", not a
+  false pass.
+
+  Three explanations were wrong before this one — a Win32 caption, a compositor
+  coverage gap, and a missing X `Expose` — and this one was not a fourth guess:
+  it was a trace diff taken on the device.
 
   **Wine never resizes the Win32 window when the window manager resizes the X
   window, because `window_update_client_config()` returns 0 at
@@ -662,9 +677,16 @@ Four things the interface said that were not true, and one that still is.
   path-traversing package id. *Not yet done:* nothing is wired to a screen (see
   `out/needs-from-install-agent.md`), and **nothing publishes `contents.json`**
   — see §6.
-- [ ] **Move the `drive_c` reader out of `ui/vm`.** `FilesViewModel` reads the
-  prefix directly with `java.io.File`, which is correct but belongs in `data/`
-  alongside the import/export copies. A decision, not an oversight.
+- [x] **Move the `drive_c` reader out of `ui/vm`.** *Done 2026-08-10.*
+  `data/PrefixFiles.kt` owns every `java.io.File` call the browser makes —
+  listing, guest-path resolution, the SAF import/export copies and the free-space
+  query — and `FilesViewModel` no longer imports `java.io.File` for anything but
+  the prefix it is handed. The one thing worth more than the tidiness: a listing
+  failure now comes back **typed** (`NoSystemDrive` / `NotAFolder` / `Denied`)
+  instead of as a nullable list, because "Android refused this folder" and "this
+  folder is empty" are indistinguishable from a list and mean opposite things —
+  which is the bug that once reported a filesystem with everything in it as an
+  empty folder.
 ## 5. Performance
 
 `docs/OPTIMIZATION.md` is the ranked audit and the measured baseline. Closed
