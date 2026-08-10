@@ -142,4 +142,18 @@ public abstract class ShaderMaterial {
         int location = getUniformLocation(uniform);
         if (location != -1) GLES20.glUniform2f(location, x, y);
     }
+
+    /**
+     * VESSEL: the vec4 setter upstream had no use for.
+     *
+     * Purely additive, and deliberately the same shape as the five setters above
+     * so it shares their per-program location cache. {@link SGSRMaterial} needs
+     * it for SGSR's single {@code ViewportInfo[0]} uniform; without it that one
+     * uniform would have to call {@code glGetUniformLocation} itself every frame
+     * and would be the only uniform in the renderer that does.
+     */
+    public void setUniformVec4(Uniform uniform, float x, float y, float z, float w) {
+        int location = getUniformLocation(uniform);
+        if (location != -1) GLES20.glUniform4f(location, x, y, z, w);
+    }
 }

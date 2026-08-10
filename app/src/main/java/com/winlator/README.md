@@ -351,6 +351,52 @@ The modifications, in the order they were made:
    synchronously before it sends `PresentIdleNotify`; `VESSEL_WSI_DRI3_FENCE=1`
    turns the request back on to re-measure once the server can answer it.
 
+22. **`SGSRMaterial`, a new file, and the two vendored files that reach it —
+   `GLRenderer` and `ShaderMaterial`.** The compositor's only upscale was
+   `GL_LINEAR` (`Texture.java:33-34`), so running the guest below the screen's
+   resolution meant accepting a soft picture. **Snapdragon Game Super Resolution
+   1.0** is Qualcomm's single-pass edge-directed spatial upscale, written for
+   Adreno, and it is structurally a drop-in for the existing blit: one fragment
+   shader, one extra uniform, no history buffer and no extra render target.
+
+   *Licence, and it is not the one this was requested as.* SGSR is
+   **BSD-3-Clause**, not Apache-2.0 — `SPDX-License-Identifier: BSD-3-Clause`,
+   Copyright (c) 2023 Qualcomm Innovation Center, Inc. Clause 1 asks that
+   redistributed source retain the notice, so the header is reproduced verbatim
+   above the shader body; the full text ships as `res/raw/license_bsd_sgsr.txt`
+   and is listed on the Licences screen. `docs/LICENSING.md` carries the entry
+   and `LicensingTest` asserts both halves. The shader is
+   `sgsr/v1/include/glsl/sgsr1_shader_mobile.frag` from
+   `SnapdragonStudios/snapdragon-gsr`, and the four adaptations it needed — the
+   `#version` line, a constant `textureGather` component, dropped `layout`
+   qualifiers and the removed Vulkan uniform-block branch — are each argued for
+   in `SGSRMaterial.SGSR_FRAGMENT_BODY`'s comment. Nothing in the algorithm or
+   its constants was touched.
+
+   *It is off unless it helps*, which is the part that made this worth doing
+   rather than a switch. `useSGSRFor()` engages only when the window's texture is
+   drawn into more pixels than it has texels — on the smaller axis, so a
+   one-axis stretch does not qualify — and never for a transparent window,
+   because SGSR's own last line is `color.w = 1.0; //assume alpha channel is not
+   used`. At 1:1 the shader is not merely a no-op, it is never bound.
+   `SGSRMaterial.isSupported()` is the third gate: `textureGather` is not in GLSL
+   ES 3.00, so the shading-language version is read back once per context and the
+   shader is compiled at what the driver reports rather than at a guess. Below
+   3.10 nothing is compiled at all — `compileShaders` throws on failure and a
+   black desktop is a far worse outcome than a soft one.
+
+   *What this cost in the vendored files.* `GLRenderer.renderWindows()` bound one
+   material outside the window loop; with two of them the bind moves inside it,
+   behind `bindWindowMaterial()`, which keeps the common case at exactly one
+   `glUseProgram` per frame as before. `ShaderMaterial` gains an additive
+   `setUniformVec4`, so SGSR's one `ViewportInfo[0]` uniform shares the
+   per-program location cache instead of being the only uniform in the renderer
+   that calls `glGetUniformLocation` every frame. The new vertex shader pins
+   `position` to `layout(location = 0)` because `VertexAttribute` resolves an
+   attribute location once per context and reuses it across programs — the
+   cursor and window materials already rely on a lone attribute landing at 0, and
+   a third program that only *probably* does would turn that into an assumption.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -366,10 +412,11 @@ fails the build.
 | `app/src/main/java/com/winlator/core/ImageUtils.java` | 11 |
 | `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
 | `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
-| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14 |
+| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
-| `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
+| `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |

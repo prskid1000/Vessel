@@ -3,6 +3,7 @@ package app.vessel.core
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamValue
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * The fixed Wine debug channel set.
@@ -335,6 +336,12 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "FEX_DISABLEL2CACHE",
     "FEX_DYNAMICL1CACHE",
     "FEX_APP_CACHE_LOCATION",
+    // Reserved because it is half of a pair. The flag makes a run *write* a
+    // codemap; teardown is what turns one into a cache. A container that turned
+    // the flag off would keep the teardown step and get nothing to compile; one
+    // that turned it on where Vessel had turned it off would write codemaps
+    // nothing reads. Neither is a setting anyone wants to be able to express.
+    "FEX_ENABLECODECACHINGWIP",
 
     // FEX's log destination, for the same reason as WINEDEBUG: docs/LOGGING.md
     // says everything diagnostic arrives on fd 2, and FEX's defaults send it
@@ -442,6 +449,101 @@ data class TurnipDriver(
 )
 
 /**
+ * The installed FEX package, for the two things the environment needs from it.
+ *
+ * Resolved by `ComponentStore.directoryFor(containerId, FEXCORE)` and handed in
+ * for the same reason as [TurnipDriver]: this function is pure and has no disk.
+ *
+ * Null is a real state and not an error here — the *session* cannot start
+ * without FEX, but [sessionEnvironment] is also called by tests and by the
+ * container screens, and an environment that omits the cache key is better than
+ * one that invents a package identity.
+ */
+data class FexPackage(
+    /** `files/components/FEXCore/<versionCode>/`. */
+    val directory: File,
+    /**
+     * What identifies this build of FEX to the code cache.
+     *
+     * **Honest about its own resolution.** The version code alone would call two
+     * rebuilds of FEX-2608 the same package, and they generate different code;
+     * the DLL lengths catch a rebuild that changed anything at all, which every
+     * real one does. What it cannot catch is two builds whose DLLs happen to be
+     * the same length and differ inside — nothing cheap can, and FEX's own cache
+     * header has the identical gap (`// TODO: Also check for matching FEX
+     * version from cache header`, `FEXOfflineCompiler/Main.cpp`). Hashing 10 MB
+     * of DLL on every launch would close it and is not worth the launch time.
+     */
+    val identity: String,
+    /**
+     * `FEXOfflineCompiler64.exe`, or null when the installed package predates
+     * `build/fex.sh` packaging it. The whole cache feature is off in that case:
+     * writing codemaps nothing compiles is the pure cost this used to be.
+     */
+    val offlineCompiler: File?,
+)
+
+/**
+ * `FEX_*` variables that are deliberately **not** part of the cache key.
+ *
+ * The key is derived from the environment map rather than from a list of knobs,
+ * because a list of knobs goes stale the first time someone adds one and the
+ * failure mode of a stale *inclusion* list is a cache silently built under
+ * different codegen settings. So the rule is "every `FEX_*` variable", and this
+ * is the exception list — which fails the safe way round: forgetting to exclude
+ * something costs a rebuild, forgetting to include something is a correctness
+ * bug, and only the first can happen now.
+ *
+ * Three entries, each for a stated reason:
+ *
+ *  - `FEX_APP_CACHE_LOCATION` is the *output*. Including it would be circular.
+ *  - `FEX_SILENTLOG` and `FEX_OUTPUTLOG` choose where FEX's diagnostics go and
+ *    have no effect on generated code. Excluding them is not just tidiness:
+ *    both are reachable from the Diagnostics screen, and a user who turns FEX
+ *    logging on to investigate a problem would otherwise be handed a *cold*
+ *    cache — a different situation from the one they are trying to observe.
+ */
+val FEX_CACHE_KEY_IGNORED: Set<String> = setOf(
+    "FEX_APP_CACHE_LOCATION",
+    "FEX_SILENTLOG",
+    "FEX_OUTPUTLOG",
+)
+
+/**
+ * A short digest of everything about FEX that decides what code it generates.
+ *
+ * **This is Vessel's answer to `CodeCacheConfigId` being `0 // TODO` upstream.**
+ * `ImageTracker.cpp` keys a cache file on the guest binary and on a config id
+ * that is hardcoded to zero, so FEX will happily load a cache built under a
+ * different TSO setting or a different CPU tuning and run it. That is a
+ * correctness hazard rather than a performance one, and it needs no FEX patch
+ * to fix from here: Vessel owns `FEX_APP_CACHE_LOCATION`, so putting the digest
+ * in the *path* means a configuration change lands in a different directory and
+ * the old cache becomes unreachable instead of silently wrong.
+ *
+ * Derived from [environment] as it actually ended up — after the manifest and
+ * diagnostics stages, so a knob a container adds is in the key without anything
+ * here being told about it. See [FEX_CACHE_KEY_IGNORED] for the three
+ * exceptions and why the exception list is the safe direction.
+ *
+ * Twelve hex characters of SHA-256. It is a directory name, not a security
+ * boundary: 48 bits is far past the point where an accidental collision between
+ * two configurations of one phone is worth thinking about, and a shorter path is
+ * a readable one.
+ */
+internal fun fexCacheKey(environment: Map<String, String>, fex: FexPackage?): String {
+    val material = buildString {
+        append("fex=").append(fex?.identity ?: "none").append('\n')
+        environment.keys
+            .filter { it.startsWith("FEX_") && it !in FEX_CACHE_KEY_IGNORED }
+            .sorted()
+            .forEach { append(it).append('=').append(environment[it]).append('\n') }
+    }
+    val digest = MessageDigest.getInstance("SHA-256").digest(material.toByteArray(Charsets.UTF_8))
+    return digest.take(6).joinToString("") { "%02x".format(it) }
+}
+
+/**
  * The two container directories the environment names.
  *
  * Both are still per container — the prefix is the container, and the logs are
@@ -509,6 +611,7 @@ fun sessionEnvironment(
     manifest: ParamManifest?,
     paths: SessionPaths,
     turnip: TurnipDriver? = null,
+    fex: FexPackage? = null,
     display: String = DEFAULT_DISPLAY,
 ): Map<String, String> {
     val environment = LinkedHashMap<String, String>()
@@ -634,23 +737,32 @@ fun sessionEnvironment(
     // a container is reset. FEX defaulted to `%LOCALAPPDATA%\fex-emu\` inside
     // the prefix, which survives a cache clear and is invisible to anything
     // that reasons about container size.
+    // Rewritten at the end of this function to append the configuration digest;
+    // set here so `LinkedHashMap` keeps the variable in this position, next to
+    // the FEX knobs the digest is taken over.
     environment["FEX_APP_CACHE_LOCATION"] = File(paths.caches, "fex").absolutePath + File.separator
+
+    // **`FEX_ENABLECODECACHINGWIP` is on, and both of the reasons it used to be
+    // off are now answered.**
     //
-    // **`FEX_ENABLECODECACHINGWIP` is deliberately NOT set, and this is the
-    // reason rather than an oversight.** The flag makes a run write a codemap;
-    // it does not compile one. Turning it into a cache needs
-    // `FEXOfflineCompiler64.exe generate <codemap>`, which `build/fex.sh` now
-    // packages but nothing invokes — so enabling the flag today would add a
-    // file write per module load on every launch and never once read a cache
-    // back. That is pure cost.
+    // The flag makes a run write a *codemap* — it does not compile one. On its
+    // own that is pure cost: a file write per module load on every launch and
+    // never a cache read back. Two things had to exist first, and both do:
     //
-    // Two things to settle before it goes on. Something has to run `generate`
-    // — after a session ends is the obvious moment, since the codemap is
-    // complete and the device is idle. And `CodeCacheConfigId` is `0 // TODO`
-    // upstream (`ImageTracker.cpp`), so a cache is **not keyed on FEX's
-    // configuration**: change a TSO setting and the next run silently loads a
-    // cache built under the old one. The knobs above are exactly the kind of
-    // change that would do it.
+    //  1. **Something runs the compiler.** `SessionRuntime.teardown` runs
+    //     `FEXOfflineCompiler64.exe process-all` once the guest is dead, which
+    //     merges the run's codemaps into the reference set and generates a cache
+    //     per binary. Teardown is the right moment because the codemap is
+    //     complete and nothing else is using the CPU. It is best-effort and
+    //     cannot fail a teardown; see the method for what it does when it fails.
+    //  2. **The cache is keyed on FEX's configuration.** Upstream's
+    //     `CodeCacheConfigId` is `0 // TODO` (`ImageTracker.cpp`), so FEX itself
+    //     would load a cache built under a different TSO or CPU setting without
+    //     noticing. [fexCacheKey] closes that from this side — a configuration
+    //     change moves the whole cache directory, so a stale cache becomes
+    //     unreachable rather than silently wrong.
+    environment["FEX_ENABLECODECACHINGWIP"] = "1"
+
     // The fixed channel set. The diagnostics stage at the end of this function
     // may replace it — with a string that still *starts* with this one, because
     // [composeWineDebug] appends and never substitutes.
@@ -919,6 +1031,18 @@ fun sessionEnvironment(
         if (key !in DIAGNOSTIC_SESSION_ENV) continue
         environment[key] = value
     }
+
+    // **Last, because the key has to be taken over the environment that actually
+    // ran.** A manifest param may add a `FEX_*` variable this file has never
+    // heard of and the diagnostics stage may rewrite one, and either changes what
+    // FEX generates. Computing the digest here is what makes "derived from the
+    // environment, not from a list" true rather than nearly true.
+    //
+    // The reassignment keeps the variable's original position — `LinkedHashMap`
+    // does not move a key on update — so the environment reads in the same order
+    // whatever the digest turns out to be.
+    environment["FEX_APP_CACHE_LOCATION"] =
+        File(File(paths.caches, "fex"), fexCacheKey(environment, fex)).absolutePath + File.separator
 
     return environment
 }

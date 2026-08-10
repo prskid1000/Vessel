@@ -81,6 +81,17 @@ object Licences {
             source = "https://github.com/bylaws/libadrenotools",
         ),
         LicenceEntry(
+            title = "Snapdragon Game Super Resolution",
+            author = "Qualcomm Innovation Center, Inc.",
+            licence = "BSD 3-Clause",
+            role = "Sharpens a game running below the screen's resolution. Its " +
+                "fragment shader is carried inside the renderer, which is what " +
+                "clause 1 — retain the copyright notice in redistributed source " +
+                "— asks be said here.",
+            text = R.raw.license_bsd_sgsr,
+            source = "https://github.com/SnapdragonStudios/snapdragon-gsr",
+        ),
+        LicenceEntry(
             title = "Inter",
             author = "Rasmus Andersson",
             licence = "SIL Open Font License 1.1",

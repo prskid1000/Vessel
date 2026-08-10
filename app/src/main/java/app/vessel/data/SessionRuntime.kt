@@ -18,6 +18,7 @@ import app.vessel.core.SessionDisplayServer
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
+import app.vessel.core.FexPackage
 import app.vessel.core.TurnipDriver
 import app.vessel.core.WINE_BOOT
 import app.vessel.core.WINE_REGEDIT
@@ -660,6 +661,7 @@ class SessionRuntime @Inject constructor(
         layout.cacheDirectories.forEach { if (!it.isDirectory) it.mkdirs() }
 
         val turnip = turnipDriver(containerId)
+        val fex = fexPackage(containerId)
         val environment = wineLauncherEnvironment(
             tree = tree,
             scratch = SessionScratch(home = layout.base, tmp = layout.tmp),
@@ -673,6 +675,7 @@ class SessionRuntime @Inject constructor(
             manifest = manifest,
             paths = SessionPaths(prefix = layout.prefix, logs = layout.logs),
             turnip = turnip,
+            fex = fex,
             display = DEFAULT_DISPLAY,
         )
 
@@ -689,6 +692,7 @@ class SessionRuntime @Inject constructor(
             tree = tree,
             environment = environment,
             log = log,
+            offlineCompiler = fex?.offlineCompiler,
         )
         plan = resolved
 
@@ -1346,6 +1350,10 @@ class SessionRuntime @Inject constructor(
         guestOutput?.close()
         guestOutput = null
 
+        // Between the guest dying and the wake lock going, which is the only
+        // window in which the CPU is both idle and still ours.
+        if (current != null) generateCodeCache(current, log)
+
         runCatching { display.stop() }
         releaseWakeLock()
 
@@ -1370,6 +1378,96 @@ class SessionRuntime @Inject constructor(
         if (final.active) {
             // Cancelled mid-run: the phase never advanced on its own.
             _state.update { it.copy(phase = SessionPhase.EXITED, exitCode = it.exitCode ?: 0) }
+        }
+    }
+
+    /**
+     * Turn this run's codemaps into a FEX code cache, if there are any.
+     *
+     * **This is the half of the code-cache feature that is not a flag.**
+     * `FEX_ENABLECODECACHINGWIP=1` makes a run record which guest blocks were
+     * translated — a *codemap*, under `<cache>/codemap/new/`. It compiles
+     * nothing. `FEXOfflineCompiler64.exe process-all` is what merges those into
+     * the reference codemaps and emits one cache file per binary, which the next
+     * launch maps at image-load time instead of re-JITting. Without this call the
+     * flag is a file write per module load that nothing ever reads back, which is
+     * exactly why it used to be off.
+     *
+     * **Best-effort, and every clause of that is deliberate:**
+     *
+     *  - It runs only when `codemap/new` has something in it, so a session that
+     *     translated nothing new — and a device with no FEX package, and a FEX
+     *     package too old to carry the compiler — pays a directory listing.
+     *  - It is bounded by [CODE_CACHE_TIMEOUT_MS]. A compiler that wedges gets
+     *     killed and teardown carries on; the alternative is a Stop button that
+     *     never finishes, which is a worse failure than a cold next launch.
+     *  - Every outcome is a line in the session log, including the boring one.
+     *     A cache that silently fails to build is indistinguishable from a cache
+     *     that is not helping, and that is the one thing this must not be:
+     *     the whole feature is a claim about launch time, and a claim needs a
+     *     record. Nothing here throws — `runCatching` wraps the lot — but nothing
+     *     here is swallowed either.
+     *
+     * Run from the component directory by its unix path rather than from
+     * `system32`: `copyWindowsPayload` deploys `.dll` files and this is an
+     * `.exe`, and copying a 3 MB tool into every prefix to run it once per
+     * session is not worth the disk. Wine takes a unix path as the program
+     * argument, and `process-all`'s own re-exec of itself for each binary
+     * resolves siblings from `GetModuleFileNameA`, which lands back in the same
+     * directory.
+     */
+    private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog) {
+        val compiler = current.offlineCompiler ?: return
+        val cache = current.environment[FEX_CACHE_LOCATION_ENV]?.let(::File) ?: return
+        val pending = withContext(Dispatchers.IO) {
+            runCatching { File(File(cache, "codemap"), "new").listFiles()?.size ?: 0 }.getOrDefault(0)
+        }
+        if (pending == 0) return
+
+        log.line(
+            LogSource.VESSEL,
+            LogLevel.INFO,
+            "building the FEX code cache from $pending new codemap(s) in ${cache.path}",
+        )
+        val started = System.currentTimeMillis()
+        val spec = ProcessSpec(
+            argv = current.tree.programArgv(compiler.absolutePath, listOf("process-all")),
+            environment = current.environment,
+            workingDirectory = current.layout.base,
+        )
+        val outcome = runCatching {
+            withTimeoutOrNull(CODE_CACHE_TIMEOUT_MS) {
+                runner.run(spec) { line -> record(log, line) }
+            }
+        }
+        val elapsed = System.currentTimeMillis() - started
+        val result = outcome.getOrNull()
+        when {
+            outcome.isFailure -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache was not built: ${outcome.exceptionOrNull()?.message}",
+            )
+            result == null -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache did not finish in ${CODE_CACHE_TIMEOUT_MS / 1000} s and was killed",
+            )
+            result is ProcessResult.NotStarted -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache compiler could not start: ${result.reason}",
+            )
+            result is ProcessResult.Exited && result.code != 0 -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache compiler exited with ${result.code} after ${elapsed} ms",
+            )
+            else -> log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "FEX code cache built in ${elapsed} ms",
+            )
         }
     }
 
@@ -1653,6 +1751,35 @@ class SessionRuntime @Inject constructor(
         )
     }
 
+    /**
+     * The installed FEX package, for the code cache. Null when none is installed.
+     *
+     * Null here is not the same as [installFex] failing — that step is the one
+     * that refuses a session with no FEX, and it runs later with the error
+     * message. This is only asked for two facts: what to key the cache on, and
+     * whether the package carries the offline compiler.
+     *
+     * [FexPackage.identity] is the store's version code plus the byte lengths of
+     * the two CPU DLLs. See the field for what that catches and what it does not.
+     */
+    private suspend fun fexPackage(containerId: String): FexPackage? {
+        val directory = components.directoryFor(containerId, ComponentType.FEXCORE) ?: return null
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val compiler = File(directory, FEX_OFFLINE_COMPILER).takeIf { it.isFile }
+                FexPackage(
+                    directory = directory,
+                    identity = listOf(
+                        directory.name,
+                        File(directory, ARM64EC_FEX).length().toString(),
+                        File(directory, WOW64_FEX).length().toString(),
+                    ).joinToString("/"),
+                    offlineCompiler = compiler,
+                )
+            }.getOrNull()
+        }
+    }
+
     private fun text(profile: ContainerProfile, manifest: ParamManifest?, key: String): String? =
         (profile.params[key] as? ParamValue.Text)?.value
             ?: (manifest?.spec(key)?.defaultValue() as? ParamValue.Text)?.value
@@ -1754,6 +1881,16 @@ class SessionRuntime @Inject constructor(
         val environment: Map<String, String>,
         /** Carried so [PrefixBootstrap]'s callbacks can write to the same file. */
         val log: SessionLog,
+        /**
+         * `FEXOfflineCompiler64.exe` in the installed FEX package, or null when
+         * the package has none. Teardown runs it; see [generateCodeCache].
+         *
+         * Held on the plan rather than looked up in teardown because teardown has
+         * no container id — it has already stopped being a session by then — and
+         * because resolving a component is a suspend call against a store this
+         * class should not be reaching into while it is shutting one down.
+         */
+        val offlineCompiler: File? = null,
         /**
          * The desktop's size, set once the desktop is actually started.
          *
@@ -1865,6 +2002,32 @@ class SessionRuntime @Inject constructor(
 
         /** `libadrenotools` reads this file; `build/turnip.sh` writes it. */
         const val ADRENOTOOLS_META = "meta.json"
+
+        /**
+         * FEX's ahead-of-time cache compiler, packaged by `build/fex.sh`.
+         *
+         * The `64` is FEX's own naming and means ARM64EC, not x86-64 —
+         * `FEXOfflineCompiler/CMakeLists.txt` names the arm64ec build `…64` and
+         * the WoW64 one `…32`. `process-all` re-execs the sibling that matches
+         * each binary's bitness, so a 32-bit guest needs `…32.exe` in the same
+         * directory; this build ships only the 64-bit one, and a 32-bit binary
+         * gets a logged "cache generation failed" rather than a broken cache.
+         */
+        const val FEX_OFFLINE_COMPILER = "FEXOfflineCompiler64.exe"
+
+        /** Read back off the plan's environment; [app.vessel.core.fexCacheKey] wrote it. */
+        const val FEX_CACHE_LOCATION_ENV = "FEX_APP_CACHE_LOCATION"
+
+        /**
+         * How long teardown will wait for the cache compiler.
+         *
+         * Generous because it is compiling every block a whole session
+         * translated, and bounded because it sits between Stop and the session
+         * being over. A run that needs longer than this loses that launch's
+         * codemap merge and nothing else — `process-all` leaves the reference
+         * codemaps it already wrote and picks the rest up next time.
+         */
+        const val CODE_CACHE_TIMEOUT_MS = 120_000L
 
         /** Long enough for a prefix with processes to shut down, short enough to feel like Stop. */
         const val KILL_TIMEOUT_MS = 8_000L

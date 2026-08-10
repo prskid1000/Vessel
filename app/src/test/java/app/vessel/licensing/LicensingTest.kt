@@ -140,6 +140,34 @@ class LicensingTest {
     }
 
     @Test
+    fun `the SGSR notice ships, and says the licence SGSR is actually under`() {
+        // BSD-3-Clause clause 1: redistributions of source code must retain the
+        // copyright notice. The source in question is the fragment shader inside
+        // SGSRMaterial, so the notice has to be in two places — beside the code
+        // and in the APK — and both are asserted here.
+        //
+        // The SPDX line is checked by name because this was requested as
+        // Apache-2.0 and is not: getting that wrong would have shipped the wrong
+        // licence text for a component whose licence is the whole obligation.
+        val shipped = RepoFiles.file("app/src/main/res/raw/license_bsd_sgsr.txt").readText()
+        assertTrue(shipped.contains("SPDX-License-Identifier: BSD-3-Clause"))
+        assertTrue(shipped.contains("Qualcomm Innovation Center, Inc."))
+        assertTrue(
+            "the shipped text is not the three-clause licence",
+            shipped.contains("Neither the name of the copyright holder"),
+        )
+
+        val material = RepoFiles
+            .file("app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java")
+            .readText()
+        assertTrue(
+            "SGSRMaterial does not carry the copyright notice its shader is under",
+            material.contains("Qualcomm Innovation Center, Inc. All rights reserved."),
+        )
+        assertTrue(material.contains("SPDX-License-Identifier: BSD-3-Clause"))
+    }
+
+    @Test
     fun `the licence notice does not repeat the retracted libadrenotools claim`() {
         // LICENSE used to argue that "or later" was needed because
         // libadrenotools is LGPL-3.0. It is BSD-2-Clause; the retraction, and
@@ -280,6 +308,7 @@ class LicensingTest {
             "@raw/license_ofl_inter",
             "@raw/license_ofl_jetbrains_mono",
             "@raw/license_bsd_adrenotools",
+            "@raw/license_bsd_sgsr",
             "@font/inter_variable",
             "@font/jetbrains_mono_variable",
         )

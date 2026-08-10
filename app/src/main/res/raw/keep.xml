@@ -5,9 +5,9 @@
   `isShrinkResources = true` on the release build deletes any resource nothing
   references from code, and everything named here is referenced by nothing:
 
-    - The four licence texts exist to satisfy an obligation. LGPL-2.1 section 6
+    - The five licence texts exist to satisfy an obligation. LGPL-2.1 section 6
       says "You must supply a copy of this License" with each copy of the work,
-      and the work is the APK. `LicencesScreen` now reads all four through
+      and the work is the APK. `LicencesScreen` now reads all five through
       `R.raw`, so the shrinker would keep them anyway — but the obligation does
       not depend on a screen continuing to reference them, and losing one to
       resource shrinking would be a licensing regression that no test of the
@@ -21,4 +21,4 @@
   Removing a name from this list is a deliberate act. See docs/LICENSING.md.
 -->
 <resources xmlns:tools="http://schemas.android.com/tools"
-    tools:keep="@raw/license_lgpl_2_1,@raw/license_ofl_inter,@raw/license_ofl_jetbrains_mono,@raw/license_bsd_adrenotools,@font/inter_variable,@font/jetbrains_mono_variable" />
+    tools:keep="@raw/license_lgpl_2_1,@raw/license_ofl_inter,@raw/license_ofl_jetbrains_mono,@raw/license_bsd_adrenotools,@raw/license_bsd_sgsr,@font/inter_variable,@font/jetbrains_mono_variable" />

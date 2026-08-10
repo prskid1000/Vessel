@@ -8,6 +8,7 @@ import app.vessel.core.params.ParamValue
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -108,12 +109,23 @@ class SessionEnvironmentTest {
         hooksDir = File("/data/app/app.vessel/lib/arm64"),
     )
 
+    /**
+     * A FEX package with the shape the store produces: `FEXCore/<code>`, and the
+     * two CPU DLLs' lengths standing in for "which build of it".
+     */
+    private val fex = FexPackage(
+        directory = File("/data/user/0/app.vessel/files/components/FEXCore/2608"),
+        identity = "2608/5148672/4616192",
+        offlineCompiler = null,
+    )
+
     private fun env(
         params: Map<String, ParamValue> = emptyMap(),
         manifest: ParamManifest? = fexManifest,
         driver: TurnipDriver? = null,
+        fexPackage: FexPackage? = fex,
         display: String = DEFAULT_DISPLAY,
-    ) = sessionEnvironment(container(params), manifest, paths, driver, display)
+    ) = sessionEnvironment(container(params), manifest, paths, driver, fexPackage, display)
 
     // — the logging contract --------------------------------------------------
 
@@ -550,11 +562,84 @@ class SessionEnvironmentTest {
                 "FEX_DISABLEL2CACHE" to "0",
                 "FEX_DYNAMICL1CACHE" to "0",
                 // FEX's cache beside the shader caches, not in LOCALAPPDATA,
-                // so a container reset clears it with the others.
-                "FEX_APP_CACHE_LOCATION" to File(caches, "fex").absolutePath + File.separator,
+                // so a container reset clears it with the others — and under a
+                // digest of the FEX configuration, because upstream's
+                // `CodeCacheConfigId` is `0 // TODO` and will otherwise load a
+                // cache built under different codegen settings.
+                //
+                // **The literal is pinned on purpose and updating it is the
+                // signal, not the chore.** Any change to any `FEX_*` variable
+                // that is not in `FEX_CACHE_KEY_IGNORED`, and any change to the
+                // FEX package, moves this string — which is exactly the event a
+                // reader of this file should be made to notice. Deriving it from
+                // `fexCacheKey` here would assert nothing at all.
+                "FEX_APP_CACHE_LOCATION" to
+                    File(File(caches, "fex"), "431d9812d0f4").absolutePath + File.separator,
+                "FEX_ENABLECODECACHINGWIP" to "1",
             ),
             environment,
         )
+    }
+
+    // — the FEX code-cache key --------------------------------------------------
+
+    @Test
+    fun `the FEX cache directory sits under the container's caches`() {
+        // The half of the path that is not a digest. `caches/fex/<key>/`, so a
+        // container reset takes the code cache with the shader caches and
+        // nothing lands in the prefix's LOCALAPPDATA where FEX would default to.
+        val location = env(driver = turnip)["FEX_APP_CACHE_LOCATION"]!!
+        assertTrue(location.startsWith(File(caches, "fex").absolutePath + File.separator))
+        assertTrue(location.endsWith(File.separator))
+    }
+
+    @Test
+    fun `changing a FEX codegen knob moves the cache directory`() {
+        // The whole point of the digest, stated as the property rather than as
+        // an implementation. Upstream keys a cache on `CodeCacheConfigId = 0`,
+        // so without this a TSO change would silently load code generated under
+        // the old setting.
+        val base = env(driver = turnip)
+        val changed = base.toMutableMap().also { it["FEX_TSOENABLED"] = "0" }
+        assertNotEquals(fexCacheKey(base, fex), fexCacheKey(changed, fex))
+    }
+
+    @Test
+    fun `changing the FEX package moves the cache directory`() {
+        // A new FEX build generates different code for the same guest bytes, and
+        // FEX's own cache header does not record which build wrote it — the
+        // `// TODO: Also check for matching FEX version from cache header` in
+        // FEXOfflineCompiler. So the package has to be in the key.
+        val other = fex.copy(identity = "2609/5148700/4616192")
+        assertNotEquals(
+            env(driver = turnip)["FEX_APP_CACHE_LOCATION"],
+            env(driver = turnip, fexPackage = other)["FEX_APP_CACHE_LOCATION"],
+        )
+    }
+
+    @Test
+    fun `the log destination is not part of the cache key`() {
+        // `FEX_SILENTLOG` and `FEX_OUTPUTLOG` decide where FEX's diagnostics go
+        // and change no generated code. Excluding them is not tidiness: both are
+        // reachable from Diagnostics, and a user who turns FEX logging on to
+        // investigate something would otherwise be handed a cold cache — a
+        // different situation from the one they are trying to observe.
+        val base = env(driver = turnip)
+        val noisy = base.toMutableMap().also {
+            it["FEX_SILENTLOG"] = "1"
+            it["FEX_OUTPUTLOG"] = "server"
+        }
+        assertEquals(fexCacheKey(base, fex), fexCacheKey(noisy, fex))
+    }
+
+    @Test
+    fun `a FEX variable nobody here has heard of is still in the key`() {
+        // The reason the key is taken over the environment map and not over a
+        // list of knobs. A manifest may declare `FEX_HOSTFEATURES` tomorrow; it
+        // changes generated code, and nothing in this file has to be told.
+        val base = env(driver = turnip)
+        val extended = base.toMutableMap().also { it["FEX_HOSTFEATURES"] = "-crypto" }
+        assertNotEquals(fexCacheKey(base, fex), fexCacheKey(extended, fex))
     }
 
     // — the diagnostics merge stage ---------------------------------------------
@@ -586,6 +671,7 @@ class SessionEnvironmentTest {
             fexManifest,
             paths,
             turnip,
+            fex,
         )
         assertEquals(bare, explicit)
     }

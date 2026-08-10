@@ -84,6 +84,7 @@ Unlike the components below, this code ships **inside** the APK.
 | Inter, as a variable font | [`rsms/inter`](https://github.com/rsms/inter) v4.1 | `InterVariable.ttf`, version 4.001 | **OFL-1.1** |
 | JetBrains Mono, as a variable font | [`JetBrains/JetBrainsMono`](https://github.com/JetBrains/JetBrainsMono) v2.304 | `JetBrainsMono[wght].ttf`, version 2.304 | **OFL-1.1** |
 | Phosphor Icons, transcribed as path data | [`phosphor-icons/core`](https://github.com/phosphor-icons/core) 2.1.1 | regular weight only | MIT |
+| Snapdragon Game Super Resolution 1.0, as one fragment shader | [`SnapdragonStudios/snapdragon-gsr`](https://github.com/SnapdragonStudios/snapdragon-gsr) | `sgsr/v1/include/glsl/sgsr1_shader_mobile.frag` | **BSD-3-Clause** |
 
 libadrenotools is at `app/src/main/cpp/adrenotools/`, with upstream's layout,
 file names and SPDX headers intact and no modification to any upstream source
@@ -91,6 +92,26 @@ file; what was taken and what was left is in that directory's `README.md`.
 BSD-2-Clause asks only that the copyright notice and the two-clause text travel
 with the binary, which `LICENSE` and `lib/linkernsbypass/LICENSE` in that
 directory satisfy. It imposes nothing on the rest of the APK.
+
+SGSR is one GLSL fragment shader, carried as a string inside
+`com/winlator/renderer/material/SGSRMaterial.java` rather than as a file, because
+it is compiled at runtime at a `#version` the driver chooses. **It is
+BSD-3-Clause and not Apache-2.0**, which is what it was believed to be when the
+work was requested — the repository's `LICENSE` carries
+`SPDX-License-Identifier: BSD-3-Clause`, Copyright (c) 2023 Qualcomm Innovation
+Center, Inc. The difference is not academic: three-clause adds the no-endorsement
+term, so Vessel may not use Qualcomm's name or its contributors' names to promote
+the app, and the copyright notice must be retained in redistributed *source* as
+well as in the binary. Both are done — the notice is reproduced verbatim above
+the shader body, the full text ships as `res/raw/license_bsd_sgsr.txt`, and the
+Licences screen lists it. `LicensingTest` asserts the SPDX line, the third
+clause's presence and the in-source notice, so a truncated or substituted licence
+file fails the build.
+
+Nothing in the algorithm or its constants was changed. The four adaptations the
+shader needed to compile at all are enumerated in that file and are all
+mechanical: the `#version` line, a constant `textureGather` component, dropped
+`layout` qualifiers, and the removal of a Vulkan-only uniform-block branch.
 
 The Winlator code is at `app/src/main/java/com/winlator/` and `app/src/main/cpp/winlator/`,
 under upstream's package names. What was taken, what was left and every local

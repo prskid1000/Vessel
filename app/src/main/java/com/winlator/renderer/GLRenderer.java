@@ -18,7 +18,9 @@ import com.winlator.core.ImageUtils;
 import com.winlator.math.Mathf;
 import com.winlator.math.XForm;
 import com.winlator.renderer.material.CursorMaterial;
+import com.winlator.renderer.material.SGSRMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
+import com.winlator.renderer.material.ShaderMaterial;
 import com.winlator.renderer.material.WindowMaterial;
 import com.winlator.widget.XServerView;
 import com.winlator.xserver.Cursor;
@@ -48,6 +50,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     private final float[] tmpXForm2 = XForm.getInstance();
     private final CursorMaterial cursorMaterial = new CursorMaterial();
     private final WindowMaterial windowMaterial = new WindowMaterial();
+    // VESSEL: the upscaler, used instead of windowMaterial when a window is
+    // being magnified. See useSGSRFor().
+    private final SGSRMaterial sgsrMaterial = new SGSRMaterial();
     public final ViewTransformation viewTransformation = new ViewTransformation();
     private final Drawable rootCursorDrawable;
     private final ArrayList<RenderableWindow> renderableWindows = new ArrayList<>();
@@ -291,28 +296,127 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             Texture texture = drawable.getTexture();
             texture.updateFromDrawable();
 
+            float destWidth;
+            float destHeight;
             if (fullscreenTransformation != null) {
                 XForm.set(tmpXForm1, fullscreenTransformation.x, fullscreenTransformation.y, fullscreenTransformation.width, fullscreenTransformation.height);
+                destWidth = fullscreenTransformation.width;
+                destHeight = fullscreenTransformation.height;
             }
-            else XForm.set(tmpXForm1, x, y, drawable.width, drawable.height);
+            else {
+                XForm.set(tmpXForm1, x, y, drawable.width, drawable.height);
+                destWidth = drawable.width;
+                destHeight = drawable.height;
+            }
 
             XForm.multiply(tmpXForm1, tmpXForm1, tmpXForm2);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture.getTextureId());
-            windowMaterial.setUniformInt(windowMaterial.uniforms.texture, 0);
-            windowMaterial.setUniformFloat(windowMaterial.uniforms.noAlpha, !transparent ? 1.0f : 0.0f);
-            windowMaterial.setUniformFloatArray(windowMaterial.uniforms.xform, tmpXForm1);
-            windowMaterial.setUniformBool(windowMaterial.uniforms.flipY, texture.isFlipY());
+
+            // VESSEL: SGSR when this window is genuinely being magnified, the
+            // bilinear blit when it is not. See useSGSRFor().
+            if (useSGSRFor(drawable, destWidth, destHeight, transparent)) {
+                bindWindowMaterial(sgsrMaterial);
+                sgsrMaterial.setUniformInt(sgsrMaterial.uniforms.texture, 0);
+                sgsrMaterial.setSourceSize(drawable.width, drawable.height);
+                sgsrMaterial.setUniformFloatArray(sgsrMaterial.uniforms.xform, tmpXForm1);
+                sgsrMaterial.setUniformBool(sgsrMaterial.uniforms.flipY, texture.isFlipY());
+            }
+            else {
+                bindWindowMaterial(windowMaterial);
+                windowMaterial.setUniformInt(windowMaterial.uniforms.texture, 0);
+                windowMaterial.setUniformFloat(windowMaterial.uniforms.noAlpha, !transparent ? 1.0f : 0.0f);
+                windowMaterial.setUniformFloatArray(windowMaterial.uniforms.xform, tmpXForm1);
+                windowMaterial.setUniformBool(windowMaterial.uniforms.flipY, texture.isFlipY());
+            }
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, quadVertices.count());
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
     }
 
+    /**
+     * VESSEL: whether this window is being drawn into more pixels than it has.
+     *
+     * <p><b>The point of the whole feature is that most windows fail this test.</b>
+     * SGSR costs a dozen-odd taps and a Lanczos fit per fragment; spending that
+     * to reproduce a 1:1 copy would be a pure loss. So the test is on the real
+     * magnification and not on a setting the user forgot they turned on.
+     *
+     * <p>Three ways it can be false, and each is a real case:
+     *
+     * <ul>
+     *   <li><b>No magnification.</b> The window's texture is {@code drawable.width}
+     *       texels and lands on {@code destWidth} guest units, which the viewport
+     *       then scales to the surface by {@link ViewTransformation#aspect} — or,
+     *       in the fullscreen branch of {@link #drawFrame()}, by the surface over
+     *       the desktop, because that branch sets the viewport to the whole
+     *       surface. The smaller of the two axes decides, so a window stretched on
+     *       one axis only is left to the bilinear path.</li>
+     *   <li><b>A transparent window.</b> SGSR's last line is
+     *       {@code color.w = 1.0; //assume alpha channel is not used}, which is
+     *       true of a game and false of a layered window. Upstream's own comment
+     *       is the reason this branch exists; running it on a window that needs
+     *       its alpha would turn a soft edge into an opaque rectangle.</li>
+     *   <li><b>A driver below GLSL ES 3.10</b>, which cannot compile
+     *       {@code textureGather}. See {@link SGSRMaterial#isSupported()}.</li>
+     * </ul>
+     *
+     * <p>The 1.02 margin is not a tuning knob, it is a guard against churn: the
+     * desktop is letterboxed onto the surface with a {@code ceil()}, so a
+     * nominally 1:1 configuration can land a hair over one and flip the material
+     * back and forth between frames.
+     */
+    private boolean useSGSRFor(Drawable drawable, float destWidth, float destHeight, boolean transparent) {
+        if (transparent) return false;
+        if (drawable.width <= 0 || drawable.height <= 0) return false;
+        if (!SGSRMaterial.isSupported()) return false;
+
+        float scaleX;
+        float scaleY;
+        if (fullscreen) {
+            scaleX = (float)surfaceWidth / xServer.screenInfo.width;
+            scaleY = (float)surfaceHeight / xServer.screenInfo.height;
+        }
+        else {
+            scaleX = viewTransformation.aspect;
+            scaleY = viewTransformation.aspect;
+        }
+
+        float magnification = Math.min(
+            (destWidth * scaleX) / drawable.width,
+            (destHeight * scaleY) / drawable.height);
+        return magnification > 1.02f;
+    }
+
+    /**
+     * VESSEL: bind a window material, and only when it is not the bound one.
+     *
+     * <p>Upstream binds one material for the whole window pass, outside the loop.
+     * With two of them the bind has to move inside it, and this keeps the common
+     * case — every window taking the same path — at exactly one
+     * {@code glUseProgram} per frame, which is what it was before.
+     */
+    private void bindWindowMaterial(ShaderMaterial material) {
+        if (material == boundWindowMaterial) return;
+        material.use();
+        if (material == sgsrMaterial) {
+            sgsrMaterial.setUniformVec2(sgsrMaterial.uniforms.viewSize, xServer.screenInfo.width, xServer.screenInfo.height);
+        }
+        else {
+            windowMaterial.setUniformVec2(windowMaterial.uniforms.viewSize, xServer.screenInfo.width, xServer.screenInfo.height);
+        }
+        quadVertices.bind(material.programId);
+        boundWindowMaterial = material;
+    }
+
+    /** VESSEL: which of the two window materials is bound, within one pass. */
+    private ShaderMaterial boundWindowMaterial;
+
     private void renderWindows() {
-        windowMaterial.use();
-        windowMaterial.setUniformVec2(windowMaterial.uniforms.viewSize, xServer.screenInfo.width, xServer.screenInfo.height);
-        quadVertices.bind(windowMaterial.programId);
+        // VESSEL: the material is chosen per window now, so the pass opens with
+        // nothing bound rather than with the bilinear one bound unconditionally.
+        boundWindowMaterial = null;
 
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
             for (RenderableWindow window : renderableWindows) {
@@ -322,7 +426,8 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             }
         }
 
-        quadVertices.disable();
+        if (boundWindowMaterial != null) quadVertices.disable();
+        boundWindowMaterial = null;
     }
 
     private void renderCursor() {

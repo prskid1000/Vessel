@@ -1,25 +1,26 @@
 package app.vessel.ui.vm
 
-import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.vessel.core.DriveMap
 import app.vessel.core.PeArchitecture
 import app.vessel.data.ContainerPaths
+import app.vessel.data.DriveListing
+import app.vessel.data.PrefixEntry
+import app.vessel.data.PrefixFiles
 import app.vessel.data.ContainerRepository
 import app.vessel.ui.Routes
 import app.vessel.ui.shell.AppRegistry
 import app.vessel.ui.shell.AppShortcut
-import app.vessel.core.DriveMap
 import app.vessel.core.GuestDrive
 import app.vessel.data.AndroidDrives
 import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.Launchable
 import app.vessel.ui.shell.launchabilityOf
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,10 +28,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -100,44 +101,34 @@ data class FilesUiState(
 }
 
 /**
- * The container's `C:` drive, read directly from Android.
+ * The container's drives, as a browser.
  *
- * **Wine is not running and does not need to be.** A Wine prefix is an ordinary
- * directory tree; listing it is `File.listFiles()`. That is the whole argument
- * for browsing it here rather than starting `winefile` inside the guest: it works
- * before the container has ever launched, it works while a session is running, it
- * costs nothing, and it gets import and export to Android storage for free —
- * which Wine's own file manager cannot do at all, because from inside the guest
- * there is no Android to copy to.
+ * **This class no longer touches the filesystem.** [PrefixFiles] reads it and
+ * says what it found; everything here is state, wording and formatting. The
+ * split is worth keeping: the reader sits in `data/` beside [AndroidDrives],
+ * which creates the very `dosdevices` links it reads through, and a screen's
+ * view model is the wrong place to learn that a Wine prefix is an ordinary
+ * directory tree.
  *
- * Reads are on [Dispatchers.IO]. A prefix has tens of thousands of files in it and
- * `drive_c\windows\system32` alone is a slow stat on this device.
+ * Reads are dispatched to [Dispatchers.IO] from here, because that is a
+ * property of *this* call site rather than of the reader: a prefix has tens of
+ * thousands of files in it and `drive_c\windows\system32` alone is a slow stat
+ * on this device.
  */
 @HiltViewModel
 class FilesViewModel @Inject constructor(
-    @ApplicationContext private val context: Context,
     savedState: SavedStateHandle,
     private val paths: ContainerPaths,
     private val containers: ContainerRepository,
     private val registry: AppRegistry,
     private val drives: AndroidDrives,
+    private val files: PrefixFiles,
 ) : ViewModel() {
 
     private val containerId: String = savedState.get<String>(Routes.ARG_CONTAINER_ID).orEmpty()
 
     private val prefix: File = paths.of(containerId).prefix
 
-    /**
-     * The drive the browser is showing, and the folder behind it.
-     *
-     * **Rooted through `dosdevices`, which is what makes every drive the same
-     * thing.** `dosdevices/c:` is a symlink to `drive_c` and `dosdevices/d:` is
-     * a symlink to the phone's storage, so opening either is opening a
-     * directory — there is no special case for the prefix's own drive and no
-     * second code path for a mapped one. The browser was rooted at `drive_c`
-     * directly, which is why `D:` existed in the container and could not be
-     * reached from here.
-     */
     /**
      * **Derived from the path being shown, not remembered beside it.**
      *
@@ -156,12 +147,6 @@ class FilesViewModel @Inject constructor(
         get() = state.value.guestPath.firstOrNull()?.lowercaseChar()
             ?.takeIf { it in 'a'..'z' }
             ?: DriveMap.SYSTEM_DRIVE
-
-    private val driveRoot: File
-        get() = File(File(prefix, DriveMap.DOSDEVICES), "$driveLetter:")
-
-    /** Kept for the callers that still mean the prefix's own C:. */
-    private val driveC: File = File(prefix, GuestPath.DRIVE_C)
 
     private val _state = MutableStateFlow(FilesUiState(containerId = containerId))
     val state: StateFlow<FilesUiState> = _state.asStateFlow()
@@ -206,9 +191,7 @@ class FilesViewModel @Inject constructor(
         // of the row here without another line of code. The mapping stays in
         // `dosdevices` on purpose, so plugging the card back in brings the drive
         // back with the letter it had.
-        val list = drives.drives(prefix).filter { drive ->
-            File(File(prefix, DriveMap.DOSDEVICES), "${drive.letter}:").list() != null
-        }
+        val list = drives.drives(prefix).filter { files.isListable(prefix, it.letter) }
         _state.update { it.copy(drives = list, canMapDrives = drives.canMap) }
     }
 
@@ -315,65 +298,59 @@ class FilesViewModel @Inject constructor(
         }
     }
 
-    private fun read(guestPath: String): Listing {
-        val directory = GuestPath.resolve(driveRoot, guestPath)
-        if (directory == null || !directory.isDirectory) {
-            return Listing(
-                error = if (!driveC.isDirectory) {
-                    "This container has no C: drive yet. It is created the first time the " +
-                        "container is launched, by Wine's own first-run setup."
-                } else {
-                    "$guestPath is not a folder on this drive any more."
-                },
-                storage = storageLine(),
-            )
-        }
+    /**
+     * Turn what [PrefixFiles] found into rows, or into the sentence that says
+     * why there are none.
+     *
+     * **Every failure gets its own words.** Which one it is comes back typed
+     * rather than as an empty list, because "Android refused this folder" and
+     * "this folder has nothing in it" look identical from a list and mean
+     * opposite things — the `Z:` case, where SELinux denies `readdir` on `/` to
+     * `untrusted_app`, and the browser used to report a filesystem with
+     * everything in it as empty.
+     */
+    private fun read(guestPath: String): Listing = when (
+        val listing = files.list(prefix, driveLetter, guestPath)
+    ) {
+        is DriveListing.Entries ->
+            Listing(rows = listing.entries.map { toRow(it, guestPath) }, storage = storageLine())
 
-        // **Null is not an empty array, and collapsing them was a lie.** `Z:` is
-        // the Unix root, which an Android app is not allowed to list — SELinux
-        // denies readdir on `/` to `untrusted_app`. `listFiles()` returns null,
-        // `.orEmpty()` turned that into no entries, and the browser said "This
-        // folder is empty" about a filesystem with everything in it. A thing
-        // that cannot be done says so and names why; that is the rule.
-        val children = directory.listFiles()
-        if (children == null) {
-            return Listing(
-                // The target, not the link. Every drive is reached through
-                // `dosdevices/<letter>:`, so `directory.path` is always that
-                // symlink — naming it tells the user about Vessel's plumbing
-                // when what they need to know is which folder was refused.
-                error = "Android does not allow this app to list " +
-                    runCatching { directory.canonicalPath }.getOrDefault(directory.path) +
-                    ". Wine creates this drive; the phone's own storage is on D:.",
-                storage = storageLine(),
-            )
-        }
-
-        // Directories first, then files, each alphabetically and case-blind. A
-        // Wine prefix mixes the two heavily and an undirected listing is unusable.
-        val sorted = children.sortedWith(
-            compareByDescending<File> { it.isDirectory }
-                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+        DriveListing.NoSystemDrive -> Listing(
+            error = "This container has no C: drive yet. It is created the first time the " +
+                "container is launched, by Wine's own first-run setup.",
+            storage = storageLine(),
         )
-        return Listing(rows = sorted.map { toRow(it, guestPath) }, storage = storageLine())
+
+        is DriveListing.NotAFolder -> Listing(
+            error = "${listing.guestPath} is not a folder on this drive any more.",
+            storage = storageLine(),
+        )
+
+        is DriveListing.Denied -> Listing(
+            error = "Android does not allow this app to list ${listing.path}. " +
+                "Wine creates this drive; the phone's own storage is on D:.",
+            storage = storageLine(),
+        )
     }
 
-    private fun toRow(file: File, parent: String): FileRow {
-        val guestPath = parent.trimEnd(SEPARATOR) + SEPARATOR + file.name
-        val launchable = if (file.isDirectory) Launchable.NotAProgram else launchabilityOf(file)
+    private fun toRow(entry: PrefixEntry, parent: String): FileRow {
+        val guestPath = parent.trimEnd(SEPARATOR) + SEPARATOR + entry.name
+        val launchable =
+            if (entry.isDirectory) Launchable.NotAProgram else launchabilityOf(entry.file)
         return FileRow(
-            name = file.name,
+            name = entry.name,
             guestPath = guestPath,
-            isDirectory = file.isDirectory,
-            detail = if (file.isDirectory) {
+            isDirectory = entry.isDirectory,
+            detail = if (entry.isDirectory) {
                 null
             } else {
-                "${sizeLabel(file.length())} \u00b7 ${DATE.format(Date(file.lastModified()))}"
+                "${sizeLabel(entry.size)} · ${DATE.format(Date(entry.modified))}"
             },
             arch = (launchable as? Launchable.Runs)?.arch,
             launchable = launchable,
         )
     }
+
 
     // — import and export ----------------------------------------------------
 
@@ -386,22 +363,12 @@ class FilesViewModel @Inject constructor(
      */
     fun import(source: Uri) {
         viewModelScope.launch {
-            val target = GuestPath.resolve(driveRoot, state.value.guestPath)
+            val target = files.resolve(prefix, driveLetter, state.value.guestPath)
             if (target == null || !target.isDirectory) {
                 _state.update { it.copy(notice = "That folder is not on this drive any more.") }
                 return@launch
             }
-            val outcome = withContext(Dispatchers.IO) {
-                runCatching {
-                    val name = displayName(source)
-                    val destination = File(target, name)
-                    context.contentResolver.openInputStream(source).use { input ->
-                        requireNotNull(input) { "Android would not open $name for reading." }
-                        destination.outputStream().use { input.copyTo(it) }
-                    }
-                    name
-                }
-            }
+            val outcome = withContext(Dispatchers.IO) { files.copyIn(source, target) }
             _state.update {
                 it.copy(
                     notice = outcome.fold(
@@ -446,19 +413,12 @@ class FilesViewModel @Inject constructor(
     /** Copy the selected file out to wherever Android's picker chose. */
     fun export(row: FileRow, destination: Uri) {
         viewModelScope.launch {
-            val source = GuestPath.resolve(driveRoot, row.guestPath)
+            val source = files.resolve(prefix, driveLetter, row.guestPath)
             if (source == null || !source.isFile) {
                 _state.update { it.copy(notice = "${row.name} is not on this drive any more.") }
                 return@launch
             }
-            val outcome = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openOutputStream(destination).use { output ->
-                        requireNotNull(output) { "Android would not open the destination." }
-                        source.inputStream().use { it.copyTo(output) }
-                    }
-                }
-            }
+            val outcome = withContext(Dispatchers.IO) { files.copyOut(source, destination) }
             _state.update {
                 it.copy(
                     notice = outcome.fold(
@@ -472,20 +432,9 @@ class FilesViewModel @Inject constructor(
         }
     }
 
-    private fun displayName(uri: Uri): String =
-        uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "imported.bin"
-
-    /**
-     * `14.2 GB free of 62 GB`.
-     *
-     * The app's own filesystem, which is where the prefix lives — not the guest's
-     * idea of a disk, which Wine reports from the same place anyway.
-     */
+    /** `14.2 GB free of 62 GB`, or nothing at all when Android will not say. */
     private fun storageLine(): String {
-        val root = paths.containersRoot
-        val free = runCatching { root.freeSpace }.getOrDefault(0L)
-        val total = runCatching { root.totalSpace }.getOrDefault(0L)
-        if (total <= 0L) return ""
+        val (free, total) = files.capacityOf(paths.containersRoot) ?: return ""
         return "${gigabytes(free)} free of ${gigabytes(total)}"
     }
 

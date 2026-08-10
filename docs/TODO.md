@@ -319,6 +319,37 @@ audit's; they are pointers, not independently re-verified.
   Metro is already installed and is the obvious subject. *Done when:* two
   launch-to-first-frame times, cold and warm, from the same title.
 
+- [ ] **The FEX code cache is wired up end to end and has never been timed.**
+  Both of the blockers that kept `FEX_ENABLECODECACHINGWIP` switched off are
+  answered, so the flag is now on:
+
+  - *Nothing ran the compiler.* `SessionRuntime.generateCodeCache` runs
+    `FEXOfflineCompiler64.exe process-all` at teardown, once the guest is dead
+    and before the wake lock goes. It skips entirely when `<cache>/codemap/new`
+    is empty or the FEX package carries no compiler, is bounded by
+    `CODE_CACHE_TIMEOUT_MS`, cannot throw, and writes every outcome — including
+    the successful one, with a duration — into the session log.
+  - *A cache was not keyed on FEX's configuration.* Upstream's
+    `CodeCacheConfigId` is `0 // TODO` (`ImageTracker.cpp`), so FEX itself will
+    load a cache built under a different TSO or CPU setting. `fexCacheKey`
+    closes it from Vessel's side without a FEX patch: `FEX_APP_CACHE_LOCATION`
+    is now `caches/fex/<digest>/`, where the digest covers **every** `FEX_*`
+    variable in the environment that actually ran — after the manifest and
+    diagnostics stages, so a knob added later is in the key without anything
+    being told — plus the FEX package's version code and the byte lengths of its
+    two CPU DLLs. Three exclusions, in `FEX_CACHE_KEY_IGNORED`, each with a
+    reason at the declaration. A configuration change moves the whole directory,
+    so a stale cache becomes *unreachable* rather than silently wrong.
+
+  Unit tests cover the properties (a codegen knob moves the directory, the log
+  destination does not, an unknown `FEX_*` variable still counts, the package
+  identity counts), and the golden environment map pins the digest so that any
+  change to it has to be looked at. **None of that is a launch-time result.**
+  *Done when:* the same program is launched twice on the device with
+  `caches/fex` wiped before the first, and the two launch-to-first-window times
+  are recorded — including if the second is no faster, which is a real answer
+  and would mean the codemap/cache is not covering the launch path.
+
 - [ ] **`FEX_HALFBARRIERTSOENABLED=1` is an unmeasured setting wearing a measured
   number.** `docs/ARCHITECTURE.md:135` and `SessionEnvironment.kt:352-353` both
   justify it as "21% cheaper than the alternative" and cite `tools/tso/run.sh` —
@@ -476,17 +507,70 @@ audit's; they are pointers, not independently re-verified.
   scene whenever the scene is rebuilt. *Done when:* a program is launched with
   the session and the area around its window is `#161826` in a screenshot.
 
-- [ ] **The guest has working sockets and no network adapters.** Unchanged in
-  substance: a WinHTTP `GET` returns 200 and `ipconfig` prints nothing, because
-  Android denies an untrusted app `bind()` on a `NETLINK_ROUTE` socket.
-  `patches/wine/0007` is built and its rate-limiting half is confirmed working —
-  the log carries **one** `nsi:poll_events bind failed, errno 13;
-  address-change notifications are off.` where there used to be fifty. Its
-  `getifaddrs` half is still unproven: the count it logs is on the `nsi` warn
-  channel, which `WINEDEBUG` does not enable, so the fallback has never been
-  read. *Done when:* a session runs with `+nsi` and either `ipconfig` names an
-  adapter or the log says `getifaddrs found 0` — the second answer closes the
-  Wine-patch approach for good and moves it to the Android side.
+- [ ] **`ipconfig` prints nothing, and interface enumeration was never the
+  reason.** `patches/wine/0007` works — both halves. Measured 2026-08-10 on the
+  device, and the log line the entry has been asking for since it was written:
+
+  ```
+  0058:warn:nsi:update_if_table if_nameindex gave nothing (errno 13); getifaddrs found 8.
+  ```
+
+  So the fallback fires, `getifaddrs()` answers where bionic's `if_nameindex()`
+  is refused, and the NDIS interface table comes back populated — nine entries
+  by the time `GetAdaptersAddresses` walks it, with nine matching
+  `ConvertInterfaceLuidToGuid` calls. The rate-limiting half was already
+  confirmed and still is: **one** `nsi:poll_events bind failed, errno 13`.
+
+  **Two earlier explanations were wrong and both are worth recording, because
+  each of them looked settled.**
+
+  *"The count is on the `nsi` warn channel, which `WINEDEBUG` does not enable."*
+  True about the class and useless as a diagnosis. Running `ipconfig` with
+  `WINEDEBUG=-all,+nsi` enables all four classes and still shows none of patch
+  0007's messages — because `nsi.dll` reaches the interface table through
+  `DeviceIoControl` on `\\.\Nsi`, and the driver that answers lives in
+  **`winedevice.exe`**, a different process. `winedevice` is started once per
+  prefix and *survives `wineserver -k`*: measured, its `/proc/<pid>/fd/2` pointed
+  at the session's `tmp/guest.out` and its environment carried the session's
+  `WINEDEBUG`, not the one on the `ipconfig` command line. The messages appeared
+  the moment every Wine process was `kill -9`ed so a fresh `winedevice` inherited
+  `+nsi`. **Anything logged by an nsiproxy, mountmgr or plugplay code path has to
+  be read this way; a `WINEDEBUG` on a client command line cannot reach it.**
+
+  *"Android denies `bind()` on a `NETLINK_ROUTE` socket, so Wine has no
+  interfaces."* The `bind()` denial is real and rate-limiting it was right, but
+  it costs only address-change notifications. Enumeration works.
+
+  **The actual cause, measured end to end.** `GetAdaptersAddresses` returns
+  `50` — `ERROR_NOT_SUPPORTED`, read straight off a relay trace
+  (`Ret iphlpapi.GetAdaptersAddresses() retval=00000032`). Wine's `ipconfig`
+  calls it once with a 4 KB buffer and, on anything that is neither
+  `ERROR_SUCCESS` nor `ERROR_BUFFER_OVERFLOW`, `get_adapters()` returns NULL and
+  `print_basic_information()` calls `exit(1)` — which is why there was no output
+  *at all*, not even a header, and why the exit code is 1. The 50 comes from
+  `gateway_and_prefix_addresses_alloc(AF_INET)` →
+  `NsiAllocateAndGetTable(NPI_MS_IPV4_MODULEID, NSI_IP_FORWARD_TABLE)` →
+  `ipv4_forward_enumerate_all`, whose first act after `getifaddrs()` is
+  `if (!(fp = fopen( "/proc/net/route", "r" ))) return STATUS_NOT_SUPPORTED;`.
+  Android denies an app uid every file under `/proc/net` — verified as
+  `app.vessel`: `route`, `ipv6_route`, `dev` and `if_inet6` all `EACCES`. One
+  unreadable file in the *route* table therefore discards nine perfectly good
+  *interfaces* on the way out.
+
+  It is an upstream inconsistency rather than an Android quirk: the IPv6 sibling
+  forty lines down does `*count = 0; return STATUS_SUCCESS` on the identical
+  `fopen` failure, which is why the IPv6 forward table succeeded in the same run.
+
+  `patches/wine/0013` makes the two agree. Written, `git apply --check` clean,
+  and **compiled** — `make dlls/nsiproxy.sys/ip.o` in the build image, no
+  warnings — but not yet in a packaged Wine. *Done when:* a session on a Wine
+  built with 0013 runs `ipconfig` and it names an adapter. If it still does not,
+  the next thing to read is `dns_info_alloc`, which is the step after the one
+  that fails today and which calls `DnsQueryConfig` — and `dnsapi` on this build
+  logs `err:dnsapi:DllMain No libresolv support, expect problems`, because Wine's
+  configure needs `res_init`/`res_query`/`ns_initparse` and bionic does not offer
+  the set. That is a second, independent defect on the same path; it has not
+  been reached yet because the route table fails first.
 
 ## 2. Self-sufficient install
 
