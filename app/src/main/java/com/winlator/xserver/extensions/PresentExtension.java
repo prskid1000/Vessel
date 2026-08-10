@@ -41,7 +41,19 @@ public class PresentExtension extends Extension {
         private static final byte QUERY_VERSION = 0;
         private static final byte PRESENT_PIXMAP = 1;
         private static final byte SELECT_INPUT = 3;
+        private static final byte QUERY_CAPABILITIES = 4; // VESSEL
     }
+
+    /**
+     * VESSEL: Present capability bits, from presentproto.
+     *
+     * Declared in full and reported as {@link #CAPABILITY_NONE}, because none
+     * of the other three is true of this server: there is no async (tearing)
+     * present, no fence support, and the UST reported by
+     * {@link #sendCompleteNotify} is `System.nanoTime()` against a fabricated
+     * 60 Hz interval rather than a real vblank clock.
+     */
+    private static final int CAPABILITY_NONE = 0;
 
     private static class Event {
         private Window window;
@@ -102,6 +114,41 @@ public class PresentExtension extends Extension {
             outputStream.writeInt(MAJOR_VERSION);
             outputStream.writeInt(MINOR_VERSION);
             outputStream.writePad(16);
+        }
+    }
+
+    /**
+     * VESSEL: `PresentQueryCapabilities`, which was the whole of the zero-copy
+     * blocker.
+     *
+     * Mesa's X11 WSI issues this while creating a DRI3 swapchain and treats a
+     * failure as fatal, so refusing it produced
+     * `vkCreateSwapchainKHR -> VK_ERROR_SURFACE_LOST_KHR` *after* the surface,
+     * the queue, the capabilities and the formats had all come back good — an
+     * error with no cause attached to it anywhere. Found by measurement, not by
+     * reading: the WARN added to this switch's default branch printed exactly
+     * one line, `Present request opcode 4 is not implemented`, during a
+     * `tools/gfx/run-x11present.sh --wsi dri3` run. The two standing theories,
+     * `xcb_dri3_open` and the absent DRM fd, were both wrong and neither is
+     * even reached.
+     *
+     * The request carries a target (a window or pixmap) and the reply is one
+     * `CARD32` of capability bits. **Answering `None` is the honest reply and
+     * not a stub:** every bit this could set would be a promise this server
+     * does not keep, and the client's fallback for each is the path already
+     * taken today. Reading the target and ignoring it is per spec — the
+     * capabilities are a property of the screen's presentation engine, and
+     * there is one here.
+     */
+    private void queryCapabilities(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        inputStream.skip(4); // target
+        try (XStreamLock lock = outputStream.lock()) {
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte)0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(0);
+            outputStream.writeInt(CAPABILITY_NONE);
+            outputStream.writePad(20);
         }
     }
 
@@ -187,6 +234,9 @@ public class PresentExtension extends Extension {
                     presentPixmap(client, inputStream, outputStream);
                 }
                 break;
+            case ClientOpcodes.QUERY_CAPABILITIES: // VESSEL
+                queryCapabilities(client, inputStream, outputStream);
+                break;
             case ClientOpcodes.SELECT_INPUT:
                 try (XLock lock = xServer.lock(XServer.Lockable.WINDOW_MANAGER)) {
                     selectInput(client, inputStream, outputStream);
@@ -197,7 +247,7 @@ public class PresentExtension extends Extension {
                 // Present is the other half of the zero-copy path, so a
                 // swapchain that dies without a protocol error could be
                 // refused here just as easily as there.
-                Log.w(DRI3Extension.PROTO_TAG, "Present request opcode " + opcode +
+                Log.w(XRequestError.PROTO_TAG, "Present request opcode " + opcode +
                         " is not implemented — replying BadImplementation");
                 throw new BadImplementation();
         }

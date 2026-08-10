@@ -187,6 +187,21 @@ The modifications, in the order they were made:
    swapchain image, and Present `QueryCapabilities(4)` — this tree implements
    DRI3 opcodes 0,1,2,3,7 and Present 0,1,3, and neither list contains a 4.
 
+18. **`PresentExtension.queryCapabilities()`** — `PresentQueryCapabilities`,
+   opcode 4, which this tree never implemented. Mesa's X11 WSI issues it while
+   creating a DRI3 swapchain and treats a failure as fatal, so refusing it
+   produced `vkCreateSwapchainKHR -> VK_ERROR_SURFACE_LOST_KHR` *after* the
+   surface, the queue, the capabilities and the formats had all come back good.
+   Found by modification 17 rather than by reading: one WARN line,
+   `Present request opcode 4 is not implemented`, during a
+   `tools/gfx/run-x11present.sh --wsi dri3` run. Both standing theories —
+   `xcb_dri3_open` and the missing DRM fd — were wrong, and neither is reached.
+   The reply is one `CARD32` of capability bits and this server answers
+   **`None`**, which is the honest answer and not a stub: async present, fence
+   support and a real UST clock are each things it does not have, the UST it
+   reports being `System.nanoTime()` against a fabricated 60 Hz interval. A
+   client's fallback for each missing bit is the path it already takes today.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -214,6 +229,8 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 

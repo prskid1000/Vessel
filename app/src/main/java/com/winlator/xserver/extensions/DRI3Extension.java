@@ -228,7 +228,7 @@ public class DRI3Extension extends Extension {
                 // Deliberately WARN and not DEBUG: an unimplemented request is
                 // always a defect in this server or a genuine version
                 // mismatch, never routine traffic.
-                Log.w(PROTO_TAG, "DRI3 request " + opcodeName(opcode) +
+                Log.w(XRequestError.PROTO_TAG, "DRI3 request " + opcodeName(opcode) +
                         " is not implemented — replying BadImplementation");
                 throw new BadImplementation();
         }
@@ -248,6 +248,4 @@ public class DRI3Extension extends Extension {
         }
     }
 
-    /** VESSEL: one tag for every unimplemented-request line across extensions. */
-    static final String PROTO_TAG = "VesselXProto";
 }
