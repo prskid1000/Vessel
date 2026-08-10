@@ -619,7 +619,43 @@ audit's; they are pointers, not independently re-verified.
   unreadable file discarding them. **`ipconfig` still exits 1 with zero bytes of
   stdout.**
 
-  *Where it now dies, and this part is inference rather than measurement.* An
+  **Measured 2026-08-10, and it refutes the paragraph that used to be here.**
+  A `+relay` trace restricted to `iphlpapi.GetAdaptersAddresses` via
+  `HKCU\Software\Wine\Debug` gives the return value directly:
+
+  ```
+  00e0:Call iphlpapi.GetAdaptersAddresses(00000000,00000080,00000000,...) ret=140010144
+  00e0:Ret  iphlpapi.GetAdaptersAddresses() retval=c0000005
+  ```
+
+  `c0000005` is `STATUS_ACCESS_VIOLATION`. **It is not `ERROR_NOT_SUPPORTED`
+  any more, and it is not `dnsapi`** — the previous note named
+  `dns_info_alloc`/libresolv as "the strongest candidate", and that was
+  inference and it was wrong. The `err:dnsapi:DllMain No libresolv support`
+  line is real but is not what fails this call.
+
+  **This is a change in failure mode that arrived with `patches/wine/0013`, and
+  it is arguably a regression.** Same program, same device: before 0013 the call
+  returned `00000032` (50, a clean `ERROR_NOT_SUPPORTED`); after 0013 it returns
+  an access violation. 0013 is the only nsiproxy change between the two runs.
+  `ipconfig` fails identically either way — no output, exit 1 — so nothing got
+  worse for the user, but a memory fault is a worse thing to ship than a clean
+  refusal and 0013 should not be treated as settled.
+
+  *What is not yet known.* Reading `ipv4_forward_enumerate_all` does not explain
+  it: the loopback loop fills both entries on the data call (`num < *count` with
+  `*count == 2`), so the early return does not obviously leave a short buffer
+  behind a non-zero count. `+seh` on the same run prints nothing, which fits the
+  status being *returned* rather than raised — so the fault is being caught and
+  converted somewhere between `nsi_ioctl` and the caller. **No cause is named
+  here on purpose.** Two explanations for this item have already been wrong, and
+  both were written down before they were measured.
+
+  *Done when:* the access violation is located — the first useful step is
+  whether it survives reverting 0013, which separates "0013 introduced it" from
+  "0013 exposed it" — and `ipconfig` names an adapter.
+
+  *Superseded, kept because it was wrong in an instructive way.* An
   `+iphlpapi` trace shows exactly **one** `GetAdaptersAddresses` call, eight
   `ConvertInterfaceLuidToGuid` calls, the route enumeration above, and then
   nothing — no second call, so it never got `ERROR_BUFFER_OVERFLOW`, and no
