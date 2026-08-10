@@ -100,6 +100,18 @@ and the two that are not share a root cause.
   `can_activate_window` reads `wm_state`, which it now has — so the next step
   here is to test restore, not to write the advertisement.
 
+- [x] **The Files control and Add-a-program are gated, and the gate works.**
+  *Confirmed on the device 2026-08-10, on a clean install.* Both are disabled
+  until the container has **both** drives, not just `C:` — see
+  `HomeViewModel.drivesReady`. `D:` is the conditional one, because it is only
+  mapped when all-files access has been granted, so without it the picker used
+  to open on a prefix holding nothing the user had put there. Disabled rather
+  than hidden, with the reason printed under the grid.
+
+  Creating a container is now blocked outright while the permission is missing,
+  which is the other half: the mapping happens once, while the prefix is built,
+  so a container created without it is one nothing can ever be added to.
+
 - [ ] **Restore from minimised is still unverified, and the attempt took the
   session down.** Minimize via the long-press menu works and is visible in the
   tree (`mapped=false 562x513+298+103`, button retained). Tapping the button to
