@@ -69,6 +69,15 @@ public class MITSHMExtension extends Extension {
         int shmid = inputStream.readInt();
         inputStream.skip(4);
         xServer.getSHMSegmentManager().attach(xid, shmid);
+        // VESSEL: this request succeeding is what makes Mesa's has_mit_shm true
+        // (`x11_xcb_display_supports_xshm` is a real ShmAttach round trip, not a
+        // reading of the extension list), and has_mit_shm being true is what
+        // makes `patches/mesa/0003` dead code — its defers_sw_blit_wait is
+        // `wsi->sw && !has_mit_shm`. Registering the extension is not the same
+        // as serving it, so the disposal of a patch should rest on this line
+        // rather than on XServer.java's constructor.
+        android.util.Log.d(XRequestError.PROTO_TAG,
+                "MIT-SHM Attach ok xid=0x" + Integer.toHexString(xid) + " shmid=" + shmid);
     }
 
     private void detach(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {

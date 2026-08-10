@@ -500,6 +500,31 @@ The modifications, in the order they were made:
    to be polite. **Written and compiled; not measured.** Nothing has yet run two
    `--wsi dri3` passes against one session to see the `BadIdChoice` gone.
 
+   *Measured on the device 2026-08-10 and both halves hold.* Six probe clients
+   in succession against one live session all returned `result=PASS`, where the
+   second used to die. Then the case the fix actually exists for: a probe run
+   to `first_frame_ms=1.99` — inside the present loop, holding three DRI3
+   pixmaps, a fence each and a Present event context — was `kill -9`'d, and the
+   next client connected and passed with no `VesselXProto` line of any kind.
+
+25. **`MITSHMExtension.attach()` logs that it served the request** — one
+   `Log.d`, and the reason it is worth a vendored modification is that it
+   decides the fate of a Mesa patch.
+
+   Mesa's `has_mit_shm` is **not** read off the extension list. It comes from
+   `x11_xcb_display_supports_xshm()`, a real `ShmAttach` round trip
+   (`wsi_common_x11.c:366`), and it gates `defers_sw_blit_wait =
+   wsi->sw && !chain->has_mit_shm` — the whole of `patches/mesa/0003`. So
+   "`XServer` registers MIT-SHM, therefore 0003 is dead code" is an inference
+   with a false premise, and it was written into `docs/TODO.md` for an hour
+   before this line disproved it: a 200-frame `--wsi sw` run produces **zero**
+   attaches, so `has_mit_shm` is false and 0003 is live.
+
+   Kept rather than reverted after the fact because the question recurred twice
+   in one afternoon, and because the answer changes whenever Mesa's build flags
+   do — `HAVE_X11_DRM` and `HAVE_SYS_SHM_H` are both in the condition, and
+   `patches/mesa/0006` is in the business of moving exactly those.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -535,6 +560,7 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
 | `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23 |

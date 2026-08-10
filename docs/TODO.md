@@ -312,17 +312,27 @@ audit's; they are pointers, not independently re-verified.
 
   The run-to-run spread inside one build (1.901 to 2.490 ms without the patch)
   is larger than any gap between builds. **`0003` is not measurable with this
-  harness**, in either direction. The patch stays, because there is no evidence
-  to remove it — not because there is evidence to keep it.
+  harness**, in either direction — but it *is* live code on the `sw` path, not
+  the dead code an earlier draft of this entry claimed. It stays: it removes a
+  real wait from the application's thread, the reason it cannot be seen is the
+  harness rather than the patch, and `sw` is the fallback if DRI3 ever fails.
 
   *Two things learned that cost runs, so that the next person does not repeat
   them.* First, `--wsi dri3` cannot see this patch **at all**: every hunk is
   inside `x11_present_to_x11_sw` or guarded by `wsi->sw`, so a dri3 A/B is
   guaranteed to be a null result and the first one taken was exactly that.
-  Second, `defers_sw_blit_wait` is set to `wsi->sw && !chain->has_mit_shm`, and
-  the vendored server *does* register MIT-SHM (`XServer.java:230`), so even in
-  `sw` the patch may never arm — hence the `sw,noshm` rows, which force the
-  path live. They are no less noisy.
+  Second — **and the first version of this paragraph got it backwards, which is
+  worth keeping visible** — `defers_sw_blit_wait` is `wsi->sw &&
+  !chain->has_mit_shm`, and it was written here that the vendored server *does*
+  register MIT-SHM (`XServer.java:230`) so the patch never arms even in `sw`.
+  That inference is wrong. Mesa does not read the extension list for this:
+  `has_mit_shm` comes from `x11_xcb_display_supports_xshm()`, a real `ShmAttach`
+  round trip (`wsi_common_x11.c:366`). `MITSHMExtension.attach()` now logs every
+  request it serves (vendored item 25), and a 200-frame `--wsi sw` run produces
+  **zero** attaches. So `has_mit_shm` is false, `defers_sw_blit_wait` is true,
+  and **0003 was armed for every `sw` row in the table above** — the A/B was
+  valid and still found nothing. The `sw,noshm` rows turn out to be a duplicate
+  of the `sw` rows rather than the only live ones.
 
   *Done when:* a harness whose own variance is below ~5% exists. Until then this
   is unanswerable rather than unanswered, and it is worth remembering what the
@@ -434,6 +444,60 @@ audit's; they are pointers, not independently re-verified.
   `caches/fex` wiped before the first, and the two launch-to-first-window times
   are recorded — including if the second is no faster, which is a real answer
   and would mean the codemap/cache is not covering the launch path.
+
+  **Read the code before booking the measurement: the cache cannot be loaded at
+  all in this configuration, and that is settled from source, not suspected.**
+  `FEX_APP_CACHE_LOCATION` is a *unix* path —
+  `SessionEnvironment.kt:1073` builds it with `File(...).absolutePath +
+  File.separator`, so FEX receives `/data/user/0/app.vessel/files/containers/
+  <id>/caches/fex/<digest>/`. FEX uses that string two different ways:
+
+  - **Writing works.** `ImageTracker.cpp:158` and `FEXOfflineCompiler`'s
+    `ProcessAll` go through `std::filesystem` and `_sopen`, which are Win32
+    calls, and Wine's `RtlGetFullPathName_UEx` has an explicit case for them:
+    `RtlPathTypeRooted` with `name[0] == '/'` calls `get_unix_full_path()`,
+    which resolves the path through `\??\unix\…` (`ntdll/path.c:694, 509`).
+    That is why `caches/fex` fills.
+  - **Reading cannot.** `ImageTracker::LoadAOTImages` does not use a Win32 API.
+    It composes an NT path by string concatenation —
+    `fmt::format("\\??\\{}cache\\{}-{:016x}", GetCacheDirectory(), …)`
+    (`ImageTracker.cpp:238`) — and hands it to `NtOpenFile`. The result is
+    `\??\/data/user/0/…/cache/<id>-…`, and `nt_to_unix_file_name_no_root`
+    strips `\??\`, takes everything up to the first backslash as the DOS device
+    prefix, and ends at `if (wcschr( prefix, '/' )) return
+    STATUS_OBJECT_PATH_NOT_FOUND` (`ntdll/unix/file.c:3793`). The only NT path
+    that reaches a unix file is `\??\unix\…`, and this is not one.
+    `LoadAOTImages` logs nothing when `NtOpenFile` fails — the `if
+    (NT_SUCCESS(...))` simply falls through — so the failure is silent.
+
+  **So the prediction for the measurement is that warm equals cold**, and that
+  `Loaded cache: <id>` never appears in a session log. That is worth running
+  anyway, because it is the falsification test for the paragraph above.
+
+  The fix is one value, not one code path: `FEX_APP_CACHE_LOCATION` has to be a
+  **DOS path ending in `\`**, which satisfies both uses at once — `C:\…\codemap
+  \new\` for the writer, `\??\C:\…\cache\…` for the reader. Where that DOS path
+  should point is a product decision and is **not** made here: putting it inside
+  the prefix (`C:\…`) contradicts the reason the cache was moved out of
+  `%LOCALAPPDATA%` in the first place — it must live under `caches/` so a
+  container reset clears it — and mapping a drive letter at `caches/` makes it
+  a user-visible drive in the Files tab and in the registry seed. Whichever is
+  chosen, `SessionRuntime.generateCodeCache` also needs the host path
+  separately, since it reads `FEX_APP_CACHE_LOCATION` back as a `File`
+  (`SessionRuntime.kt:1423`).
+
+  *The `DriveMap.removeRootDrive()`-called-twice suspicion is not a defect.*
+  Both calls are deliberate and documented at their sites
+  (`ContainerProvisioner.kt:387, 432`): once before the registry seed is
+  rendered, because the seed is rendered from `dosdevices` and must not declare
+  a drive that is about to go, and once after `wineboot --init`, which recreates
+  `dosdevices/z:` itself. `removeRootDrive` is a single `File.delete()` wrapped
+  in `runCatching`; `false` means "already gone". The underlying worry — a PE
+  handed a `/data/…` path with no drive letter to resolve through — is real, but
+  `Z:` is not what would have rescued it: Wine resolves a leading `/` through
+  `\??\unix\…` and not through any drive, and the path that actually breaks
+  breaks inside FEX's own `\??\` string concatenation, where no drive mapping
+  can reach it.
 
 - [ ] **`FEX_HALFBARRIERTSOENABLED=1` is an unmeasured setting wearing a measured
   number.** `docs/ARCHITECTURE.md:135` and `SessionEnvironment.kt:352-353` both
@@ -750,6 +814,63 @@ in that case.**
   features"`. Undiagnosed, and it is why every D3D result above comes from the
   standalone harness rather than from a session.
 
+  **Four corrections from reading the FEX tree, before any of this is run
+  again. The plan survives; three of the four reasons given for it do not.**
+
+  1. ***"Only two `ERROR_AND_DIE` sites" is false, and the elimination argument
+     built on it does not work.*** Two is the count in `Source/Windows/`.
+     `libarm64ecfex.dll` also links FEXCore and `Source/Common`, which add about
+     thirty more — seven in `Interface/Core/CodeCache.cpp` alone, ten in
+     `JIT/JITClass.h`, two each in `Core.cpp`, `Arm64Relocations.cpp`,
+     `Utils/Threads.cpp` and `x87StackOptimizationPass.cpp`, three in
+     `Common/Async.h`. Naming the site by elimination was never available.
+  2. ***One of the two Windows sites is unreachable in a session, so it is not
+     the candidate to test next.*** `"Unhandled relocation"` lives in
+     `LoadImageRelocations`, which `HandleImageMap` calls only
+     `if (IsGeneratingCache)` (`ImageTracker.cpp:135`). Both session modules
+     construct the tracker as `ImageTracker.emplace(*CTX, false)`
+     (`ARM64EC/Module.cpp:615`, `WOW64/Module.cpp:547`); only
+     `FEXOfflineCompiler` passes `true`. In a session that site cannot fire.
+  3. ***The candidate set is exactly the `ERROR_AND_DIE_FMT` sites, and nothing
+     else.*** `LOGMAN_MSG_A_FMT` and `LOGMAN_THROW_A_FMT` also end in
+     `ForcedAssert`, but only under `ASSERTIONS_ENABLED`, which FEX's
+     `CMakeLists.txt:183` sets for `DEBUG` builds only and `build/fex.sh:127`
+     builds `Release`. They compile to nothing here.
+  4. ***`FEX_SILENTLOG=0` is load-bearing in a way the entry did not say, and
+     the output does not go where the entry looked.*** `SilentLog` **defaults to
+     true** (`Config.json.in:387`). When it is true `FEX::Windows::Logging::Init`
+     returns *before* `LogMan::Msg::InstallHandler`, and `MFmtImpl` with no
+     handler installed discards the message without writing anywhere — so the
+     `%LOCALAPPDATA%` fallback is not "not taken", it does not exist on that
+     path either. When it is false the handler writes through
+     `__wine_dbg_output`, which is unconditional: it goes to the **guest's own
+     stderr**, i.e. `tmp/guest.out`, and *not* into a `WINEDEBUG`-channel log.
+     The line to grep for is one starting `A ` — `MsgHandler` formats
+     `"{} {:X} {}\n"` with `DebugLevelStr(ASSERT)` being the single letter `A`.
+     `Logging::Init()` runs early in `ProcessInit`, before both candidate sites,
+     so ordering is not the problem.
+
+  **The link-register plan is still the right one, and it needs a different
+  vehicle than `+seh`.** `+seh`'s register dump comes from `TRACE_CONTEXT` in
+  `ntdll_misc.h`, and in an ARM64EC ntdll the `__x86_64__` variant is selected —
+  it prints the AMD64-named subset only. In `ARM64EC_NT_CONTEXT` the link
+  register is aliased onto `FloatRegisters[0]` at offset `0x120`
+  (`include/winnt.h:1969`), which that macro never prints. So `lr` is not in the
+  trace already taken and will not appear by rerunning with `+seh`.
+
+  What does print it, with no rebuild, is **`+unwind`**: `RtlVirtualUnwind2`
+  opens with `TRACE( "type %lx base %I64x pc %I64x rva %I64x sp %I64x\n", … )`
+  (`ntdll/unwind.c:799`). `ForcedAssert` is `naked` with no unwind data, so it
+  takes the leaf path — `context->Pc = context->Lr` — and the *second* of those
+  lines carries the caller's `base` and `rva` directly, with no arithmetic. Then
+  `llvm-objdump` on the shipped `libarm64ecfex.dll` names the symbol, exactly as
+  it did for `ForcedAssert` itself.
+
+  *Order to run it in:* `WINEDEBUG=+seh,+unwind` with `FEX_SILENTLOG=0`,
+  capturing **`tmp/guest.out`** and not only the channel log, and grep it for
+  `^A ` first — if FEX's own message is there the site is named outright and the
+  unwind trace is only corroboration.
+
 - [x] **At session start the desktop background is black until something
   repaints it.** Fixed in code and not yet watched: a texture is uploaded at
   allocation and after that only on damage, and the desktop's background paint
@@ -879,21 +1000,97 @@ in that case.**
   for a memory fault, which is strictly worse to ship. The patch text is in git
   history at `ea5b239` if it is picked up again.
 
-  *What is still unknown is why.* Reading it does not explain the fault: the
-  early return copies the tail of the upstream function
-  (`if (!want_data || num <= *count) *count = num; else status =
-  STATUS_BUFFER_OVERFLOW;`), and the loopback loop above it fills both entries
-  on the data call because `num < *count` holds for `num` 0 and 1 with
-  `*count == 2`. Something about returning at that point, rather than the values
-  returned, is what breaks the caller. **No cause is named here**; three
-  explanations for this item have now been wrong, and every one of them was
-  written down before it was measured.
+  ***Wrong, and this is the fourth wrong explanation on this item — but the
+  first three were guesses and this one was a measurement read backwards, which
+  is a different mistake and worth naming separately.** The table is correct.
+  "Introduces" versus "exposes" is not something an A/B can tell you when the
+  patch's whole effect is to let execution continue: removing a failure moves
+  the program past it. The next section is what the code says happens next, and
+  it was reverted back in.*
 
-  *Done when:* the IPv4 route table returns an empty-but-valid table the way its
-  IPv6 sibling already does, without an access violation, and `ipconfig` names
-  an adapter.
+  **The A/B was read wrongly, and the real cause is now named with evidence
+  rather than inference. 0013 does not fault — it *unblocks* a fault that was
+  always there.** The A/B result is genuine and its interpretation was not: a
+  patch that turns a failure into a success moves execution past the failure,
+  and what it reached is where the access violation lives.
 
-  *Superseded, kept because it was wrong in an instructive way.* An
+  `adapters_addresses_alloc` runs three stages in order
+  (`iphlpapi_main.c:1310-1320`): unicast addresses, then
+  `call_families( gateway_and_prefix_addresses_alloc )`, then `dns_info_alloc`.
+  Each one `goto err`s on failure. **Without 0013 the second stage returns 50
+  and `dns_info_alloc` is never called at all.** With 0013 the route table
+  succeeds and `dns_info_alloc` runs for the first time — and its first act is
+  `DnsQueryConfig( DnsConfigDnsServersUnspec, ... )`, which is
+  `RESOLV_CALL( get_serverlist, ... )`, which is
+  `__wine_unix_call( __wine_unixlib_handle, unix_get_serverlist, &params )`.
+
+  Four facts, each checked rather than reasoned about:
+
+  1. **`dnsapi`'s unix half does not exist in this build.** `libresolv.c` is
+     `#ifdef HAVE_RESOLV` from its first line to its last, and this build's own
+     configure log says `checking for resolver library... not found` — bionic
+     has no `res_getservers`. The `dnsapi.so` inside `wine-11.14-canoe.wcp` is
+     4992 bytes and its symbol table holds `crtbegin_so.c`, `libresolv.c` and
+     nothing else: **neither `__wine_unix_call_funcs` nor
+     `__wine_unix_lib_init`**. Read straight out of the shipped tarball, not
+     from the build.
+  2. **So the handle stays zero.** `get_unixlib_funcs` (`unix/virtual.c:843`)
+     returns `STATUS_ENTRYPOINT_NOT_FOUND` when neither symbol is present,
+     `__wine_init_unix_call()` fails, and `__wine_unixlib_handle` — a
+     *per-module* variable defined in `libs/winecrt0/unix_lib.c` — is left at 0.
+     That is precisely the condition that prints the
+     `err:dnsapi:DllMain No libresolv support` line this entry already recorded
+     twice. The message was never decoration; it was the diagnosis.
+  3. **A zero handle is a null function table, and the dispatcher indexes it.**
+     `__wine_unix_call_dispatcher` on aarch64 is
+     `ldr x16, [x0, x1, lsl 3]` (`unix/signal_arm64.c:1830`) with `x0` the
+     handle and `x1` the call code. With `x0 == 0` it loads from address
+     `code * 8`.
+  4. **That fault is *returned*, not raised — which is why `+seh` printed
+     nothing.** The `ldr` executes after `mov sp, x10` has switched to the
+     kernel stack, so `is_inside_syscall()` is true and `handle_syscall_fault`
+     takes the `get_syscall_frame` branch: `REGn_sig(0, context) =
+     rec->ExceptionCode`. `c0000005` comes back in `x0` as the return value of
+     `__wine_unix_call`. `DnsQueryConfig` returns it, `dns_info_alloc` returns
+     it at `if (err) return err`, `adapters_addresses_alloc` `goto err`s with
+     it, and `GetAdaptersAddresses` returns it — exactly the relay line above,
+     with no exception ever dispatched.
+
+  The relay arguments corroborate the path: `GetAdaptersAddresses(00000000,
+  00000080, ...)` is `AF_UNSPEC` with `GAA_FLAG_INCLUDE_GATEWAYS` and *without*
+  `GAA_FLAG_SKIP_DNS_SERVER`, which is what makes `dns_info_alloc` reach the
+  resolver at all.
+
+  *So the earlier note that named `dns_info_alloc` was right about the function
+  and wrong about the mechanism — it blamed the missing `res_init`/`res_query`
+  set for a bad answer, when the actual defect is that there is no unix library
+  to answer at all and the call jumps through a null table. The paragraph that
+  declared it "refuted" was itself inference: the relay read the value, not the
+  site.*
+
+  **Three patches, and all three are needed:**
+
+  - `patches/wine/0013` is reinstated unchanged apart from its comment, which
+    now records why the revert was wrong.
+  - `patches/wine/0014` guards `RESOLV_CALL` on `__wine_unixlib_handle` and
+    returns `DNS_ERROR_NO_DNS_SERVERS` when it is zero. Not an invented error:
+    it is what `resolv_get_serverlist` itself returns when the resolver has no
+    servers, so every caller already handles it.
+  - `patches/wine/0015` stops `dns_info_alloc` treating that as fatal. An
+    adapter with no DNS servers is an adapter, and Windows lists it. This is an
+    upstream bug independent of Android — any host with an empty
+    `/etc/resolv.conf` fails `GetAdaptersAddresses` the same way. It also
+    initialises `size`, which was read uninitialised on the first
+    `DnsQueryConfig` of every call since `3bace8862f1`.
+
+  *Done when:* `ipconfig` names an adapter on the device. **Built but not yet
+  run on the device.**
+
+  *Kept, and it reads differently now: this note named the right function
+  before anything had measured it, and was then thrown away for the wrong
+  reason. What it got wrong was only the mechanism — the missing
+  `res_init`/`res_query` set is not what fails the call; the missing unix
+  library behind them is.* An
   `+iphlpapi` trace shows exactly **one** `GetAdaptersAddresses` call, eight
   `ConvertInterfaceLuidToGuid` calls, the route enumeration above, and then
   nothing — no second call, so it never got `ERROR_BUFFER_OVERFLOW`, and no
