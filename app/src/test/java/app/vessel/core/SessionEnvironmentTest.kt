@@ -554,6 +554,9 @@ class SessionEnvironmentTest {
                 // documents both as stutter sources. See the assignment.
                 "FEX_DISABLEL2CACHE" to "0",
                 "FEX_DYNAMICL1CACHE" to "0",
+                // FEX's cache beside the shader caches, not in LOCALAPPDATA,
+                // so a container reset clears it with the others.
+                "FEX_APP_CACHE_LOCATION" to File(caches, "fex").absolutePath + File.separator,
             ),
             environment,
         )

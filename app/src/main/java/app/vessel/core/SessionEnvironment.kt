@@ -233,6 +233,7 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // upstream's stutter with no way to tell that is what happened.
     "FEX_DISABLEL2CACHE",
     "FEX_DYNAMICL1CACHE",
+    "FEX_APP_CACHE_LOCATION",
 
     // FEX's log destination, for the same reason as WINEDEBUG: docs/LOGGING.md
     // says everything diagnostic arrives on fd 2, and FEX's defaults send it
@@ -465,6 +466,31 @@ fun sessionEnvironment(
     // variable.
     environment["FEX_DISABLEL2CACHE"] = "0"
     environment["FEX_DYNAMICL1CACHE"] = "0"
+
+    // FEX's own cache lives beside the shader caches, not in LOCALAPPDATA.
+    //
+    // Everything else that caches compiled work for this container — Mesa,
+    // DXVK, vkd3d — is under `caches/`, and that is also what gets cleared when
+    // a container is reset. FEX defaulted to `%LOCALAPPDATA%\fex-emu\` inside
+    // the prefix, which survives a cache clear and is invisible to anything
+    // that reasons about container size.
+    environment["FEX_APP_CACHE_LOCATION"] = File(paths.caches, "fex").absolutePath + File.separator
+    //
+    // **`FEX_ENABLECODECACHINGWIP` is deliberately NOT set, and this is the
+    // reason rather than an oversight.** The flag makes a run write a codemap;
+    // it does not compile one. Turning it into a cache needs
+    // `FEXOfflineCompiler64.exe generate <codemap>`, which `build/fex.sh` now
+    // packages but nothing invokes — so enabling the flag today would add a
+    // file write per module load on every launch and never once read a cache
+    // back. That is pure cost.
+    //
+    // Two things to settle before it goes on. Something has to run `generate`
+    // — after a session ends is the obvious moment, since the codemap is
+    // complete and the device is idle. And `CodeCacheConfigId` is `0 // TODO`
+    // upstream (`ImageTracker.cpp`), so a cache is **not keyed on FEX's
+    // configuration**: change a TSO setting and the next run silently loads a
+    // cache built under the old one. The knobs above are exactly the kind of
+    // change that would do it.
     environment["WINEDEBUG"] = WINEDEBUG_CHANNELS
     environment[WINEDLLOVERRIDES_ENV] = dllOverrides(profile, manifest)
     environment["DISPLAY"] = display

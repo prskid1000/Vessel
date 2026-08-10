@@ -1058,9 +1058,39 @@ fun WindowDragBorders(
         handle(left + width - grab, top + grab, grab, height - grab * 2) { dx, _ ->
             rect.copy(width = (rect.width + dx).coerceAtLeast(MIN_DRAG_PX))
         }
-        // Resize — the bottom-right corner, both axes at once. Declared last so
-        // it is hit-tested first, and drawn stronger because it is the one a
-        // thumb reaches for.
+        // Resize — all four corners, both axes at once. Declared after the
+        // edges so they win the hit test where they overlap, and drawn stronger
+        // because a corner is what you reach for when you want to size freely.
+        //
+        // A corner that owns the origin has to move it by however much the size
+        // actually changed, not by the raw drag: clamping at MIN_DRAG_PX would
+        // otherwise keep sliding the window after it had stopped shrinking.
+        handle(left, top, grab, grab, strong = true) { dx, dy ->
+            val w2 = (rect.width - dx).coerceAtLeast(MIN_DRAG_PX)
+            val h2 = (rect.height - dy).coerceAtLeast(MIN_DRAG_PX)
+            rect.copy(
+                x = rect.x + (rect.width - w2),
+                y = rect.y + (rect.height - h2),
+                width = w2,
+                height = h2,
+            )
+        }
+        handle(left + width - grab, top, grab, grab, strong = true) { dx, dy ->
+            val h2 = (rect.height - dy).coerceAtLeast(MIN_DRAG_PX)
+            rect.copy(
+                y = rect.y + (rect.height - h2),
+                width = (rect.width + dx).coerceAtLeast(MIN_DRAG_PX),
+                height = h2,
+            )
+        }
+        handle(left, top + height - grab, grab, grab, strong = true) { dx, dy ->
+            val w2 = (rect.width - dx).coerceAtLeast(MIN_DRAG_PX)
+            rect.copy(
+                x = rect.x + (rect.width - w2),
+                width = w2,
+                height = (rect.height + dy).coerceAtLeast(MIN_DRAG_PX),
+            )
+        }
         handle(
             left + width - grab, top + height - grab, grab, grab, strong = true,
         ) { dx, dy ->

@@ -130,6 +130,28 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
 
   install -m 0644 "$DLL" "$STAGE/$DLL_NAME"
   ok "$DLL_NAME ($TRIPLE)"
+
+  # The offline code-cache compiler, which cmake already built and this script
+  # used to throw away.
+  #
+  # FEX-2608 has a full AOT pipeline for Windows: a run with
+  # FEX_ENABLECODECACHINGWIP=1 writes a codemap under the cache directory,
+  # `FEXOfflineCompiler64.exe generate <codemap>` turns that into a cache, and
+  # later runs map the cache at image-load time instead of re-JITting. Without
+  # this binary in the package the first step has nowhere to go, so shipping it
+  # is the prerequisite for the whole feature.
+  #
+  # Packaged but not yet used: nothing runs `generate` — see
+  # SessionEnvironment.kt for why the runtime flag stays off until something
+  # does. Best-effort by design; a FEX that stops building it should not fail
+  # the Wine-critical part of this package.
+  COMPILER="$(find "$BUILD" -type f -name 'FEXOfflineCompiler*.exe' -print -quit || true)"
+  if [ -n "$COMPILER" ]; then
+    install -m 0644 "$COMPILER" "$STAGE/$(basename "$COMPILER")"
+    ok "$(basename "$COMPILER") ($TRIPLE)"
+  else
+    info "no FEXOfflineCompiler for $TRIPLE — code-cache generation unavailable"
+  fi
 done
 
 # Both DLLs sit at the package root, which is where the Wine side looks.

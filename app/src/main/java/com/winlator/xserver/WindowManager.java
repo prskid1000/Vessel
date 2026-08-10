@@ -4,6 +4,8 @@ import android.util.SparseArray;
 
 import com.winlator.core.Bitmask;
 import com.winlator.renderer.GPUImage;
+
+import java.nio.ByteBuffer;
 import com.winlator.xconnector.XInputStream;
 import com.winlator.xserver.errors.BadIdChoice;
 import com.winlator.xserver.errors.BadMatch;
@@ -225,17 +227,41 @@ public class WindowManager extends XResourceManager {
         if (content.width <= MIN_HARDWARE_BUFFER_EDGE || content.height <= MIN_HARDWARE_BUFFER_EDGE) return;
 
         GPUImage image = new GPUImage(content);
-        if (image.getVirtualData() == null) {
-            // Allocation or lock failed. Say so once — a silent fallback here
-            // would look like the optimisation working and doing nothing.
+        ByteBuffer buffer = image.getVirtualData();
+        if (buffer == null) {
+            // Allocation or lock failed. Fall back to the plain Texture rather
+            // than hand the drawable a null ByteBuffer.
             image.destroy();
             return;
         }
+
+        // **Zero it, because gralloc does not.** A plain Texture's ByteBuffer
+        // arrives zero-filled; an AHardwareBuffer arrives with whatever was in
+        // that memory. Without this, swapping one for the other would have
+        // turned "an area the client has not painted" from black into garbage.
+        // One memset per window creation and resize, not per frame.
+        //
+        // *This is not the fix for the white region seen on an over-sized
+        // window.* That predates hardware-buffer backing: it is Wine erasing
+        // the frame window to its own background brush, and it shows wherever
+        // the client does not cover the frame — 44 rows of caption before
+        // patches/wine/0010, a large L now that a shell drag can make the frame
+        // bigger than the client. The cure for that is the client tracking the
+        // frame, which is the managed-mode work in docs/TODO.md.
+        byte[] zeros = new byte[ZERO_CHUNK_BYTES];
+        buffer.clear();
+        while (buffer.remaining() >= zeros.length) buffer.put(zeros);
+        while (buffer.hasRemaining()) buffer.put((byte) 0);
+        buffer.clear();
+
         content.setTexture(image);
     }
 
     /** Below this, a window is Wine's message-only plumbing rather than a window. */
     private static final int MIN_HARDWARE_BUFFER_EDGE = 1;
+
+    /** Chunk for the initial clear. Big enough to be cheap, small enough to reuse. */
+    private static final int ZERO_CHUNK_BYTES = 8192;
 
     private void changeWindowGeometry(Window window, short x, short y, short width, short height) {
         boolean resized = window.getWidth() != width || window.getHeight() != height;

@@ -1,0 +1,186 @@
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index a51c9853200..48eaa479c69 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -2879,7 +2879,12 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+ #endif
+       }
+ 
+-      if (wsi->sw) {
++      /* Software WSI must wait for the blit into the linear image before the
++       * pixels can be read on the CPU — but this is the *application's*
++       * thread, and a backend that only queues here will not read them for a
++       * while yet. Such a backend sets defers_sw_blit_wait and does the wait
++       * itself, immediately before the read. See wsi_swapchain. */
++      if (wsi->sw && !swapchain->defers_sw_blit_wait) {
+          wsi->WaitForFences(vk_device_to_handle(dev),
+                             1, &swapchain->fences[image_index], true, ~0ull);
+       }
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+index 3d2cd7d2e51..abbfe1bede5 100644
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -239,6 +239,22 @@ struct wsi_swapchain {
+    VkSemaphore present_id_timeline;
+    bool present_wait_enabled;
+ 
++   /**
++    * The backend waits on the software blit fence itself, off the app thread.
++    *
++    * Software WSI has to wait for the GPU blit into the linear image before it
++    * can read those pixels on the CPU. wsi_common_queue_present does that wait
++    * inline, which blocks the *application's* vkQueuePresentKHR — even for a
++    * backend whose queue_present only pushes to a queue and presents later on
++    * its own thread. When this is set the generic code skips the wait and the
++    * backend does it immediately before it touches the pixels, which is the
++    * first moment it actually has to be true.
++    *
++    * Default false, so every backend that has not opted in keeps the existing
++    * ordering exactly.
++    */
++   bool defers_sw_blit_wait;
++
+    int signal_dma_buf_from_semaphore;
+    /**
+     * Optional semaphore for implicit-sync swapchains.  It will be signaled by
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+index a077afeb352..1875de22796 100644
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -1252,6 +1252,26 @@ struct x11_swapchain {
+    uint32_t                                     depth;
+    VkExtent2D                                   extent;
+ 
++   /* The software present path's resize check, pipelined by one frame.
++    *
++    * x11_present_to_x11_sw asks for the window geometry and then blocks on the
++    * reply before returning, and that reply is queued behind the multi-megabyte
++    * PutImage it just sent on the same connection. Holding the cookie and
++    * reading it on the *next* present removes the stall: the request is still
++    * issued every frame, the answer is simply collected one frame later.
++    *
++    * The cost is that a resize is noticed one present late, which is harmless —
++    * OUT_OF_DATE arriving a frame later still makes the app rebuild the
++    * swapchain, and the frame in between was already drawn at the old size.
++    *
++    * The obvious alternative — select StructureNotify and read ConfigureNotify
++    * — must not be used here: for an Xlib surface `conn` is the application's
++    * own connection, so changing the event mask would replace the mask Wine
++    * selected on its own window.
++    */
++   bool                                         sw_geom_pending;
++   xcb_get_geometry_cookie_t                    sw_geom_cookie;
++
+    blake3_hash                                  dri3_modifier_hash;
+ 
+    xcb_present_event_t                          event_id;
+@@ -1848,10 +1868,33 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+ {
+    assert(!chain->base.image_info.explicit_sync);
+    struct x11_image *image = &chain->images[image_index];
++   const struct wsi_device *wsi = chain->base.wsi;
++
++   /* The blit wait, moved here off the application's thread.
++    *
++    * wsi_common_queue_present used to block the app in vkQueuePresentKHR until
++    * the GPU blit into this linear image had landed. But x11_queue_present only
++    * pushes to present_queue and returns; the pixels are not read until this
++    * function runs, on the present-manager thread. So the app was being made to
++    * wait for a fence that nothing needed yet. Here is the first instruction
++    * that genuinely requires it — the put-image below reads image->cpu_map. */
++   if (wsi->sw) {
++      wsi->WaitForFences(chain->base.device, 1,
++                         &chain->base.fences[image_index], true, ~0ull);
++   }
+ 
+    /* Begin querying this before submitting the frame for improved async performance.
+-    * In this _sw() mode we're expecting network round-trip delay, not just UNIX socket delay. */
++    * In this _sw() mode we're expecting network round-trip delay, not just UNIX socket delay.
++    *
++    * The reply is collected on the *next* present rather than at the end of
++    * this one — see sw_geom_pending. Issued first, as before, so the server can
++    * be working on it while the PutImage streams. */
+    xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(chain->conn, chain->window);
++   bool had_previous_geom = chain->sw_geom_pending;
++   xcb_get_geometry_cookie_t previous_geom_cookie = chain->sw_geom_cookie;
++
++   chain->sw_geom_cookie = geom_cookie;
++   chain->sw_geom_pending = true;
+ 
+    xcb_void_cookie_t cookie;
+    void *myptr = image->base.cpu_map;
+@@ -1910,21 +1953,29 @@ x11_present_to_x11_sw(struct x11_swapchain *chain, uint32_t image_index)
+    xcb_flush(chain->conn);
+ 
+    /* We don't have queued present here.
+-    * Immediately let application acquire again, but query geometry first so
+-    * we can report OUT_OF_DATE on resize. */
+-   xcb_generic_error_t *err;
+-
+-   xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(chain->conn, geom_cookie, &err);
++    * Immediately let application acquire again, but check geometry so we can
++    * report OUT_OF_DATE on resize.
++    *
++    * The reply read here belongs to the *previous* present. Reading this
++    * frame's would block on a reply sitting behind the PutImage above on the
++    * same connection; the previous frame's has had a whole frame to arrive, so
++    * it is almost always already buffered. The very first present has no
++    * previous cookie and simply skips the check. */
+    VkResult result = VK_SUCCESS;
+-   if (geom) {
+-      if (chain->extent.width != geom->width ||
+-          chain->extent.height != geom->height)
+-         result = VK_ERROR_OUT_OF_DATE_KHR;
+-   } else {
+-      result = VK_ERROR_SURFACE_LOST_KHR;
++   if (had_previous_geom) {
++      xcb_generic_error_t *err;
++      xcb_get_geometry_reply_t *geom =
++         xcb_get_geometry_reply(chain->conn, previous_geom_cookie, &err);
++      if (geom) {
++         if (chain->extent.width != geom->width ||
++             chain->extent.height != geom->height)
++            result = VK_ERROR_OUT_OF_DATE_KHR;
++      } else {
++         result = VK_ERROR_SURFACE_LOST_KHR;
++      }
++      free(err);
++      free(geom);
+    }
+-   free(err);
+-   free(geom);
+ 
+    wsi_queue_push(&chain->acquire_queue, image_index);
+    return result;
+@@ -2976,6 +3027,14 @@ x11_swapchain_destroy(struct wsi_swapchain *wsi_chain,
+    thrd_join(chain->queue_manager, NULL);
+    thrd_join(chain->event_manager, NULL);
+ 
++   /* The pipelined resize check leaves one geometry reply outstanding by
++    * design. Discard it after the present thread has stopped, so the reply is
++    * not left buffered on the connection for the rest of the process. */
++   if (chain->sw_geom_pending) {
++      xcb_discard_reply(chain->conn, chain->sw_geom_cookie.sequence);
++      chain->sw_geom_pending = false;
++   }
++
+    if (!chain->base.image_info.explicit_sync)
+       wsi_queue_destroy(&chain->acquire_queue);
+    wsi_queue_destroy(&chain->present_queue);
+@@ -3375,6 +3434,16 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+       goto fail_init_fifo_queue;
+    }
+ 
++   /* Now that the present-manager thread exists, the app no longer has to wait
++    * for the software blit in vkQueuePresentKHR — x11_present_to_x11_sw does it
++    * on that thread, immediately before it reads the pixels.
++    *
++    * Scoped to exactly the path that carries the wait. x11_present_to_x11 picks
++    * the _sw() function only for `sw && !has_mit_shm`; the DRI3 path does not
++    * read cpu_map and has no such wait, so claiming deferral for it would drop
++    * the fence entirely rather than move it. */
++   chain->base.defers_sw_blit_wait = chain->base.wsi->sw && !chain->has_mit_shm;
++
+    ret = thrd_create(&chain->event_manager,
+                      x11_manage_event_queue, chain);
+    if (ret != thrd_success) {
