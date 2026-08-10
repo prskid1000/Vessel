@@ -1,11 +1,15 @@
 package app.vessel.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import android.content.Intent
 import android.net.Uri
@@ -21,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,6 +47,7 @@ import app.vessel.ui.components.VLabeledField
 import app.vessel.ui.components.VRule
 import app.vessel.ui.components.VSheet
 import app.vessel.ui.components.VSheetHeader
+import app.vessel.ui.components.VSheetRow
 import app.vessel.ui.components.VStepper
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VToggle
@@ -51,6 +57,7 @@ import app.vessel.ui.vm.ContainerSheetUiState
 import app.vessel.ui.vm.ContainerSheetViewModel
 import app.vessel.ui.vm.EditorGroup
 import app.vessel.ui.vm.EditorParam
+import app.vessel.ui.vm.InputUiState
 
 /**
  * A container's settings, over the container.
@@ -100,6 +107,7 @@ fun ContainerSheet(
         onDelete = viewModel::delete,
         onOpenLogs = { onOpenLogs(state.containerId) },
         onDiagnostics = viewModel::setDiagnostics,
+        onInputProfile = viewModel::setInputProfile,
         onDeleteLogs = viewModel::deleteLogs,
         onCopyDiagnostics = viewModel::copyDiagnosticsTo,
         onGrantStorage = {
@@ -125,6 +133,7 @@ private fun ContainerSheetContent(
     onDelete: () -> Unit,
     onOpenLogs: () -> Unit,
     onDiagnostics: (ContainerDiagnostics) -> Unit,
+    onInputProfile: (String?) -> Unit,
     onDeleteLogs: () -> Unit,
     onCopyDiagnostics: (String) -> Unit,
     onGrantStorage: () -> Unit,
@@ -138,10 +147,19 @@ private fun ContainerSheetContent(
     // there, so Save becomes a chevron that puts the form back.
     var diagnosticsOpen by remember { mutableStateOf(false) }
 
+    /**
+     * Input takes the sheet over for the same reason Diagnostics does: what is
+     * behind the row is a table, not a control. Today it is only the per-container
+     * profile picker — *which* table this container starts with, which is a
+     * setting about the container and belongs here rather than in a session.
+     */
+    var inputOpen by remember { mutableStateOf(false) }
+
     // Back closes Diagnostics before it closes the sheet. Registered inside
     // VSheet's own handler, so it wins while it is enabled — the innermost
     // enabled callback is the one the dispatcher runs.
     BackHandler(enabled = diagnosticsOpen) { diagnosticsOpen = false }
+    BackHandler(enabled = inputOpen) { inputOpen = false }
 
     VSheet(
         onDismiss = onDismiss,
@@ -150,6 +168,14 @@ private fun ContainerSheetContent(
                 DiagnosticsHeader(
                     containerName = state.name.ifBlank { "Container" },
                     onCollapse = { diagnosticsOpen = false },
+                )
+            } else if (inputOpen) {
+                VSheetHeader(
+                    title = "Input",
+                    subtitle = state.name.ifBlank { "Container" },
+                    trailing = {
+                        VButton("Done", { inputOpen = false }, style = VButtonStyle.Secondary)
+                    },
                 )
             } else {
                 VSheetHeader(
@@ -187,6 +213,10 @@ private fun ContainerSheetContent(
                 onDeleteLogs = onDeleteLogs,
                 onCopyTo = onCopyDiagnostics,
             )
+            return@VSheet
+        }
+        if (inputOpen) {
+            InputProfilePanel(state.input, onInputProfile)
             return@VSheet
         }
         when {
@@ -241,6 +271,26 @@ private fun ContainerSheetContent(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+
+                // **A route rather than a control, because what is behind it is a
+                // table.** It sits in the manifest's own order — after the display
+                // settings, before the destructive actions — and it exists on a
+                // container being created as well, unlike everything below the
+                // rule: picking which bindings a container starts with needs no
+                // prefix and no session, and it is the one thing a user setting up
+                // a container with a pad in their hands will want first.
+                VRule(verticalMargin = Vessel.metrics.s6)
+                VSheetRow(
+                    icon = VIcons.Gamepad,
+                    title = "Input · ${state.input.profileName}",
+                    help = if (state.input.missing) {
+                        "The profile this container named has been deleted, so it " +
+                            "starts on the default."
+                    } else {
+                        "Which pad bindings and touch overlay this container starts with."
+                    },
+                    onClick = { inputOpen = true },
+                )
 
                 // Nothing below this line changes a setting: one destructive
                 // action, one destination, and one section that changes what the
@@ -338,6 +388,66 @@ private fun ParamGroup(group: EditorGroup, onParam: (String, ParamValue) -> Unit
             }
         }
     }
+}
+
+/**
+ * Which profile this container starts with.
+ *
+ * **The picker and nothing else, and that is deliberate for now.** Editing a
+ * binding is a question about the game that is running — whether `R2` should be
+ * left-click or `Space` is not knowable from a sheet — so the table itself is
+ * edited from the session rail, over the running desktop. What belongs here is
+ * the one part that is genuinely a property of the container: which table it
+ * starts on.
+ */
+@Composable
+private fun InputProfilePanel(state: InputUiState, onPick: (String?) -> Unit) {
+    if (state.missing) {
+        VCaution(
+            "This container names a profile that has been deleted. It starts on the " +
+                "default until something else is chosen — nothing was rewritten, so " +
+                "restoring the profile restores the choice.",
+        )
+    }
+    state.choices.forEach { choice ->
+        val selected = choice.id == state.profileId
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClickLabel = choice.name) { onPick(choice.id) }
+                .heightIn(min = Vessel.metrics.touchTarget)
+                .padding(vertical = Vessel.metrics.s6),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // A check on the chosen one rather than a radio ring: the sheet has no
+            // other radio anywhere, and a tick is the mark the rest of the product
+            // already uses for "this is the one".
+            Icon(
+                VIcons.Check,
+                contentDescription = null,
+                Modifier
+                    .size(Vessel.metrics.iconMd)
+                    .alpha(if (selected) 1f else 0f),
+                tint = Vessel.colors.accent,
+            )
+            Column(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+            ) {
+                Text(choice.name, style = Vessel.type.body)
+                Text(choice.note, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
+            }
+        }
+    }
+    Text(
+        "A profile belongs to no container until one selects it, and several " +
+            "containers can share one. The default is what a container gets when it " +
+            "has never been given anything, and it is never written to disk.",
+        style = Vessel.type.bodySmall,
+        color = Vessel.colors.textMuted,
+        modifier = Modifier.padding(top = Vessel.metrics.s6),
+    )
 }
 
 /** A short closed choice, which is what can sit in half a sheet's width. */
@@ -532,6 +642,7 @@ private fun ContainerSheetPreview() {
             onDelete = {},
             onOpenLogs = {},
             onDiagnostics = {},
+            onInputProfile = {},
             onDeleteLogs = {},
             onCopyDiagnostics = {},
             onGrantStorage = {},

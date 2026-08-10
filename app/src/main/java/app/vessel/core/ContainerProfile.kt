@@ -47,4 +47,16 @@ data class ContainerProfile(
      * "nothing switched on", which is also what it was running with.
      */
     val diagnostics: ContainerDiagnostics = ContainerDiagnostics(),
+
+    /**
+     * Which input profile this container starts with, and whether the touch
+     * overlay is drawn. See [ContainerInput].
+     *
+     * A typed defaulted field for the same reason [diagnostics] is: it points at
+     * a document with its own schema and its own failure domain, which no
+     * manifest key can do. Defaulted, so a container written before this existed
+     * reads back as "the built-in default", which is also what it was running
+     * with — no migration, and an untouched container's bytes do not change.
+     */
+    val input: ContainerInput = ContainerInput(),
 )

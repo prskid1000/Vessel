@@ -4,7 +4,9 @@ import android.content.Context
 import android.os.PowerManager
 import app.vessel.core.GuestUnits
 import app.vessel.core.ComponentType
+import app.vessel.core.ContainerInput
 import app.vessel.core.ContainerProfile
+import app.vessel.input.InputProfile
 import app.vessel.core.DEFAULT_DISPLAY
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.DisplayOutcome
@@ -186,6 +188,7 @@ class SessionRuntime @Inject constructor(
     private val runner: WineProcessRunner,
     private val guest: GuestProcessTree,
     private val display: SessionDisplayServer,
+    private val inputProfiles: InputProfileRepository,
     private val json: Json,
 ) : PrefixBootstrap {
 
@@ -687,12 +690,33 @@ class SessionRuntime @Inject constructor(
             )
         }
 
+        // **Resolved here rather than in `runDesktop`, because a missing profile
+        // is not a failure and must not read like one.** A `profileId` naming a
+        // profile that has since been deleted is ordinary — profiles are shared
+        // between containers and deleting one is allowed — so it resolves to the
+        // built-in default, is said out loud in the log, and **the container is
+        // not rewritten**. Rewriting it here would turn "you deleted a profile"
+        // into a silent edit of a second document during a launch.
+        val wanted = profile.input.profileId
+        val input = inputProfiles.resolve(wanted)
+        if (wanted != null && wanted != input.id) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "input profile $wanted has been deleted; using ${input.name}",
+            )
+        } else {
+            log.line(LogSource.VESSEL, LogLevel.INFO, "input profile ${input.name}")
+        }
+
         val resolved = LaunchPlan(
             layout = layout,
             tree = tree,
             environment = environment,
             log = log,
             offlineCompiler = fex?.offlineCompiler,
+            input = input,
+            touchVisible = profile.input.touchVisible,
         )
         plan = resolved
 
@@ -775,6 +799,13 @@ class SessionRuntime @Inject constructor(
                 return
             }
         }
+
+        // **Pushed after the server is up and before the guest exists.** The view
+        // that carries the translator is built by `display.start`, so anything
+        // pushed earlier lands on a view that is about to be replaced; anything
+        // pushed later means the first seconds of a game run on the wrong table.
+        display.setInputProfile(current.input)
+        display.setTouchControlsVisible(current.touchVisible)
 
         // What the display server answered with becomes part of the plan, not just
         // of this one command: `launchProgram` starts a guest process later and it
@@ -1891,6 +1922,14 @@ class SessionRuntime @Inject constructor(
          * class should not be reaching into while it is shutting one down.
          */
         val offlineCompiler: File? = null,
+        /**
+         * The bindings this session starts with, already resolved against the
+         * profile document. Pushed onto the display seam once the server is up;
+         * the panel may replace it at any point after that.
+         */
+        val input: InputProfile = InputProfile.Default,
+        /** Whether this container draws the touch overlay. See [ContainerInput]. */
+        val touchVisible: Boolean = false,
         /**
          * The desktop's size, set once the desktop is actually started.
          *

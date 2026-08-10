@@ -1,6 +1,7 @@
 package app.vessel.ui.components
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
@@ -141,7 +142,20 @@ object VIcons {
     /** `warning` — a refusal that is not an error. */
     val Warning: ImageVector by lazy { glyph("phosphor.warning", WARNING) }
 
-    private fun glyph(name: String, pathData: String): ImageVector =
+    /**
+     * A gamepad — the Input tool, and the container sheet's Input row.
+     *
+     * **Drawn here rather than transcribed, and the name says so.** Phosphor's
+     * `game-controller` is not in this file and the project vendors no Phosphor
+     * asset to copy it out of, so inventing a path and labelling it `phosphor.*`
+     * would put a claim in the source that `CREDITS.md` cannot back. This is
+     * authored to the same 256 grid and the same 16-unit stroke weight as the
+     * rest: a rounded body, a d-pad on the left, two buttons on the right. Swap
+     * it for the real glyph the moment the asset is available.
+     */
+    val Gamepad: ImageVector by lazy { glyph("vessel.gamepad", GAMEPAD, evenOdd = true) }
+
+    private fun glyph(name: String, pathData: String, evenOdd: Boolean = false): ImageVector =
         ImageVector.Builder(
             name = name,
             defaultWidth = VIconCanvas,
@@ -150,12 +164,28 @@ object VIcons {
             viewportHeight = PHOSPHOR_GRID,
         ).addPath(
             pathData = addPathNodes(pathData),
+            // Even-odd, so a glyph built from an outline plus the shapes inside it
+            // reads as a hollow body with solid features rather than one blob.
+            pathFillType = if (evenOdd) PathFillType.EvenOdd else PathFillType.NonZero,
             fill = SolidColor(Color.Black),
         ).build()
 }
 
 /** Phosphor's own grid. Every path below is authored against it. */
 private const val PHOSPHOR_GRID = 256f
+
+/**
+ * A gamepad, drawn here. Five subpaths, even-odd: the body's outer and inner
+ * rounded rectangles make the shell hollow, and the cross and the two buttons sit
+ * inside that hole, where a third crossing makes them solid again.
+ */
+private const val GAMEPAD =
+    "M48,72H208a24,24,0,0,1,24,24v64a24,24,0,0,1-24,24H48a24,24,0,0,1-24-24V96A24,24,0,0,1,48,72Z" +
+        "M48,88a8,8,0,0,0-8,8v64a8,8,0,0,0,8,8H208a8,8,0,0,0,8-8V96a8,8,0,0,0-8-8Z" +
+        "M56,120H96v16H56Z" +
+        "M68,108H84v40H68Z" +
+        "M182,116a10,10,0,1,1-20,0a10,10,0,1,1,20,0Z" +
+        "M206,140a10,10,0,1,1-20,0a10,10,0,1,1,20,0Z"
 
 private const val ARROW_LEFT =
     "M224,128a8,8,0,0,1-8,8H59.31l58.35,58.34a8,8,0,0,1-11.32,11.32l-72-72a8,8,0,0,1,0-11.32l72-72a8," +

@@ -32,6 +32,7 @@ import app.vessel.core.xSocketName
 import app.vessel.input.GamepadControl
 import app.vessel.input.GamepadTranslator
 import app.vessel.input.GuestInput
+import app.vessel.input.InputProfile
 import app.vessel.input.PointerButton
 import app.vessel.input.PointerGestures
 import app.vessel.input.PointerMode
@@ -132,6 +133,15 @@ class XServerDisplay @Inject constructor(
     private val _pointerMode = MutableStateFlow(PointerMode.TRACKPAD)
     override val pointerMode: StateFlow<PointerMode> = _pointerMode.asStateFlow()
 
+    private val _inputProfile = MutableStateFlow(InputProfile.Default)
+    override val inputProfile: StateFlow<InputProfile> = _inputProfile.asStateFlow()
+
+    private val _touchControlsVisible = MutableStateFlow(false)
+    override val touchControlsVisible: StateFlow<Boolean> = _touchControlsVisible.asStateFlow()
+
+    private val _heldControls = MutableStateFlow<Set<GamepadControl>>(emptySet())
+    override val heldControls: StateFlow<Set<GamepadControl>> = _heldControls.asStateFlow()
+
     private val _windows = MutableStateFlow<List<TopLevelWindow>>(emptyList())
     override val windows: StateFlow<List<TopLevelWindow>> = _windows.asStateFlow()
 
@@ -230,6 +240,22 @@ class XServerDisplay @Inject constructor(
     }
 
     /**
+     * Kept here as well as on the view, because a session that has not started
+     * yet — or has just been torn down and is about to restart — still has to
+     * remember what the container asked for. The view picks it up when it is
+     * built; see [start].
+     */
+    override fun setInputProfile(profile: InputProfile) {
+        _inputProfile.value = profile
+        val view = session?.view ?: return
+        view.post { view.inputProfile = profile }
+    }
+
+    override fun setTouchControlsVisible(visible: Boolean) {
+        _touchControlsVisible.value = visible
+    }
+
+    /**
      * Raise a window and focus it.
      *
      * Both halves are needed and they are different operations: raising changes
@@ -283,6 +309,11 @@ class XServerDisplay @Inject constructor(
                 // about what the taskbar wants.
                 started.onWindowsChanged = { list -> _windows.value = list }
             started.onDesktopUp = { _desktopUp.value = true }
+                // The bindings the container resolved before the server started.
+                // A new view begins on the default table otherwise, and the
+                // profile would only land if the user opened the panel.
+                started.view.inputProfile = _inputProfile.value
+                started.view.onHeldControlsChanged = { held -> _heldControls.value = held }
                 _surface.value = started.view
                 startSampling(started.view.renderer, request.fpsLimit, request.geometry.width, request.geometry.height)
                 DisplayOutcome.Started(started.environment)
@@ -313,6 +344,9 @@ class XServerDisplay @Inject constructor(
         // windows of a session that has stopped is worse than an empty one.
         _windows.value = emptyList()
         _desktopUp.value = false
+        // Nothing is held once there is no view to hold it, and a row left lit
+        // after the session ended reads as a stuck button.
+        _heldControls.value = emptySet()
         session?.let { runCatching { it.stop() }.onFailure { e -> Log.w(TAG, "teardown", e) } }
         session = null
     }
@@ -1189,6 +1223,43 @@ private class SessionSurfaceView(
             gestures.mode = value
         }
 
+    /**
+     * The pad's binding table. Written by the Input panel, live.
+     *
+     * **The release happens before the change, and that ordering is the whole
+     * point.** A control held while its binding is rewritten would send its
+     * press under the old table and never send a release under either, and
+     * nothing left in the system could let it go.
+     */
+    var inputProfile: InputProfile = InputProfile.Default
+        set(value) {
+            field = value
+            sink.accept(gamepad.reset())
+            publishHeld()
+            gamepad.profile = value.pad
+            gamepad.config = value.config
+            syncLookTimer()
+        }
+
+    /** Told when the set of held pad controls changes; drives the live-press rows. */
+    var onHeldControlsChanged: ((Set<GamepadControl>) -> Unit)? = null
+
+    private var publishedHeld: Set<GamepadControl> = emptySet()
+
+    /**
+     * Push the held set, but only when it has actually changed.
+     *
+     * A stick sends a `MotionEvent` per sample and most of them change nothing;
+     * a flow updated on every one would recompose the whole binding list at the
+     * pad's report rate.
+     */
+    private fun publishHeld() {
+        val held = gamepad.heldControls
+        if (held == publishedHeld) return
+        publishedHeld = held
+        onHeldControlsChanged?.invoke(held)
+    }
+
     private val longPress = Runnable { sink.accept(gestures.onTimeout(now())) }
 
     /** Only alive while a look stick is off centre; see [GamepadTranslator.looking]. */
@@ -1225,6 +1296,7 @@ private class SessionSurfaceView(
         looking = false
         sink.accept(gestures.reset())
         sink.accept(gamepad.reset())
+        publishHeld()
         sink.releaseAll()
         super.onDetachedFromWindow()
     }
@@ -1385,6 +1457,7 @@ private class SessionSurfaceView(
             ),
         )
         syncLookTimer()
+        publishHeld()
         return true
     }
 
@@ -1425,6 +1498,7 @@ private class SessionSurfaceView(
                 KeyEvent.ACTION_DOWN -> sink.accept(gamepad.onButton(control, true))
                 KeyEvent.ACTION_UP -> sink.accept(gamepad.onButton(control, false))
             }
+            publishHeld()
             return true
         }
 

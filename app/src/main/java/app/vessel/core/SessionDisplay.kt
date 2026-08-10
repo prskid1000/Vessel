@@ -1,6 +1,8 @@
 package app.vessel.core
 
 import android.view.View
+import app.vessel.input.GamepadControl
+import app.vessel.input.InputProfile
 import app.vessel.input.PointerMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -226,6 +228,57 @@ interface SessionDisplayServer {
     fun setPointerMode(mode: PointerMode)
 
     /**
+     * The binding table the running session is using.
+     *
+     * On this seam alongside [pointerMode] and for the same stated reason: it is
+     * a thing the *user* changes mid-session, from the Session rail, and the rail
+     * has no reference to the view — it only knows this interface. A flow rather
+     * than a getter so the panel's rows match reality after a session restart,
+     * which resets it to whatever the container names.
+     */
+    val inputProfile: StateFlow<InputProfile>
+
+    /**
+     * Change what the pad sends, now.
+     *
+     * **Releases before it changes.** Every held control is let go first:
+     * changing a binding while a key is down would otherwise leave the guest
+     * holding a key that nothing left in the system can ever release, and the
+     * symptom — a character that walks into a wall forever — looks nothing like
+     * its cause.
+     *
+     * Live edits persist immediately and push immediately. A draft-with-Save was
+     * rejected: the entire argument for editing bindings from inside a session is
+     * that a change is visible the moment it is made.
+     */
+    fun setInputProfile(profile: InputProfile)
+
+    /**
+     * Whether the on-screen overlay is drawn and taking touches.
+     *
+     * Separate from the profile because it is about *this* container on *this*
+     * run — a profile shared with a container played on a real pad should not
+     * have to choose.
+     */
+    val touchControlsVisible: StateFlow<Boolean>
+
+    fun setTouchControlsVisible(visible: Boolean)
+
+    /**
+     * Which physical pad controls are held down right now.
+     *
+     * **The thing that turns "which button is X on this pad?" into a press.** The
+     * editor keeps feeding the translator while it is open, so a row highlights
+     * the moment its control is pressed — which is the only honest way to answer
+     * that question for an 8BitDo, a DualSense and a Backbone, all of which
+     * report the same axes through this path.
+     *
+     * Empty when nothing is running, and empty for a session with no pad
+     * attached, which is the same thing as far as anything reading it goes.
+     */
+    val heldControls: StateFlow<Set<GamepadControl>>
+
+    /**
      * Top-level guest windows, for the taskbar. Empty when nothing is running.
      *
      * On this seam and not somewhere in `data/` because the X server is the only
@@ -396,6 +449,25 @@ interface SessionDisplayServer {
             MutableStateFlow(PointerMode.TRACKPAD).asStateFlow()
 
         override fun setPointerMode(mode: PointerMode) = Unit
+
+        // Headless: there is nothing to send the bindings to. The profile is
+        // still reported so an editor opened over a headless session shows the
+        // container's real table rather than an empty one — it simply has no
+        // effect, which is what the whole of `Absent` is.
+        override val inputProfile: StateFlow<InputProfile> =
+            MutableStateFlow(InputProfile.Default).asStateFlow()
+
+        override fun setInputProfile(profile: InputProfile) = Unit
+
+        override val touchControlsVisible: StateFlow<Boolean> =
+            MutableStateFlow(false).asStateFlow()
+
+        override fun setTouchControlsVisible(visible: Boolean) = Unit
+
+        // No view, so no pad events reach anything. An editor's live-press
+        // indicator simply never lights, which is true.
+        override val heldControls: StateFlow<Set<GamepadControl>> =
+            MutableStateFlow(emptySet<GamepadControl>()).asStateFlow()
 
         // Headless: there are no windows, and saying so with an empty list is the
         // honest answer rather than a missing capability the taskbar has to guess at.

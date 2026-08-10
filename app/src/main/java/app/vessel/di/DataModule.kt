@@ -12,6 +12,9 @@ import app.vessel.data.AppShortcutDocument
 import app.vessel.data.AppShortcutDocumentSerializer
 import app.vessel.data.ContainerDocument
 import app.vessel.data.ContainerDocumentSerializer
+import app.vessel.data.INPUT_PROFILES_FILE
+import app.vessel.data.InputProfileDocument
+import app.vessel.data.InputProfileDocumentSerializer
 import app.vessel.core.SessionDisplayServer
 import app.vessel.data.ContainerPaths
 import app.vessel.data.FreeSpace
@@ -138,6 +141,31 @@ object DataModule {
         },
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
         produceFile = { context.dataStoreFile(SHORTCUTS_FILE) },
+    )
+
+    /**
+     * The input-profile document.
+     *
+     * A third file rather than a field on either of the other two, and the
+     * argument is the one already made for `shortcuts.json`: separate failure
+     * domains. Losing your bindings must not cost you your containers, and the
+     * reverse would be much worse. It is also the file an older build never
+     * opens — so the profiles survive a downgrade intact even though the *link*
+     * from a container to one does not.
+     */
+    @Provides
+    @Singleton
+    fun inputProfileStore(
+        @ApplicationContext context: Context,
+        json: Json,
+    ): DataStore<InputProfileDocument> = DataStoreFactory.create(
+        serializer = InputProfileDocumentSerializer(json),
+        corruptionHandler = ReplaceFileCorruptionHandler {
+            preserveCorruptFile(context, INPUT_PROFILES_FILE, it)
+            InputProfileDocument()
+        },
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+        produceFile = { context.dataStoreFile(INPUT_PROFILES_FILE) },
     )
 
     /**

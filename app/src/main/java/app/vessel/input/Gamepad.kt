@@ -225,6 +225,16 @@ class GamepadTranslator(
     val looking: Boolean get() = lookX != 0f || lookY != 0f
 
     /**
+     * Which controls are physically down, whatever they are bound to.
+     *
+     * Published on the display seam so the binding editor can highlight a row
+     * the moment its control is pressed — the only honest way to answer "which
+     * of these twenty rows is the button under my thumb" on a pad nobody can
+     * identify. A copy, because the caller holds it across events.
+     */
+    val heldControls: Set<GamepadControl> get() = held.toSet()
+
+    /**
      * A digital button changed.
      *
      * Returns nothing for an unbound control, which is not the same as an

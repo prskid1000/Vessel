@@ -14,7 +14,9 @@ import app.vessel.core.params.ResolvedParam
 import app.vessel.core.params.resolve
 import app.vessel.data.AndroidDrives
 import app.vessel.data.ContainerRepository
+import app.vessel.data.InputProfileRepository
 import app.vessel.data.InstalledComponents
+import app.vessel.input.InputProfile
 import app.vessel.data.ParamManifestStore
 import app.vessel.data.SessionLogStore
 import app.vessel.ui.shell.AppRegistry
@@ -87,6 +89,32 @@ data class ContainerSheetUiState(
      * on the next launch.
      */
     val canMapStorage: Boolean = true,
+    val input: InputUiState = InputUiState(),
+)
+
+/**
+ * Which input profile this container starts with.
+ *
+ * [missing] is the case worth naming: the container names a profile that has
+ * since been deleted. It resolves to the built-in default and the container is
+ * **not** rewritten — a profile is shared between containers and deleting one is
+ * allowed — so the row says so in words rather than quietly forgetting, and the
+ * pointer is only cleared if the user picks something.
+ */
+data class InputUiState(
+    /** Null means the container has chosen nothing, which is the built-in default. */
+    val profileId: String? = null,
+    val profileName: String = "",
+    val missing: Boolean = false,
+    val choices: List<InputChoice> = emptyList(),
+)
+
+/** One row in the profile picker. [id] is null for the built-in default. */
+data class InputChoice(
+    val id: String?,
+    val name: String,
+    /** `20 bound · 6 on the overlay`. */
+    val note: String,
 )
 
 /**
@@ -148,6 +176,7 @@ class ContainerSheetViewModel @Inject constructor(
     private val registry: AppRegistry,
     private val sessionLogs: SessionLogStore,
     private val drives: AndroidDrives,
+    private val inputProfiles: InputProfileRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ContainerSheetUiState())
@@ -209,7 +238,57 @@ class ContainerSheetViewModel @Inject constructor(
             )
         }
         rebuild()
+        refreshInput()
         if (!creating) refreshDiagnostics()
+    }
+
+    // — input profile ---------------------------------------------------------
+
+    /**
+     * Point this container at a profile, or at nothing.
+     *
+     * **Nothing is stored as null rather than as the default profile's id.** The
+     * built-in default is never written to disk, so a container that has chosen
+     * it has chosen nothing — which is what keeps an untouched container's bytes
+     * identical to what they were before this feature existed.
+     */
+    fun setInputProfile(id: String?) {
+        val current = draft ?: return
+        draft = current.copy(input = current.input.copy(profileId = id))
+        refreshInput()
+    }
+
+    private fun refreshInput() {
+        val current = draft ?: return
+        viewModelScope.launch {
+            val stored = inputProfiles.profiles.first()
+            val wanted = current.input.profileId
+            val found = stored.firstOrNull { it.id == wanted }
+            val resolved = found ?: InputProfile.Default
+            _state.update {
+                it.copy(
+                    input = InputUiState(
+                        profileId = wanted,
+                        profileName = resolved.name,
+                        missing = wanted != null && found == null,
+                        choices = listOf(
+                            InputChoice(
+                                id = null,
+                                name = InputProfile.Default.name,
+                                note = "built in · ${InputProfile.Default.boundCount} bound",
+                            ),
+                        ) + stored.map { profile ->
+                            InputChoice(
+                                id = profile.id,
+                                name = profile.name,
+                                note = "${profile.boundCount} bound · " +
+                                    "${profile.touch.controls.size} on the overlay",
+                            )
+                        },
+                    ),
+                )
+            }
+        }
     }
 
     // — edits ----------------------------------------------------------------
