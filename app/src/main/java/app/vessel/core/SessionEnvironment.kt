@@ -162,6 +162,31 @@ val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
  */
 const val TURNIP_ENABLED: Boolean = true
 
+/**
+ * Whether Wine treats this session as having a real window manager.
+ *
+ * **The switch behind move, resize, Maximize and the white strip — all one
+ * thing.** `explorer /desktop=` normally sets `managed_mode = FALSE`
+ * (`dlls/winex11.drv/desktop.c`), on the reasoning that Wine *is* the window
+ * manager inside its own virtual desktop. The consequence, measured on the
+ * device: a `ConfigureNotify` Wine did not ask for is recorded as the current
+ * state and then overwritten from Wine's desired state instead of becoming a
+ * `SetWindowPos`. So the shell's drag borders moved the frame — 1280x720+0+0 to
+ * 1047x720+0+149, confirmed in the tree — and the client never followed. What
+ * you see is the frame's own background wherever the client stops covering it,
+ * which is the white region, and it appears only once a window is dragged
+ * larger than its client ever was.
+ *
+ * `patches/wine/0011` lets `VESSEL_MANAGED=1` keep managed mode, and the
+ * vendored server now maintains `WM_STATE` so a managed Wine is not waiting on
+ * a window manager that never speaks. Neither half works alone.
+ *
+ * A constant because it is not a preference, and one line to revert: flipping
+ * Wine from unmanaged to managed changes geometry *and* focus handling for
+ * every window, not just the one being dragged.
+ */
+const val MANAGED_DESKTOP: Boolean = true
+
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
 
@@ -212,6 +237,7 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // the move/resize borders itself. A container that turned this off would get
     // a 41px strip nothing paints and a client that overflows its own parent.
     "VESSEL_BORDERLESS",
+    "VESSEL_MANAGED",
     // Not a driconf file and not a setting: it is a correctness/perf pairing
     // with FEX's store-release behaviour, and FEX would try to set it itself if
     // it could. See where it is assigned.
@@ -509,6 +535,10 @@ fun sessionEnvironment(
     // minimise, close and force-close, and move/resize is a toggle in the same
     // menu, so removing the frame takes nothing away.
     environment["VESSEL_BORDERLESS"] = "1"
+
+    // See [MANAGED_DESKTOP]: what makes a shell-initiated move or resize reach
+    // the client instead of stopping at the frame.
+    if (MANAGED_DESKTOP) environment["VESSEL_MANAGED"] = "1"
 
     environment["DXVK_LOG_LEVEL"] = "info"
 

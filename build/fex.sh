@@ -50,14 +50,27 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
     "FEX requires clang >= 13 and does not build with GCC at any version.
      Point LLVM_MINGW_HOME at a newer llvm-mingw."
 
-  # Probed for the record, but deliberately NOT passed to this build. FEX's JIT
-  # detects the host CPU at runtime, so -mcpu would reach only FEX's own C++ and
+  # Probed for the record, but deliberately NOT passed as CMAKE_C_FLAGS. FEX's
+  # JIT detects the host CPU at runtime, so -mcpu reaches only FEX's own C++ and
   # never the code it generates for the guest. Worse, -mcpu=oryon-1 in
   # CMAKE_C_FLAGS leaks into C++20 module dependency scans, which run under the
   # host triple and reject it with "unsupported option '-mcpu=' for target
-  # 'x86_64-unknown-linux-gnu'" repeatedly through an otherwise good build. If
-  # FEX's own C++ is ever worth tuning, the flag belongs in the mingw toolchain
-  # file.
+  # 'x86_64-unknown-linux-gnu'" repeatedly through an otherwise good build.
+  #
+  # **That reasoning is still right and it was not the whole story.** FEX has
+  # its own knob, -DTUNE_CPU, which lands in FEX_TUNE_COMPILE_FLAGS and is
+  # applied with target_compile_options(... PRIVATE) to the FEXCore target only
+  # (CMakeLists.txt:524-527, FEXCore/Source/CMakeLists.txt) — so it tunes the
+  # hot C++ without ever reaching a dependency scan.
+  #
+  # It is set here because its **default was quietly wrong**. TUNE_CPU defaults
+  # to "native" (CMakeLists.txt:170); for an arm64 target that runs
+  # Scripts/aarch64_fit_native.py over `/proc/cpuinfo` — and this build runs in
+  # an x86-64 container, where the script finds no ARM part and prints its
+  # hardcoded fallback, `largest_big = "cortex-a57"` (:128, printed :145). So
+  # every FEX package so far has been tuned for a 2014 ARMv8.0 core while
+  # running on Oryon. Naming the CPU removes the dependency on which machine
+  # happened to run the build.
   resolve_cpu_flags "$TRIPLE_CC"
 
   BUILD="$WORK_DIR/$COMPONENT-$TRIPLE"
@@ -112,6 +125,7 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DMINGW_TRIPLE="$TRIPLE" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DTUNE_CPU=oryon-1 \
     -DENABLE_LTO="$FEX_LTO" \
     -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
     -DBUILD_TESTING=False \
@@ -163,7 +177,7 @@ done
 # compiler. LTO rides along for the same reason: two packages that differ only
 # in a link-time flag are otherwise indistinguishable after the fact, and this
 # is the one flag anyone is likely to be A/B testing.
-VESSEL_CPU_FLAGS="none (JIT detects host CPU at runtime), LTO=$FEX_LTO"
+VESSEL_CPU_FLAGS="TUNE_CPU=oryon-1 (FEXCore C++ only; the JIT still detects the host CPU at runtime), LTO=$FEX_LTO"
 write_provenance "$STAGE/provenance.json" "$COMPONENT" "$VERSION"
 
 log "packaging"

@@ -1,0 +1,45 @@
+diff --git a/dlls/winex11.drv/desktop.c b/dlls/winex11.drv/desktop.c
+index 703ab98b7aa..65a051252b5 100644
+--- a/dlls/winex11.drv/desktop.c
++++ b/dlls/winex11.drv/desktop.c
+@@ -24,6 +24,7 @@
+ #endif
+ 
+ #include "config.h"
++#include <stdlib.h>
+ #include <X11/cursorfont.h>
+ #include <X11/Xlib.h>
+ 
+@@ -53,9 +54,32 @@ BOOL is_virtual_desktop(void)
+  */
+ void X11DRV_init_desktop( Window win )
+ {
++    const char *vessel_managed;
++
+     host_primary_rect = get_host_primary_monitor_rect();
+     root_window = win;
+     managed_mode = FALSE;  /* no managed windows in desktop mode */
++
++    /* Vessel: unless the host really is a window manager.
++     *
++     * The assumption above is that in `explorer /desktop=` mode Wine *is* the
++     * window manager, so there is no outside authority over geometry — and with
++     * managed_mode false, is_window_managed() returns FALSE for every window
++     * unconditionally (window.c). One consequence is the whole reason for this
++     * hook: a ConfigureNotify that Wine did not ask for is recorded as the
++     * current state and then overwritten from the desired state, instead of
++     * becoming a SetWindowPos. So an outside move or resize of a top-level
++     * window changes the frame and never reaches the client, which shows up as
++     * a client that no longer covers its own frame.
++     *
++     * Vessel's X server *is* an outside window manager: the shell owns the
++     * taskbar, the window menu and the move/resize handles, and it maintains
++     * WM_STATE and the _NET_SUPPORTING_WM_CHECK/_NET_SUPPORTED advertisement
++     * that a managed Wine looks for. VESSEL_MANAGED=1 says so.
++     *
++     * Unset, this is exactly upstream. */
++    vessel_managed = getenv( "VESSEL_MANAGED" );
++    if (vessel_managed && vessel_managed[0] == '1') managed_mode = TRUE;
+ }
+ 
+ /***********************************************************************

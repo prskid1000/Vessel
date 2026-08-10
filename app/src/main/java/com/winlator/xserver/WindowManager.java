@@ -6,6 +6,7 @@ import com.winlator.core.Bitmask;
 import com.winlator.renderer.GPUImage;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import com.winlator.xconnector.XInputStream;
 import com.winlator.xserver.errors.BadIdChoice;
 import com.winlator.xserver.errors.BadMatch;
@@ -109,6 +110,7 @@ public class WindowManager extends XResourceManager {
                 window.sendEvent(Event.STRUCTURE_NOTIFY, new MapNotify(window, window));
                 parent.sendEvent(Event.SUBSTRUCTURE_NOTIFY, new MapNotify(parent, window));
                 window.sendEvent(Event.EXPOSURE, new Expose(window));
+                setWmState(window, WM_STATE_NORMAL); // VESSEL
                 triggerOnMapWindow(window);
             }
             else parent.sendEvent(Event.SUBSTRUCTURE_REDIRECT, new MapRequest(parent, window));
@@ -121,6 +123,7 @@ public class WindowManager extends XResourceManager {
             Window parent = window.getParent();
             window.sendEvent(Event.STRUCTURE_NOTIFY, new UnmapNotify(window, window));
             parent.sendEvent(Event.SUBSTRUCTURE_NOTIFY, new UnmapNotify(parent, window));
+            setWmState(window, WM_STATE_ICONIC); // VESSEL
             if (window == focusedWindow) revertFocus();
             triggerOnUnmapWindow(window);
         }
@@ -307,6 +310,36 @@ public class WindowManager extends XResourceManager {
         }
         triggerOnChangeWindowZOrder(window);
     }
+
+    // VESSEL: the ICCCM half of being a window manager — WM_STATE.
+    //
+    // Wine decides whether a top-level window is *managed* by asking whether a
+    // window manager exists, and a managed Wine then reads WM_STATE to learn
+    // what the WM did: NormalState means mapped and ordinary, IconicState means
+    // minimised. `can_activate_window` (dlls/winex11.drv/event.c) refuses to
+    // activate a window it believes is iconic, and `window_wm_state_notify`
+    // waits on the property changing.
+    //
+    // Without this the vendored server set no WM_STATE at all, so
+    // patches/wine/0011 could not be switched on: Wine would treat every window
+    // as managed and then wait for state transitions from a window manager that
+    // never spoke. The two changes only make sense together.
+    //
+    // Set on map and on unmap, which is what iconifying *is* in X11 and what
+    // the shell's Minimize already does.
+    private void setWmState(Window window, int state) {
+        if (window == null || window == rootWindow) return;
+        int atom = Atom.internAtom(WM_STATE_ATOM_NAME);
+        // WM_STATE is two 32-bit values: the state, and the icon window (None).
+        byte[] data = new byte[8];
+        ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).putInt(state).putInt(0);
+        window.modifyProperty(atom, atom, Property.Format.INT_ARRAY, Property.Mode.REPLACE, data);
+    }
+
+    /** ICCCM WM_STATE values. */
+    private static final int WM_STATE_NORMAL = 1;
+    private static final int WM_STATE_ICONIC = 3;
+    private static final String WM_STATE_ATOM_NAME = "WM_STATE";
 
     // VESSEL: window-manager-initiated move and resize, for the shell's drag
     // borders. Every existing way into changeWindowGeometry arrives from a
