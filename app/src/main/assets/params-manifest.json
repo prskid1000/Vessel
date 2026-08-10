@@ -32,15 +32,20 @@
         {
           "key": "display.resolution",
           "title": "Resolution",
-          "help": "Lower is much faster. The top of the list is the screen's own size.",
+          "help": "Lower is much faster, and it is the biggest dial on this phone: a game at 1280 x 720 measured 20-26 fps and the same scene at 640 x 360 hit the 60 fps cap. Halving each side quarters the pixels. The top of the list is the screen's own size.",
           "type": "enum",
           "options": [
+            "640x360",
             "640x480",
             "800x600",
+            "854x480",
+            "960x540",
             "1024x768",
+            "1152x648",
             "1280x720",
             "1280x800",
             "1366x768",
+            "1390x632",
             "1440x900",
             "1600x900",
             "1680x1050",
@@ -52,12 +57,17 @@
           ],
           "default": "1280x720",
           "optionLabels": {
+            "640x360": "640 x 360  (half of 720p)",
             "640x480": "640 x 480",
             "800x600": "800 x 600",
+            "854x480": "854 x 480  (480p, 16:9)",
+            "960x540": "960 x 540  (half of 1080p)",
             "1024x768": "1024 x 768",
+            "1152x648": "1152 x 648  (90% of 720p)",
             "1280x720": "1280 x 720  (720p)",
             "1280x800": "1280 x 800",
             "1366x768": "1366 x 768",
+            "1390x632": "1390 x 632  (half of native)",
             "1440x900": "1440 x 900",
             "1600x900": "1600 x 900",
             "1680x1050": "1680 x 1050",
@@ -106,7 +116,7 @@
           "default": ""
         }
       ],
-      "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP \u2014 so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations.",
+      "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP — so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations.",
       "_note": "The three FEX memory-ordering toggles (TSOEnabled, HalfBarrierTSOEnabled, VectorTSOEnabled) used to live here and are now fixed in SessionEnvironment.kt alongside WINEESYNC. They were removed for the same reason as the Settings, Components and GPU-drivers screens: every default was already the only correct one, and each was a trade a user would be making blind. Measured on this device (tools/tso/run.sh, and see docs/ARCHITECTURE.md 'Why memory ordering dominates on this chip'): strict ordering is required for correctness, the half-barrier path is a 21% win over disabling LRCPC2, and vector ordering is a severe cost that fixes nothing on hardware without FEAT_LRCPC3 codegen. Nothing a user could learn from the UI would change any of those. If a future device or FEX release changes the answer, the value changes in code -- it does not come back as a switch."
     }
   ]

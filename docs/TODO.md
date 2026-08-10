@@ -303,8 +303,24 @@ audit's; they are pointers, not independently re-verified.
   server's `pixmapFromBuffer` mmaps the client's fd on the CPU, so the other
   DRI3 direction is one copy, not zero.
 
-- [ ] **FEX asserts on any large PE inside a container, and it blocks the test
-  loop.** x86-64 and ARM64EC binaries over roughly 200 KB die at
+- [ ] **FEX asserts inside a container. The assert is real; "any large PE" is
+  not the discriminator.**
+  *Re-measured 2026-08-10 with `+seh,+module` and `FEX_SILENTLOG=0`.* The fault
+  is `c000001d EXCEPTION_ILLEGAL_INSTRUCTION` at `0x7FFFBF44F4`, and the module
+  map puts `libarm64ecfex.dll` at `0x7FFFA80000` — so **RVA `0x1744F4`**, which
+  is essentially the `FEXCore::Assert::ForcedAssert` site this entry already
+  recorded at `0x1766E4` in an older build. Five SEH handlers are called and all
+  five return `ExceptionContinueSearch`, then `NtRaiseException` gives up. So
+  the recorded cause stands and the earlier doubt about it was wrong.
+  *What is wrong is the framing.* "Over roughly 200 KB" cannot be the rule:
+  Metro 2033 Redux is far larger and runs at 60 fps in the same container.
+  `presentbench-x86_64.exe` is 238 KB, built by llvm-mingw with `-O1` against
+  `dxguid/uuid/gdi32/user32`; `hello-x86_64.exe` is 88 KB from the same
+  toolchain and runs. The discriminator is therefore something about the image,
+  not its size, and FEX's Windows layer has only two `ERROR_AND_DIE` sites —
+  `"Unhandled relocation"` and `"Couldn't detect CPU features"`. The first is
+  the candidate worth testing next.
+  *Done when:* the assert is traced to one of those two sites, by name. x86-64 and ARM64EC binaries over roughly 200 KB die at
   `FEXCore::Assert::ForcedAssert` — `hlt #1`, `libarm64ecfex.dll` RVA
   `0x1766E4` — during `BTCpuProcessInit`, before FEX logs anything.
   `hello-x86_64.exe` (88 KB) runs in the same container with the same
