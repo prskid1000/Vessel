@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Measure what one flip costs, on the phone, against the app's own X server.
 #
-#   ./tools/gfx/run-presentbench.sh                      # every WSI mode
+#   ./tools/gfx/run-presentbench.sh                      # sw baseline, then DRI3
 #   ./tools/gfx/run-presentbench.sh --wsi sw             # one mode
+#   ./tools/gfx/run-presentbench.sh --wsi dri3           # zero-copy candidate
+#   ./tools/gfx/run-presentbench.sh --wsi sw,linear      # closed; see WSI_MODES
 #   ./tools/gfx/run-presentbench.sh --arch x86_64        # one architecture
 #   ./tools/gfx/run-presentbench.sh --frames 600
 #
@@ -41,7 +43,22 @@ in_app_test() { [ "$(in_app "if $1; then echo yes; fi")" = yes ]; }
 # open. Redirect to a file the child can hold, then read the file.
 in_app_bg() { adb shell "run-as $PKG sh -c '( $1 ) > $2 2>&1 </dev/null; cat $2'" | tr -d '\r'; }
 
-WSI_MODES="sw sw,linear"
+# `dri3` is not a value Mesa understands — it is this script's name for *not
+# setting the variable at all*, which is how the zero-copy path gets selected.
+# `MESA_VK_WSI_DEBUG` is a set of opt-in flags (`wsi_common.c:55-60`); with `sw`
+# absent, `wsi->sw` is false (`:89`) and X11 takes its DRI3 half. There is no
+# positive spelling to pass, so the mode has to be an absence, and an absence
+# cannot be a word in a space-separated list without a name.
+#
+# The baseline first and the candidate second, deliberately: a DRI3 attempt has
+# already taken a session down once, and running it second means the sitting
+# still produces a comparable `sw` number when it does.
+#
+# `sw,linear` is *not* in the default any more. It is closed as won't-do with
+# three runs of evidence (docs/TODO.md, "MESA_VK_WSI_DEBUG=sw,linear") — ~14%
+# slower on the mean — so it costs a run of the harness every time and answers a
+# question that has an answer. Still reachable: `--wsi sw,linear`.
+WSI_MODES="sw dri3"
 # x86_64 rather than aarch64, and the reason is not obvious enough to leave
 # unsaid: DXVK is built arm64ec only, so system32 holds ARM64EC images. An
 # x86-64 process runs on Wine's ARM64EC ntdll and loads them natively — the
@@ -167,14 +184,27 @@ WINE="/system/bin/linker64 \$PWD/$WINE_DIR/bin/wine"
 RESULTS=""
 for arch in $ARCHES; do
   for wsi in $WSI_MODES; do
-    say "$arch · MESA_VK_WSI_DEBUG=$wsi"
-    OUT="$(in_app_bg "$GUEST_ENV && export MESA_VK_WSI_DEBUG=$wsi && \
+    if [ "$wsi" = dri3 ]; then
+      say "$arch · MESA_VK_WSI_DEBUG unset (DRI3)"
+      WSI_EXPORT="unset MESA_VK_WSI_DEBUG"
+    else
+      say "$arch · MESA_VK_WSI_DEBUG=$wsi"
+      WSI_EXPORT="export MESA_VK_WSI_DEBUG=$wsi"
+    fi
+    # The last DRI3 attempt ended with "X connection to :0 broken" and *no* X
+    # protocol error anywhere — so the interesting output may be on a channel
+    # this harness never read. Mesa under Android logs to logcat by default
+    # (`util/log.c:119-124`), which is not the pipe below.
+    adb logcat -c >/dev/null 2>&1 || true
+    OUT="$(in_app_bg "$GUEST_ENV && $WSI_EXPORT && \
            timeout 180 $WINE c:\\\\presentbench-$arch.exe --frames=$FRAMES" \
            "files/presentbench.log" || true)"
+    LOGCAT="$(adb logcat -d -s mesa:* tu:* vulkan:* VesselX:* 2>/dev/null | tr -d '\r' | tail -20 || true)"
     printf '%s\n' "$OUT" | grep -E 'VESSEL-PRESENT' | sed 's/^/       /' || true
     LINE="$(printf '%s\n' "$OUT" | grep -E '^VESSEL-PRESENT api=' | head -1 || true)"
     if [ -z "$LINE" ]; then
       printf '%s\n' "$OUT" | tail -12 | sed 's/^/       ! /'
+      [ -n "$LOGCAT" ] && printf '%s\n' "$LOGCAT" | sed 's/^/       ~ /'
       bad "$arch/$wsi produced no result line"
       RESULTS="$RESULTS\n  NO-OUTPUT  $arch  $wsi"
     else
