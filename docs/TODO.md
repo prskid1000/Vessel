@@ -54,11 +54,13 @@ is putting those pixels in a window.
 Running an actual game found four things at once. Two are fixed; two are not,
 and the two that are not share a root cause.
 
-- [ ] **A game that minimises itself cannot be restored, and Maximize cannot be
+- [x] **A game that minimises itself cannot be restored, and Maximize cannot be
   built.** Both are the same missing piece. Measured on device: Metro minimises
   itself on focus loss — open `cmd` and the game's X window goes `1280x720` →
   `160x46`, which is Wine shrinking it to the Win32 iconic size. It stays in the
   taskbar, but tapping it does nothing, and Wine says why:
+
+  **Fixed — confirmed on the device by the reporter, 2026-08-10**, on the build carrying `patches/wine/0012`, the DRI3 present path (`patches/mesa/0006`, `0007`) and SGSR. Which of those is responsible was not isolated per symptom; the record below is what was believed before the fix and is kept because several of its explanations were wrong and worth not repeating.
 
   ```c
   if (data->current_state.wm_state == IconicState) style |= WS_MINIMIZE;
@@ -112,8 +114,14 @@ and the two that are not share a root cause.
   which is the other half: the mapping happens once, while the prefix is built,
   so a container created without it is one nothing can ever be added to.
 
-- [ ] **Restore from minimised is still unverified, and the attempt took the
-  session down.** Minimize via the long-press menu works and is visible in the
+- [x] **Restore from minimised — works.** *Confirmed on the device 2026-08-10.*
+
+  The note below is the state before that, kept only because it is a good
+  example of why a contended device is not evidence: the earlier attempt was
+  written up as inconclusive rather than as a defect, and it was right to be.
+
+  ~~Restore from minimised is still unverified, and the attempt took the
+  session down.~~ Minimize via the long-press menu works and is visible in the
   tree (`mapped=false 562x513+298+103`, button retained). Tapping the button to
   restore was not observed: the app went to the Android launcher mid-sequence
   and came back with a new pid and no Wine processes, with an **empty crash
@@ -208,7 +216,7 @@ and the two that are not share a root cause.
   device, and the trace carries a `config changed` line where today it carries
   `unexpected config`.
 
-- [~] **A white bar across the top of a fullscreen game — and it is a fixed
+- [x] **A white bar across the top of a fullscreen game — and it is a fixed
   height in *guest* pixels, which rules out most of the candidates.**
   *Superseded — the caption is gone (`patches/wine/0010`) and the drag borders
   resize the guest; both are in `docs/DONE.md`. Kept here for the measurement,
@@ -220,6 +228,8 @@ and the two that are not share a root cause.
   gap would show `#161826`, not white.*
   *Measured on the device, 2026-08-10,* by reproducing it at three different
   sizes in one sitting and converting each back to guest rows:
+
+  **Fixed — confirmed on the device by the reporter, 2026-08-10**, on the build carrying `patches/wine/0012`, the DRI3 present path (`patches/mesa/0006`, `0007`) and SGSR. Which of those is responsible was not isolated per symptom; the record below is what was believed before the fix and is kept because several of its explanations were wrong and worth not repeating.
 
   | Desktop | Window | Bar, in guest rows |
   |---|---|---|
@@ -527,12 +537,14 @@ audit's; they are pointers, not independently re-verified.
   features"`. Undiagnosed, and it is why every D3D result above comes from the
   standalone harness rather than from a session.
 
-- [ ] **At session start the desktop background is black until something
+- [x] **At session start the desktop background is black until something
   repaints it.** Fixed in code and not yet watched: a texture is uploaded at
   allocation and after that only on damage, and the desktop's background paint
   lands in the gap. `GLRenderer.updateScene` now distrusts every texture in the
   scene whenever the scene is rebuilt. *Done when:* a program is launched with
   the session and the area around its window is `#161826` in a screenshot.
+
+  **Fixed — confirmed on the device by the reporter, 2026-08-10**, on the build carrying `patches/wine/0012`, the DRI3 present path (`patches/mesa/0006`, `0007`) and SGSR. Which of those is responsible was not isolated per symptom; the record below is what was believed before the fix and is kept because several of its explanations were wrong and worth not repeating.
 
 - [~] **`ipconfig` prints nothing, and interface enumeration was never the
   reason.** *Two patches verified working; a third defect stands behind them.* `patches/wine/0007` works — both halves. Measured 2026-08-10 on the
@@ -675,9 +687,11 @@ Four things the interface said that were not true, and one that still is.
   and the extension is already in the path, so there is no schema change, no
   migration and nothing that can go stale. Colour stays `UNKNOWN`'s neutral grey
   — a script does not run natively and must not wear the green that says so.
-- [~] **Returning to the desktop leaves a black surface.** Reproduced twice: the
+- [x] **Returning to the desktop leaves a black surface.** Reproduced twice: the
   route is right, the orientation lock is right, the pixels are gone. Not the
   old Turnip wedge — see §1.
+
+  **Fixed — confirmed on the device by the reporter, 2026-08-10**, on the build carrying `patches/wine/0012`, the DRI3 present path (`patches/mesa/0006`, `0007`) and SGSR. Which of those is responsible was not isolated per symptom; the record below is what was believed before the fix and is kept because several of its explanations were wrong and worth not repeating.
 
   **Cause found, fix not yet watched working.** It is not that there is no
   damage to replay; the window contents are still in the X server's drawables
