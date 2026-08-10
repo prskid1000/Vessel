@@ -216,6 +216,52 @@ const val TURNIP_ENABLED: Boolean = true
  */
 const val MANAGED_DESKTOP: Boolean = true
 
+/**
+ * Whether presents go through DRI3 instead of a whole-frame CPU copy.
+ *
+ * True leaves `MESA_VK_WSI_DEBUG` unset so Mesa's X11 WSI chooses DRI3, which
+ * is only a choice at all since `patches/mesa/0004` put this build on the
+ * `pseudo-drm` platform and gave it `HAVE_X11_DRM`. On the software path a
+ * present costs a GPU `vkCmdCopyImageToBuffer` of the entire frame plus an
+ * `xcb_put_image` of 3.6 MB at 720p; on DRI3 the swapchain image is the
+ * window's own buffer and neither happens.
+ *
+ * **Failure here is loud, not subtle.** If DRI3 cannot negotiate against the
+ * vendored server the result is no swapchain or a black window — not a slower
+ * one — so a run that draws normally is most of the evidence needed. The
+ * software path stays fully intact behind this constant, including the
+ * measured `sw` versus `sw,linear` result at the assignment.
+ *
+ * **Off: tried on the device 2026-08-10 and the session died.** Metro reached
+ * `initialization finished in 14.450132 sec` and then the log ends at
+ * `X connection to :0 broken (explicit kill or server shutdown)`, with the app
+ * process gone. `libxcb-dri3.so` and `libxcb-present.so` both loaded, so the
+ * path was genuinely selected rather than skipped.
+ *
+ * *No X protocol error was logged*, which rules out the obvious first guess —
+ * an unimplemented request coming back as an error reply — and leaves the cause
+ * unproven. What is known is a real gap: `DRI3Extension` answers version 1.0
+ * and exactly five opcodes (QueryVersion, Open, PixmapFromBuffer,
+ * BufferFromPixmap, PixmapFromBuffers) and throws `BadImplementation` for
+ * everything else, so `GetSupportedModifiers` (4), `FenceFromFD` (5) and
+ * `FDFromFence` (6) are all absent. `FenceFromFD` is the one that matters:
+ * Mesa's DRI3 uses an xshmfence to know when the server has finished with a
+ * buffer, and there is no honest way to stub it — accepting the fd and ignoring
+ * it would hand back frames that are still being read, which is corruption
+ * rather than a crash.
+ *
+ * There is also a deeper question this attempt did not answer. Mesa's DRI3 WSI
+ * is written against DRM, which is what `HAVE_X11_DRM` names; Turnip here talks
+ * to KGSL and there is no DRM device to hand back from `xcb_dri3_open`. Whether
+ * the `pseudo-drm` platform is sufficient for a *Vulkan* driver, or only ever
+ * carried Zink, is the thing to establish before writing any server code.
+ *
+ * *Done when:* `tools/gfx/run-presentbench.sh` completes a run with this true.
+ * That harness exists precisely so this can be answered without a game, and
+ * using it first would have been the better order.
+ */
+const val ZERO_COPY_PRESENT: Boolean = false
+
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
 
@@ -685,11 +731,32 @@ fun sessionEnvironment(
     // plus the blit it was supposed to save. Adreno wants to render tiled and be
     // copied out of, not to render straight into a scanout layout.
     //
-    // Leaving `MESA_VK_WSI_DEBUG` unset entirely is not an option and is not
-    // merely slower: with no `HAVE_X11_DRM` the DRI3 branch is
+    // Leaving `MESA_VK_WSI_DEBUG` unset entirely was not an option and was not
+    // merely slower: with no `HAVE_X11_DRM` the DRI3 branch was
     // `__builtin_unreachable()`, and the probe measured 12.8 ms a frame there —
     // a number produced by undefined behaviour, not by a slow path.
-    environment["MESA_VK_WSI_DEBUG"] = "sw"
+    //
+    // **That last paragraph is why this was forced, and it stopped being true.**
+    // `patches/mesa/0004` puts the build on Mesa's `pseudo-drm` platform, which
+    // defines `HAVE_X11_DRM`, so the DRI3 branch is real compiled code now and
+    // the driver links `libxcb-dri3`, `libxcb-present`, `libxcb-sync`,
+    // `libxcb-shm` and `libxshmfence`. Unset, Mesa picks DRI3 and the swapchain
+    // image *is* the window's buffer: no whole-frame `vkCmdCopyImageToBuffer`,
+    // no `xcb_put_image`, no CPU copy. That is the zero-copy present this file
+    // has been describing as unreachable.
+    //
+    // Both halves were proven separately before this: `tools/gfx/wsiprobe.c`
+    // showed Turnip importing the server's dma-buf and binding a TILING_LINEAR
+    // image to it at rowPitch 5120, and the vendored server already answers
+    // DRI3 `BufferFromPixmap` over `SCM_RIGHTS` with `presentPixmap`'s flip
+    // branch in place. Joining them has never been run.
+    //
+    // So [ZERO_COPY_PRESENT] is a switch, not a deletion. If DRI3 does not
+    // negotiate against this server the symptom will be immediate and total —
+    // a black window or no swapchain at all, not a slow one — and the way back
+    // is one line. The `sw,linear` measurement above stays because it is still
+    // the right answer for the software path.
+    if (!ZERO_COPY_PRESENT) environment["MESA_VK_WSI_DEBUG"] = "sw"
 
     // **FEX asks Turnip for this and cannot deliver it here, so Vessel does.**
     //

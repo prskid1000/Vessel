@@ -530,12 +530,6 @@ class SessionEnvironmentTest {
                 "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
                 "VKD3D_SHADER_CACHE_PATH" to File(caches, "vkd3d").absolutePath,
                 "TU_DEBUG" to "startup",
-                // Not optional and not diagnostic: the Turnip this project
-                // builds has only the software half of Mesa's X11 WSI compiled
-                // in, and without `sw` every swapchain reaches an UNREACHABLE.
-                // `sw,linear` was tried and is 14% slower on the mean and 35%
-                // on the median — tools/gfx/x11present.c, 400 frames, three runs
-                // each. The reasoning at the assignment says why.
                 "MESA_VK_WSI_DEBUG" to "sw",
                 // A Turnip driconf option delivered as an env var, because FEX
                 // asks Turnip for it through `__wine_set_unix_env` and that
