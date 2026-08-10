@@ -297,6 +297,27 @@ public class WindowManager extends XResourceManager {
         Window previousSibling = window.previousSibling();
         window.sendEvent(Event.STRUCTURE_NOTIFY, new ConfigureNotify(window, window, previousSibling, x, y, width, height, window.getBorderWidth(), overrideRedirect));
         parent.sendEvent(Event.SUBSTRUCTURE_NOTIFY, new ConfigureNotify(parent, window, previousSibling, x, y, width, height, window.getBorderWidth(), overrideRedirect));
+
+        // VESSEL: and then ask the client to repaint, which is the half that was
+        // missing.
+        //
+        // A ConfigureNotify tells a client its geometry changed; it does not
+        // tell it to draw. A real X server also sends Expose for anything the
+        // resize left undefined, and `changeWindowGeometry` above reallocates
+        // the backing Drawable at the new size — so after a resize the window's
+        // pixels are whatever the new buffer happens to hold until somebody
+        // paints them. Wine erases the frame with the class background brush
+        // (COLOR_WINDOW, white) and then waits for a WM_PAINT that never comes.
+        //
+        // Reported as: a white region after dragging a resize border, which
+        // clears if you minimise and restore. That is the diagnosis in one
+        // sentence — `mapWindow` above *does* send Expose (:110), so remapping
+        // produces the repaint that resizing never asked for.
+        //
+        // The whole window, not the newly exposed strip: the Drawable was
+        // reallocated, so none of it is known good, and a shrink exposes no new
+        // area yet still needs the client to lay out again.
+        window.sendEvent(Event.EXPOSURE, new Expose(window));
     }
 
     public void configureWindow(Window window, Bitmask valueMask, XInputStream inputStream) throws XRequestError {

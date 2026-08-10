@@ -258,6 +258,37 @@ The modifications, in the order they were made:
    skips the `update` and `valid` fields and copies the whole pixmap — the ids
    must still be real, since a client sets, reuses and destroys them.
 
+21. **`WindowManager.moveResizeWindow()` sends `Expose`** — modification 16
+   added the geometry change and the two `ConfigureNotify`s and stopped there. A
+   `ConfigureNotify` tells a client its geometry moved; it does not tell it to
+   draw, and `changeWindowGeometry` reallocates the backing `Drawable` at the
+   new size, so after a resize the window's pixels are whatever the fresh buffer
+   holds until something paints them. Wine erases with the class background
+   brush — `COLOR_WINDOW`, white — and then waits for a `WM_PAINT` that never
+   arrives. Reported as a white region after dragging a resize border **that
+   clears if you minimise and restore**, which is the diagnosis in one sentence:
+   `mapWindow` (:110) already sends `Expose`, so remapping produces the repaint
+   resizing never asked for. The whole window rather than the newly exposed
+   strip, because the `Drawable` was reallocated so none of it is known good,
+   and because a *shrink* exposes no new area yet still needs the client to lay
+   out again.
+
+   **This did NOT fix the reported symptom, and the entry stays only because
+   sending `Expose` after a resize is protocol-correct on its own terms.** Tried
+   on the device: the white region still appears on a border drag and still
+   clears on minimise/restore. So the missing repaint is not simply a missing
+   `Expose`, and the next reader should not treat this as the fix.
+
+   *What the attempt did establish.* `changeWindowGeometry` replaces the backing
+   `Drawable` with a **freshly created** one, and a new `ByteBuffer` is
+   zero-filled — so the new buffer is transparent black, not white. White
+   therefore has to be something Wine painted *after* the resize: it erased with
+   the class brush and then did not paint the client area. Which means Wine is
+   either not receiving this `Expose` or not acting on it, and that is the thing
+   to measure next — `WINEDEBUG=+event,+x11drv` during a border drag will say
+   which. The compositor is ruled out twice over: it clears to transparent black
+   (`GLRenderer.java:131`), so a coverage gap would show `#161826`.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -282,7 +313,7 @@ fails the build.
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16 |
+| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20 |
 | `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20 |
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
