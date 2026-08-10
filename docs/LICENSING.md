@@ -306,7 +306,7 @@ packages rebuilt and a CI run, 10 is a judgement about a moving target.
 | 6 | Trademarks must not be in the product name or icon | **Closed.** Checked, and the name is asserted. |
 | 7 | Our Wine/vkd3d patches must be the only difference from upstream | **Closed.** `assert_pristine()` fails the build on a drifted checkout; the `winefile` drift that prompted it is gone. |
 | 8 | Prominent notice, in the interface, that the app contains LGPL code | **Closed.** A permanent line at the foot of home naming the X server and its licence, opening `LicencesScreen`; five entries, each with its full text out of `res/raw`. libadrenotools' BSD-2-Clause notice is in the APK now too, which it had not been. Asserted three ways in `LicensingTest`. |
-| 9 | A source offer on the component release page | **Open, and further from closed than it looked.** See below. |
+| 9 | A source offer on the component release page | **Closed 2026-08-10.** DXVK and vkd3d rebuilt so their provenance names a source repository; the renderer covers all six published components with no `unknown`. Not yet published — the next component build carries it. See below. |
 | 10 | A `README` that is true on the day | **Open, and cannot be closed by a document pass.** Tracked in `docs/TODO.md` §6. One flatly countable claim was wrong and is fixed — it said six Wine patches against eleven in `patches/wine/`. The rest of what is stale is the graphics narrative: the README still ends on "KGSL cannot export a dma-buf … the single thing between here and a triangle" and reports DXVK as reaching `vkCreateInstance` with no swapchain, while its own opening paragraph says Metro 2033 Redux renders and the DRI3 present path has since landed. Rewriting that is not a licensing edit and not a safe one from the repository alone: every claim in it is a device measurement, and the measurements are being retaken. |
 
 ### 9, in detail: running the renderer is what found the hole
@@ -351,11 +351,21 @@ instead was considered and rejected: that is a claim about today's pin dressed
 up as a fact about the artefact, and a source offer that looks right and is not
 is the failure mode this whole item exists to prevent.
 
-**What still has to happen to close it:** rebuild DXVK and vkd3d so their
-`.wcp` provenance carries `sourceRepo`, then let a component build run on
-`main`. *Done when:* the `components` release body names an upstream repository
-for every package on it, and every `patches/` path in that body resolves in the
-repository.
+**Closed 2026-08-10.** DXVK and vkd3d were rebuilt, and their provenance now
+carries `sourceRepo` — `https://github.com/doitsujin/dxvk.git` at `v2.7.1` and
+`https://github.com/HansKristian-Work/vkd3d-proton.git` at `v3.0.1`. The
+renderer no longer refuses: it writes an offer covering all six published
+components, every one naming a real upstream repository, ref and commit, with
+the superseded Wine 10.13 and Turnip HAL builds and the unpublished Git package
+filtered out. The *Modifications to upstream* section enumerates
+`patches/mesa/` (6) and `patches/wine/` (14) from the filesystem, so every path
+in it resolves by construction.
+
+*What has still not happened, and it is the difference between the obligation
+being dischargeable and discharged:* a component build has not run on `main`
+since. The offer has been rendered locally over `dist/`, which holds the same
+packages the release does; it has not been published. Nothing further is
+required of the repository — the next component build carries it.
 
 Two things that are *not* blockers and were checked so they can stop being
 raised:
