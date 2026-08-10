@@ -320,7 +320,28 @@ audit's; they are pointers, not independently re-verified.
   not its size, and FEX's Windows layer has only two `ERROR_AND_DIE` sites —
   `"Unhandled relocation"` and `"Couldn't detect CPU features"`. The first is
   the candidate worth testing next.
-  *Done when:* the assert is traced to one of those two sites, by name. x86-64 and ARM64EC binaries over roughly 200 KB die at
+  *Confirmed at the byte level, 2026-08-10.* `llvm-objdump` of the shipped
+  `libarm64ecfex.dll` (ImageBase `0x180000000`, so VMA `0x1801744F4`):
+
+  ```
+  00000001801744f4 <_ZN7FEXCore6Assert12ForcedAssertEv>:
+  1801744f4: d4400020    hlt #0x1
+  ```
+
+  Exactly the symbol, exactly `hlt #1`. No inference left in that half.
+  Directly above it sits `LogMan::Msg::MFmtImpl`, so **FEX does log a reason
+  before dying** — `ERROR_AND_DIE` formats a message and then asserts.
+
+  **The blocker is now that the message reaches nowhere we read, and that is a
+  new finding.** `FEX_SILENTLOG=0` in the guest environment produced no FEX
+  output in a Wine log captured with `+seh,+module,+winediag`, and the
+  `%LOCALAPPDATA%` fallback the Windows logging init falls back to does not
+  exist — `.config/fex-emu/` in the container is empty and there is no `*.log`
+  under the container from that run. So either `__wine_dbg_output` resolution is
+  failing silently and the fallback is not being taken either, or the message is
+  written somewhere neither path predicts.
+  *Done when:* one `ERROR_AND_DIE` message from FEX is read, by any means —
+  after which naming the site is free, since there are only two. x86-64 and ARM64EC binaries over roughly 200 KB die at
   `FEXCore::Assert::ForcedAssert` — `hlt #1`, `libarm64ecfex.dll` RVA
   `0x1766E4` — during `BTCpuProcessInit`, before FEX logs anything.
   `hello-x86_64.exe` (88 KB) runs in the same container with the same
