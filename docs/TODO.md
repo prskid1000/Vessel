@@ -366,6 +366,22 @@ audit's; they are pointers, not independently re-verified.
   inside the 2.245 ms — it will show as composite headroom and lower bandwidth,
   not as present latency.
 
+  **Measured 2026-08-10, and the prize is 252 microseconds.** The copy is now
+  timed in `PresentExtension.presentPixmap` itself and reported every 120
+  presents, because neither end could see it: `x11present`'s 0.546 ms is the
+  *client's* `vkQueuePresentKHR` round trip and with three swapchain images the
+  client is usually not waiting on this copy when it returns. Over 600 presents
+  at 1280x720: **mean 252 us, max 1032 us** — 3.6 MB in 252 us is 14.3 GB/s, so
+  the memcpy is not slow, there is simply 3.6 MB of it.
+
+  That is about 46% of the client-visible present cost and it is held under
+  `content.renderLock`, which the compositor also takes, so deleting it is
+  worth something. But it is **1.5% of a frame at 60 Hz and 0.25% of one at the
+  8-12 fps Metro actually renders**. *Recommendation: do not build this yet.*
+  The same measurement session found the device ~85% idle at 10 fps with every
+  game thread asleep; 252 us cannot be what is missing, and this item should
+  wait until whatever costs the other 99.75% of the frame is named.
+
 - [ ] **Measure the shader cache, cold against warm.** `docs/OPTIMIZATION.md:31`
   calls pipeline recompilation "the single largest avoidable cost in the whole
   stack". It was fixed (`SessionEnvironment.kt:430-433`) and explicitly left

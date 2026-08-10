@@ -37,6 +37,12 @@ public class PresentExtension extends Extension {
     private final SparseArray<Event> events = new SparseArray<>();
     private SyncExtension syncExtension;
 
+    // VESSEL: see presentPixmap. Touched only from the X request thread.
+    private static final int COPY_REPORT_EVERY = 120;
+    private long copyNanos;
+    private long copyMaxNanos;
+    private long copyCount;
+
     private static abstract class ClientOpcodes {
         private static final byte QUERY_VERSION = 0;
         private static final byte PRESENT_PIXMAP = 1;
@@ -173,7 +179,28 @@ public class PresentExtension extends Extension {
 
         synchronized (content.renderLock) {
             if (pixmap != null) {
+                // VESSEL: time the copy, because nothing else can see it.
+                //
+                // The 0.560 ms `x11present` reports is the *client's*
+                // vkQueuePresentKHR round trip, and with three swapchain images
+                // the client is usually not waiting on this copy when it
+                // returns. So the one number that decides whether item 27
+                // (GPU-backing the drawable to delete this memcpy) is worth
+                // building has never been visible from either end. Sampled
+                // rather than logged per present: at 60 Hz a line a frame is
+                // itself a cost.
+                long t0 = System.nanoTime();
                 content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
+                long dt = System.nanoTime() - t0;
+                copyNanos += dt;
+                if (dt > copyMaxNanos) copyMaxNanos = dt;
+                if (++copyCount % COPY_REPORT_EVERY == 0) {
+                    Log.d(XRequestError.PROTO_TAG, "Present copyArea x" + copyCount
+                            + " mean=" + (copyNanos / copyCount / 1000) + "us"
+                            + " max=" + (copyMaxNanos / 1000) + "us"
+                            + " last=" + (dt / 1000) + "us"
+                            + " " + pixmap.drawable.width + "x" + pixmap.drawable.height);
+                }
                 sendIdleNotify(window, pixmap, serial, idleFence);
             }
             else content.forceUpdate();
