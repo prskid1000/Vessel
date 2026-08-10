@@ -1,0 +1,38 @@
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index b315490b1f2..15411e1f9a1 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1187,6 +1187,11 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
+         if (!(flags & GAA_FLAG_SKIP_DNS_SERVER))
+         {
+             servers = (DNS_ADDR_ARRAY *)buf;
++            /* VESSEL: `size` is the in/out buffer length and was never
++             * initialised, so the first DnsQueryConfig() of every call read an
++             * indeterminate value off the stack and any implementation that
++             * trusts it writes past a 3-entry buffer. */
++            size = sizeof(buf);
+             for (attempt = 0; attempt < 5; attempt++)
+             {
+                 err = DnsQueryConfig( query, 0, name, NULL, servers, &size );
+@@ -1199,7 +1204,20 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
+                     break;
+                 }
+             }
+-            if (!err)
++            /* VESSEL: an adapter with no DNS servers is not a failed
++             * enumeration.
++             *
++             * DNS_ERROR_NO_DNS_SERVERS is what the resolver returns whenever it
++             * has nothing configured -- an Android container has no
++             * /etc/resolv.conf, and resolv_get_serverlist() says the same on any
++             * host with an empty one. Propagating it aborts dns_info_alloc(),
++             * which aborts adapters_addresses_alloc(), which makes
++             * GetAdaptersAddresses() fail outright; `ipconfig` then exits 1
++             * without printing a single line, because get_adapters() got NULL.
++             * Windows lists the adapter with an empty DNS server list instead,
++             * and so should this. */
++            if (err == DNS_ERROR_NO_DNS_SERVERS) err = ERROR_SUCCESS;
++            else if (!err)
+             {
+                 next = &aa->FirstDnsServerAddress;
+                 for (i = 0; i < servers->AddrCount; i++)

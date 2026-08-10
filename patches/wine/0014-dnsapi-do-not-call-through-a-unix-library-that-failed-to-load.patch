@@ -1,0 +1,37 @@
+diff --git a/dlls/dnsapi/dnsapi.h b/dlls/dnsapi/dnsapi.h
+index d2b57b96972..23ac95786f6 100644
+--- a/dlls/dnsapi/dnsapi.h
++++ b/dlls/dnsapi/dnsapi.h
+@@ -130,4 +130,31 @@ enum unix_funcs
+     unix_funcs_count
+ };
+ 
+-#define RESOLV_CALL( func, params ) WINE_UNIX_CALL( unix_ ## func, params )
++/* VESSEL: never call through a unix library that failed to load.
++ *
++ * WINE_UNIX_CALL expands to __wine_unix_call( __wine_unixlib_handle, code, args ),
++ * and the dispatcher's first instruction on aarch64 is
++ * `ldr x16, [x0, x1, lsl 3]` -- it indexes a function table *at* the handle. If
++ * __wine_init_unix_call() failed, that handle is still 0 (libs/winecrt0/unix_lib.c
++ * defines it as such per module) and the load reads address `code * 8`. The fault
++ * happens with the stack already switched to the syscall frame, so
++ * handle_syscall_fault() converts it into a *returned* STATUS_ACCESS_VIOLATION
++ * instead of raising an exception. The caller sees c0000005 as an error code out
++ * of a function documented to return a Win32 status, no SEH is dispatched, and
++ * nothing is logged.
++ *
++ * That is not hypothetical here. dnsapi's unix half is `#ifdef HAVE_RESOLV` in
++ * its entirety, bionic has no res_getservers, and the dnsapi.so this build ships
++ * is a 5 KB stub whose symbol table contains neither __wine_unix_call_funcs nor
++ * __wine_unix_lib_init. DllMain already says so -- "No libresolv support, expect
++ * problems" -- and then every RESOLV_CALL faults. GetAdaptersAddresses returned
++ * c0000005 for exactly this reason.
++ *
++ * DNS_ERROR_NO_DNS_SERVERS is the honest answer and not an invention: it is what
++ * resolv_get_serverlist() itself returns when the resolver reports no servers, so
++ * callers already have to handle it, and "this machine has no resolver" is a true
++ * description of an Android container.
++ */
++#define RESOLV_CALL( func, params ) \
++    (__wine_unixlib_handle ? WINE_UNIX_CALL( unix_ ## func, params ) \
++                           : (NTSTATUS)DNS_ERROR_NO_DNS_SERVERS)

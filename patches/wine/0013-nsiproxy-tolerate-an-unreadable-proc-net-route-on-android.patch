@@ -1,0 +1,57 @@
+diff --git a/dlls/nsiproxy.sys/ip.c b/dlls/nsiproxy.sys/ip.c
+index 6c4d5808be4..ff296d3aca2 100644
+--- a/dlls/nsiproxy.sys/ip.c
++++ b/dlls/nsiproxy.sys/ip.c
+@@ -1548,7 +1548,51 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void
+         }
+         freeifaddrs( addrs );
+ 
+-        if (!(fp = fopen( "/proc/net/route", "r" ))) return STATUS_NOT_SUPPORTED;
++        /* VESSEL: an unreadable /proc/net/route is an empty route table, not a
++         * missing IPv4 stack.
++         *
++         * Android denies an untrusted app everything under /proc/net -- measured
++         * on Android 16 as the app's own uid, EACCES on route, ipv6_route, dev
++         * and if_inet6 alike. Failing the whole table returns
++         * STATUS_NOT_SUPPORTED, iphlpapi turns that into ERROR_NOT_SUPPORTED (50)
++         * out of gateway_and_prefix_addresses_alloc, and GetAdaptersAddresses
++         * then fails for *every* caller. That is why `ipconfig` printed nothing
++         * at all -- not even a header: get_adapters() returned NULL and
++         * print_basic_information() called exit(1). The interfaces the NDIS
++         * table had already enumerated were discarded on the way out.
++         *
++         * The IPv6 sibling below already does the right thing with the same
++         * fopen -- `*count = 0; return STATUS_SUCCESS` -- and this makes the two
++         * agree. The loopback entries synthesized above are kept, because they
++         * came from getifaddrs() and not from /proc, so the table is short
++         * rather than absent. That is what "no routes are visible from here"
++         * should look like to a Win32 program.
++         *
++         * This patch was once reverted because an A/B put a c0000005 out of
++         * GetAdaptersAddresses on the build that carried it. That reading was
++         * wrong, and the reason is recorded here so it is not repeated: this
++         * return does not fault, it *unblocks* the caller. Without it
++         * call_families( gateway_and_prefix_addresses_alloc ) fails with 50 and
++         * adapters_addresses_alloc goes straight to its error label; with it,
++         * execution reaches dns_info_alloc for the first time, and that is where
++         * the access violation lived. dnsapi's unix library is a stub on Android
++         * -- bionic has no res_getservers, so HAVE_RESOLV is undefined and the
++         * shipped dnsapi.so exports no __wine_unix_call_funcs at all -- so
++         * __wine_init_unix_call() fails, __wine_unixlib_handle stays 0, and the
++         * first RESOLV_CALL indexes a null function table inside
++         * __wine_unix_call_dispatcher. handle_syscall_fault() turns that into a
++         * *returned* STATUS_ACCESS_VIOLATION rather than a raised one, which is
++         * why +seh showed nothing and why the status came back through
++         * GetAdaptersAddresses as a return value. See the dnsapi and iphlpapi
++         * patches that go with this one.
++         */
++        if (!(fp = fopen( "/proc/net/route", "r" )))
++        {
++            WARN( "/proc/net/route unreadable; reporting %u route(s).\n", num );
++            if (!want_data || num <= *count) *count = num;
++            else status = STATUS_BUFFER_OVERFLOW;
++            return status;
++        }
+ 
+         /* skip header line */
+         fgets( buf, sizeof(buf), fp );
