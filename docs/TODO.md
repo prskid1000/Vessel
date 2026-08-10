@@ -522,8 +522,8 @@ audit's; they are pointers, not independently re-verified.
   scene whenever the scene is rebuilt. *Done when:* a program is launched with
   the session and the area around its window is `#161826` in a screenshot.
 
-- [ ] **`ipconfig` prints nothing, and interface enumeration was never the
-  reason.** `patches/wine/0007` works — both halves. Measured 2026-08-10 on the
+- [~] **`ipconfig` prints nothing, and interface enumeration was never the
+  reason.** *Two patches verified working; a third defect stands behind them.* `patches/wine/0007` works — both halves. Measured 2026-08-10 on the
   device, and the log line the entry has been asking for since it was written:
 
   ```
@@ -576,16 +576,39 @@ audit's; they are pointers, not independently re-verified.
   forty lines down does `*count = 0; return STATUS_SUCCESS` on the identical
   `fopen` failure, which is why the IPv6 forward table succeeded in the same run.
 
-  `patches/wine/0013` makes the two agree. Written, `git apply --check` clean,
-  and **compiled** — `make dlls/nsiproxy.sys/ip.o` in the build image, no
-  warnings — but not yet in a packaged Wine. *Done when:* a session on a Wine
-  built with 0013 runs `ipconfig` and it names an adapter. If it still does not,
-  the next thing to read is `dns_info_alloc`, which is the step after the one
-  that fails today and which calls `DnsQueryConfig` — and `dnsapi` on this build
-  logs `err:dnsapi:DllMain No libresolv support, expect problems`, because Wine's
-  configure needs `res_init`/`res_query`/`ns_initparse` and bionic does not offer
-  the set. That is a second, independent defect on the same path; it has not
-  been reached yet because the route table fails first.
+  `patches/wine/0013` makes the two agree, and **it is built, shipped and
+  measured — it does exactly what it claims, and `ipconfig` still prints
+  nothing.** Run 2026-08-10 against `wine-11.14-canoe.wcp` on the device, with
+  the patch confirmed present in the shipped binary (`grep -c unreadable
+  lib/wine/aarch64-unix/nsiproxy.so` → 1) rather than assumed from the build log:
+
+  ```
+  0058:trace:nsi:ipv4_forward_enumerate_all 0x72b0161cc4 48 0x72b01628c4 32 ...
+  0058:warn:nsi:ipv4_forward_enumerate_all /proc/net/route unreadable; reporting 2 route(s).
+  00e0:trace:nsi:NsiFreeTable ...
+  ```
+
+  The route table now returns rather than failing — the 2 routes are the
+  loopback entries `getifaddrs()` had already synthesized before the `fopen`, so
+  the count is real and the buffer behind it is filled. Both patches on this
+  path are therefore doing their job: 0007 finds 8 interfaces, 0013 stops one
+  unreadable file discarding them. **`ipconfig` still exits 1 with zero bytes of
+  stdout.**
+
+  *Where it now dies, and this part is inference rather than measurement.* An
+  `+iphlpapi` trace shows exactly **one** `GetAdaptersAddresses` call, eight
+  `ConvertInterfaceLuidToGuid` calls, the route enumeration above, and then
+  nothing — no second call, so it never got `ERROR_BUFFER_OVERFLOW`, and no
+  output, so it did not get `ERROR_SUCCESS` either. The strongest candidate is
+  the defect this entry already predicted: `dns_info_alloc`, the step after the
+  one 0013 fixes, which calls `DnsQueryConfig`, and `dnsapi` logs
+  `err:dnsapi:DllMain No libresolv support, expect problems` twice in the same
+  run because Wine's configure wants `res_init`/`res_query`/`ns_initparse` and
+  bionic does not offer the set. Consistent with everything observed, **but the
+  return code has not been read** and this project's record on unmeasured
+  causes is poor. *Done when:* `GetAdaptersAddresses`' return value is read at
+  the point of failure — a relay trace, or an instrumented `dns_info_alloc` —
+  and `ipconfig` names an adapter.
 
 ## 2. Self-sufficient install
 
