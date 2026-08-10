@@ -477,6 +477,49 @@ audit's; they are pointers, not independently re-verified.
   `Loaded cache: <id>` never appears in a session log. That is worth running
   anyway, because it is the falsification test for the paragraph above.
 
+  **Measured on the device 2026-08-10, and the timing cannot be taken yet
+  because two things upstream of it have never worked. Neither is the path bug
+  above.**
+
+  *One: the compiler has never run, so there is nothing to load.* The container
+  holds two cache keys — `caches/fex/431d9812d0f4` and `caches/fex/96a6dacbc994`,
+  so the digest scheme is doing its job across a configuration change — and
+  between them **three Metro codemaps, all still in `codemap/new/`**. There is no
+  `codemap/ready/` and **no `cache/` directory at all**. `ProcessAll()` creates
+  both as its first two acts, so neither existing means it has never started.
+  The reason is in the session metadata: **every session ever recorded on this
+  device reads `"exit": "RUNNING", "endedAt": null`** — the process was killed,
+  teardown never ran, and `generateCodeCache` is called from teardown. It is not
+  that the compile step is broken; it is that nothing has ever reached it.
+
+  *Two: the compiler crashes at startup when it is run by hand.* Invoked
+  directly against an existing key, with `FEX_APP_CACHE_LOCATION` pointing at it:
+
+  ```
+  D 120 Load module FEXOfflineCompiler64.exe (…): 140000000
+  D 120 Exception: Code: C0000005 Address: 1400439E8
+  wine: Unhandled page fault on read access to 0000000000000018
+        at address 00000001400439E8 (thread 0120)
+  EXIT=5
+  ```
+
+  Only ntdll, kernel32, kernelbase and ucrtbase are loaded when it dies, and no
+  directory is created, so it faults before `ProcessAll` does anything. Had
+  teardown ever run, the session log would have said "the FEX code cache
+  compiler exited with 5".
+
+  *What the run did confirm.* Writing works exactly as the source reading said:
+  a probe launch with `FEX_ENABLECODECACHINGWIP=1` and a unix
+  `FEX_APP_CACHE_LOCATION` created `…/codemap/new/pb.exe-0ffc5f8403f7ac8b.<ts>.bin`
+  at the **real** unix path, and there is no stray `drive_c/data/…` tree anywhere
+  in the prefix. So the asymmetry is confirmed from both ends: Win32 writes
+  resolve, the hand-built `\??\` read cannot.
+
+  **Order of work, and the cold/warm number is last:** make a session reach
+  teardown (or move the compile step somewhere a killed process still reaches),
+  fix the compiler's startup fault, give `FEX_APP_CACHE_LOCATION` a DOS path.
+  Only then is there a measurement to take.
+
   The fix is one value, not one code path: `FEX_APP_CACHE_LOCATION` has to be a
   **DOS path ending in `\`**, which satisfies both uses at once — `C:\…\codemap
   \new\` for the writer, `\??\C:\…\cache\…` for the reader. Where that DOS path
@@ -891,6 +934,35 @@ in that case.**
   `^A ` first — if FEX's own message is there the site is named outright and the
   unwind trace is only corroboration.
 
+  **Run on the device 2026-08-10, and it did not reproduce. That is the whole
+  result and it is not a fix.** `presentbench-x86_64.exe` — 238 KB, built by the
+  same llvm-mingw line `device-graphics.sh` uses, `-O1` against
+  `dxguid/uuid/gdi32/user32` — was run in the app's own container prefix from
+  the command line, three times:
+
+  | environment | outcome |
+  |---|---|
+  | `FEX_SILENTLOG=0` only | ran; `result=BLOCKED stage=createwindow err=203`, EXIT=1 |
+  | `+ FEX_ENABLECODECACHINGWIP=1`, `FEX_APP_CACHE_LOCATION` | same, and it wrote a codemap |
+  | `+` the whole session knob set (`TSOENABLED`, `HALFBARRIERTSOENABLED=0`, `VECTORTSOENABLED`, `DISABLEL2CACHE`, `DYNAMICL1CACHE`) | same |
+
+  No `c000001d`, no `ForcedAssert`, no line starting `A `. It loaded d3d11 and
+  dxgi and got as far as `CreateWindow`, which fails only because a bare
+  command-line run has no X server. **So the discriminator is neither the image
+  nor the guest's `FEX_*` environment** — the two things this entry has blamed —
+  and what is left is the session harness itself, or a change since the assert
+  was last seen. It is not closed on that: a negative from a hand-run is weaker
+  than the positive it is contradicting, and the next attempt has to be a real
+  session launch.
+
+  **One blocker is closed either way, and it is the one that mattered.** With
+  `FEX_SILENTLOG=0` FEX's own log reaches the guest's stderr and is readable —
+  every run above produced `D <tid> Load module …` lines in the captured output.
+  So "the message reaches nowhere we read" was wrong: the sink works, and when
+  an `ERROR_AND_DIE` does fire its text will be on that stream as a line
+  beginning `A `. Whatever the earlier run did, it was not reading that stream
+  with `SilentLog` off in the process that died.
+
 - [x] **At session start the desktop background is black until something
   repaints it.** Fixed in code and not yet watched: a texture is uploaded at
   allocation and after that only on damage, and the desktop's background paint
@@ -1103,8 +1175,24 @@ in that case.**
     initialises `size`, which was read uninitialised on the first
     `DnsQueryConfig` of every call since `3bace8862f1`.
 
-  *Done when:* `ipconfig` names an adapter on the device. **Built but not yet
-  run on the device.**
+  **Fixed. Measured on the device 2026-08-10, in the standalone `files/session`
+  prefix and again in the app's own container**, on a Wine carrying 0013, 0014
+  and 0015 (`grep -c unreadable …/nsiproxy.so` → 1 in the installed component,
+  so the binary was checked and not assumed):
+
+  ```
+  Unknown adapter wlan0
+      IPv6 address. . . . . . . . . . . : 2401:4900:1c37:faa4:c024:82ff:fe84:bc1
+      IPv4 address. . . . . . . . . . . : 192.168.1.5
+  …8 adapters, EXIT=0
+  ```
+
+  `err:dnsapi:DllMain No libresolv support` is still printed and is now correct
+  and harmless: there is no resolver, `RESOLV_CALL` says so instead of faulting,
+  and the adapter list is printed anyway. **The DNS server list is empty**, which
+  is honest for a container and is the remaining gap — a real one would have to
+  come from Android's `net.dns*` properties, and that is a separate item nobody
+  has asked for yet.
 
   *Kept, and it reads differently now: this note named the right function
   before anything had measured it, and was then thrown away for the wrong
