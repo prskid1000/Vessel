@@ -387,7 +387,10 @@ audit's; they are pointers, not independently re-verified.
   That is about 46% of the client-visible present cost and it is held under
   `content.renderLock`, which the compositor also takes, so deleting it is
   worth something. But it is **1.5% of a frame at 60 Hz and 0.25% of one at the
-  8-12 fps Metro actually renders**. *Recommendation: do not build this yet.*
+  8-12 fps Metro actually renders**. *Decided 2026-08-10: deferred, not
+  dropped.* Unlike the flip branch below there is no closed gate here — the
+  machinery exists and the change is buildable today — so this waits on
+  priority rather than on feasibility.
   The same measurement session found the device ~85% idle at 10 fps with every
   game thread asleep; 252 us cannot be what is missing, and this item should
   wait until whatever costs the other 99.75% of the frame is named.
@@ -662,10 +665,27 @@ audit's; they are pointers, not independently re-verified.
     written for: nothing asked the server to free those resources, and it freed
     them anyway.
 
-  - [ ] **The last copy: a flip branch in `PresentExtension`.** Specified
-    below, not started. It is the most invasive of the three and it is
-    **blocked on the fence above being real**, for a reason that is structural
-    rather than schedule: see the specification.
+  - [~] **The last copy: a flip branch in `PresentExtension`. Closed as
+    won't-do, 2026-08-10 — the gate it depended on is shut.** The
+    specification below is kept because it is the reasoning, not the plan.
+
+    The flip needs the app's EGL context to make a texture out of a Turnip
+    dma-buf. There are two routes and this device offers neither cleanly:
+    `dumpsys SurfaceFlinger` lists 42 EGL extensions and
+    **`EGL_EXT_image_dma_buf_import` is not among them**, which closes the
+    direct one; the remaining route is `AHardwareBuffer_createFromHandle`,
+    which is not in the NDK.
+
+    Two other things say the same. The payoff is now measured and it is **252
+    us** — see item 27 above, which times the copy this would delete — against
+    a frame that takes 80-125 ms in the title that motivated it. And the
+    structural blocker is gone in a way that removes the urgency rather than
+    creating it: `patches/mesa/0007` is deleted, so the DRI3 idle fence is the
+    default, so the flip no longer has a missing-fence hazard to design around.
+
+    *Reopen when:* something makes a Turnip dma-buf importable into the app's
+    GL context without a private API, **and** a profile shows the copy costing
+    a meaningful fraction of a frame. Neither is true today.
 
   *Kept from the original specification, still true:* the server's
   `pixmapFromBuffer` mmaps the client's fd on the CPU, gralloc returns a tight
