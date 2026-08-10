@@ -152,13 +152,16 @@ Adding this closed the reason **the APK should not be distributed**; a release
 had already been published before it existed, which is recorded here rather than
 quietly fixed.
 
-**3. One of 6(a)–(e) — 6(a), satisfied for the app, and now for the components
-release too.** The components release publishes built binaries of Wine, FEX,
-DXVK, vkd3d and Mesa, every one from a patched upstream tree, and for a while its
-body said nothing about where any of that source is. A repository that happens to
-be public is not an offer; a page that hands out binaries has to say where their
-source lives. `build/source_offer.py` now writes that body from the packages' own
-provenance and `_component.yml` publishes it beside `contents.json`.
+**3. One of 6(a)–(e) — 6(a), satisfied for the app; still open for the
+components release.** The components release publishes built binaries of Wine,
+FEX, DXVK, vkd3d and Mesa, every one from a patched upstream tree, and for a
+while its body said nothing about where any of that source is. A repository that
+happens to be public is not an offer; a page that hands out binaries has to say
+where their source lives. `build/source_offer.py` writes that body from the
+packages' own provenance and `_component.yml` publishes it beside
+`contents.json` — but two of the six packages predate the field that names their
+upstream repository, so the renderer refuses rather than publishing a row that
+says `unknown`. Blocker 9 in the checklist has the detail and what closes it.
 
 
 6(a) wants the Library's complete source "including whatever changes were used in
@@ -253,8 +256,11 @@ The provenance the packages themselves carry is the other half of this:
 `write_provenance()` embeds `sourceRef` and `sourceSha` into every `.wcp`'s
 `profile.json`, `build/gen_registry.py` copies them into the registry, and
 `ComponentPackage` puts them on screen. So any installed package can already name
-the upstream commit it was built from. What is *not* yet in place is a written
-offer or a source link on the release page itself — see the checklist.
+the upstream commit it was built from — except that `sourceRepo` was added later
+than the other two, and the DXVK and vkd3d packages predate it and say `unknown`.
+`build/source_offer.py` turns the release page's half of this into a generated
+offer, and refuses to write one for a package whose provenance cannot name its
+repository; see blocker 9 in the checklist.
 
 ## Trademarks
 
@@ -277,9 +283,18 @@ project circumvents copy protection.
 
 ## Before this repository goes public
 
-The remote is set (`prskid1000/Vessel`) and nothing has been pushed. This is the
-list that gate is waiting on. **The repository can go public as soon as the two
-open items below are done; the APK needs the third as well.**
+**This gate has already been passed, which changes what the list is for.** This
+section still said "the remote is set and nothing has been pushed" on
+2026-08-10; `docs/TODO.md` §6 records that everything is pushed and that v0.2.0
+is published with a signed APK carrying all six components. So the two items
+below are not a gate any more, they are a **live gap in what has shipped** —
+recorded here in those words rather than reworded, for the same reason §6's
+"a release had already been published before this existed" is recorded above.
+
+Eight of the ten are closed with the evidence named. Neither of the two open
+ones affects the APK: both are about the *components release* page and its
+index, and nothing about them is fixed by editing a document — 9 needs two
+packages rebuilt and a CI run, 10 is a judgement about a moving target.
 
 | # | Blocker | Status |
 |---|---|---|
@@ -291,8 +306,56 @@ open items below are done; the APK needs the third as well.**
 | 6 | Trademarks must not be in the product name or icon | **Closed.** Checked, and the name is asserted. |
 | 7 | Our Wine/vkd3d patches must be the only difference from upstream | **Closed.** `assert_pristine()` fails the build on a drifted checkout; the `winefile` drift that prompted it is gone. |
 | 8 | Prominent notice, in the interface, that the app contains LGPL code | **Closed.** A permanent line at the foot of home naming the X server and its licence, opening `LicencesScreen`; five entries, each with its full text out of `res/raw`. libadrenotools' BSD-2-Clause notice is in the APK now too, which it had not been. Asserted three ways in `LicensingTest`. |
-| 9 | A source offer on the component release page | **Closed in code, unproven until a build runs.** `build/source_offer.py` renders the release body from the packages' own provenance — component, version, upstream repository, ref, commit, and the `patches/<name>/` directory — and `_component.yml` writes it with `gh release edit` after each publish. Generated rather than hand-written because a hand-maintained list goes stale on the first pin bump, and a stale source offer is worse than none: it looks like one. `sourceRepo` is new in provenance; the ref and commit were recorded already and are useless without saying which repository they are commits *of*. |
-| 10 | A `README` that is true on the day | Tracked in `docs/TODO.md` §6, not here. |
+| 9 | A source offer on the component release page | **Open, and further from closed than it looked.** See below. |
+| 10 | A `README` that is true on the day | **Open, and cannot be closed by a document pass.** Tracked in `docs/TODO.md` §6. One flatly countable claim was wrong and is fixed — it said six Wine patches against eleven in `patches/wine/`. The rest of what is stale is the graphics narrative: the README still ends on "KGSL cannot export a dma-buf … the single thing between here and a triangle" and reports DXVK as reaching `vkCreateInstance` with no swapchain, while its own opening paragraph says Metro 2033 Redux renders and the DRI3 present path has since landed. Rewriting that is not a licensing edit and not a safe one from the repository alone: every claim in it is a device measurement, and the measurements are being retaken. |
+
+### 9, in detail: running the renderer is what found the hole
+
+The item read "closed in code, unproven until a build runs". It was run on
+2026-08-10 — over `dist/`, which holds the same packages the release does — and
+the offer it would have published was wrong in three ways. None of them was
+visible from reading the script.
+
+- **Two of the six shipped components had no upstream repository in the offer at
+  all.** `sourceRepo` entered provenance on 2026-08-09; `dxvk-2.7.1-canoe` and
+  `vkd3d-3.0.1-canoe` were packaged on 2026-08-07 and carry none, so
+  `provenance.get("sourceRepo", "unknown")` rendered the literal word `unknown`
+  in the Upstream column. For vkd3d-proton, which is LGPL-2.1-or-later, that is
+  a row that discharges nothing: the ref and the commit are useless without
+  saying which repository they are commits *of*, which is the exact sentence
+  this blocker was written around.
+- **The `patches/` pointer was broken for four of the six.** The renderer wrote
+  ``patches/<component>/`` on every row unconditionally. `patches/dxvk/`,
+  `patches/vkd3d/`, `patches/turnip/` and `patches/zink/` do not exist —
+  the first two because those components carry no patches, the last two because
+  the patch directory is keyed on the *source tree* and both are built from one
+  Mesa checkout, so theirs are in `patches/mesa/`. "The complete source
+  including whatever changes were used in the work" is the obligation, and the
+  changes were the half being pointed into empty space.
+- **It covered packages that are not published**, including the superseded Wine
+  10.13 and Turnip HAL builds and the repackaged Git that no workflow uploads.
+
+Two of the three are fixed in the renderer. It now enumerates every
+`patches/<tree>/` directory in the repository with its patch files listed in
+full, rather than guessing a directory per row — complete, and incapable of
+naming one that is not there — and it applies the same supersession and
+`--exclude` filters as `gen_registry.py`, so the offer and the index describe
+one set of packages.
+
+The first cannot be fixed by editing anything. A package's provenance is
+written when it is built, so **DXVK and vkd3d must be rebuilt** before an offer
+covering them can name their source. Until they are, `source_offer.py` *refuses
+to write the file* — the same shape as `gen_registry.py` refusing to publish a
+registry without hashes. Reading the repository out of `native/pins.env`
+instead was considered and rejected: that is a claim about today's pin dressed
+up as a fact about the artefact, and a source offer that looks right and is not
+is the failure mode this whole item exists to prevent.
+
+**What still has to happen to close it:** rebuild DXVK and vkd3d so their
+`.wcp` provenance carries `sourceRepo`, then let a component build run on
+`main`. *Done when:* the `components` release body names an upstream repository
+for every package on it, and every `patches/` path in that body resolves in the
+repository.
 
 Two things that are *not* blockers and were checked so they can stop being
 raised:

@@ -110,7 +110,7 @@ VESSEL-OK bits=32 sum=333338333350000   x86-32 via WoW64 + libwow64fex
 | vkd3d-proton 3.0.1 | `vkd3d-3.0.1-canoe.wcp` | Same |
 | Zink (OpenGL) | `zink-…-canoe.wcp` | Built — **not yet run** |
 
-Six Wine patches, all in `patches/wine/`, each with its reason in its header. The
+Eleven Wine patches, all in `patches/wine/`, each with its reason in its header. The
 one that mattered most: a PE image relocated away from its ImageBase can never be
 made executable on Android, because making a *modified* private file mapping
 executable needs SELinux `execmod`, which apps are not granted and parts of the
