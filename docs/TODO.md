@@ -1086,8 +1086,8 @@ says, not what the section said when it was written.
 Ordered so that each item is independently shippable and the ones that make the
 later ones honest come first.
 
-- [ ] **`docs/LOGGING.md` no longer describes what the code does, and everything
-  else here cites it.** Three corrections, all found by reading the code against
+- [x] **`docs/LOGGING.md` no longer describes what the code does, and everything
+  else here cites it.** *Done 2026-08-10.* Three corrections, all found by reading the code against
   the document. `:15` omits `+debugstr` from the configuration block while the
   code sets it (`SessionEnvironment.kt:18`), the test asserts it
   (`SessionEnvironmentTest.kt:122`) and the document's own `debugstr` section
@@ -1100,12 +1100,20 @@ later ones honest come first.
   resolves `__wine_dbg_output` when not silent and falls back to a
   `%LOCALAPPDATA%` file when that fails. Cheap, and it goes first because
   `SessionEnvironment.kt:15-16` says to change that document before the code.
-  *Done when:* the configuration block in `LOGGING.md` is the string
-  `SessionEnvironmentTest` asserts, character for character, and the FEX section
-  states the finding rather than the open question.
+  A fourth was found on the way and is fixed with them: the block also omitted
+  `FEX_SILENTLOG=0` and `FEX_OUTPUTLOG=stderr`, which are logging configuration
+  and were the only two variables the code sent that the block did not name.
+  *Evidence:* every logging variable in the block was diffed against the map
+  `SessionEnvironmentTest`'s *a fully provisioned container produces exactly
+  this environment* pins — `WINEDEBUG`, `DXVK_LOG_LEVEL`, `DXVK_LOG_PATH`,
+  `VKD3D_DEBUG`, `VKD3D_SHADER_DEBUG`, `TU_DEBUG`, `FEX_SILENTLOG`,
+  `FEX_OUTPUTLOG` all equal, and `VKD3D_LOG_FILE` and `MESA_LOG` absent from
+  both, which is what "deliberately not set" has to mean to be worth writing.
+  Zero mismatches. The FEX section is now *FEX: `SILENTLOG`, and nothing else on
+  this platform* and states the finding at `Logging.cpp:36-49`.
 
-- [ ] **One log limit drops lines silently, and it is the one that fires first
-  when the limits go up.** `SessionLogWriter` announces every truncation it
+- [x] **One log limit drops lines silently, and it is the one that fires first
+  when the limits go up.** *Done 2026-08-10.* `SessionLogWriter` announces every truncation it
   performs — dedup, rate limit, elision — and `LOGGING.md:190` states the rule:
   "A log that hides its own truncation is worse than no log." The producer
   channel breaks it. It is `Channel(8192, BufferOverflow.DROP_OLDEST)`
@@ -1115,12 +1123,21 @@ later ones honest come first.
   that will not say so. Counting is a `Channel.onUndeliveredElement` or a
   monotonic counter compared against `lines + dropped` at flush; either way the
   count has to reach the sidecar and the marker.
-  *Done when:* a session driven with a synthetic producer faster than the pump
-  ends with a `… N lines dropped before the sink …` marker in the file and a
-  non-zero field in `SessionLogMeta`, and a unit test asserts both.
+  It counts now. `onUndeliveredElement` on the channel increments an
+  `AtomicInteger` — on the *sender's* thread, which is why it is atomic
+  (`SessionLogWriter.kt:89, 94-101`) — `SessionLogMeta.overflowLines`
+  (`SessionLog.kt:111`) carries it into the sidecar, and `overflowLogMarker`
+  (`SessionLogFormat.kt:270`) puts it in the file both mid-run and at finalise
+  (`SessionLogWriter.kt:348-355, 389`).
+  *Evidence:* `SessionLogWriterTest`'s *lines the channel throws away are
+  counted and admitted in the file* pins the pump behind a latch, sends 20 000
+  lines, and asserts the marker is in the file and that
+  `overflowLines + lines - 1 == 20 000` — every line either written or dropped
+  and counted, the one extra being the marker that says so.
 
-- [ ] **Turnip's diagnostics do not reach the session log, so the switch that
-  proves it loaded proves it to nobody.** Mesa picks its logger at init and
+- [~] **Turnip's diagnostics do not reach the session log, so the switch that
+  proves it loaded proves it to nobody.** *Built; the measurement that closes it
+  needs the device.* Mesa picks its logger at init and
   under Android the default is logcat — `mesa_log_control |=
   MESA_LOG_CONTROL_ANDROID` (`native/mesa/src/util/log.c:119-124`),
   `__android_log_write` at `:388` — and Vessel reads no logcat: grepping
@@ -1136,12 +1153,26 @@ later ones honest come first.
   defaulting to `MESA_LOG_INFO` in a release build (`log.h:49-53`), which passes
   Turnip's `mesa_logi` startup lines (`tu_util.cc:135-136`) and drops its
   `mesa_logd` ones (`:108`).
+  `MESA_LOG` is now a diagnostics control — *Driver messages in the log*, levels
+  `not set` and `file`, off by default (`ContainerDiagnostics.kt:494-508`,
+  `FIXED_MESA_LOG` at `:673`) — and it is in `DIAGNOSTIC_SESSION_ENV`
+  (`SessionEnvironment.kt:416`) and in `RESERVED_SESSION_ENV` beneath it, so no
+  manifest param can reach it. The three Turnip flag rows (`perf`, `nolrz`,
+  `noubwc`) are **gated** on it (`ContainerDiagnostics.kt:571-584`): with the
+  driver logger off they draw disabled with the reason, because a switch whose
+  output nothing can read is worse than no switch.
+  `ContainerDiagnosticsTest`'s *Turnip flags are unreachable until the driver
+  logger is on* holds that.
+  **Still open, and no test can close it:** that the mechanism exists is read
+  out of Mesa's source; that Turnip's lines actually arrive in the session log
+  has not been observed. `docs/LOGGING.md` marks it *Unverified end to end* in
+  those words.
   *Done when:* a device session with `MESA_LOG=file` set has a non-zero
   `grep -c 'TU_DEBUG='` over its session log, and the lines are tagged `driver`
   in the viewer rather than falling through to `wine`.
 
-- [ ] **`RESERVED_SESSION_ENV` blocks every variable diagnostics needs to
-  write, and unreserving is the wrong fix.** The manifest merge is
+- [x] **`RESERVED_SESSION_ENV` blocks every variable diagnostics needs to
+  write, and unreserving is the wrong fix.** *Done 2026-08-10.* The manifest merge was
   `if (key !in RESERVED_SESSION_ENV) environment[key] = value`
   (`SessionEnvironment.kt:741-743`), and `WINEDEBUG`, `DXVK_LOG_LEVEL`,
   `VKD3D_DEBUG`, `VKD3D_SHADER_DEBUG`, `TU_DEBUG` and `FEX_SILENTLOG` are all in
@@ -1155,13 +1186,22 @@ later ones honest come first.
   keeps `VKD3D_LOG_FILE` (reserved to guarantee an absence, `:212-216`) and
   `MESA_VK_WSI_DEBUG` (not a debug switch on this build, `:600-663`)
   unreachable by any path.
-  *Done when:* `sessionEnvironment` takes a diagnostics record, a test asserts
-  `DIAGNOSTIC_SESSION_ENV ⊆ RESERVED_SESSION_ENV`, another asserts that an
-  empty record reproduces the pinned environment at
-  `SessionEnvironmentTest.kt:504-568` byte for byte, and a third asserts a
-  manifest param still cannot set `WINEDEBUG`.
+  That is what was built. `DIAGNOSTIC_SESSION_ENV` is seven names
+  (`SessionEnvironment.kt:409-417`) — `WINEDEBUG`, `DXVK_LOG_LEVEL`,
+  `VKD3D_DEBUG`, `VKD3D_SHADER_DEBUG`, `TU_DEBUG`, `FEX_SILENTLOG`, `MESA_LOG` —
+  and the third stage (`:1059-1062`) runs after the manifest one and drops any
+  key not in it. The record reaches `sessionEnvironment` on the container rather
+  than as an argument (`ContainerProfile.diagnostics`), which is the same thing
+  for this purpose and means a container document carries its own diagnostics.
+  *Evidence:* three tests, as specified. `SessionEnvironmentTest` asserts
+  `DIAGNOSTIC_SESSION_ENV ⊆ RESERVED_SESSION_ENV` and that it is strictly
+  smaller, and that `VKD3D_LOG_FILE` and `MESA_VK_WSI_DEBUG` are in neither;
+  *a container with nothing diagnosed produces the environment above, unchanged*
+  pins the empty-record case against the golden map; and *a manifest param still
+  cannot set `WINEDEBUG` when diagnostics are on* covers the third.
 
-- [ ] **The `WINEDEBUG` composer, which is where this gets silently wrong.**
+- [x] **The `WINEDEBUG` composer, which is where this gets silently wrong.**
+  *Done 2026-08-10.*
   Diagnostics never hands Wine a value; it appends to `WINEDEBUG_CHANNELS`, the
   shape `dllOverrides` already uses and for the reason stated at `:765-771` — a
   later term wins, so a user can add without being able to delete the defaults.
@@ -1175,12 +1215,28 @@ later ones honest come first.
   the raw field must refuse the literal word or hand the user a session that
   dies before the program starts; and a leading `-all` in the raw field erases
   everything before it.
-  *Done when:* a unit test pins the composed string for every ladder stop of
-  every curated channel, `-all` is still `terms.first()` in all of them, and the
-  raw field's rejection of `help` has a test.
+  `composeWineDebug` (`ContainerDiagnostics.kt:851`) is the one composer, and it
+  can only append: it splits the constant and joins the rows' terms after it.
+  *Evidence:* `ContainerDiagnosticsTest`'s *each stop emits the terms that force
+  exactly its classes* pins the composed string for every stop of every curated
+  channel; *the stubs stop names warn as well, because inheritance is from the
+  defaults* is the `warn+x,fixme+x` rule specifically; and *every stop of every
+  Wine entry leaves minus-all first and the prefix intact* asserts
+  `terms.first() == "-all"` and exactly one `-all` across the whole product of
+  entries and stops.
+  **The raw-field clause was answered by deleting the raw field**, which is
+  worth recording rather than ticking. There is no free-text `WINEDEBUG` box:
+  the surface is rows only, `isLoggableName` refuses `,+-:`, whitespace and
+  anything reaching `char name[15]`, and both hazards are therefore unreachable
+  by construction — `help` typed as a channel name composes `-help,err+help,…`
+  and never the bare word Wine tests for, and no row can emit a leading `-all`.
+  *the word that kills the process cannot be composed, whatever is typed* pins
+  that, because "unreachable by construction" is a claim about a shape and a
+  later raw-input row would break it in silence.
 
-- [ ] **The screen.** `docs/DIAGNOSTICS-UI.md` §7 has the control table and §9
-  the eight decisions that are genuinely open. Four groups — Wine channels with
+- [~] **The screen.** *Built; the measurement that closes it needs the device.*
+  `docs/DIAGNOSTICS-UI.md` §7 has the control table and §9
+  the eight decisions that were open. Four groups — Wine channels with
   levels, the subsystems in their own vocabularies, the raw escape hatch, the
   dangerous tier behind a warning — reached from a row beside *Session logs* in
   the container sheet (`ContainerSheet.kt:149-154`). The one thing not open to
@@ -1190,12 +1246,24 @@ later ones honest come first.
   (`native/dxvk/src/util/log/log.cpp:146-152`), and the difference is not
   smoothed out. Two subsystems with different vocabularies drawn as one control
   is a screen that lies about what it sets.
+  It exists as `ui/screens/DiagnosticsSection.kt` — a panel that takes over the
+  container sheet rather than a separate route, entered from `ContainerSheet.kt:275`.
+  Three of the four groups shipped; **the raw escape hatch was dropped**, see the
+  item above. No string in that file names a channel or a variable: the rows come
+  from `ADDABLE_LOGGABLES`, so the screen cannot offer something the composer
+  does not implement. The vkd3d/DXVK vocabularies are kept apart as specified and
+  *DXVK and vkd3d keep their own words in their own order* asserts it.
+  **Still open, and no test can close it:** every assertion here is about the
+  map `sessionEnvironment` returns, not about the environment a process on the
+  phone actually has. Between the two are `SessionRuntime`, the bootstrap
+  filter, and the exec.
   *Done when:* every control on the screen is watched changing the environment
   of a real session on the device — the composed `WINEDEBUG` read out of
   `/proc/<pid>/environ`, not out of a unit test — and a fresh container shows
   nothing switched on.
 
-- [ ] **Limits and retention to maximum, with the storage on screen.** Today:
+- [x] **Limits and retention to maximum, with the storage on screen.** *Done
+  2026-08-10.* Before:
   5 MB head, two 1536 KB tail segments so 1.5–3 MB of tail, 2000 lines a second,
   ten sessions a container (`SessionLogWriter.kt:401-414`,
   `SessionLogStore.kt:354`) — eight megabytes a session and eighty a container,
@@ -1210,12 +1278,27 @@ later ones honest come first.
   reason nobody can find. `docs/DIAGNOSTICS-UI.md` §5 sets out the alternative
   worth pricing first: one container-wide budget the store prunes against,
   rather than a product of three numbers.
-  *Done when:* the numbers are decided in `DIAGNOSTICS-UI.md` with the worst
-  case stated, the writer enforces them, the screen shows real bytes read off
-  the container's log directory, and a session that hits the new cap still
-  writes its elision marker.
+  Decided as three ladders rather than one budget, per container, defaulting to
+  the top rung: 32 MB head, 16 MB retained tail, 20 000 lines a second
+  (`SessionLogLimits`, `ContainerDiagnostics.kt:943-979`). That is 48 MB a
+  session and 480 MB a container at ten sessions, against 8 and 80 before, and
+  `DIAGNOSTICS-UI.md:344-345` states that arithmetic. The three move together in
+  the interface for the reason given above.
+  *Evidence:* *the caps default to the top of every ladder* asserts the two
+  worst-case numbers directly, so a ladder cannot be extended without moving the
+  figure the storage card shows; *the first rung of every ladder is what shipped
+  before this was a setting* pins 5 MB / 1536 KB / 2000 as rung one. The screen
+  reads real bytes — `SessionLogStore.usageBytes(containerId)` off the container's
+  log directory (`ContainerSheetViewModel.kt:372, 412-416`) — and carries
+  *Delete all logs* (`DiagnosticsSection.kt:336`).
+  *One caveat, stated rather than glossed:* the elision marker is proven at the
+  mechanism (`head, marker, previous tail, current tail — in that order`, over
+  `mergeTailSegments`), not by a session that actually writes 32 MB. Writing
+  48 MB in a unit test to prove an `if` on a byte count would buy the
+  arithmetic, which is already asserted, at the cost of a slow suite.
 
-- [ ] **The dangerous tier turns itself off after one session.** `+relay`,
+- [~] **The dangerous tier turns itself off after one session.** *Built; the
+  measurement that closes it needs the device.* `+relay`,
   `+seh`, `warn+d3d` and above, `DXVK_LOG_LEVEL` at `debug`/`trace` and
   `VKD3D_SHADER_DEBUG=trace` can each fill the cap in seconds — `+seh` runs for
   every raised exception handled or not, with a full register dump, and C++ and
@@ -1231,6 +1314,23 @@ later ones honest come first.
   like, which is a hang with an empty `drive_c` two minutes later. Either refuse
   the tier on a container that has never launched, or say in the warning that
   the first launch will take much longer.
+  Built, though not as a stamp. It is a property of the *level*, not of the
+  control: each `Loggable` declares `oneSessionFrom`, the first rung loud enough
+  to be spent (`ContainerDiagnostics.kt:285, 311`), and `consumed()` (`:78`)
+  drops exactly the rows sitting at or above it. A row turned *down* survives.
+  That is stronger than the stamp the item proposed — there is no timestamp to
+  compare and nothing to get wrong when the app is killed mid-run, because the
+  record is rewritten when the session starts rather than interpreted later.
+  The `BOOTSTRAP_SESSION_ENV` consequence was taken as the second option: the
+  confirmation sheet says the first launch will take much longer
+  (`DiagnosticsSection.kt:163-172`).
+  *Evidence:* four tests — *one session is a property of the level, not of the
+  thing*, *one session spends the row, and a quiet one survives*, *turning a
+  loud row down keeps it across launches*, *a fresh container has nothing to
+  spend* — plus *the cost warning says the concrete things and names the
+  mechanism*.
+  **Still open, and no test can close it:** whether the record is actually
+  rewritten at the right moment on a real launch.
   *Done when:* a container armed with `+relay` runs one session, and the second
   session's environment — read off the device, not asserted in a test — carries
   the ordinary `WINEDEBUG` string with the screen showing the control off.

@@ -40,11 +40,21 @@ VKD3D_SHADER_DEBUG=warn
 # VKD3D_LOG_FILE deliberately NOT set — setting it silences stderr
 
 TU_DEBUG=<existing flags>,startup
+# MESA_LOG deliberately NOT set by default — see the Turnip section
+
+FEX_SILENTLOG=0
+FEX_OUTPUTLOG=stderr               # intent only; Windows never reads it
 ```
+
+That is every logging variable a session is sent, and the set is asserted:
+`SessionEnvironmentTest`'s *a fully provisioned container produces exactly this
+environment* pins each value, so a term added to the code and not to this block
+fails there.
 
 `+debugstr` earns its place below, under *the guest program's own voice*; the
 block above omitted it for one cycle while the code set it and the test asserted
-it.
+it. The two `FEX_*` lines were missing from it for the same reason and for
+longer — their argument is in the FEX section at the end.
 
 `DXVK_LOG_PATH=none` is a correction, not a downgrade, and the measurement is at
 `core/SessionEnvironment.kt`'s assignment: pointed at the log directory, DXVK

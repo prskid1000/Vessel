@@ -264,6 +264,28 @@ class ContainerDiagnosticsTest {
     }
 
     @Test
+    fun `the word that kills the process cannot be composed, whatever is typed`() {
+        // `init_options` compares the *whole* variable against "help" and calls
+        // `debug_usage()`, which writes to fd 2 and exit(1)
+        // (`native/wine/dlls/ntdll/unix/debug.c:183-193, 213`) — a session that
+        // dies before the program starts, with the reason on a stream nothing
+        // shows. The design answer was to have no free-text WINEDEBUG field at
+        // all, so the hazard is unreachable by construction; this pins that,
+        // because "unreachable by construction" is a claim about a shape that a
+        // later raw-input row would silently break.
+        for (level in loggableFor("help").levels) {
+            val composed = composeWineDebug(row("help", level))
+            assertTrue("help escaped the prefix", composed.startsWith(WINEDEBUG_CHANNELS))
+            assertFalse("the bare word is what Wine tests for", composed == "help")
+            assertTrue("help" !in composed.split(","))
+        }
+        // The same for the other whole-variable spelling Wine accepts, and for
+        // the one term that would erase everything before it.
+        assertFalse(isLoggableName("-all"))
+        assertFalse(isLoggableName("help,x"))
+    }
+
+    @Test
     fun `an invalid name is flagged on the row and composes nothing`() {
         val bad = row("+relay,-heap")
         assertTrue(diagnosticRows(bad).last().nameIsInvalid)
