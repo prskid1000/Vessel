@@ -678,7 +678,15 @@ class SessionRuntime @Inject constructor(
 
         val turnip = turnipDriver(containerId)
         val fex = fexPackage(containerId)
-        val sessionPaths = SessionPaths(prefix = layout.prefix, logs = layout.logs)
+        // `tmp` explicitly, even though the default derives the same directory:
+        // it is where the D3D layer writes the counters the Metrics tab graphs,
+        // and a reader following that path should find it named rather than
+        // inferred.
+        val sessionPaths = SessionPaths(
+            prefix = layout.prefix,
+            logs = layout.logs,
+            tmp = layout.tmp,
+        )
         val environment = wineLauncherEnvironment(
             tree = tree,
             scratch = SessionScratch(home = layout.base, tmp = layout.tmp),

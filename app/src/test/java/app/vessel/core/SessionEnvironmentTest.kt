@@ -30,7 +30,8 @@ class SessionEnvironmentTest {
     private val prefix = File("/data/user/0/app.vessel/files/containers/c1/prefix")
     private val logs = File("/data/user/0/app.vessel/files/logs/c1")
     private val caches = File("/data/user/0/app.vessel/files/containers/c1/caches")
-    private val paths = SessionPaths(prefix = prefix, logs = logs, caches = caches)
+    private val tmp = File("/data/user/0/app.vessel/files/containers/c1/tmp")
+    private val paths = SessionPaths(prefix = prefix, logs = logs, caches = caches, tmp = tmp)
 
     /**
      * A manifest that still declares the three FEX params, which the shipped one
@@ -176,6 +177,58 @@ class SessionEnvironmentTest {
             ),
         )
         assertFalse(env(manifest = sneaky).containsKey("VKD3D_LOG_FILE"))
+    }
+
+    // — the graphics counters --------------------------------------------------
+
+    @Test
+    fun `the D3D counter snapshot lands in the container's own scratch directory`() {
+        // Inside app data, because both sides open it by path: Wine writes it
+        // through the CRT and the sampler reads it as the app. Anywhere else and
+        // one of the two is denied.
+        assertEquals(File(tmp, GFX_STATS_FILE).absolutePath, env()["VESSEL_GFX_STATS"])
+        // The directory, stated separately from the file name: `tmp` is what
+        // `TMPDIR` already points at, and the point of the row is that the two
+        // agree. Compared as `File`s rather than as strings because this suite
+        // runs on the build host, where a separator is a backslash.
+        assertEquals(tmp.absoluteFile, File(env()["VESSEL_GFX_STATS"]!!).parentFile)
+    }
+
+    @Test
+    fun `the scratch directory is derived from the prefix when it is not given`() {
+        // The default matters: every caller that predates this variable keeps
+        // pointing it at the same directory `TMPDIR` already names, rather than
+        // at the prefix, where nothing would ever prune it.
+        val defaulted = SessionPaths(prefix = prefix, logs = logs)
+        assertEquals(
+            File(prefix.parentFile, "tmp").absolutePath,
+            defaulted.tmp.absolutePath,
+        )
+    }
+
+    @Test
+    fun `a manifest param cannot move the D3D counter snapshot out of the container`() {
+        val sneaky = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "g", title = "G",
+                    params = listOf(
+                        ParamSpec(
+                            key = "gfx.stats",
+                            title = "Stats",
+                            type = ParamType.ENUM,
+                            default = JsonPrimitive("/sdcard/anywhere.json"),
+                            env = "VESSEL_GFX_STATS",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(
+            File(tmp, GFX_STATS_FILE).absolutePath,
+            env(manifest = sneaky)["VESSEL_GFX_STATS"],
+        )
     }
 
     @Test
@@ -534,6 +587,10 @@ class SessionEnvironmentTest {
                 // it write `<exe>_dxgi.log` beside the session log while the session
                 // log itself got nothing. Measured on a real game launch.
                 "DXVK_LOG_PATH" to "none",
+                // The D3D counter snapshot, in the container's scratch. Always
+                // set: it is what makes draw calls, submissions and vidmem
+                // graphable without a per-game `dxvk.conf` and a screenshot.
+                "VESSEL_GFX_STATS" to File(tmp, GFX_STATS_FILE).absolutePath,
                 "VKD3D_DEBUG" to "warn",
                 "VKD3D_SHADER_DEBUG" to "warn",
                 "VKD3D_CONFIG" to "nodxr",

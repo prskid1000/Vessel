@@ -308,6 +308,16 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // that with a connect(2) failure per damaged region rather than an error.
     SYSVSHM_SOCKET_ENV,
     "VESSEL_VULKAN_ICD",
+    // Where the D3D layer writes the counters this app graphs. Reserved for the
+    // reason the long comment above this set gives: a variable a manifest param
+    // could overwrite is a variable a container document can corrupt, and this
+    // one names a path the app opens and reads. A document that pointed it at
+    // `/sdcard/…` would have Wine writing outside the container; one that
+    // pointed it at the prefix would have the sampler reading a file nothing
+    // updates and drawing a flat line that is not a measurement. Neither is a
+    // preference anyone wants to be able to express, and the graphs are not
+    // improved by being able to move their own source.
+    "VESSEL_GFX_STATS",
     // Reserved rather than offered, because a caption is not a preference here:
     // Vessel's taskbar is the only window control on a phone and the shell draws
     // the move/resize borders itself. A container that turned this off would get
@@ -634,7 +644,42 @@ data class SessionPaths(
      * upgrade. Note vkd3d's cache has no pruning and no size cap of its own.
      */
     val caches: File = File(prefix.parentFile ?: prefix, "caches"),
+    /**
+     * `TMPDIR` and `XDG_RUNTIME_DIR` — `files/containers/<id>/tmp`.
+     *
+     * Named here as well as in [SessionScratch] because one thing in this
+     * function's output lives in it: [GFX_STATS_FILE], the snapshot the D3D
+     * layer writes its counters to. The container's scratch is the right home
+     * for it — it is a file with the lifetime of a session, it is inside the
+     * app's own data so both sides can open it without a permission question,
+     * and a container reset takes it with everything else. Beside the log would
+     * put a file nothing appends to in a directory whose whole contents are
+     * append-only history; beside the caches would put a file that is rewritten
+     * every second among files that exist to survive.
+     *
+     * Defaulted the same way [caches] is, so a caller that predates this keeps
+     * working, and derived from the prefix's parent for the same reason.
+     */
+    val tmp: File = File(prefix.parentFile ?: prefix, "tmp"),
 )
+
+/**
+ * The D3D layer's counter snapshot, inside the container's scratch directory.
+ *
+ * One fixed name rather than one per session. The container's `tmp` is already
+ * per container and only one session of a container runs at a time, so the file
+ * *is* per session in practice — and a name carrying a timestamp would leave a
+ * snapshot behind for every run that ever happened, in a directory nothing
+ * prunes. What the reader does about a file left over from the previous session
+ * is a freshness check rather than a unique name: see
+ * [app.vessel.data.MetricSampler], which treats a snapshot older than a few
+ * seconds as no reading at all, because that is also the answer for a program
+ * that has stopped drawing.
+ */
+const val GFX_STATS_FILE: String = "gfx-stats.json"
+
+/** [GFX_STATS_FILE] inside a container's scratch directory, for both sides of it. */
+fun gfxStatsFile(tmp: File): File = File(tmp, GFX_STATS_FILE)
 
 /**
  * The environment a session is started with — `docs/LOGGING.md` as code.
@@ -928,6 +973,31 @@ fun sessionEnvironment(
     // file **instead of** resolving `__wine_dbg_output`. Same mistake, same fix,
     // and the two layers now behave the same way.
     environment["DXVK_LOG_PATH"] = FIXED_DXVK_LOG_PATH
+
+    // **The D3D layer's own counters, permanently on, into a file this app
+    // reads.**
+    //
+    // DXVK maintains every counter its HUD draws whether or not the HUD is on —
+    // the HUD only reads them — and `patches/dxvk/0001` writes a snapshot of
+    // them to this path once a second. That is the whole cost: when the variable
+    // is unset the patch is one predictable branch per present, and when it is
+    // set it is a truncate-and-write of about two hundred bytes a second, off
+    // any per-frame path.
+    //
+    // Set unconditionally rather than behind a switch, because the thing it
+    // replaces is a per-game `dxvk.conf` with `dxvk.hud=full` in it and a person
+    // reading numbers off a screenshot. That worked exactly once and it was
+    // worth it — a single frame of HUD showed `Draw calls: 1, Render passes: 1,
+    // GPU: 2%` during Metro's intro and settled that the intro is a fullscreen
+    // video blit bottlenecked on a single-threaded CPU decode under FEX, not a
+    // graphics problem at all. A diagnosis that good should not need a
+    // screenshot, a config file, or the foresight to have turned something on
+    // before the run that went wrong.
+    //
+    // A program that uses no Direct3D never loads DXVK and so never writes this,
+    // which is not a failure and is reported as such: see the `d3d` row in
+    // [app.vessel.data.MetricSampler]'s sources.
+    environment["VESSEL_GFX_STATS"] = gfxStatsFile(paths.tmp).absolutePath
 
     environment["VKD3D_DEBUG"] = FIXED_VKD3D_DEBUG
     environment["VKD3D_SHADER_DEBUG"] = FIXED_VKD3D_SHADER_DEBUG
