@@ -77,20 +77,21 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * The three things input is: a controller, a screen you touch, and the named
- * arrangement that holds both.
+ * There are no tabs any more, and this is the note that says why.
  *
- * The tabs are the design's, and the split is not arbitrary — each one answers a
- * different question. *Pad* is "what does this button send", *Touch* is "where is
- * that button on the glass", and *Profiles* is "which of my arrangements is this
- * container using". A single scrolling screen holding all three was the shape
- * this replaced, and it made the second and third invisible.
+ * The screen was Pad / Touch / Profiles, from the design deliverable, split by
+ * the question each answered: what does this button send, where is it on the
+ * glass, which arrangement is this container using. That reads well and it
+ * described three views of one table — both the first two drew a picture of the
+ * controller you tap to pick a control, and both listed the same controls. Once
+ * every overlay control carried its pad identity the split was duplication
+ * rather than structure, and the profile picker in the header already answered
+ * the third question on every tab.
+ *
+ * So: one screen. The map, the control you have selected, every control, the
+ * settings, the profiles — in that order, in one list. `Vessel Input
+ * Mapping.dc.html` still shows three tabs and is out of date by this commit.
  */
-enum class InputTab(val title: String) {
-    PAD("Pad"),
-    TOUCH("Touch"),
-    PROFILES("Profiles"),
-}
 
 /**
  * Everything the editor draws, gathered so the two entry points hand it the same
@@ -176,7 +177,11 @@ fun InputEditorHeader(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Box(Modifier.width(PROFILE_FIELD_WIDTH)) {
+        Row(
+            Modifier.width(PROFILE_FIELD_WIDTH),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             val ids = listOf(InputProfile.DEFAULT_ID) + state.profiles.map { it.id }
             // The profile being edited is in the map even before the list of
             // stored ones has arrived. Without it the field renders a UUID for
@@ -203,6 +208,26 @@ fun InputEditorHeader(
                 selected = selected,
                 onSelect = { actions.onPickProfile(it.takeIf { id -> id != InputProfile.DEFAULT_ID }) },
             )
+            // **Beside the picker, not inside it.** Putting delete on each row of
+            // an open dropdown was the other idea, and a destructive action a few
+            // pixels from the row you meant to *switch to* is the wrong place for
+            // it. Out here it acts on the profile named to its left, which is the
+            // one you are looking at.
+            VIconAction(
+                VIcons.Copy,
+                "Duplicate this profile",
+                { actions.onDuplicate(state.profile) },
+            )
+            // The built-in default is never deletable, and the control is absent
+            // rather than disabled: a dead button asks to be pressed once.
+            if (!state.profile.isBuiltInDefault) {
+                VIconAction(
+                    VIcons.Trash,
+                    "Delete this profile",
+                    { actions.onDelete(state.profile) },
+                    style = VButtonStyle.Danger,
+                )
+            }
         }
     }
 }
@@ -228,12 +253,10 @@ private val PROFILE_FIELD_WIDTH = 150.dp
 fun InputEditor(
     state: InputEditorState,
     actions: InputEditorActions,
-    tab: InputTab,
-    onTab: (InputTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val onLayout: (TouchLayout) -> Unit = { actions.onProfile(state.profile.copy(touch = it)) }
     Column(modifier.fillMaxSize()) {
-        InputTabs(tab, onTab)
         state.notice?.let { notice ->
             Column(Modifier.padding(top = Vessel.metrics.s8)) {
                 VCaution(notice)
@@ -242,19 +265,34 @@ fun InputEditor(
         }
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
             val wide = maxWidth >= TWO_COLUMN_WIDTH
-            when (tab) {
-                InputTab.PAD -> PadTab(
-                    profile = state.profile,
-                    lit = state.held,
-                    live = state.live,
-                    wide = wide,
-                    onProfile = actions.onProfile,
-                    modifier = Modifier.padding(top = Vessel.metrics.s8),
-                )
-
-                InputTab.TOUCH -> TouchTab(state, actions, wide)
-                InputTab.PROFILES -> ProfilesTab(state, actions)
-            }
+            PadTab(
+                profile = state.profile,
+                lit = state.held,
+                live = state.live,
+                wide = wide,
+                onProfile = actions.onProfile,
+                modifier = Modifier.padding(top = Vessel.metrics.s8),
+                before = {
+                    item {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+                            modifier = Modifier.padding(bottom = Vessel.metrics.s11),
+                        ) {
+                            TouchPreviewCard(state, onLayout, actions)
+                            TouchSettings(state, actions)
+                            TouchSelectionEditor(state, actions, onLayout)
+                            TouchAddRow(state.profile.overlay, actions, onLayout)
+                        }
+                    }
+                },
+                after = {
+                    item {
+                        Column(Modifier.padding(top = Vessel.metrics.s11)) {
+                            ProfilesTab(state, actions)
+                        }
+                    }
+                },
+            )
         }
     }
 }
@@ -262,37 +300,6 @@ fun InputEditor(
 /** Below this the settings cannot sit beside the list, so they sit above it. */
 private val TWO_COLUMN_WIDTH = 500.dp
 
-@Composable
-private fun InputTabs(tab: InputTab, onTab: (InputTab) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(Vessel.metrics.shapeTag)
-            .background(Vessel.colors.neutral900)
-            .padding(Vessel.metrics.s3),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
-    ) {
-        InputTab.entries.forEach { entry ->
-            val selected = entry == tab
-            Box(
-                Modifier
-                    .weight(1f)
-                    .height(TAB_HEIGHT)
-                    .clip(Vessel.metrics.shapeMd)
-                    .background(if (selected) Vessel.colors.accentHover else Color.Transparent)
-                    .clickable(onClickLabel = entry.title) { onTab(entry) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    entry.title,
-                    style = Vessel.type.bodySmall,
-                    color = if (selected) Vessel.colors.accent else Vessel.colors.textLabel,
-                    maxLines = 1,
-                )
-            }
-        }
-    }
-}
 
 private val TAB_HEIGHT = 28.dp
 
@@ -1054,10 +1061,11 @@ private val KINDS = listOf(
  */
 @Composable
 private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
+    // No scroll of its own: it is one item inside the screen's single list, and
+    // a scroller nested in a scroller measures to nothing.
     Column(
         Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .fillMaxWidth()
             .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s22),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {

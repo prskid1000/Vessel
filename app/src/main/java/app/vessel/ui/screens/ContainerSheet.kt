@@ -186,7 +186,6 @@ private fun ContainerSheetContent(
     var inputOpen by remember { mutableStateOf(false) }
 
     /** Which of the editor's three tabs is showing, kept across a takeover. */
-    var inputTab by remember { mutableStateOf(InputTab.PAD) }
 
     // Back closes Diagnostics before it closes the sheet. Registered inside
     // VSheet's own handler, so it wins while it is enabled — the innermost
@@ -251,6 +250,18 @@ private fun ContainerSheetContent(
                             // container has already been built, and refusing to
                             // let its name be changed over a drive would be a
                             // gate on the wrong action.
+                            // **Beside Save rather than a row of its own.**
+                            // Input was a full VSheetRow with a title, two lines
+                            // of help and a chip — the largest thing in the sheet,
+                            // for a destination rather than a setting. Everything
+                            // else in the body changes a value in place; this one
+                            // opens another screen, and that belongs with the
+                            // other header action.
+                            VButton(
+                                "Input",
+                                { inputOpen = true },
+                                style = VButtonStyle.Ghost,
+                            )
                             VButton(
                                 "Save",
                                 onSave,
@@ -276,8 +287,6 @@ private fun ContainerSheetContent(
             InputEditor(
                 state = editorState,
                 actions = inputActions,
-                tab = inputTab,
-                onTab = { inputTab = it },
             )
             return@VSheet
         }
@@ -341,25 +350,6 @@ private fun ContainerSheetContent(
                 // rule: picking which bindings a container starts with needs no
                 // prefix and no session, and it is the one thing a user setting up
                 // a container with a pad in their hands will want first.
-                VRule(verticalMargin = Vessel.metrics.s6)
-                VSheetRow(
-                    icon = VIcons.Gamepad,
-                    title = "Input",
-                    help = if (state.input.missing) {
-                        "The profile this container named has been deleted, so it " +
-                            "starts on the default."
-                    } else {
-                        "Pad bindings and the touch overlay. " +
-                            "${state.input.profile.boundCount} controls mapped, " +
-                            "${state.input.overlayCount} on the overlay."
-                    },
-                    onClick = { inputOpen = true },
-                    // The profile's name is a chip rather than part of the title:
-                    // the row is about input and the chip is which arrangement of
-                    // it, which is the same shape every value-carrying row in this
-                    // product takes.
-                    trailing = { BindingChip(state.input.profileName, bound = true) },
-                )
 
                 // Nothing below this line changes a setting: one destructive
                 // action, one destination, and one section that changes what the

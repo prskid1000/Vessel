@@ -434,7 +434,6 @@ fun SessionDesktop(
     var inputOpen by remember { mutableStateOf(false) }
 
     /** Which of the panel's three tabs is showing. Here, so closing it remembers. */
-    var inputTab by remember { mutableStateOf(InputTab.PAD) }
 
     // **Laying the overlay out takes the rail away, and that is deliberate.** The
     // rail plus the panel is 820 dp of a 927 dp window, and the controls being
@@ -557,8 +556,6 @@ fun SessionDesktop(
                 InputPanel(
                     state = input,
                     actions = panelActions,
-                    tab = inputTab,
-                    onTab = { inputTab = it },
                     onClose = { inputOpen = false },
                 )
             }

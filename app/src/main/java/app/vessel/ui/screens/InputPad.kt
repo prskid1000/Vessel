@@ -105,6 +105,18 @@ internal fun PadTab(
     wide: Boolean,
     onProfile: (InputProfile) -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * The overlay's own sections, emitted into this list rather than beside it.
+     *
+     * **Why they are passed in instead of drawn here.** This screen is one
+     * LazyColumn and the binding rows are `LazyListScope` items; a Column of
+     * touch controls placed above it would have to be a second scroller, and a
+     * LazyColumn inside a scroll is the crash this feature already hit once.
+     * Handing the caller the same scope is what lets "the map, then the
+     * settings, then every control" be one list instead of three.
+     */
+    before: (LazyListScope.() -> Unit)? = null,
+    after: (LazyListScope.() -> Unit)? = null,
 ) {
     /** The control whose key is being chosen, or null while the list is showing. */
     var picking by remember { mutableStateOf<GamepadControl?>(null) }
@@ -184,7 +196,9 @@ internal fun PadTab(
                         state = listState,
                         contentPadding = LIST_PADDING,
                     ) {
-                        bindingListItems(profile, highlighted, { picking = it }, onProfile)
+                        before?.invoke(this)
+                        bindingListItems(profile, highlighted, { pinned = it; picking = it }, onProfile)
+                        after?.invoke(this)
                     }
                 } else {
                     KeyPicker(
@@ -215,6 +229,7 @@ internal fun PadTab(
         state = listState,
         contentPadding = LIST_PADDING,
     ) {
+        before?.invoke(this)
         padSettingsItems(
             profile = profile,
             live = live,
@@ -224,7 +239,8 @@ internal fun PadTab(
             onPin = pin,
             onProfile = onProfile,
         )
-        bindingListItems(profile, highlighted, { picking = it }, onProfile)
+        bindingListItems(profile, highlighted, { pinned = it; picking = it }, onProfile)
+        after?.invoke(this)
     }
 }
 
@@ -565,8 +581,16 @@ private val DPAD_SIZE = 64.dp
 /** The design's 45%: a pad that cannot light up must not look like one that will not. */
 private const val COLD_DIAGRAM_ALPHA = 0.45f
 
-/** Past this the pad stops reading as a diagram and starts reading as furniture. */
-private const val PAD_DIAGRAM_MAX_SCALE = 2.2f
+/**
+ * Past this the pad stops reading as a diagram and starts reading as furniture.
+ *
+ * 2.2 was the first attempt -- the width of a 421 dp sheet -- and it looked
+ * crude: the proportions were drawn at 210 dp and enlarging them by that much
+ * makes the d-pad enormous and the gaps between clusters read as mistakes. The
+ * original complaint was that the pad sat in the left half of the column, and
+ * centring is most of that answer; a modest scale is the rest.
+ */
+private const val PAD_DIAGRAM_MAX_SCALE = 1.45f
 
 private data class PadPin(
     val control: GamepadControl,

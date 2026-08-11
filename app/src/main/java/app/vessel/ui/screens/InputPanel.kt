@@ -37,8 +37,6 @@ import app.vessel.ui.theme.vCard
 fun InputPanel(
     state: InputEditorState,
     actions: InputEditorActions,
-    tab: InputTab,
-    onTab: (InputTab) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -73,8 +71,6 @@ fun InputPanel(
         InputEditor(
             state = state,
             actions = actions,
-            tab = tab,
-            onTab = onTab,
             modifier = Modifier.padding(top = Vessel.metrics.s8),
         )
     }
