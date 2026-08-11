@@ -4,9 +4,12 @@ import android.view.View
 import app.vessel.input.GamepadControl
 import app.vessel.input.InputProfile
 import app.vessel.input.PointerMode
+import app.vessel.input.TouchLayout
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import java.io.File
 
 /**
@@ -265,6 +268,46 @@ interface SessionDisplayServer {
     fun setTouchControlsVisible(visible: Boolean)
 
     /**
+     * Whether the overlay is being laid out rather than played.
+     *
+     * On the seam for the same reason [touchControlsVisible] is — the panel that
+     * toggles it has no reference to the view — and separate from the profile
+     * because it is a mode, not a setting: nothing about it is persisted and a
+     * session that restarts comes back in play mode.
+     *
+     * **While it is true the overlay produces no [app.vessel.input.GuestInput] at
+     * all.** Not a filtered subset — none, and every finger on the screen is
+     * taken by the editor. A mode that half-forwarded would be one where you
+     * rebind a button by accidentally shooting.
+     */
+    val touchEditing: StateFlow<Boolean>
+
+    fun setTouchEditing(editing: Boolean)
+
+    /**
+     * The control the editor has selected, by id, or null.
+     *
+     * It lives here rather than in the panel because both ends write it: the
+     * panel's list selects a row, and a finger on the overlay itself selects what
+     * it lands on. Two copies would disagree the first time either did.
+     */
+    val selectedTouchControl: StateFlow<String?>
+
+    fun selectTouchControl(id: String?)
+
+    /**
+     * Layouts the user dragged on the overlay itself, one per finished gesture.
+     *
+     * A flow out rather than a value read back, because the drag happens in the
+     * view and the profile lives in a DataStore two layers away — and because the
+     * *rate* matters: a move emits a new position every frame, and persisting each
+     * would be sixty writes a second. The view publishes once, on release.
+     *
+     * Empty for [Absent], which has no view to drag anything on.
+     */
+    val touchLayoutEdits: Flow<TouchLayout>
+
+    /**
      * Which physical pad controls are held down right now.
      *
      * **The thing that turns "which button is X on this pad?" into a press.** The
@@ -463,6 +506,19 @@ interface SessionDisplayServer {
             MutableStateFlow(false).asStateFlow()
 
         override fun setTouchControlsVisible(visible: Boolean) = Unit
+
+        // Headless: there is no overlay to lay out, so the editor's mode is a
+        // constant and nothing can ever be dragged.
+        override val touchEditing: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
+
+        override fun setTouchEditing(editing: Boolean) = Unit
+
+        override val selectedTouchControl: StateFlow<String?> =
+            MutableStateFlow<String?>(null).asStateFlow()
+
+        override fun selectTouchControl(id: String?) = Unit
+
+        override val touchLayoutEdits: Flow<TouchLayout> = emptyFlow()
 
         // No view, so no pad events reach anything. An editor's live-press
         // indicator simply never lights, which is true.

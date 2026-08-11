@@ -38,7 +38,13 @@ import app.vessel.input.PointerGestures
 import app.vessel.input.PointerMode
 import app.vessel.input.ScrollAxis
 import app.vessel.input.SubPixel
+import app.vessel.input.OverlayTouch
+import app.vessel.input.PointerRouter
 import app.vessel.input.Touch
+import app.vessel.input.TouchControl
+import app.vessel.input.TouchControlTranslator
+import app.vessel.input.TouchEdit
+import app.vessel.input.TouchLayout
 import app.vessel.input.TouchPhase
 import app.vessel.input.X11
 import app.vessel.input.X11KeyMap
@@ -76,9 +82,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -138,6 +148,27 @@ class XServerDisplay @Inject constructor(
 
     private val _touchControlsVisible = MutableStateFlow(false)
     override val touchControlsVisible: StateFlow<Boolean> = _touchControlsVisible.asStateFlow()
+
+    private val _touchEditing = MutableStateFlow(false)
+    override val touchEditing: StateFlow<Boolean> = _touchEditing.asStateFlow()
+
+    private val _selectedTouchControl = MutableStateFlow<String?>(null)
+    override val selectedTouchControl: StateFlow<String?> = _selectedTouchControl.asStateFlow()
+
+    /**
+     * One emission per finished drag, never conflated with the last one.
+     *
+     * `MutableSharedFlow` with a buffer rather than a `StateFlow`: two drags that
+     * happen to produce the same layout are still two things the editor has to
+     * persist, and a state flow would swallow the second. `DROP_OLDEST` because a
+     * layout that has been superseded is worthless — the newest is the truth.
+     */
+    private val _touchLayoutEdits = MutableSharedFlow<TouchLayout>(
+        replay = 0,
+        extraBufferCapacity = 4,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    override val touchLayoutEdits: Flow<TouchLayout> = _touchLayoutEdits.asSharedFlow()
 
     private val _heldControls = MutableStateFlow<Set<GamepadControl>>(emptySet())
     override val heldControls: StateFlow<Set<GamepadControl>> = _heldControls.asStateFlow()
@@ -251,8 +282,38 @@ class XServerDisplay @Inject constructor(
         view.post { view.inputProfile = profile }
     }
 
+    /**
+     * Held here as well as pushed at the view, for the reason [setInputProfile]
+     * is: a container that has not started yet still has to remember what it
+     * asked for, and the view picks it up when it is built.
+     */
     override fun setTouchControlsVisible(visible: Boolean) {
         _touchControlsVisible.value = visible
+        val view = session?.view ?: return
+        view.post { view.touchControlsVisible = visible }
+    }
+
+    /**
+     * Leaving edit mode drops the selection with it.
+     *
+     * A selected control that survived into play mode would put a ring around a
+     * button the user is now pressing, which reads as a stuck editor rather than
+     * as leftover state.
+     */
+    override fun setTouchEditing(editing: Boolean) {
+        _touchEditing.value = editing
+        if (!editing) _selectedTouchControl.value = null
+        val view = session?.view ?: return
+        view.post {
+            view.touchEditing = editing
+            if (!editing) view.selectedTouchControl = null
+        }
+    }
+
+    override fun selectTouchControl(id: String?) {
+        _selectedTouchControl.value = id
+        val view = session?.view ?: return
+        view.post { view.selectedTouchControl = id }
     }
 
     /**
@@ -314,6 +375,15 @@ class XServerDisplay @Inject constructor(
                 // profile would only land if the user opened the panel.
                 started.view.inputProfile = _inputProfile.value
                 started.view.onHeldControlsChanged = { held -> _heldControls.value = held }
+                // The overlay's own three, for the same reason: a view built
+                // after the container resolved its settings begins on the
+                // defaults otherwise, and the overlay would only appear once
+                // somebody opened the panel and toggled it twice.
+                started.view.touchControlsVisible = _touchControlsVisible.value
+                started.view.touchEditing = _touchEditing.value
+                started.view.selectedTouchControl = _selectedTouchControl.value
+                started.view.onTouchSelection = { id -> _selectedTouchControl.value = id }
+                started.view.onTouchLayoutEdited = { layout -> _touchLayoutEdits.tryEmit(layout) }
                 _surface.value = started.view
                 startSampling(started.view.renderer, request.fpsLimit, request.geometry.width, request.geometry.height)
                 DisplayOutcome.Started(started.environment)
@@ -347,6 +417,11 @@ class XServerDisplay @Inject constructor(
         // Nothing is held once there is no view to hold it, and a row left lit
         // after the session ended reads as a stuck button.
         _heldControls.value = emptySet()
+        // Edit mode is a mode, not a setting: a session that ends while the
+        // overlay is being laid out must not bring the next one up in an editor
+        // with a selection from a layout nobody is looking at.
+        _touchEditing.value = false
+        _selectedTouchControl.value = null
         session?.let { runCatching { it.stop() }.onFailure { e -> Log.w(TAG, "teardown", e) } }
         session = null
     }
@@ -1215,6 +1290,74 @@ private class SessionSurfaceView(
     private val gamepad = GamepadTranslator()
     private val handler = Handler(Looper.getMainLooper())
 
+    // — the on-screen overlay ---------------------------------------------------------
+
+    private val router = PointerRouter()
+    private val overlay = TouchControlTranslator()
+    private val painter = TouchOverlayPainter(resources.displayMetrics.density)
+
+    /** Which controls have a finger on them, for the press feedback only. */
+    private val pressedControls = mutableMapOf<Int, String>()
+
+    /** What the editor is dragging, if anything, and how. */
+    private var editDrag: EditDrag? = null
+
+    private enum class EditMode { MOVE, RESIZE }
+
+    private data class EditDrag(val pointerId: Int, val id: String, val mode: EditMode)
+
+    /**
+     * Whether the overlay is drawn and taking touches.
+     *
+     * Switching it off releases everything it was holding first, in the same
+     * breath and for the same reason a profile change does: a finger on a fire
+     * button when the overlay disappears would leave the guest holding that key
+     * with nothing left in the system able to let it go.
+     */
+    var touchControlsVisible: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            releaseOverlay()
+            router.enabled = value
+            invalidate()
+        }
+
+    /** Laying the overlay out rather than playing with it. See `PointerRouter.editing`. */
+    var touchEditing: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            releaseOverlay()
+            router.editing = value
+            editDrag = null
+            invalidate()
+        }
+
+    var selectedTouchControl: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
+    /** Told when a finger on the overlay selects a control, or deselects. */
+    var onTouchSelection: ((String?) -> Unit)? = null
+
+    /** Told once per finished drag, with the whole layout. Never per frame. */
+    var onTouchLayoutEdited: ((TouchLayout) -> Unit)? = null
+
+    /**
+     * The layout being drawn and dragged.
+     *
+     * A field of its own rather than being read out of [inputProfile] every time,
+     * because a drag in progress has to move the control on screen without the
+     * profile having been rewritten yet — the profile is only told when the
+     * finger lifts. Setting the profile replaces this wholesale, which is what
+     * makes an edit from the panel land immediately.
+     */
+    private var touchLayout: TouchLayout = InputProfile.Default.touch
+
     /** Trackpad or direct touch. Read and written by the Session rail. */
     var pointerMode: PointerMode
         get() = gestures.mode
@@ -1238,7 +1381,15 @@ private class SessionSurfaceView(
             publishHeld()
             gamepad.profile = value.pad
             gamepad.config = value.config
+            // The overlay carries the same release-before-change rule, and needs
+            // it more: a control can be moved out from under the finger that is
+            // holding it, which the pad can never do.
+            sink.accept(overlay.setLayout(value.touch))
+            overlay.config = value.config
+            touchLayout = value.touch
+            pressedControls.clear()
             syncLookTimer()
+            invalidate()
         }
 
     /** Told when the set of held pad controls changes; drives the live-press rows. */
@@ -1262,14 +1413,23 @@ private class SessionSurfaceView(
 
     private val longPress = Runnable { sink.accept(gestures.onTimeout(now())) }
 
-    /** Only alive while a look stick is off centre; see [GamepadTranslator.looking]. */
+    /**
+     * Only alive while a look stick is off centre; see [GamepadTranslator.looking].
+     *
+     * Both translators are ticked from the one timer. A physical stick and an
+     * on-screen look pad are the same thing to the cursor, and two heartbeats
+     * would move it twice as fast whenever both were up.
+     */
     private val look = object : Runnable {
         override fun run() {
             sink.accept(gamepad.tick(now()))
-            if (gamepad.looking) handler.postDelayed(this, LOOK_INTERVAL_MS)
+            sink.accept(overlay.tick(now()))
+            if (isLooking()) handler.postDelayed(this, LOOK_INTERVAL_MS)
         }
     }
     private var looking = false
+
+    private fun isLooking(): Boolean = gamepad.looking || overlay.looking
 
     init {
         addView(xServerView)
@@ -1296,6 +1456,10 @@ private class SessionSurfaceView(
         looking = false
         sink.accept(gestures.reset())
         sink.accept(gamepad.reset())
+        // Both machines and the router, which is the rule `PointerRouter` states:
+        // a view that goes away with a thumb on a fire button has to let go of it
+        // as surely as one that goes away mid-drag.
+        releaseOverlay()
         publishHeld()
         sink.releaseAll()
         super.onDetachedFromWindow()
@@ -1357,7 +1521,25 @@ private class SessionSurfaceView(
             else -> return false
         }
 
-        sink.accept(gestures.onTouch(phase, event.touches(), event.eventTime))
+        // **Routed before either machine sees it, and that is the whole of the
+        // coexistence.** A finger the overlay has claimed never appears in the
+        // list `PointerGestures` is given — without that filter, holding an
+        // on-screen fire button and tapping the screen counts as two fingers and
+        // is a right click. See `PointerRouter` for the other two traps.
+        val routed = router.route(
+            phase = phase,
+            pointers = event.touches(),
+            changedId = event.getPointerId(event.actionIndex),
+            layout = touchLayout,
+            width = width.toFloat(),
+            height = height.toFloat(),
+        )
+
+        routed.overlay.forEach { onOverlayTouch(it) }
+        routed.gesturePhase?.let { gesturePhase ->
+            sink.accept(gestures.onTouch(gesturePhase, routed.gesturePointers, event.eventTime))
+        }
+        syncLookTimer()
 
         // Rescheduled from scratch every event rather than cancelled selectively:
         // the machine owns the deadline and this only mirrors it, so there is no
@@ -1370,6 +1552,128 @@ private class SessionSurfaceView(
     /** Every finger currently down, in the order Android indexes them. */
     private fun MotionEvent.touches(): List<Touch> =
         (0 until pointerCount).map { Touch(getPointerId(it), getX(it), getY(it)) }
+
+    // — the overlay's own fingers ------------------------------------------------------
+
+    private fun onOverlayTouch(touch: OverlayTouch) {
+        if (touchEditing) editTouch(touch) else playTouch(touch)
+    }
+
+    /**
+     * Play mode: a finger on a control is a press, and nothing else it does
+     * matters until it lifts.
+     */
+    private fun playTouch(touch: OverlayTouch) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        when (touch) {
+            is OverlayTouch.Down -> {
+                val control = touch.control ?: return
+                pressedControls[touch.pointerId] = control.id
+                sink.accept(overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h))
+                invalidate()
+            }
+
+            is OverlayTouch.Move ->
+                sink.accept(overlay.onMove(touch.pointerId, touch.x, touch.y, w, h))
+
+            is OverlayTouch.Up -> {
+                pressedControls.remove(touch.pointerId)
+                sink.accept(overlay.onUp(touch.pointerId))
+                invalidate()
+            }
+        }
+    }
+
+    /**
+     * Edit mode: the same fingers, moving controls instead of pressing them.
+     *
+     * Nothing here touches [sink]. The router has claimed every pointer on the
+     * screen, so the guest receives literally nothing while this is running,
+     * which is what the panel says out loud.
+     *
+     * The layout is published on **release** rather than on every frame. A move
+     * emits a new position per frame and the profile lives in a DataStore two
+     * layers away; persisting each would be sixty writes a second for one drag.
+     */
+    private fun editTouch(touch: OverlayTouch) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        when (touch) {
+            is OverlayTouch.Down -> {
+                val control = touch.control
+                if (control == null) {
+                    selectedTouchControl = null
+                    onTouchSelection?.invoke(null)
+                    return
+                }
+                // **Read before the selection moves.** The handle is only live
+                // for the control that was *already* selected, because that is
+                // the only one it is drawn on — a grip nobody can see cannot be
+                // aimed at, and hit-testing one on every control would turn the
+                // corner of every button into a resize.
+                val wasSelected = selectedTouchControl == control.id
+                selectedTouchControl = control.id
+                onTouchSelection?.invoke(control.id)
+                val onHandle = wasSelected && TouchEdit.onHandle(control, touch.x, touch.y, w, h)
+                editDrag = EditDrag(
+                    touch.pointerId,
+                    control.id,
+                    if (onHandle) EditMode.RESIZE else EditMode.MOVE,
+                )
+            }
+
+            is OverlayTouch.Move -> {
+                val drag = editDrag ?: return
+                if (drag.pointerId != touch.pointerId) return
+                val control = touchLayout.byId(drag.id) ?: return
+                val next = when (drag.mode) {
+                    EditMode.MOVE -> TouchEdit.moved(control, touch.x, touch.y, w, h)
+                    EditMode.RESIZE -> TouchEdit.resized(control, touch.x, touch.y, w, h)
+                }
+                touchLayout = touchLayout.with(next)
+                invalidate()
+            }
+
+            is OverlayTouch.Up -> {
+                val drag = editDrag ?: return
+                if (drag.pointerId != touch.pointerId) return
+                editDrag = null
+                onTouchLayoutEdited?.invoke(touchLayout)
+            }
+        }
+    }
+
+    /** Everything the overlay is holding, let go of. */
+    private fun releaseOverlay() {
+        router.reset()
+        pressedControls.clear()
+        editDrag = null
+        sink.accept(overlay.reset())
+    }
+
+    /**
+     * The overlay, over the guest's output.
+     *
+     * `dispatchDraw` rather than a child view: the compositor below is a
+     * `SurfaceView`, whose surface is composited *behind* the window with a
+     * transparent hole punched through to it — so anything this view group draws
+     * after its children lands on top of the desktop, which is where an overlay
+     * has to be.
+     */
+    override fun dispatchDraw(canvas: android.graphics.Canvas) {
+        super.dispatchDraw(canvas)
+        if (!touchControlsVisible) return
+        painter.draw(
+            canvas = canvas,
+            layout = touchLayout,
+            width = width.toFloat(),
+            height = height.toFloat(),
+            editing = touchEditing,
+            selectedId = selectedTouchControl,
+            held = pressedControls.values.toSet(),
+        )
+    }
 
     // — a real mouse ------------------------------------------------------------------
 
@@ -1463,11 +1767,15 @@ private class SessionSurfaceView(
 
     /** A held stick emits no events at all, so the cursor needs a heartbeat. */
     private fun syncLookTimer() {
-        if (gamepad.looking && !looking) {
+        val wanted = isLooking()
+        if (wanted && !looking) {
             looking = true
-            gamepad.tick(now())   // seed, so the first real tick has an interval
+            // Seed both, so the first real tick has an interval on whichever of
+            // them was not the one that started the timer.
+            gamepad.tick(now())
+            overlay.tick(now())
             handler.postDelayed(look, LOOK_INTERVAL_MS)
-        } else if (!gamepad.looking && looking) {
+        } else if (!wanted && looking) {
             looking = false
             handler.removeCallbacks(look)
         }

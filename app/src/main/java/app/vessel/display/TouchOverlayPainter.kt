@@ -1,0 +1,193 @@
+package app.vessel.display
+
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
+import app.vessel.input.TouchControl
+import app.vessel.input.TouchEdit
+import app.vessel.input.TouchKind
+import app.vessel.input.TouchLayout
+
+/**
+ * The on-screen controls, drawn.
+ *
+ * **An `android.graphics` painter rather than a Compose overlay, and the reason
+ * is touch routing rather than taste.** Every finger has to arrive at one view,
+ * because the overlay and the trackpad share the screen and a pointer is claimed
+ * by whichever of them it landed on — see `PointerRouter`. Android delivers a
+ * whole gesture to whichever view consumed its first DOWN, so a Compose layer
+ * that consumed a press on a fire button would take every later finger with it
+ * and the trackpad would go dead for the rest of the gesture. One view takes all
+ * the touches; the same view therefore has to draw.
+ *
+ * The colours are transcribed from `VesselTheme` rather than read from it: a
+ * `View` has no composition to read a theme out of, and the four values below are
+ * the four this overlay uses. They are named after their theme tokens so the two
+ * can be compared by eye when either moves.
+ */
+internal class TouchOverlayPainter(private val density: Float) {
+
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = false
+    }
+    private val bounds = Rect()
+    private val box = RectF()
+
+    /**
+     * Draw the whole overlay.
+     *
+     * [held] is the set of control ids with a finger on them, which is the only
+     * feedback a glass button can give that a physical one gives for free.
+     */
+    fun draw(
+        canvas: Canvas,
+        layout: TouchLayout,
+        width: Float,
+        height: Float,
+        editing: Boolean,
+        selectedId: String?,
+        held: Set<String>,
+    ) {
+        if (width <= 0f || height <= 0f) return
+        layout.controls.forEach { control ->
+            drawControl(
+                canvas = canvas,
+                control = control,
+                width = width,
+                height = height,
+                editing = editing,
+                selected = editing && control.id == selectedId,
+                pressed = control.id in held,
+            )
+        }
+    }
+
+    private fun drawControl(
+        canvas: Canvas,
+        control: TouchControl,
+        width: Float,
+        height: Float,
+        editing: Boolean,
+        selected: Boolean,
+        pressed: Boolean,
+    ) {
+        val cx = control.centreX(width)
+        val cy = control.centreY(height)
+        val r = control.radiusPx(width, height)
+        if (r <= 0f) return
+
+        // **Edit mode is drawn at full strength whatever the control's own
+        // opacity says.** A control you are placing has to be visible to be
+        // placed, and a 10% ghost being dragged around is the one state where the
+        // per-control opacity actively fights the task.
+        val alpha = if (editing) 1f else control.opacity
+        val pressBoost = if (pressed) PRESS_BOOST else 0f
+
+        fill.color = withAlpha(SURFACE, (alpha * SURFACE_ALPHA + pressBoost).coerceAtMost(1f))
+        stroke.color = when {
+            selected -> withAlpha(ACCENT, 1f)
+            editing -> withAlpha(ACCENT, EDIT_RING_ALPHA)
+            pressed -> withAlpha(ACCENT, 1f)
+            else -> withAlpha(INK, alpha.coerceAtLeast(MIN_RING_ALPHA))
+        }
+        stroke.strokeWidth = (if (selected) 2f else 1f) * density
+
+        if (control.round) {
+            canvas.drawCircle(cx, cy, r, fill)
+            canvas.drawCircle(cx, cy, r, stroke)
+        } else {
+            box.set(cx - r, cy - r, cx + r, cy + r)
+            val radius = CORNER_DP * density
+            canvas.drawRoundRect(box, radius, radius, fill)
+            canvas.drawRoundRect(box, radius, radius, stroke)
+        }
+
+        // A d-pad gets its cross drawn, because a rounded square with "Arrows" in
+        // it is not a picture of a d-pad and the whole value of the shape is that
+        // a thumb can find its four directions without reading anything.
+        if (control.kind == TouchKind.DPAD) drawCross(canvas, cx, cy, r)
+
+        val label = control.bindingLabel
+        if (label.isNotEmpty()) {
+            text.color = withAlpha(INK, (alpha + LABEL_BOOST).coerceAtMost(1f))
+            text.textSize = labelSize(r, label)
+            text.getTextBounds(label, 0, label.length, bounds)
+            canvas.drawText(label, cx, cy - (bounds.top + bounds.bottom) / 2f, text)
+        }
+
+        if (editing && selected) drawHandle(canvas, control, width, height)
+    }
+
+    /** The two bars of a d-pad, at the ring's own strength. */
+    private fun drawCross(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+        val arm = r * CROSS_ARM
+        stroke.strokeWidth = 1f * density
+        canvas.drawLine(cx - arm, cy, cx + arm, cy, stroke)
+        canvas.drawLine(cx, cy - arm, cx, cy + arm, stroke)
+    }
+
+    /** The grip that resizes the selected control, on its lower-right diagonal. */
+    private fun drawHandle(canvas: Canvas, control: TouchControl, width: Float, height: Float) {
+        val hx = TouchEdit.handleX(control, width, height)
+        val hy = TouchEdit.handleY(control, width, height)
+        val hr = HANDLE_DP * density
+        fill.color = withAlpha(ACCENT, 1f)
+        canvas.drawCircle(hx, hy, hr, fill)
+    }
+
+    /**
+     * A label sized to fit inside the control it names.
+     *
+     * `W A S D` in a small stick and `Space` in a large button want different
+     * numbers, and a fixed size makes one of them overflow. The cap keeps a
+     * 20%-of-the-screen look pad from setting its label in a display face.
+     */
+    private fun labelSize(radius: Float, label: String): Float {
+        val byWidth = (radius * 2f * LABEL_FIT) / label.length.coerceAtLeast(1)
+        return byWidth.coerceIn(MIN_LABEL_DP * density, MAX_LABEL_DP * density)
+    }
+
+    private fun withAlpha(rgb: Int, alpha: Float): Int =
+        Color.argb((alpha.coerceIn(0f, 1f) * 255).toInt(), Color.red(rgb), Color.green(rgb), Color.blue(rgb))
+
+    private companion object {
+        /** `--color-surface-2` — the ground every card in the product sits on. */
+        const val SURFACE = 0xFF232532.toInt()
+
+        /** `--color-accent`. */
+        const val ACCENT = 0xFF9184D9.toInt()
+
+        /** `--color-text-primary`. */
+        const val INK = 0xFFE9E9ED.toInt()
+
+        /** How solid the ground is relative to the control's opacity. */
+        const val SURFACE_ALPHA = 0.85f
+
+        /** Extra ground under a finger. The only press feedback glass can give. */
+        const val PRESS_BOOST = 0.30f
+
+        /** A ring never goes below this, or a 10% control is a rumour. */
+        const val MIN_RING_ALPHA = 0.35f
+
+        /** A label reads a little stronger than its control, so it stays legible. */
+        const val LABEL_BOOST = 0.25f
+
+        const val EDIT_RING_ALPHA = 0.55f
+
+        const val CORNER_DP = 8f
+        const val HANDLE_DP = 7f
+        const val MIN_LABEL_DP = 8f
+        const val MAX_LABEL_DP = 15f
+
+        /** How much of a control's width a label may take. */
+        const val LABEL_FIT = 1.1f
+
+        /** A d-pad's arms, as a fraction of its radius. */
+        const val CROSS_ARM = 0.55f
+    }
+}
