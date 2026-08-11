@@ -14,104 +14,156 @@ index 8923911bba3..49600beca5e 100644
 -	ossmidi.c
 +	oss.c
 diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
-index 431264faf31..1c56bacb493 100644
+index 431264faf31..c48f0984a79 100644
 --- a/dlls/wineoss.drv/oss.c
 +++ b/dlls/wineoss.drv/oss.c
-@@ -1,5 +1,5 @@
- /*
+@@ -1,2166 +1,2291 @@
+-/*
 - * OSS driver (unixlib)
-+ * AAudio driver (unixlib), in wineoss.drv's clothes
-  *
-  * Copyright 2011 Andrew Eikum for CodeWeavers
-  *           2022 Huw Davies
-@@ -17,6 +17,22 @@
-  * You should have received a copy of the GNU Lesser General Public
-  * License along with this library; if not, write to the Free Software
-  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
-+ *
-+ * Android has no OSS device nodes, no ALSA userspace and no PulseAudio
-+ * daemon; the one native audio API an NDK process can use is AAudio
-+ * (libaaudio.so, API 26+). Rather than wire a brand-new driver directory
-+ * through configure, this file keeps wineoss.drv's name and its entire
-+ * mmdevapi unixlib scaffolding - the local ring buffer, the period timer
-+ * thread, the wow64 thunks - and swaps the device layer underneath from
-+ * /dev/dsp ioctls to an AAudioStream. mmdevapi already probes "oss" in its
-+ * default driver list, so nothing else has to learn a new name.
-+ *
-+ * The accounting maps one-to-one: where OSS asked SNDCTL_DSP_GETOSPACE how
-+ * much of its buffer is filled, AAudio answers with the difference between
-+ * AAudioStream_getFramesWritten() and AAudioStream_getFramesRead(); where
-+ * OSS write()s into /dev/dsp, AAudioStream_write() with a zero timeout is
-+ * the same non-blocking contract. MIDI and the OSS mixer-based aux devices
-+ * have no Android equivalent and are stubbed to "no devices".
-  */
- 
- #if 0
-@@ -26,13 +42,13 @@
- #include <stdarg.h>
- #include <sys/types.h>
- #include <sys/stat.h>
+- *
+- * Copyright 2011 Andrew Eikum for CodeWeavers
+- *           2022 Huw Davies
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2.1 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+- */
+-
+-#if 0
+-#pragma makedep unix
+-#endif
+-
+-#include <stdarg.h>
+-#include <sys/types.h>
+-#include <sys/stat.h>
 -#include <sys/ioctl.h>
- #include <fcntl.h>
- #include <unistd.h>
- #include <errno.h>
+-#include <fcntl.h>
+-#include <unistd.h>
+-#include <errno.h>
 -#include <sys/soundcard.h>
- #include <pthread.h>
- 
-+#include <aaudio/AAudio.h>
-+
- #include "ntstatus.h"
- #include "winternl.h"
- #include "initguid.h"
-@@ -53,12 +69,14 @@ struct oss_stream
-     HANDLE event;
-     HANDLE timer_thread;
- 
+-#include <pthread.h>
+-
+-#include "ntstatus.h"
+-#include "winternl.h"
+-#include "initguid.h"
+-#include "audioclient.h"
+-#include "mmddk.h"
+-
+-#include "wine/debug.h"
+-#include "wine/unixlib.h"
+-
+-#include "unixlib.h"
+-
+-struct oss_stream
+-{
+-    WAVEFORMATEX *fmt;
+-    EDataFlow flow;
+-    UINT flags;
+-    AUDCLNT_SHAREMODE share;
+-    HANDLE event;
+-    HANDLE timer_thread;
+-
 -    int fd;
-+    AAudioStream *aas;
- 
-     BOOL playing, mute, please_quit;
-+    /* Whether the device buffer has been raised past its start-threshold size. */
-+    BOOL buffer_raised;
-     UINT64 written_frames, last_pos_frames;
-     UINT32 period_frames, bufsize_frames, held_frames, tmp_buffer_frames, in_oss_frames;
+-
+-    BOOL playing, mute, please_quit;
+-    UINT64 written_frames, last_pos_frames;
+-    UINT32 period_frames, bufsize_frames, held_frames, tmp_buffer_frames, in_oss_frames;
 -    UINT32 oss_bufsize_bytes, lcl_offs_frames; /* offs into local_buffer where valid data starts */
-+    UINT32 lcl_offs_frames; /* offs into local_buffer where valid data starts */
-     REFERENCE_TIME period;
- 
-     BYTE *local_buffer, *tmp_buffer;
-@@ -126,244 +144,216 @@ static struct oss_stream *handle_get_stream(stream_handle h)
-     return (struct oss_stream *)(UINT_PTR)h;
- }
- 
+-    REFERENCE_TIME period;
+-
+-    BYTE *local_buffer, *tmp_buffer;
+-    INT32 getbuf_last; /* <0 when using tmp_buffer */
+-
+-    pthread_mutex_t lock;
+-};
+-
+-WINE_DEFAULT_DEBUG_CHANNEL(oss);
+-
+-static const REFERENCE_TIME def_period = 100000;
+-static const REFERENCE_TIME min_period = 50000;
+-
+-static ULONG_PTR zero_bits = 0;
+-
+-static NTSTATUS oss_not_implemented(void *args)
+-{
+-    return STATUS_SUCCESS;
+-}
+-
+-/* copied from kernelbase */
+-static int muldiv( int a, int b, int c )
+-{
+-    LONGLONG ret;
+-
+-    if (!c) return -1;
+-
+-    /* We want to deal with a positive divisor to simplify the logic. */
+-    if (c < 0)
+-    {
+-        a = -a;
+-        c = -c;
+-    }
+-
+-    /* If the result is positive, we "add" to round. else, we subtract to round. */
+-    if ((a < 0 && b < 0) || (a >= 0 && b >= 0))
+-        ret = (((LONGLONG)a * b) + (c / 2)) / c;
+-    else
+-        ret = (((LONGLONG)a * b) - (c / 2)) / c;
+-
+-    if (ret > 2147483647 || ret < -2147483647) return -1;
+-    return ret;
+-}
+-
+-static void oss_lock(struct oss_stream *stream)
+-{
+-    pthread_mutex_lock(&stream->lock);
+-}
+-
+-static void oss_unlock(struct oss_stream *stream)
+-{
+-    pthread_mutex_unlock(&stream->lock);
+-}
+-
+-static NTSTATUS oss_unlock_result(struct oss_stream *stream,
+-                                  HRESULT *result, HRESULT value)
+-{
+-    *result = value;
+-    oss_unlock(stream);
+-    return STATUS_SUCCESS;
+-}
+-
+-static struct oss_stream *handle_get_stream(stream_handle h)
+-{
+-    return (struct oss_stream *)(UINT_PTR)h;
+-}
+-
 -static NTSTATUS oss_test_connect(void *args)
-+static aaudio_format_t get_aaudio_format(const WAVEFORMATEX *fmt)
- {
+-{
 -    struct test_connect_params *params = args;
 -    int mixer_fd;
 -    oss_sysinfo sysinfo;
-+    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
- 
+-
 -    /* Attempt to determine if we are running on OSS or ALSA's OSS
 -     * compatibility layer. There is no official way to do that, so just check
 -     * for validity as best as possible, without rejecting valid OSS
 -     * implementations. */
-+    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->wBitsPerSample != fmtex->Samples.wValidBitsPerSample)
-+        return AAUDIO_FORMAT_INVALID;
- 
+-
 -    mixer_fd = open("/dev/mixer", O_RDONLY, 0);
 -    if(mixer_fd < 0){
 -        TRACE("Priority_Unavailable: open failed\n");
 -        params->priority = Priority_Unavailable;
 -        return STATUS_SUCCESS;
-+    if(fmt->wFormatTag == WAVE_FORMAT_PCM ||
-+            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-+             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))){
-+        if(fmt->wBitsPerSample == 16)
-+            return AAUDIO_FORMAT_PCM_I16;
-+        return AAUDIO_FORMAT_INVALID;
-     }
- 
+-    }
+-
 -    sysinfo.version[0] = 0xFF;
 -    sysinfo.versionnum = ~0;
 -    if(ioctl(mixer_fd, SNDCTL_SYSINFO, &sysinfo) < 0){
@@ -119,18 +171,10 @@ index 431264faf31..1c56bacb493 100644
 -        close(mixer_fd);
 -        params->priority = Priority_Unavailable;
 -        return STATUS_SUCCESS;
-+    if(fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
-+            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-+             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))){
-+        if(fmt->wBitsPerSample == 32)
-+            return AAUDIO_FORMAT_PCM_FLOAT;
-+        return AAUDIO_FORMAT_INVALID;
-     }
- 
+-    }
+-
 -    close(mixer_fd);
-+    return AAUDIO_FORMAT_INVALID;
-+}
- 
+-
 -    if(sysinfo.version[0] < '4' || sysinfo.version[0] > '9'){
 -        TRACE("Priority_Low: sysinfo.version[0]: %x\n", sysinfo.version[0]);
 -        params->priority = Priority_Low;
@@ -141,174 +185,66 @@ index 431264faf31..1c56bacb493 100644
 -        params->priority = Priority_Low;
 -        return STATUS_SUCCESS;
 -    }
-+/* The format checks setup_oss_device used to make, minus the device probes:
-+ * AAudio's shared streams go through AudioFlinger, which mixes and resamples
-+ * anything sane, so validity is a property of the format alone. */
-+static HRESULT check_format(AUDCLNT_SHAREMODE share, const WAVEFORMATEX *fmt)
-+{
-+    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
- 
+-
 -    TRACE("Priority_Preferred: Seems like valid OSS!\n");
-+    if(get_aaudio_format(fmt) == AAUDIO_FORMAT_INVALID)
-+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
- 
+-
 -    params->priority = Priority_Preferred;
 -    return STATUS_SUCCESS;
 -}
-+    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-+            (fmtex->Format.nAvgBytesPerSec == 0 ||
-+             fmtex->Format.nBlockAlign == 0 ||
-+             fmtex->Samples.wValidBitsPerSample > fmtex->Format.wBitsPerSample))
-+        return E_INVALIDARG;
- 
+-
 -/* dst must be large enough to hold devnode */
 -static void oss_clean_devnode(char *dest, const char *devnode)
 -{
 -    const char *dot, *slash;
 -    size_t len;
-+    if(fmt->nChannels == 0 || fmt->nChannels > 8)
-+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
- 
+-
 -    strcpy(dest, devnode);
 -    dot = strrchr(dest, '.');
 -    if(!dot)
 -        return;
-+    if(fmt->nSamplesPerSec < 8000 || fmt->nSamplesPerSec > 192000)
-+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
- 
+-
 -    slash = strrchr(dest, '/');
 -    if(slash && dot < slash)
 -        return;
-+    if(fmt->nBlockAlign != fmt->nChannels * fmt->wBitsPerSample / 8 ||
-+            fmt->nAvgBytesPerSec != fmt->nBlockAlign * fmt->nSamplesPerSec ||
-+            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-+             fmtex->Samples.wValidBitsPerSample < fmtex->Format.wBitsPerSample))
-+        return S_FALSE;
-+
-+    if(share == AUDCLNT_SHAREMODE_EXCLUSIVE &&
-+            fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE){
-+        if(fmtex->dwChannelMask == 0 || fmtex->dwChannelMask & SPEAKER_RESERVED)
-+            return S_FALSE;
-+    }
- 
+-
 -    len = dot - dest;
 -    dest[len] = '\0';
-+    return S_OK;
- }
- 
+-}
+-
 -static int open_device(const char *device, EDataFlow flow)
-+static HRESULT open_aaudio_stream(EDataFlow flow, const WAVEFORMATEX *fmt, AAudioStream **out)
- {
+-{
 -    int flags = ((flow == eRender) ? O_WRONLY : O_RDONLY) | O_NONBLOCK;
-+    AAudioStreamBuilder *builder;
-+    aaudio_format_t format = get_aaudio_format(fmt);
-+    aaudio_result_t res;
- 
+-
 -    return open(device, flags, 0);
 -}
-+    *out = NULL;
- 
+-
 -static void get_default_device(EDataFlow flow, char device[OSS_DEVNODE_SIZE])
 -{
 -    int fd, err;
 -    oss_audioinfo ai;
-+    if(format == AAUDIO_FORMAT_INVALID)
-+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
- 
+-
 -    device[0] = '\0';
 -    fd = open_device("/dev/dsp", flow);
 -    if(fd < 0){
 -        WARN("Couldn't open default device!\n");
 -        return;
-+    if((res = AAudio_createStreamBuilder(&builder)) != AAUDIO_OK){
-+        WARN("AAudio_createStreamBuilder failed: %d (%s)\n", res, AAudio_convertResultToText(res));
-+        return AUDCLNT_E_SERVICE_NOT_RUNNING;
-+    }
-+
-+    AAudioStreamBuilder_setDirection(builder, flow == eRender ? AAUDIO_DIRECTION_OUTPUT
-+                                                              : AAUDIO_DIRECTION_INPUT);
-+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-+    AAudioStreamBuilder_setFormat(builder, format);
-+    AAudioStreamBuilder_setSampleRate(builder, fmt->nSamplesPerSec);
-+    AAudioStreamBuilder_setChannelCount(builder, fmt->nChannels);
-+
-+    /* **Ask for the MMAP path first, because the burst is the whole game.**
-+     *
-+     * Everything about the cushion this driver has to keep is a multiple of
-+     * AAudio's burst: the device takes exactly one burst per pull, so the guest
-+     * must stay a burst ahead or the queue empties, and every frame of that
-+     * cushion is latency the player hears.
-+     *
-+     * Measured 2026-08-11: this stream was getting a burst of **868 frames, 18
-+     * ms**, while the device's own fast mixer on the same thread runs 144-frame
-+     * periods at 3 ms (`dumpsys media.audio_flinger`). That is the legacy mixer,
-+     * not the low-latency path, despite LOW_LATENCY being asked for -- and it is
-+     * why the cushion had to be tens of milliseconds. A burst six times smaller
-+     * makes the cushion six times smaller for free.
-+     *
-+     * EXCLUSIVE is what selects MMAP NOIRQ, where the guest writes into a buffer
-+     * the DSP reads directly. It is refused whenever anything else holds the
-+     * device, or the HAL has no MMAP support at all, so SHARED is not a fallback
-+     * for an error case but the ordinary outcome on many devices -- attempted,
-+     * not assumed, and the mode actually granted is logged rather than believed.
-+     */
-+    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_EXCLUSIVE);
-+    res = AAudioStreamBuilder_openStream(builder, out);
-+    if(res != AAUDIO_OK){
-+        TRACE("no exclusive stream (%s); asking for a shared one\n",
-+              AAudio_convertResultToText(res));
-+        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
-+        res = AAudioStreamBuilder_openStream(builder, out);
-+    }
-+    AAudioStreamBuilder_delete(builder);
-+
-+    if(res != AAUDIO_OK){
-+        WARN("AAudioStreamBuilder_openStream failed: %d (%s)\n", res, AAudio_convertResultToText(res));
-+        *out = NULL;
-+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
-     }
- 
+-    }
+-
 -    ai.dev = -1;
 -    if((err = ioctl(fd, SNDCTL_ENGINEINFO, &ai)) < 0){
 -        WARN("SNDCTL_ENGINEINFO failed: %d (%s)\n", err, strerror(errno));
 -        close(fd);
 -        return;
-+    /* The one line that says whether the latency below is going to be small.
-+     * ERR so it survives a session log at its default level: a burst this
-+     * driver did not expect is the first thing to look at when audio is rough,
-+     * and it costs one line per stream. */
-+    ERR("aaudio: %s, burst %d, capacity %d, %d Hz x%d\n",
-+        AAudioStream_getSharingMode(*out) == AAUDIO_SHARING_MODE_EXCLUSIVE
-+            ? "exclusive (mmap)" : "shared",
-+        AAudioStream_getFramesPerBurst(*out),
-+        AAudioStream_getBufferCapacityInFrames(*out),
-+        AAudioStream_getSampleRate(*out),
-+        AAudioStream_getChannelCount(*out));
-+
-+    /* The legacy (AudioFlinger) path honours the requested rate by
-+     * resampling, so this only trips if something is deeply wrong - but a
-+     * stream running at a different rate than the frames we feed it would
-+     * be a pitch shift, which is worse than no audio. */
-+    if(AAudioStream_getSampleRate(*out) != (int32_t)fmt->nSamplesPerSec ||
-+            AAudioStream_getChannelCount(*out) != fmt->nChannels){
-+        WARN("stream opened at %d Hz x%d, wanted %u Hz x%u\n",
-+                AAudioStream_getSampleRate(*out), AAudioStream_getChannelCount(*out),
-+                (unsigned)fmt->nSamplesPerSec, fmt->nChannels);
-+        AAudioStream_close(*out);
-+        *out = NULL;
-+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
-     }
+-    }
 -    close(fd);
- 
+-
 -    TRACE("Default devnode: %s\n", ai.devnode);
 -    oss_clean_devnode(device, ai.devnode);
 -    return;
-+    return S_OK;
- }
- 
+-}
+-
 -static NTSTATUS oss_get_endpoint_ids(void *args)
-+static NTSTATUS oss_test_connect(void *args)
- {
+-{
 -    struct get_endpoint_ids_params *params = args;
 -    oss_sysinfo sysinfo;
 -    oss_audioinfo ai;
@@ -316,9 +252,7 @@ index 431264faf31..1c56bacb493 100644
 -    static const WCHAR outW[] = {'O','u','t',':',' ',0};
 -    static const WCHAR inW[] = {'I','n',':',' ',0};
 -    struct endpoint_info
-+    struct test_connect_params *params = args;
-+    WAVEFORMATEX fmt =
-     {
+-    {
 -        WCHAR name[ARRAY_SIZE(ai.name) + ARRAY_SIZE(outW)];
 -        char device[OSS_DEVNODE_SIZE];
 -    } *info;
@@ -341,24 +275,12 @@ index 431264faf31..1c56bacb493 100644
 -            params->result = AUDCLNT_E_SERVICE_NOT_RUNNING;
 -            return STATUS_SUCCESS;
 -        }
-+        .wFormatTag = WAVE_FORMAT_PCM,
-+        .nChannels = 2,
-+        .nSamplesPerSec = 48000,
-+        .nAvgBytesPerSec = 48000 * 4,
-+        .nBlockAlign = 4,
-+        .wBitsPerSample = 16,
-+    };
-+    AAudioStream *probe;
- 
+-
 -        ERR("Error getting SNDCTL_SYSINFO: %d (%s)\n", errno, strerror(errno));
 -        params->result = E_FAIL;
-+    if(FAILED(open_aaudio_stream(eRender, &fmt, &probe))){
-+        TRACE("Priority_Unavailable: could not open an AAudio output stream\n");
-+        params->priority = Priority_Unavailable;
-         return STATUS_SUCCESS;
-     }
-+    AAudioStream_close(probe);
- 
+-        return STATUS_SUCCESS;
+-    }
+-
 -    if(!print_once){
 -        TRACE("OSS sysinfo:\n");
 -        TRACE("product: %s\n", sysinfo.product);
@@ -377,39 +299,16 @@ index 431264faf31..1c56bacb493 100644
 -        params->result = AUDCLNT_E_SERVICE_NOT_RUNNING;
 -        return STATUS_SUCCESS;
 -    }
-+    TRACE("Priority_Preferred: AAudio output stream opened\n");
-+    params->priority = Priority_Preferred;
-+    return STATUS_SUCCESS;
-+}
- 
+-
 -    info = malloc(sysinfo.numaudios * sizeof(*info));
 -    if(!info){
 -        close(mixer_fd);
 -        params->result = E_OUTOFMEMORY;
-+static NTSTATUS oss_get_endpoint_ids(void *args)
-+{
-+    struct get_endpoint_ids_params *params = args;
-+    static const WCHAR nameW[] = {'A','n','d','r','o','i','d',' ','A','u','d','i','o',0};
-+    static const char device[] = "aaudio";
-+    struct endpoint *endpoint = params->endpoints;
-+    unsigned int name_len = ARRAY_SIZE(nameW), device_len = sizeof(device);
-+    unsigned int needed, offset;
-+
-+    /* One fixed render endpoint. Capture is deliberately not enumerated:
-+     * the app has no RECORD_AUDIO permission, so an input stream could
-+     * never open, and a microphone that is listed but always fails is
-+     * worse for programs than no microphone at all. */
-+    if(params->flow != eRender){
-+        params->num = 0;
-+        params->default_idx = 0;
-+        params->result = S_OK;
-         return STATUS_SUCCESS;
-     }
- 
+-        return STATUS_SUCCESS;
+-    }
+-
 -    get_default_device(params->flow, default_device);
-+    offset = sizeof(*endpoint);
-+    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
- 
+-
 -    num = 0;
 -    for(i = 0; i < sysinfo.numaudios; ++i){
 -        char devnode[OSS_DEVNODE_SIZE];
@@ -480,26 +379,47 @@ index 431264faf31..1c56bacb493 100644
 -            offset += (device_len + 1) & ~1;
 -            endpoint++;
 -        }
-+    if(needed <= params->size){
-+        endpoint->name = offset;
-+        memcpy((char *)params->endpoints + offset, nameW, name_len * sizeof(WCHAR));
-+        offset += name_len * sizeof(WCHAR);
-+        endpoint->device = offset;
-+        memcpy((char *)params->endpoints + offset, device, device_len);
-     }
+-    }
 -    free(info);
- 
+-
 -    params->num = num;
 -    params->default_idx = default_idx;
-+    params->num = 1;
-+    params->default_idx = 0;
- 
-     if(needed > params->size){
-         params->size = needed;
-@@ -400,51 +390,6 @@ static UINT get_channel_mask(unsigned int channels)
-     return 0;
- }
- 
+-
+-    if(needed > params->size){
+-        params->size = needed;
+-        params->result = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+-    } else
+-        params->result = S_OK;
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-static UINT get_channel_mask(unsigned int channels)
+-{
+-    switch(channels){
+-    case 0:
+-        return 0;
+-    case 1:
+-        return KSAUDIO_SPEAKER_MONO;
+-    case 2:
+-        return KSAUDIO_SPEAKER_STEREO;
+-    case 3:
+-        return KSAUDIO_SPEAKER_STEREO | SPEAKER_LOW_FREQUENCY;
+-    case 4:
+-        return KSAUDIO_SPEAKER_QUAD;    /* not _SURROUND */
+-    case 5:
+-        return KSAUDIO_SPEAKER_QUAD | SPEAKER_LOW_FREQUENCY;
+-    case 6:
+-        return KSAUDIO_SPEAKER_5POINT1; /* not 5POINT1_SURROUND */
+-    case 7:
+-        return KSAUDIO_SPEAKER_5POINT1 | SPEAKER_BACK_CENTER;
+-    case 8:
+-        return KSAUDIO_SPEAKER_7POINT1_SURROUND; /* Vista deprecates 7POINT1 */
+-    }
+-    FIXME("Unknown speaker configuration: %u\n", channels);
+-    return 0;
+-}
+-
 -static int get_oss_format(const WAVEFORMATEX *fmt)
 -{
 -    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE*)fmt;
@@ -545,13 +465,27 @@ index 431264faf31..1c56bacb493 100644
 -    return -1;
 -}
 -
- static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
- {
-     WAVEFORMATEXTENSIBLE *ret;
-@@ -466,75 +411,13 @@ static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
-     return ret;
- }
- 
+-static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
+-{
+-    WAVEFORMATEXTENSIBLE *ret;
+-    size_t size;
+-
+-    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+-        size = sizeof(WAVEFORMATEXTENSIBLE);
+-    else
+-        size = sizeof(WAVEFORMATEX);
+-
+-    ret = malloc(size);
+-    if(!ret)
+-        return NULL;
+-
+-    memcpy(ret, fmt, size);
+-
+-    ret->Format.cbSize = size - sizeof(WAVEFORMATEX);
+-
+-    return ret;
+-}
+-
 -static HRESULT setup_oss_device(AUDCLNT_SHAREMODE share, int fd, const WAVEFORMATEX *fmt)
 -{
 -    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
@@ -615,22 +549,25 @@ index 431264faf31..1c56bacb493 100644
 -    return ret;
 -}
 -
- static NTSTATUS oss_create_stream(void *args)
- {
-     struct create_stream_params *params = args;
+-static NTSTATUS oss_create_stream(void *args)
+-{
+-    struct create_stream_params *params = args;
 -    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE *)params->fmt;
-+    WAVEFORMATEXTENSIBLE *fmtex;
-     struct oss_stream *stream;
+-    struct oss_stream *stream;
 -    oss_audioinfo ai;
-+    UINT32 want_frames;
-+    int32_t capacity, burst;
-     SIZE_T size;
- 
-     params->result = S_OK;
-@@ -548,34 +431,11 @@ static NTSTATUS oss_create_stream(void *args)
-     stream->flow = params->flow;
-     pthread_mutex_init(&stream->lock, NULL);
- 
+-    SIZE_T size;
+-
+-    params->result = S_OK;
+-
+-    stream = calloc(1, sizeof(*stream));
+-    if(!stream){
+-        params->result = E_OUTOFMEMORY;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    stream->flow = params->flow;
+-    pthread_mutex_init(&stream->lock, NULL);
+-
 -    stream->fd = open_device(params->device, params->flow);
 -    if(stream->fd < 0){
 -        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
@@ -642,11 +579,9 @@ index 431264faf31..1c56bacb493 100644
 -    if(ioctl(stream->fd, SNDCTL_ENGINEINFO, &ai) < 0){
 -        WARN("Unable to get audio info for device %s: %d (%s)\n", params->device, errno, strerror(errno));
 -        params->result = E_FAIL;
-+    params->result = check_format(params->share, params->fmt);
-+    if(FAILED(params->result))
-         goto exit;
+-        goto exit;
 -    }
- 
+-
 -    TRACE("OSS audioinfo:\n");
 -    TRACE("devnode: %s\n", ai.devnode);
 -    TRACE("name: %s\n", ai.name);
@@ -661,14 +596,2132 @@ index 431264faf31..1c56bacb493 100644
 -    TRACE("max_channels: %d\n", ai.max_channels);
 -
 -    params->result = setup_oss_device(params->share, stream->fd, params->fmt);
-+    params->result = open_aaudio_stream(params->flow, params->fmt, &stream->aas);
-     if(FAILED(params->result))
-         goto exit;
- 
-@@ -598,6 +458,103 @@ static NTSTATUS oss_create_stream(void *args)
-     stream->bufsize_frames = muldiv(params->duration, params->fmt->nSamplesPerSec, 10000000);
-     if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
-         stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
+-    if(FAILED(params->result))
+-        goto exit;
+-
+-    fmtex = clone_format(params->fmt);
+-    if(!fmtex){
+-        params->result = E_OUTOFMEMORY;
+-        goto exit;
+-    }
+-    stream->fmt = &fmtex->Format;
+-
+-    stream->period = params->period;
+-    stream->period_frames = muldiv(params->fmt->nSamplesPerSec, params->period, 10000000);
+-
+-    if (stream->period_frames == 0)
+-    {
+-        params->result = E_INVALIDARG;
+-        goto exit;
+-    }
+-
+-    stream->bufsize_frames = muldiv(params->duration, params->fmt->nSamplesPerSec, 10000000);
+-    if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
+-        stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
+-    size = stream->bufsize_frames * params->fmt->nBlockAlign;
+-    if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits,
+-                               &size, MEM_COMMIT, PAGE_READWRITE)){
+-        params->result = E_OUTOFMEMORY;
+-        goto exit;
+-    }
+-
+-    stream->share = params->share;
+-    stream->flags = params->flags;
+-    stream->oss_bufsize_bytes = 0;
+-
+-exit:
+-    if(FAILED(params->result)){
+-        if(stream->fd >= 0) close(stream->fd);
+-        if(stream->local_buffer){
+-            size = 0;
+-            NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
+-        }
+-        pthread_mutex_destroy(&stream->lock);
+-        free(stream->fmt);
+-        free(stream);
+-    }else{
+-        *params->channel_count = params->fmt->nChannels;
+-        *params->stream = (stream_handle)(UINT_PTR)stream;
+-    }
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_release_stream(void *args)
+-{
+-    struct release_stream_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    SIZE_T size;
+-
+-    if(stream->timer_thread){
+-        stream->please_quit = TRUE;
+-        NtWaitForSingleObject(stream->timer_thread, FALSE, NULL);
+-        NtClose(stream->timer_thread);
+-    }
+-
+-    close(stream->fd);
+-    if(stream->local_buffer){
+-        size = 0;
+-        NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
+-    }
+-    if(stream->tmp_buffer){
+-        size = 0;
+-        NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
+-    }
+-    free(stream->fmt);
+-    pthread_mutex_destroy(&stream->lock);
+-    free(stream);
+-
+-    params->result = S_OK;
+-    return STATUS_SUCCESS;
+-}
+-
+-static void silence_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 frames)
+-{
+-    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE*)stream->fmt;
+-    if((stream->fmt->wFormatTag == WAVE_FORMAT_PCM ||
+-            (stream->fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+-             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))) &&
+-            stream->fmt->wBitsPerSample == 8)
+-        memset(buffer, 128, frames * stream->fmt->nBlockAlign);
+-    else
+-        memset(buffer, 0, frames * stream->fmt->nBlockAlign);
+-}
+-
+-static void oss_write_data(struct oss_stream *stream)
+-{
+-    ssize_t written_bytes;
+-    UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
+-    SIZE_T to_write_frames, to_write_bytes, advanced;
+-    audio_buf_info bi;
+-    BYTE *buf;
+-
+-    if(ioctl(stream->fd, SNDCTL_DSP_GETOSPACE, &bi) < 0){
+-        WARN("GETOSPACE failed: %d (%s)\n", errno, strerror(errno));
+-        return;
+-    }
+-
+-    max_period = max(bi.fragsize / stream->fmt->nBlockAlign, stream->period_frames);
+-
+-    if(bi.bytes > stream->oss_bufsize_bytes){
+-        TRACE("New buffer size (%u) is larger than old buffer size (%u)\n",
+-                bi.bytes, stream->oss_bufsize_bytes);
+-        stream->oss_bufsize_bytes = bi.bytes;
+-        in_oss_frames = 0;
+-    }else
+-        in_oss_frames = (stream->oss_bufsize_bytes - bi.bytes) / stream->fmt->nBlockAlign;
+-
+-    if(in_oss_frames > stream->in_oss_frames){
+-        TRACE("Capping reported frames from %u to %u\n",
+-                in_oss_frames, stream->in_oss_frames);
+-        in_oss_frames = stream->in_oss_frames;
+-    }
+-
+-    write_limit = 0;
+-    while(write_limit + in_oss_frames < max_period * 3)
+-        write_limit += max_period;
+-    if(write_limit == 0)
+-        return;
+-
+-    /*        vvvvvv - in_oss_frames
+-     * [--xxxxxxxxxx]
+-     *       [xxxxxxxxxx--]
+-     *        ^^^^^^^^^^ - held_frames
+-     *        ^ - lcl_offs_frames
+-     */
+-    advanced = stream->in_oss_frames - in_oss_frames;
+-    if(advanced > stream->held_frames)
+-        advanced = stream->held_frames;
+-    stream->lcl_offs_frames += advanced;
+-    stream->lcl_offs_frames %= stream->bufsize_frames;
+-    stream->held_frames -= advanced;
+-    stream->in_oss_frames = in_oss_frames;
+-    TRACE("advanced by %lu, lcl_offs: %u, held: %u, in_oss: %u\n",
+-            advanced, stream->lcl_offs_frames, stream->held_frames, stream->in_oss_frames);
+-
+-
+-    if(stream->held_frames == stream->in_oss_frames)
+-        return;
+-
+-    write_offs_frames = (stream->lcl_offs_frames + stream->in_oss_frames) % stream->bufsize_frames;
+-    new_frames = stream->held_frames - stream->in_oss_frames;
+-
+-    if(write_offs_frames + new_frames > stream->bufsize_frames)
+-        to_write_frames = stream->bufsize_frames - write_offs_frames;
+-    else
+-        to_write_frames = new_frames;
+-
+-    to_write_frames = min(to_write_frames, write_limit);
+-    to_write_bytes = to_write_frames * stream->fmt->nBlockAlign;
+-    TRACE("going to write %lu frames from %u (%lu of %u)\n", to_write_frames,
+-            write_offs_frames, to_write_frames + write_offs_frames,
+-            stream->bufsize_frames);
+-
+-    buf = stream->local_buffer + write_offs_frames * stream->fmt->nBlockAlign;
+-
+-    if(stream->mute)
+-        silence_buffer(stream, buf, to_write_frames);
+-
+-    written_bytes = write(stream->fd, buf, to_write_bytes);
+-    if(written_bytes < 0){
+-        /* EAGAIN is OSS buffer full, log that too */
+-        WARN("write failed: %d (%s)\n", errno, strerror(errno));
+-        return;
+-    }
+-    written_frames = written_bytes / stream->fmt->nBlockAlign;
+-
+-    stream->in_oss_frames += written_frames;
+-
+-    if(written_frames < to_write_frames){
+-        /* OSS buffer probably full */
+-        return;
+-    }
+-
+-    if(new_frames > written_frames && written_frames < write_limit){
+-        /* wrapped and have some data back at the start to write */
+-
+-        to_write_frames = min(write_limit - written_frames, new_frames - written_frames);
+-        to_write_bytes = to_write_frames * stream->fmt->nBlockAlign;
+-
+-        if(stream->mute)
+-            silence_buffer(stream, stream->local_buffer, to_write_frames);
+-
+-        TRACE("wrapping to write %lu frames from beginning\n", to_write_frames);
+-
+-        written_bytes = write(stream->fd, stream->local_buffer, to_write_bytes);
+-        if(written_bytes < 0){
+-            WARN("write failed: %d (%s)\n", errno, strerror(errno));
+-            return;
+-        }
+-        written_frames = written_bytes / stream->fmt->nBlockAlign;
+-        stream->in_oss_frames += written_frames;
+-    }
+-}
+-
+-static void oss_read_data(struct oss_stream *stream)
+-{
+-    UINT64 pos, readable;
+-    ssize_t nread;
+-
+-    pos = (stream->held_frames + stream->lcl_offs_frames) % stream->bufsize_frames;
+-    readable = (stream->bufsize_frames - pos) * stream->fmt->nBlockAlign;
+-
+-    nread = read(stream->fd, stream->local_buffer + pos * stream->fmt->nBlockAlign,
+-            readable);
+-    if(nread < 0){
+-        WARN("read failed: %d (%s)\n", errno, strerror(errno));
+-        return;
+-    }
+-
+-    stream->held_frames += nread / stream->fmt->nBlockAlign;
+-
+-    if(stream->held_frames > stream->bufsize_frames){
+-        WARN("Overflow of unread data\n");
+-        stream->lcl_offs_frames += stream->held_frames;
+-        stream->lcl_offs_frames %= stream->bufsize_frames;
+-        stream->held_frames = stream->bufsize_frames;
+-    }
+-}
+-
+-static void oss_timer_loop(void *args)
+-{
+-    struct oss_stream *stream = args;
+-    LARGE_INTEGER delay, now, next;
+-    int adjust;
+-
+-    oss_lock(stream);
+-
+-    delay.QuadPart = -stream->period;
+-    NtQueryPerformanceCounter(&now, NULL);
+-    next.QuadPart = now.QuadPart + stream->period;
+-
+-    while(!stream->please_quit){
+-        if(stream->playing){
+-            if(stream->flow == eRender && stream->held_frames)
+-                oss_write_data(stream);
+-            else if(stream->flow == eCapture)
+-                oss_read_data(stream);
+-        }
+-        if(stream->event)
+-            NtSetEvent(stream->event, NULL);
+-        oss_unlock(stream);
+-
+-        NtDelayExecution(FALSE, &delay);
+-
+-        oss_lock(stream);
+-        NtQueryPerformanceCounter(&now, NULL);
+-        adjust = next.QuadPart - now.QuadPart;
+-        if(adjust > stream->period / 2)
+-            adjust = stream->period / 2;
+-        else if(adjust < -stream->period / 2)
+-            adjust = -stream->period / 2;
+-        delay.QuadPart = -(stream->period + adjust);
+-        next.QuadPart += stream->period;
+-    }
+-
+-    oss_unlock(stream);
+-}
+-
+-static NTSTATUS oss_start(void *args)
+-{
+-    struct start_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    static const WCHAR name[] = {'a','u','d','i','o','_','c','l','i','e','n','t','_','t','i','m','e','r',0};
+-
+-    oss_lock(stream);
+-
+-    if((stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) && !stream->event)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_EVENTHANDLE_NOT_SET);
+-
+-    if(stream->playing)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
+-
+-    stream->playing = TRUE;
+-    if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_stop(void *args)
+-{
+-    struct stop_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    if(!stream->playing)
+-        return oss_unlock_result(stream, &params->result, S_FALSE);
+-
+-    stream->playing = FALSE;
+-    stream->in_oss_frames = 0;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_reset(void *args)
+-{
+-    struct reset_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    if(stream->playing)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
+-
+-    if(stream->getbuf_last)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
+-
+-    if(stream->flow == eRender){
+-        stream->written_frames = 0;
+-        stream->last_pos_frames = 0;
+-    }else{
+-        stream->written_frames += stream->held_frames;
+-    }
+-    stream->held_frames = 0;
+-    stream->lcl_offs_frames = 0;
+-    stream->in_oss_frames = 0;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_render_buffer(void *args)
+-{
+-    struct get_render_buffer_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT32 write_pos, frames = params->frames;
+-    BYTE **data = params->data;
+-    SIZE_T size;
+-
+-    oss_lock(stream);
+-
+-    if(stream->getbuf_last)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
+-
+-    if(!frames)
+-        return oss_unlock_result(stream, &params->result, S_OK);
+-
+-    if(stream->held_frames + frames > stream->bufsize_frames)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_TOO_LARGE);
+-
+-    write_pos =
+-        (stream->lcl_offs_frames + stream->held_frames) % stream->bufsize_frames;
+-    if(write_pos + frames > stream->bufsize_frames){
+-        if(stream->tmp_buffer_frames < frames){
+-            if(stream->tmp_buffer){
+-                size = 0;
+-                NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
+-                stream->tmp_buffer = NULL;
+-            }
+-            size = frames * stream->fmt->nBlockAlign;
+-            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits,
+-                                       &size, MEM_COMMIT, PAGE_READWRITE)){
+-                stream->tmp_buffer_frames = 0;
+-                return oss_unlock_result(stream, &params->result, E_OUTOFMEMORY);
+-            }
+-            stream->tmp_buffer_frames = frames;
+-        }
+-        *data = stream->tmp_buffer;
+-        stream->getbuf_last = -frames;
+-    }else{
+-        *data = stream->local_buffer + write_pos * stream->fmt->nBlockAlign;
+-        stream->getbuf_last = frames;
+-    }
+-
+-    silence_buffer(stream, *data, frames);
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static void oss_wrap_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 written_frames)
+-{
+-    UINT32 write_offs_frames =
+-        (stream->lcl_offs_frames + stream->held_frames) % stream->bufsize_frames;
+-    UINT32 write_offs_bytes = write_offs_frames * stream->fmt->nBlockAlign;
+-    UINT32 chunk_frames = stream->bufsize_frames - write_offs_frames;
+-    UINT32 chunk_bytes = chunk_frames * stream->fmt->nBlockAlign;
+-    UINT32 written_bytes = written_frames * stream->fmt->nBlockAlign;
+-
+-    if(written_bytes <= chunk_bytes){
+-        memcpy(stream->local_buffer + write_offs_bytes, buffer, written_bytes);
+-    }else{
+-        memcpy(stream->local_buffer + write_offs_bytes, buffer, chunk_bytes);
+-        memcpy(stream->local_buffer, buffer + chunk_bytes,
+-                written_bytes - chunk_bytes);
+-    }
+-}
+-
+-static NTSTATUS oss_release_render_buffer(void *args)
+-{
+-    struct release_render_buffer_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT32 written_frames = params->written_frames;
+-    UINT flags = params->flags;
+-    BYTE *buffer;
+-
+-    oss_lock(stream);
+-
+-    if(!written_frames){
+-        stream->getbuf_last = 0;
+-        return oss_unlock_result(stream, &params->result, S_OK);
+-    }
+-
+-    if(!stream->getbuf_last)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
+-
+-    if(written_frames > (stream->getbuf_last >= 0 ? stream->getbuf_last : -stream->getbuf_last))
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_INVALID_SIZE);
+-
+-    if(stream->getbuf_last >= 0)
+-        buffer = stream->local_buffer + stream->fmt->nBlockAlign *
+-          ((stream->lcl_offs_frames + stream->held_frames) % stream->bufsize_frames);
+-    else
+-        buffer = stream->tmp_buffer;
+-
+-    if(flags & AUDCLNT_BUFFERFLAGS_SILENT)
+-        silence_buffer(stream, buffer, written_frames);
+-
+-    if(stream->getbuf_last < 0)
+-        oss_wrap_buffer(stream, buffer, written_frames);
+-
+-    stream->held_frames += written_frames;
+-    stream->written_frames += written_frames;
+-    stream->getbuf_last = 0;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_capture_buffer(void *args)
+-{
+-    struct get_capture_buffer_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT64 *devpos = params->devpos, *qpcpos = params->qpcpos;
+-    UINT32 *frames = params->frames;
+-    UINT *flags = params->flags;
+-    BYTE **data = params->data;
+-    SIZE_T size;
+-
+-    oss_lock(stream);
+-
+-    if(stream->getbuf_last)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
+-
+-    if(stream->held_frames < stream->period_frames){
+-        *frames = 0;
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_S_BUFFER_EMPTY);
+-    }
+-
+-    *flags = 0;
+-
+-    *frames = stream->period_frames;
+-
+-    if(stream->lcl_offs_frames + *frames > stream->bufsize_frames){
+-        UINT32 chunk_bytes, offs_bytes, frames_bytes;
+-        if(stream->tmp_buffer_frames < *frames){
+-            if(stream->tmp_buffer){
+-                size = 0;
+-                NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
+-                stream->tmp_buffer = NULL;
+-            }
+-            size = *frames * stream->fmt->nBlockAlign;
+-            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits,
+-                                       &size, MEM_COMMIT, PAGE_READWRITE)){
+-                stream->tmp_buffer_frames = 0;
+-                return oss_unlock_result(stream, &params->result, E_OUTOFMEMORY);
+-            }
+-            stream->tmp_buffer_frames = *frames;
+-        }
+-
+-        *data = stream->tmp_buffer;
+-        chunk_bytes = (stream->bufsize_frames - stream->lcl_offs_frames) *
+-            stream->fmt->nBlockAlign;
+-        offs_bytes = stream->lcl_offs_frames * stream->fmt->nBlockAlign;
+-        frames_bytes = *frames * stream->fmt->nBlockAlign;
+-        memcpy(stream->tmp_buffer, stream->local_buffer + offs_bytes, chunk_bytes);
+-        memcpy(stream->tmp_buffer + chunk_bytes, stream->local_buffer,
+-                frames_bytes - chunk_bytes);
+-    }else
+-        *data = stream->local_buffer +
+-            stream->lcl_offs_frames * stream->fmt->nBlockAlign;
+-
+-    stream->getbuf_last = *frames;
+-
+-    if(devpos)
+-       *devpos = stream->written_frames;
+-    if(qpcpos){
+-        LARGE_INTEGER stamp, freq;
+-        NtQueryPerformanceCounter(&stamp, &freq);
+-        *qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
+-    }
+-
+-    return oss_unlock_result(stream, &params->result, *frames ? S_OK : AUDCLNT_S_BUFFER_EMPTY);
+-}
+-
+-static NTSTATUS oss_release_capture_buffer(void *args)
+-{
+-    struct release_capture_buffer_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT32 done = params->done;
+-
+-    oss_lock(stream);
+-
+-    if(!done){
+-        stream->getbuf_last = 0;
+-        return oss_unlock_result(stream, &params->result, S_OK);
+-    }
+-
+-    if(!stream->getbuf_last)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
+-
+-    if(stream->getbuf_last != done)
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_INVALID_SIZE);
+-
+-    stream->written_frames += done;
+-    stream->held_frames -= done;
+-    stream->lcl_offs_frames += done;
+-    stream->lcl_offs_frames %= stream->bufsize_frames;
+-    stream->getbuf_last = 0;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_is_format_supported(void *args)
+-{
+-    struct is_format_supported_params *params = args;
+-    int fd;
+-
+-    fd = open_device(params->device, params->flow);
+-    if(fd < 0){
+-        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
+-        return STATUS_SUCCESS;
+-    }
+-    params->result = setup_oss_device(params->share, fd, params->fmt_in);
+-    close(fd);
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_get_mix_format(void *args)
+-{
+-    struct get_mix_format_params *params = args;
+-    WAVEFORMATEXTENSIBLE *fmt = params->fmt;
+-    oss_audioinfo ai;
+-    int formats, fd;
+-
+-    if(params->flow != eRender && params->flow != eCapture){
+-        params->result = E_UNEXPECTED;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    fd = open_device(params->device, params->flow);
+-    if(fd < 0){
+-        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    ai.dev = -1;
+-    if(ioctl(fd, SNDCTL_ENGINEINFO, &ai) < 0){
+-        WARN("Unable to get audio info for device %s: %d (%s)\n", params->device, errno, strerror(errno));
+-        close(fd);
+-        params->result = E_FAIL;
+-        return STATUS_SUCCESS;
+-    }
+-    close(fd);
+-
+-    if(params->flow == eRender)
+-        formats = ai.oformats;
+-    else
+-        formats = ai.iformats;
+-
+-    fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+-    if(formats & AFMT_S16_LE){
+-        fmt->Format.wBitsPerSample = 16;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-#ifdef AFMT_FLOAT
+-    }else if(formats & AFMT_FLOAT){
+-        fmt->Format.wBitsPerSample = 32;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+-#endif
+-    }else if(formats & AFMT_U8){
+-        fmt->Format.wBitsPerSample = 8;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-    }else if(formats & AFMT_S32_LE){
+-        fmt->Format.wBitsPerSample = 32;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-    }else if(formats & AFMT_S24_LE){
+-        fmt->Format.wBitsPerSample = 24;
+-        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+-    }else{
+-        WARN("Didn't recognize any available OSS formats: %x\n", formats);
+-        params->result = E_FAIL;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    /* some OSS drivers are buggy, so set reasonable defaults if
+-     * the reported values seem wacky */
+-    fmt->Format.nChannels = max(ai.max_channels, ai.min_channels);
+-    if(fmt->Format.nChannels == 0 || fmt->Format.nChannels > 8)
+-        fmt->Format.nChannels = 2;
+-
+-    /* For most hardware on Windows, users must choose a configuration with an even
+-     * number of channels (stereo, quad, 5.1, 7.1). Users can then disable
+-     * channels, but those channels are still reported to applications from
+-     * GetMixFormat! Some applications behave badly if given an odd number of
+-     * channels (e.g. 2.1). */
+-    if(fmt->Format.nChannels > 1 && (fmt->Format.nChannels & 0x1))
+-    {
+-        if(fmt->Format.nChannels < ai.max_channels)
+-            fmt->Format.nChannels += 1;
+-        else
+-            /* We could "fake" more channels and downmix the emulated channels,
+-             * but at that point you really ought to tweak your OSS setup or
+-             * just use PulseAudio. */
+-            WARN("Some Windows applications behave badly with an odd number of channels (%u)!\n", fmt->Format.nChannels);
+-    }
+-
+-    if(ai.max_rate == 0)
+-        fmt->Format.nSamplesPerSec = 44100;
+-    else
+-        fmt->Format.nSamplesPerSec = min(ai.max_rate, 44100);
+-    if(fmt->Format.nSamplesPerSec < ai.min_rate)
+-        fmt->Format.nSamplesPerSec = ai.min_rate;
+-
+-    fmt->dwChannelMask = get_channel_mask(fmt->Format.nChannels);
+-
+-    fmt->Format.nBlockAlign = (fmt->Format.wBitsPerSample *
+-            fmt->Format.nChannels) / 8;
+-    fmt->Format.nAvgBytesPerSec = fmt->Format.nSamplesPerSec *
+-        fmt->Format.nBlockAlign;
+-
+-    fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
+-    fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+-
+-    params->result = S_OK;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_get_device_period(void *args)
+-{
+-    struct get_device_period_params *params = args;
+-
+-    if (params->def_period)
+-        *params->def_period = def_period;
+-    if (params->min_period)
+-        *params->min_period = min_period;
+-
+-    params->result = S_OK;
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_get_buffer_size(void *args)
+-{
+-    struct get_buffer_size_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    *params->frames = stream->bufsize_frames;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_latency(void *args)
+-{
+-    struct get_latency_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    /* pretend we process audio in Period chunks, so max latency includes
+-     * the period time.  Some native machines add .6666ms in shared mode. */
+-    *params->latency = stream->period + 6666;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_current_padding(void *args)
+-{
+-    struct get_current_padding_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    *params->padding = stream->held_frames;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_next_packet_size(void *args)
+-{
+-    struct get_next_packet_size_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT32 *frames = params->frames;
+-
+-    oss_lock(stream);
+-
+-    *frames = stream->held_frames < stream->period_frames ? 0 : stream->period_frames;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_frequency(void *args)
+-{
+-    struct get_frequency_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT64 *freq = params->freq;
+-
+-    oss_lock(stream);
+-
+-    if(stream->share == AUDCLNT_SHAREMODE_SHARED)
+-        *freq = (UINT64)stream->fmt->nSamplesPerSec * stream->fmt->nBlockAlign;
+-    else
+-        *freq = stream->fmt->nSamplesPerSec;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_get_position(void *args)
+-{
+-    struct get_position_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT64 *pos = params->pos, *qpctime = params->qpctime;
+-
+-    if (params->device) {
+-        FIXME("Device position reporting not implemented\n");
+-        params->result = E_NOTIMPL;
+-        return STATUS_SUCCESS;
+-    }
+-
+-    oss_lock(stream);
+-
+-    if(stream->flow == eRender){
+-        *pos = stream->written_frames - stream->held_frames;
+-        if(*pos < stream->last_pos_frames)
+-            *pos = stream->last_pos_frames;
+-    }else if(stream->flow == eCapture){
+-        audio_buf_info bi;
+-        UINT32 held;
+-
+-        if(ioctl(stream->fd, SNDCTL_DSP_GETISPACE, &bi) < 0){
+-            TRACE("GETISPACE failed: %d (%s)\n", errno, strerror(errno));
+-            held = 0;
+-        }else{
+-            if(bi.bytes <= bi.fragsize)
+-                held = 0;
+-            else
+-                held = bi.bytes / stream->fmt->nBlockAlign;
+-        }
+-
+-        *pos = stream->written_frames + held;
+-    }
+-
+-    stream->last_pos_frames = *pos;
+-
+-    TRACE("returning: %s\n", wine_dbgstr_longlong(*pos));
+-    if(stream->share == AUDCLNT_SHAREMODE_SHARED)
+-        *pos *= stream->fmt->nBlockAlign;
+-
+-    if(qpctime){
+-        LARGE_INTEGER stamp, freq;
+-        NtQueryPerformanceCounter(&stamp, &freq);
+-        *qpctime = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
+-    }
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_set_volumes(void *args)
+-{
+-    struct set_volumes_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-    UINT16 i;
+-
+-    if (params->master_volume) {
+-        for (i = 0; i < stream->fmt->nChannels; ++i) {
+-            if (params->master_volume * params->volumes[i] * params->session_volumes[i] != 1.0f) {
+-                FIXME("Volume control is not implemented\n");
+-                break;
+-            }
+-        }
+-    }
+-
+-    oss_lock(stream);
+-    stream->mute = !params->master_volume;
+-    oss_unlock(stream);
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_set_event_handle(void *args)
+-{
+-    struct set_event_handle_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    if(!(stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK))
+-        return oss_unlock_result(stream, &params->result, AUDCLNT_E_EVENTHANDLE_NOT_EXPECTED);
+-
+-    if (stream->event){
+-        FIXME("called twice\n");
+-        return oss_unlock_result(stream, &params->result, HRESULT_FROM_WIN32(ERROR_INVALID_NAME));
+-    }
+-
+-    stream->event = params->event;
+-
+-    return oss_unlock_result(stream, &params->result, S_OK);
+-}
+-
+-static NTSTATUS oss_is_started(void *args)
+-{
+-    struct is_started_params *params = args;
+-    struct oss_stream *stream = handle_get_stream(params->stream);
+-
+-    oss_lock(stream);
+-
+-    return oss_unlock_result(stream, &params->result, stream->playing ? S_OK : S_FALSE);
+-}
+-
+-static NTSTATUS oss_get_prop_value(void *args)
+-{
+-    struct get_prop_value_params *params = args;
+-
+-    params->result = E_NOTIMPL;
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-/* Aux driver */
+-
+-static unsigned int num_aux;
+-
+-#define MIXER_DEV "/dev/mixer"
+-
+-static UINT aux_init(void)
+-{
+-    int mixer;
+-
+-    TRACE("()\n");
+-
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        num_aux = 0;
+-    }
+-    else
+-    {
+-        close(mixer);
+-        num_aux = 6;
+-    }
+-    return 0;
+-}
+-
+-static UINT aux_exit(void)
+-{
+-    TRACE("()\n");
+-    return 0;
+-}
+-
+-static UINT aux_get_devcaps(WORD dev_id, AUXCAPSW *caps, UINT size)
+-{
+-    int mixer, volume;
+-    static const WCHAR ini[] = {'O','S','S',' ','A','u','x',' ','#','0',0};
+-
+-    TRACE("(%04X, %p, %u);\n", dev_id, caps, size);
+-    if (caps == NULL) return MMSYSERR_NOTENABLED;
+-    if (dev_id >= num_aux) return MMSYSERR_BADDEVICEID;
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    if (ioctl(mixer, SOUND_MIXER_READ_LINE, &volume) == -1)
+-    {
+-        close(mixer);
+-        WARN("unable to read mixer !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    close(mixer);
+-    caps->wMid = 0xAA;
+-    caps->wPid = 0x55 + dev_id;
+-    caps->vDriverVersion = 0x0100;
+-    memcpy(caps->szPname, ini, sizeof(ini));
+-    caps->szPname[9] = '0' + dev_id; /* 6  at max */
+-    caps->wTechnology = (dev_id == 2) ? AUXCAPS_CDAUDIO : AUXCAPS_AUXIN;
+-    caps->wReserved1 = 0;
+-    caps->dwSupport = AUXCAPS_VOLUME | AUXCAPS_LRVOLUME;
+-
+-    return MMSYSERR_NOERROR;
+-}
+-
+-static UINT aux_get_volume(WORD dev_id, UINT *vol)
+-{
+-    int mixer, volume, left, right, cmd;
+-
+-    TRACE("(%04X, %p);\n", dev_id, vol);
+-    if (vol == NULL) return MMSYSERR_NOTENABLED;
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    switch(dev_id)
+-    {
+-    case 0:
+-        TRACE("SOUND_MIXER_READ_PCM !\n");
+-        cmd = SOUND_MIXER_READ_PCM;
+-        break;
+-    case 1:
+-        TRACE("SOUND_MIXER_READ_SYNTH !\n");
+-        cmd = SOUND_MIXER_READ_SYNTH;
+-        break;
+-    case 2:
+-        TRACE("SOUND_MIXER_READ_CD !\n");
+-        cmd = SOUND_MIXER_READ_CD;
+-        break;
+-    case 3:
+-        TRACE("SOUND_MIXER_READ_LINE !\n");
+-        cmd = SOUND_MIXER_READ_LINE;
+-        break;
+-    case 4:
+-        TRACE("SOUND_MIXER_READ_MIC !\n");
+-        cmd = SOUND_MIXER_READ_MIC;
+-        break;
+-    case 5:
+-        TRACE("SOUND_MIXER_READ_VOLUME !\n");
+-        cmd = SOUND_MIXER_READ_VOLUME;
+-        break;
+-    default:
+-        WARN("invalid device id=%04X !\n", dev_id);
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    if (ioctl(mixer, cmd, &volume) == -1)
+-    {
+-        WARN("unable to read mixer !\n");
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    close(mixer);
+-    left = LOBYTE(LOWORD(volume));
+-    right = HIBYTE(LOWORD(volume));
+-    TRACE("left=%d right=%d !\n", left, right);
+-    *vol = MAKELONG((left * 0xFFFFL) / 100, (right * 0xFFFFL) / 100);
+-    return MMSYSERR_NOERROR;
+-}
+-
+-static UINT aux_set_volume(WORD dev_id, UINT vol)
+-{
+-    int mixer;
+-    int volume, left, right;
+-    int cmd;
+-
+-    TRACE("(%04X, %08X);\n", dev_id, vol);
+-
+-    left   = (LOWORD(vol) * 100) >> 16;
+-    right  = (HIWORD(vol) * 100) >> 16;
+-    volume = (right << 8) | left;
+-
+-    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
+-    {
+-        WARN("mixer device not available !\n");
+-        return MMSYSERR_NOTENABLED;
+-    }
+-
+-    switch(dev_id)
+-    {
+-    case 0:
+-        TRACE("SOUND_MIXER_WRITE_PCM !\n");
+-        cmd = SOUND_MIXER_WRITE_PCM;
+-        break;
+-    case 1:
+-        TRACE("SOUND_MIXER_WRITE_SYNTH !\n");
+-        cmd = SOUND_MIXER_WRITE_SYNTH;
+-        break;
+-    case 2:
+-        TRACE("SOUND_MIXER_WRITE_CD !\n");
+-        cmd = SOUND_MIXER_WRITE_CD;
+-        break;
+-    case 3:
+-        TRACE("SOUND_MIXER_WRITE_LINE !\n");
+-        cmd = SOUND_MIXER_WRITE_LINE;
+-        break;
+-    case 4:
+-        TRACE("SOUND_MIXER_WRITE_MIC !\n");
+-        cmd = SOUND_MIXER_WRITE_MIC;
+-        break;
+-    case 5:
+-        TRACE("SOUND_MIXER_WRITE_VOLUME !\n");
+-        cmd = SOUND_MIXER_WRITE_VOLUME;
+-        break;
+-    default:
+-        WARN("invalid device id=%04X !\n", dev_id);
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    if (ioctl(mixer, cmd, &volume) == -1)
+-    {
+-        WARN("unable to set mixer !\n");
+-        close(mixer);
+-        return MMSYSERR_NOTENABLED;
+-    }
+-    close(mixer);
+-    return MMSYSERR_NOERROR;
+-}
+-
+-static NTSTATUS oss_aux_message(void *args)
+-{
+-    struct aux_message_params *params = args;
+-
+-    switch (params->msg)
+-    {
+-    case DRVM_INIT:
+-        *params->err = aux_init();
+-        break;
+-    case DRVM_EXIT:
+-        *params->err = aux_exit();
+-        break;
+-    case DRVM_ENABLE:
+-    case DRVM_DISABLE:
+-        /* FIXME: Pretend this is supported */
+-        *params->err = 0;
+-        break;
+-    case AUXDM_GETDEVCAPS:
+-        *params->err = aux_get_devcaps(params->dev_id, (AUXCAPSW *)params->param_1, params->param_2);
+-        break;
+-    case AUXDM_GETNUMDEVS:
+-        TRACE("return %d;\n", num_aux);
+-        *params->err = num_aux;
+-        break;
+-    case AUXDM_GETVOLUME:
+-        *params->err = aux_get_volume(params->dev_id, (UINT *)params->param_1);
+-        break;
+-    case AUXDM_SETVOLUME:
+-        *params->err = aux_set_volume(params->dev_id, params->param_1);
+-        break;
+-    default:
+-        WARN("unknown message !\n");
+-        *params->err = MMSYSERR_NOTSUPPORTED;
+-        break;
+-    }
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-const unixlib_entry_t __wine_unix_call_funcs[] =
+-{
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_get_endpoint_ids,
+-    oss_create_stream,
+-    oss_release_stream,
+-    oss_start,
+-    oss_stop,
+-    oss_reset,
+-    oss_get_render_buffer,
+-    oss_release_render_buffer,
+-    oss_get_capture_buffer,
+-    oss_release_capture_buffer,
+-    oss_is_format_supported,
+-    oss_not_implemented,
+-    oss_get_mix_format,
+-    oss_get_device_period,
+-    oss_get_buffer_size,
+-    oss_get_latency,
+-    oss_get_current_padding,
+-    oss_get_next_packet_size,
+-    oss_get_frequency,
+-    oss_get_position,
+-    oss_set_volumes,
+-    oss_set_event_handle,
+-    oss_not_implemented,
+-    oss_test_connect,
+-    oss_is_started,
+-    oss_get_prop_value,
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_midi_release,
+-    oss_midi_out_message,
+-    oss_midi_in_message,
+-    oss_midi_notify_wait,
+-    oss_aux_message,
+-};
+-
+-C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
+-
+-#ifdef _WIN64
+-
+-typedef UINT PTR32;
+-
+-static NTSTATUS oss_wow64_process_attach(void *args)
+-{
+-    SYSTEM_BASIC_INFORMATION info;
+-
+-    NtQuerySystemInformation(SystemEmulationBasicInformation, &info, sizeof(info), NULL);
+-    zero_bits = (ULONG_PTR)info.HighestUserAddress | 0x7fffffff;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_test_connect(void *args)
+-{
+-    struct
+-    {
+-        PTR32 name;
+-        enum driver_priority priority;
+-    } *params32 = args;
+-    struct test_connect_params params =
+-    {
+-        .name = ULongToPtr(params32->name),
+-    };
+-    oss_test_connect(&params);
+-    params32->priority = params.priority;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_endpoint_ids(void *args)
+-{
+-    struct
+-    {
+-        EDataFlow flow;
+-        PTR32 endpoints;
+-        unsigned int size;
+-        HRESULT result;
+-        unsigned int num;
+-        unsigned int default_idx;
+-    } *params32 = args;
+-    struct get_endpoint_ids_params params =
+-    {
+-        .flow = params32->flow,
+-        .endpoints = ULongToPtr(params32->endpoints),
+-        .size = params32->size
+-    };
+-    oss_get_endpoint_ids(&params);
+-    params32->size = params.size;
+-    params32->result = params.result;
+-    params32->num = params.num;
+-    params32->default_idx = params.default_idx;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_create_stream(void *args)
+-{
+-    struct
+-    {
+-        PTR32 name;
+-        PTR32 device;
+-        EDataFlow flow;
+-        AUDCLNT_SHAREMODE share;
+-        UINT flags;
+-        REFERENCE_TIME duration;
+-        REFERENCE_TIME period;
+-        PTR32 fmt;
+-        HRESULT result;
+-        PTR32 channel_count;
+-        PTR32 stream;
+-    } *params32 = args;
+-    struct create_stream_params params =
+-    {
+-        .name = ULongToPtr(params32->name),
+-        .device = ULongToPtr(params32->device),
+-        .flow = params32->flow,
+-        .share = params32->share,
+-        .flags = params32->flags,
+-        .duration = params32->duration,
+-        .period = params32->period,
+-        .fmt = ULongToPtr(params32->fmt),
+-        .channel_count = ULongToPtr(params32->channel_count),
+-        .stream = ULongToPtr(params32->stream)
+-    };
+-    oss_create_stream(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_release_stream(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-    } *params32 = args;
+-    struct release_stream_params params =
+-    {
+-        .stream = params32->stream,
+-    };
+-    oss_release_stream(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_render_buffer(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        UINT32 frames;
+-        HRESULT result;
+-        PTR32 data;
+-    } *params32 = args;
+-    BYTE *data = NULL;
+-    struct get_render_buffer_params params =
+-    {
+-        .stream = params32->stream,
+-        .frames = params32->frames,
+-        .data = &data
+-    };
+-    oss_get_render_buffer(&params);
+-    params32->result = params.result;
+-    *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_capture_buffer(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-        PTR32 data;
+-        PTR32 frames;
+-        PTR32 flags;
+-        PTR32 devpos;
+-        PTR32 qpcpos;
+-    } *params32 = args;
+-    BYTE *data = NULL;
+-    struct get_capture_buffer_params params =
+-    {
+-        .stream = params32->stream,
+-        .data = &data,
+-        .frames = ULongToPtr(params32->frames),
+-        .flags = ULongToPtr(params32->flags),
+-        .devpos = ULongToPtr(params32->devpos),
+-        .qpcpos = ULongToPtr(params32->qpcpos)
+-    };
+-    oss_get_capture_buffer(&params);
+-    params32->result = params.result;
+-    *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
+-    return STATUS_SUCCESS;
+-};
+-
+-static NTSTATUS oss_wow64_is_format_supported(void *args)
+-{
+-    struct
+-    {
+-        PTR32 device;
+-        EDataFlow flow;
+-        AUDCLNT_SHAREMODE share;
+-        PTR32 fmt_in;
+-        HRESULT result;
+-    } *params32 = args;
+-    struct is_format_supported_params params =
+-    {
+-        .device = ULongToPtr(params32->device),
+-        .flow = params32->flow,
+-        .share = params32->share,
+-        .fmt_in = ULongToPtr(params32->fmt_in),
+-    };
+-    oss_is_format_supported(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_mix_format(void *args)
+-{
+-    struct
+-    {
+-        PTR32 device;
+-        EDataFlow flow;
+-        PTR32 fmt;
+-        HRESULT result;
+-    } *params32 = args;
+-    struct get_mix_format_params params =
+-    {
+-        .device = ULongToPtr(params32->device),
+-        .flow = params32->flow,
+-        .fmt = ULongToPtr(params32->fmt)
+-    };
+-    oss_get_mix_format(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_device_period(void *args)
+-{
+-    struct
+-    {
+-        PTR32 device;
+-        EDataFlow flow;
+-        HRESULT result;
+-        PTR32 def_period;
+-        PTR32 min_period;
+-    } *params32 = args;
+-    struct get_device_period_params params =
+-    {
+-        .device = ULongToPtr(params32->device),
+-        .flow = params32->flow,
+-        .def_period = ULongToPtr(params32->def_period),
+-        .min_period = ULongToPtr(params32->min_period),
+-    };
+-    oss_get_device_period(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_buffer_size(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-        PTR32 frames;
+-    } *params32 = args;
+-    struct get_buffer_size_params params =
+-    {
+-        .stream = params32->stream,
+-        .frames = ULongToPtr(params32->frames)
+-    };
+-    oss_get_buffer_size(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_latency(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-        PTR32 latency;
+-    } *params32 = args;
+-    struct get_latency_params params =
+-    {
+-        .stream = params32->stream,
+-        .latency = ULongToPtr(params32->latency)
+-    };
+-    oss_get_latency(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_current_padding(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-        PTR32 padding;
+-    } *params32 = args;
+-    struct get_current_padding_params params =
+-    {
+-        .stream = params32->stream,
+-        .padding = ULongToPtr(params32->padding)
+-    };
+-    oss_get_current_padding(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_next_packet_size(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-        PTR32 frames;
+-    } *params32 = args;
+-    struct get_next_packet_size_params params =
+-    {
+-        .stream = params32->stream,
+-        .frames = ULongToPtr(params32->frames)
+-    };
+-    oss_get_next_packet_size(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_frequency(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        HRESULT result;
+-        PTR32 freq;
+-    } *params32 = args;
+-    struct get_frequency_params params =
+-    {
+-        .stream = params32->stream,
+-        .freq = ULongToPtr(params32->freq)
+-    };
+-    oss_get_frequency(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_position(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        BOOL device;
+-        HRESULT result;
+-        PTR32 pos;
+-        PTR32 qpctime;
+-    } *params32 = args;
+-    struct get_position_params params =
+-    {
+-        .stream = params32->stream,
+-        .device = params32->device,
+-        .pos = ULongToPtr(params32->pos),
+-        .qpctime = ULongToPtr(params32->qpctime)
+-    };
+-    oss_get_position(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_set_volumes(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        float master_volume;
+-        PTR32 volumes;
+-        PTR32 session_volumes;
+-    } *params32 = args;
+-    struct set_volumes_params params =
+-    {
+-        .stream = params32->stream,
+-        .master_volume = params32->master_volume,
+-        .volumes = ULongToPtr(params32->volumes),
+-        .session_volumes = ULongToPtr(params32->session_volumes),
+-    };
+-    return oss_set_volumes(&params);
+-}
+-
+-static NTSTATUS oss_wow64_set_event_handle(void *args)
+-{
+-    struct
+-    {
+-        stream_handle stream;
+-        PTR32 event;
+-        HRESULT result;
+-    } *params32 = args;
+-    struct set_event_handle_params params =
+-    {
+-        .stream = params32->stream,
+-        .event = ULongToHandle(params32->event)
+-    };
+-
+-    oss_set_event_handle(&params);
+-    params32->result = params.result;
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_get_prop_value(void *args)
+-{
+-    struct propvariant32
+-    {
+-        WORD vt;
+-        WORD pad1, pad2, pad3;
+-        union
+-        {
+-            ULONG ulVal;
+-            PTR32 ptr;
+-            ULARGE_INTEGER uhVal;
+-        };
+-    } *value32;
+-    struct
+-    {
+-        PTR32 device;
+-        EDataFlow flow;
+-        PTR32 guid;
+-        PTR32 prop;
+-        HRESULT result;
+-        PTR32 value;
+-        PTR32 buffer; /* caller allocated buffer to hold value's strings */
+-        PTR32 buffer_size;
+-    } *params32 = args;
+-    PROPVARIANT value;
+-    struct get_prop_value_params params =
+-    {
+-        .device = ULongToPtr(params32->device),
+-        .flow = params32->flow,
+-        .guid = ULongToPtr(params32->guid),
+-        .prop = ULongToPtr(params32->prop),
+-        .value = &value,
+-        .buffer = ULongToPtr(params32->buffer),
+-        .buffer_size = ULongToPtr(params32->buffer_size)
+-    };
+-    oss_get_prop_value(&params);
+-    params32->result = params.result;
+-    if (SUCCEEDED(params.result))
+-    {
+-        value32 = UlongToPtr(params32->value);
+-        value32->vt = value.vt;
+-        switch (value.vt)
+-        {
+-        case VT_UI4:
+-            value32->ulVal = value.ulVal;
+-            break;
+-        case VT_LPWSTR:
+-            value32->ptr = params32->buffer;
+-            break;
+-        default:
+-            FIXME("Unhandled vt %04x\n", value.vt);
+-        }
+-    }
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS oss_wow64_aux_message(void *args)
+-{
+-    struct
+-    {
+-        UINT dev_id;
+-        UINT msg;
+-        UINT user;
+-        UINT param_1;
+-        UINT param_2;
+-        PTR32 err;
+-    } *params32 = args;
+-    struct aux_message_params params =
+-    {
+-        .dev_id = params32->dev_id,
+-        .msg = params32->msg,
+-        .user = params32->user,
+-        .param_1 = params32->param_1,
+-        .param_2 = params32->param_2,
+-        .err = ULongToPtr(params32->err),
+-    };
+-    return oss_aux_message(&params);
+-}
+-
+-const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+-{
+-    oss_wow64_process_attach,
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_wow64_get_endpoint_ids,
+-    oss_wow64_create_stream,
+-    oss_wow64_release_stream,
+-    oss_start,
+-    oss_stop,
+-    oss_reset,
+-    oss_wow64_get_render_buffer,
+-    oss_release_render_buffer,
+-    oss_wow64_get_capture_buffer,
+-    oss_release_capture_buffer,
+-    oss_wow64_is_format_supported,
+-    oss_not_implemented,
+-    oss_wow64_get_mix_format,
+-    oss_wow64_get_device_period,
+-    oss_wow64_get_buffer_size,
+-    oss_wow64_get_latency,
+-    oss_wow64_get_current_padding,
+-    oss_wow64_get_next_packet_size,
+-    oss_wow64_get_frequency,
+-    oss_wow64_get_position,
+-    oss_wow64_set_volumes,
+-    oss_wow64_set_event_handle,
+-    oss_not_implemented,
+-    oss_wow64_test_connect,
+-    oss_is_started,
+-    oss_wow64_get_prop_value,
+-    oss_not_implemented,
+-    oss_not_implemented,
+-    oss_midi_release,
+-    oss_wow64_midi_out_message,
+-    oss_wow64_midi_in_message,
+-    oss_wow64_midi_notify_wait,
+-    oss_wow64_aux_message,
+-};
+-
+-C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == funcs_count);
+-
+-#endif /* _WIN64 */
++/*
++ * AAudio driver (unixlib), in wineoss.drv's clothes
++ *
++ * Copyright 2011 Andrew Eikum for CodeWeavers
++ *           2022 Huw Davies
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ *
++ * Android has no OSS device nodes, no ALSA userspace and no PulseAudio
++ * daemon; the one native audio API an NDK process can use is AAudio
++ * (libaaudio.so, API 26+). Rather than wire a brand-new driver directory
++ * through configure, this file keeps wineoss.drv's name and its entire
++ * mmdevapi unixlib scaffolding - the local ring buffer, the period timer
++ * thread, the wow64 thunks - and swaps the device layer underneath from
++ * /dev/dsp ioctls to an AAudioStream. mmdevapi already probes "oss" in its
++ * default driver list, so nothing else has to learn a new name.
++ *
++ * The accounting maps one-to-one: where OSS asked SNDCTL_DSP_GETOSPACE how
++ * much of its buffer is filled, AAudio answers with the difference between
++ * AAudioStream_getFramesWritten() and AAudioStream_getFramesRead(); where
++ * OSS write()s into /dev/dsp, AAudioStream_write() with a zero timeout is
++ * the same non-blocking contract. MIDI and the OSS mixer-based aux devices
++ * have no Android equivalent and are stubbed to "no devices".
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include <stdarg.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <errno.h>
++#include <pthread.h>
++
++#include <aaudio/AAudio.h>
++
++#include "ntstatus.h"
++#include "winternl.h"
++#include "initguid.h"
++#include "audioclient.h"
++#include "mmddk.h"
++
++#include "wine/debug.h"
++#include "wine/unixlib.h"
++
++#include "unixlib.h"
++
++struct oss_stream
++{
++    WAVEFORMATEX *fmt;
++    EDataFlow flow;
++    UINT flags;
++    AUDCLNT_SHAREMODE share;
++    HANDLE event;
++    HANDLE timer_thread;
++
++    AAudioStream *aas;
++
++    BOOL playing, mute, please_quit;
++    /**
++     * Underruns seen the last time the device buffer was sized.
++     *
++     * The buffer grows by a burst whenever this moves, which is AAudio's own
++     * documented sizing loop: the device is asked how often it ran dry rather
++     * than being handed a cushion picked in advance.
++     */
++    int32_t last_xruns;
++    UINT64 written_frames, last_pos_frames;
++    UINT32 period_frames, bufsize_frames, held_frames, tmp_buffer_frames, in_oss_frames;
++    UINT32 lcl_offs_frames; /* offs into local_buffer where valid data starts */
++    REFERENCE_TIME period;
++
++    BYTE *local_buffer, *tmp_buffer;
++    INT32 getbuf_last; /* <0 when using tmp_buffer */
++
++    /**
++     * Set when the guest speaks float32 and the device is being fed int16.
++     *
++     * Not a fidelity choice -- it is the price of the MMAP path. This device's
++     * `mmap_no_irq_out` mix port declares exactly one profile,
++     * `AUDIO_FORMAT_PCM_16_BIT` at 48000 stereo, so a float stream is refused
++     * the low-latency path before anything else is looked at. Converting here
++     * buys a burst six times smaller, and a burst is what every millisecond of
++     * this driver's latency is a multiple of.
++     */
++    BOOL convert_to_i16;
++    /** Where the converted frames go. One period's worth, grown on demand. */
++    BYTE *conv_buffer;
++    UINT32 conv_buffer_frames;
++
++    pthread_mutex_t lock;
++};
++
++WINE_DEFAULT_DEBUG_CHANNEL(oss);
++
++static const REFERENCE_TIME def_period = 100000;
++static const REFERENCE_TIME min_period = 50000;
++
++static ULONG_PTR zero_bits = 0;
++
++static NTSTATUS oss_not_implemented(void *args)
++{
++    return STATUS_SUCCESS;
++}
++
++/* copied from kernelbase */
++static int muldiv( int a, int b, int c )
++{
++    LONGLONG ret;
++
++    if (!c) return -1;
++
++    /* We want to deal with a positive divisor to simplify the logic. */
++    if (c < 0)
++    {
++        a = -a;
++        c = -c;
++    }
++
++    /* If the result is positive, we "add" to round. else, we subtract to round. */
++    if ((a < 0 && b < 0) || (a >= 0 && b >= 0))
++        ret = (((LONGLONG)a * b) + (c / 2)) / c;
++    else
++        ret = (((LONGLONG)a * b) - (c / 2)) / c;
++
++    if (ret > 2147483647 || ret < -2147483647) return -1;
++    return ret;
++}
++
++static void oss_lock(struct oss_stream *stream)
++{
++    pthread_mutex_lock(&stream->lock);
++}
++
++static void oss_unlock(struct oss_stream *stream)
++{
++    pthread_mutex_unlock(&stream->lock);
++}
++
++static NTSTATUS oss_unlock_result(struct oss_stream *stream,
++                                  HRESULT *result, HRESULT value)
++{
++    *result = value;
++    oss_unlock(stream);
++    return STATUS_SUCCESS;
++}
++
++static struct oss_stream *handle_get_stream(stream_handle h)
++{
++    return (struct oss_stream *)(UINT_PTR)h;
++}
++
++static aaudio_format_t get_aaudio_format(const WAVEFORMATEX *fmt)
++{
++    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
++
++    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->wBitsPerSample != fmtex->Samples.wValidBitsPerSample)
++        return AAUDIO_FORMAT_INVALID;
++
++    if(fmt->wFormatTag == WAVE_FORMAT_PCM ||
++            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))){
++        if(fmt->wBitsPerSample == 16)
++            return AAUDIO_FORMAT_PCM_I16;
++        return AAUDIO_FORMAT_INVALID;
++    }
++
++    if(fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
++            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))){
++        if(fmt->wBitsPerSample == 32)
++            return AAUDIO_FORMAT_PCM_FLOAT;
++        return AAUDIO_FORMAT_INVALID;
++    }
++
++    return AAUDIO_FORMAT_INVALID;
++}
++
++/* The format checks setup_oss_device used to make, minus the device probes:
++ * AAudio's shared streams go through AudioFlinger, which mixes and resamples
++ * anything sane, so validity is a property of the format alone. */
++static HRESULT check_format(AUDCLNT_SHAREMODE share, const WAVEFORMATEX *fmt)
++{
++    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
++
++    if(get_aaudio_format(fmt) == AAUDIO_FORMAT_INVALID)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++            (fmtex->Format.nAvgBytesPerSec == 0 ||
++             fmtex->Format.nBlockAlign == 0 ||
++             fmtex->Samples.wValidBitsPerSample > fmtex->Format.wBitsPerSample))
++        return E_INVALIDARG;
++
++    if(fmt->nChannels == 0 || fmt->nChannels > 8)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    if(fmt->nSamplesPerSec < 8000 || fmt->nSamplesPerSec > 192000)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    if(fmt->nBlockAlign != fmt->nChannels * fmt->wBitsPerSample / 8 ||
++            fmt->nAvgBytesPerSec != fmt->nBlockAlign * fmt->nSamplesPerSec ||
++            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++             fmtex->Samples.wValidBitsPerSample < fmtex->Format.wBitsPerSample))
++        return S_FALSE;
++
++    if(share == AUDCLNT_SHAREMODE_EXCLUSIVE &&
++            fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE){
++        if(fmtex->dwChannelMask == 0 || fmtex->dwChannelMask & SPEAKER_RESERVED)
++            return S_FALSE;
++    }
++
++    return S_OK;
++}
++
++/**
++ * Validate and announce a stream that opened, whichever path it came from.
++ *
++ * The rate check is not paranoia: the legacy path honours a requested rate by
++ * resampling, so a mismatch here means something is deeply wrong -- and a stream
++ * running at a different rate than the frames fed to it is a pitch shift, which
++ * is worse than no audio at all.
++ */
++static HRESULT finish_aaudio_stream(AAudioStream *aas, const WAVEFORMATEX *fmt)
++{
++    /* The one line that says whether the latency below is going to be small.
++     * ERR so it survives a session log at its default level: a burst this
++     * driver did not expect is the first thing to look at when audio is rough,
++     * and it costs one line per stream. */
++    ERR("aaudio: %s, burst %d, capacity %d, %d Hz x%d, format %d\n",
++        AAudioStream_getSharingMode(aas) == AAUDIO_SHARING_MODE_EXCLUSIVE
++            ? "exclusive (mmap)" : "shared",
++        AAudioStream_getFramesPerBurst(aas),
++        AAudioStream_getBufferCapacityInFrames(aas),
++        AAudioStream_getSampleRate(aas),
++        AAudioStream_getChannelCount(aas),
++        AAudioStream_getFormat(aas));
++
++    if(AAudioStream_getSampleRate(aas) != (int32_t)fmt->nSamplesPerSec ||
++            AAudioStream_getChannelCount(aas) != fmt->nChannels){
++        WARN("stream opened at %d Hz x%d, wanted %u Hz x%u\n",
++                AAudioStream_getSampleRate(aas), AAudioStream_getChannelCount(aas),
++                (unsigned)fmt->nSamplesPerSec, fmt->nChannels);
++        AAudioStream_close(aas);
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    }
++
++    return S_OK;
++}
++
++static HRESULT open_aaudio_stream(EDataFlow flow, const WAVEFORMATEX *fmt, AAudioStream **out,
++                                  BOOL *convert_to_i16)
++{
++    AAudioStreamBuilder *builder;
++    aaudio_format_t format = get_aaudio_format(fmt);
++    aaudio_result_t res;
++
++    *out = NULL;
++
++    if(format == AAUDIO_FORMAT_INVALID)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    if((res = AAudio_createStreamBuilder(&builder)) != AAUDIO_OK){
++        WARN("AAudio_createStreamBuilder failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++        return AUDCLNT_E_SERVICE_NOT_RUNNING;
++    }
++
++    AAudioStreamBuilder_setDirection(builder, flow == eRender ? AAUDIO_DIRECTION_OUTPUT
++                                                              : AAUDIO_DIRECTION_INPUT);
++    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
++    AAudioStreamBuilder_setSampleRate(builder, fmt->nSamplesPerSec);
++    AAudioStreamBuilder_setChannelCount(builder, fmt->nChannels);
++
++    /* **Int16 first when the guest is float, because MMAP takes nothing else.**
++     *
++     * Read off this device 2026-08-11, `/vendor/etc/audio_policy_configuration.xml`:
++     *
++     *     <mixPort name="mmap_no_irq_out" flags="... AUDIO_OUTPUT_FLAG_MMAP_NOIRQ">
++     *       <profile format="AUDIO_FORMAT_PCM_16_BIT" samplingRates="48000"
++     *                channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
++     *
++     * One profile, one format. The rate and the channel mask already matched;
++     * the format was the only thing between this driver and the low-latency
++     * path, and a float stream is refused before anything else is considered.
++     * `aaudio.mmap_policy` is 2 here, so the path is permitted -- it was the
++     * format, not the policy, and the two look identical from the failure.
++     *
++     * The conversion costs one pass over a period -- 480 frames of stereo, a
++     * few microseconds -- against a burst that drops from 868 to about 192.
++     * Everything downstream is a multiple of that burst, so this is the one
++     * change that makes latency smaller rather than trading it away.
++     */
++    if(format == AAUDIO_FORMAT_PCM_FLOAT){
++        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
++        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_EXCLUSIVE);
++        if(AAudioStreamBuilder_openStream(builder, out) == AAUDIO_OK){
++            HRESULT hr;
++
++            TRACE("exclusive int16 stream for a float guest; converting on the way out\n");
++            AAudioStreamBuilder_delete(builder);
++            if(FAILED(hr = finish_aaudio_stream(*out, fmt))){
++                *out = NULL;
++                return hr;
++            }
++            *convert_to_i16 = TRUE;
++            return S_OK;
++        }
++        TRACE("no exclusive int16 stream; keeping the guest's own format\n");
++    }
++
++    AAudioStreamBuilder_setFormat(builder, format);
++
++    /* **Ask for the MMAP path first, because the burst is the whole game.**
++     *
++     * Everything about the cushion this driver has to keep is a multiple of
++     * AAudio's burst: the device takes exactly one burst per pull, so the guest
++     * must stay a burst ahead or the queue empties, and every frame of that
++     * cushion is latency the player hears.
++     *
++     * Measured 2026-08-11: this stream was getting a burst of **868 frames, 18
++     * ms**, while the device's own fast mixer on the same thread runs 144-frame
++     * periods at 3 ms (`dumpsys media.audio_flinger`). That is the legacy mixer,
++     * not the low-latency path, despite LOW_LATENCY being asked for -- and it is
++     * why the cushion had to be tens of milliseconds. A burst six times smaller
++     * makes the cushion six times smaller for free.
++     *
++     * EXCLUSIVE is what selects MMAP NOIRQ, where the guest writes into a buffer
++     * the DSP reads directly. It is refused whenever anything else holds the
++     * device, or the HAL has no MMAP support at all, so SHARED is not a fallback
++     * for an error case but the ordinary outcome on many devices -- attempted,
++     * not assumed, and the mode actually granted is logged rather than believed.
++     */
++    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_EXCLUSIVE);
++    res = AAudioStreamBuilder_openStream(builder, out);
++    if(res != AAUDIO_OK){
++        TRACE("no exclusive stream (%s); asking for a shared one\n",
++              AAudio_convertResultToText(res));
++        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
++        res = AAudioStreamBuilder_openStream(builder, out);
++    }
++    AAudioStreamBuilder_delete(builder);
++
++    if(res != AAUDIO_OK){
++        WARN("AAudioStreamBuilder_openStream failed: %d (%s)\n", res, AAudio_convertResultToText(res));
++        *out = NULL;
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    }
++
++    {
++        HRESULT hr = finish_aaudio_stream(*out, fmt);
++
++        if(FAILED(hr)) *out = NULL;
++        return hr;
++    }
++}
++
++static NTSTATUS oss_test_connect(void *args)
++{
++    struct test_connect_params *params = args;
++    WAVEFORMATEX fmt =
++    {
++        .wFormatTag = WAVE_FORMAT_PCM,
++        .nChannels = 2,
++        .nSamplesPerSec = 48000,
++        .nAvgBytesPerSec = 48000 * 4,
++        .nBlockAlign = 4,
++        .wBitsPerSample = 16,
++    };
++    AAudioStream *probe;
++    /* The probe only asks whether a stream opens; how it is fed is not its
++     * question, so the answer is taken and dropped. */
++    BOOL probe_convert = FALSE;
++
++    if(FAILED(open_aaudio_stream(eRender, &fmt, &probe, &probe_convert))){
++        TRACE("Priority_Unavailable: could not open an AAudio output stream\n");
++        params->priority = Priority_Unavailable;
++        return STATUS_SUCCESS;
++    }
++    AAudioStream_close(probe);
++
++    TRACE("Priority_Preferred: AAudio output stream opened\n");
++    params->priority = Priority_Preferred;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_get_endpoint_ids(void *args)
++{
++    struct get_endpoint_ids_params *params = args;
++    static const WCHAR nameW[] = {'A','n','d','r','o','i','d',' ','A','u','d','i','o',0};
++    static const char device[] = "aaudio";
++    struct endpoint *endpoint = params->endpoints;
++    unsigned int name_len = ARRAY_SIZE(nameW), device_len = sizeof(device);
++    unsigned int needed, offset;
++
++    /* One fixed render endpoint. Capture is deliberately not enumerated:
++     * the app has no RECORD_AUDIO permission, so an input stream could
++     * never open, and a microphone that is listed but always fails is
++     * worse for programs than no microphone at all. */
++    if(params->flow != eRender){
++        params->num = 0;
++        params->default_idx = 0;
++        params->result = S_OK;
++        return STATUS_SUCCESS;
++    }
++
++    offset = sizeof(*endpoint);
++    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
++
++    if(needed <= params->size){
++        endpoint->name = offset;
++        memcpy((char *)params->endpoints + offset, nameW, name_len * sizeof(WCHAR));
++        offset += name_len * sizeof(WCHAR);
++        endpoint->device = offset;
++        memcpy((char *)params->endpoints + offset, device, device_len);
++    }
++
++    params->num = 1;
++    params->default_idx = 0;
++
++    if(needed > params->size){
++        params->size = needed;
++        params->result = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
++    } else
++        params->result = S_OK;
++
++    return STATUS_SUCCESS;
++}
++
++static UINT get_channel_mask(unsigned int channels)
++{
++    switch(channels){
++    case 0:
++        return 0;
++    case 1:
++        return KSAUDIO_SPEAKER_MONO;
++    case 2:
++        return KSAUDIO_SPEAKER_STEREO;
++    case 3:
++        return KSAUDIO_SPEAKER_STEREO | SPEAKER_LOW_FREQUENCY;
++    case 4:
++        return KSAUDIO_SPEAKER_QUAD;    /* not _SURROUND */
++    case 5:
++        return KSAUDIO_SPEAKER_QUAD | SPEAKER_LOW_FREQUENCY;
++    case 6:
++        return KSAUDIO_SPEAKER_5POINT1; /* not 5POINT1_SURROUND */
++    case 7:
++        return KSAUDIO_SPEAKER_5POINT1 | SPEAKER_BACK_CENTER;
++    case 8:
++        return KSAUDIO_SPEAKER_7POINT1_SURROUND; /* Vista deprecates 7POINT1 */
++    }
++    FIXME("Unknown speaker configuration: %u\n", channels);
++    return 0;
++}
++
++static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
++{
++    WAVEFORMATEXTENSIBLE *ret;
++    size_t size;
++
++    if(fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
++        size = sizeof(WAVEFORMATEXTENSIBLE);
++    else
++        size = sizeof(WAVEFORMATEX);
++
++    ret = malloc(size);
++    if(!ret)
++        return NULL;
++
++    memcpy(ret, fmt, size);
++
++    ret->Format.cbSize = size - sizeof(WAVEFORMATEX);
++
++    return ret;
++}
++
++static NTSTATUS oss_create_stream(void *args)
++{
++    struct create_stream_params *params = args;
++    WAVEFORMATEXTENSIBLE *fmtex;
++    struct oss_stream *stream;
++    UINT32 want_frames;
++    int32_t capacity, burst;
++    SIZE_T size;
++
++    params->result = S_OK;
++
++    stream = calloc(1, sizeof(*stream));
++    if(!stream){
++        params->result = E_OUTOFMEMORY;
++        return STATUS_SUCCESS;
++    }
++
++    stream->flow = params->flow;
++    pthread_mutex_init(&stream->lock, NULL);
++
++    params->result = check_format(params->share, params->fmt);
++    if(FAILED(params->result))
++        goto exit;
++
++    params->result = open_aaudio_stream(params->flow, params->fmt, &stream->aas,
++                                        &stream->convert_to_i16);
++    if(FAILED(params->result))
++        goto exit;
++
++    fmtex = clone_format(params->fmt);
++    if(!fmtex){
++        params->result = E_OUTOFMEMORY;
++        goto exit;
++    }
++    stream->fmt = &fmtex->Format;
++
++    stream->period = params->period;
++    stream->period_frames = muldiv(params->fmt->nSamplesPerSec, params->period, 10000000);
++
++    if (stream->period_frames == 0)
++    {
++        params->result = E_INVALIDARG;
++        goto exit;
++    }
++
++    stream->bufsize_frames = muldiv(params->duration, params->fmt->nSamplesPerSec, 10000000);
++    if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
++        stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
 +
 +    burst = AAudioStream_getFramesPerBurst(stream->aas);
 +    capacity = AAudioStream_getBufferCapacityInFrames(stream->aas);
@@ -766,47 +2819,122 @@ index 431264faf31..1c56bacb493 100644
 +             "may never reach its start threshold\n", stream->bufsize_frames,
 +             AAudioStream_getBufferSizeInFrames(stream->aas));
 +
-     size = stream->bufsize_frames * params->fmt->nBlockAlign;
-     if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits,
-                                &size, MEM_COMMIT, PAGE_READWRITE)){
-@@ -607,11 +564,10 @@ static NTSTATUS oss_create_stream(void *args)
- 
-     stream->share = params->share;
-     stream->flags = params->flags;
--    stream->oss_bufsize_bytes = 0;
- 
- exit:
-     if(FAILED(params->result)){
--        if(stream->fd >= 0) close(stream->fd);
++    size = stream->bufsize_frames * params->fmt->nBlockAlign;
++    if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits,
++                               &size, MEM_COMMIT, PAGE_READWRITE)){
++        params->result = E_OUTOFMEMORY;
++        goto exit;
++    }
++
++    stream->share = params->share;
++    stream->flags = params->flags;
++
++exit:
++    if(FAILED(params->result)){
 +        if(stream->aas) AAudioStream_close(stream->aas);
-         if(stream->local_buffer){
-             size = 0;
-             NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
-@@ -639,7 +595,10 @@ static NTSTATUS oss_release_stream(void *args)
-         NtClose(stream->timer_thread);
-     }
- 
--    close(stream->fd);
++        if(stream->local_buffer){
++            size = 0;
++            NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
++        }
++        pthread_mutex_destroy(&stream->lock);
++        free(stream->fmt);
++        free(stream);
++    }else{
++        *params->channel_count = params->fmt->nChannels;
++        *params->stream = (stream_handle)(UINT_PTR)stream;
++    }
++
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_release_stream(void *args)
++{
++    struct release_stream_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    SIZE_T size;
++
++    if(stream->timer_thread){
++        stream->please_quit = TRUE;
++        NtWaitForSingleObject(stream->timer_thread, FALSE, NULL);
++        NtClose(stream->timer_thread);
++    }
++
 +    if(stream->aas){
 +        AAudioStream_requestStop(stream->aas);
 +        AAudioStream_close(stream->aas);
 +    }
-     if(stream->local_buffer){
-         size = 0;
-         NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
-@@ -658,38 +617,69 @@ static NTSTATUS oss_release_stream(void *args)
- 
- static void silence_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 frames)
- {
--    WAVEFORMATEXTENSIBLE *fmtex = (WAVEFORMATEXTENSIBLE*)stream->fmt;
--    if((stream->fmt->wFormatTag == WAVE_FORMAT_PCM ||
--            (stream->fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
--             IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM))) &&
--            stream->fmt->wBitsPerSample == 8)
--        memset(buffer, 128, frames * stream->fmt->nBlockAlign);
--    else
--        memset(buffer, 0, frames * stream->fmt->nBlockAlign);
++    if(stream->local_buffer){
++        size = 0;
++        NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
++    }
++    if(stream->tmp_buffer){
++        size = 0;
++        NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
++    }
++    if(stream->conv_buffer){
++        size = 0;
++        NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->conv_buffer, &size, MEM_RELEASE);
++    }
++    free(stream->fmt);
++    pthread_mutex_destroy(&stream->lock);
++    free(stream);
++
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static void silence_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 frames)
++{
 +    memset(buffer, 0, frames * stream->fmt->nBlockAlign);
++}
++
++/**
++ * The guest's float frames as int16, in a buffer AAudio can take.
++ *
++ * Returns NULL when the scratch buffer cannot be grown, and the caller then
++ * writes nothing this pass rather than writing the wrong bytes -- a silent gap
++ * is recoverable and a misread buffer is a noise burst at full scale.
++ *
++ * Saturating rather than wrapping, because a guest is entitled to hand over
++ * samples slightly outside -1..1 and the wrap of an overflow is a click at full
++ * amplitude where the clamp is a moment of distortion nobody hears.
++ */
++static const BYTE *convert_to_i16_frames(struct oss_stream *stream, const BYTE *src, UINT32 frames)
++{
++    const float *in = (const float *)src;
++    UINT32 samples = frames * stream->fmt->nChannels;
++    INT16 *out;
++    UINT32 i;
++
++    if(stream->conv_buffer_frames < frames){
++        SIZE_T size = frames * stream->fmt->nChannels * sizeof(INT16);
++        void *buffer = NULL;
++
++        if(stream->conv_buffer){
++            SIZE_T old = 0;
++            NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->conv_buffer, &old, MEM_RELEASE);
++            stream->conv_buffer = NULL;
++            stream->conv_buffer_frames = 0;
++        }
++        if(NtAllocateVirtualMemory(GetCurrentProcess(), &buffer, 0, &size,
++                                   MEM_COMMIT, PAGE_READWRITE)){
++            WARN("could not grow the conversion buffer to %u frames\n", frames);
++            return NULL;
++        }
++        stream->conv_buffer = buffer;
++        stream->conv_buffer_frames = frames;
++    }
++
++    out = (INT16 *)stream->conv_buffer;
++    for(i = 0; i < samples; i++){
++        float v = in[i] * 32768.0f;
++
++        if(v > 32767.0f) v = 32767.0f;
++        else if(v < -32768.0f) v = -32768.0f;
++        out[i] = (INT16)v;
++    }
++
++    return stream->conv_buffer;
 +}
 +
 +/* Frames handed to AAudio and not yet played. The difference of the two
@@ -857,42 +2985,25 @@ index 431264faf31..1c56bacb493 100644
 +    if(queued < 0)
 +        queued = 0;
 +    return queued;
- }
- 
- static void oss_write_data(struct oss_stream *stream)
- {
--    ssize_t written_bytes;
-     UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
--    SIZE_T to_write_frames, to_write_bytes, advanced;
--    audio_buf_info bi;
++}
++
++static void oss_write_data(struct oss_stream *stream)
++{
++    UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
 +    UINT32 fill_target;
 +    SIZE_T to_write_frames, advanced;
 +    aaudio_result_t written;
 +    int32_t buffer_frames;
-     BYTE *buf;
- 
--    if(ioctl(stream->fd, SNDCTL_DSP_GETOSPACE, &bi) < 0){
--        WARN("GETOSPACE failed: %d (%s)\n", errno, strerror(errno));
--        return;
--    }
--
--    max_period = max(bi.fragsize / stream->fmt->nBlockAlign, stream->period_frames);
--
--    if(bi.bytes > stream->oss_bufsize_bytes){
--        TRACE("New buffer size (%u) is larger than old buffer size (%u)\n",
--                bi.bytes, stream->oss_bufsize_bytes);
--        stream->oss_bufsize_bytes = bi.bytes;
--        in_oss_frames = 0;
--    }else
--        in_oss_frames = (stream->oss_bufsize_bytes - bi.bytes) / stream->fmt->nBlockAlign;
++    BYTE *buf;
++
 +    in_oss_frames = aaudio_queued_frames(stream);
- 
-     if(in_oss_frames > stream->in_oss_frames){
-         TRACE("Capping reported frames from %u to %u\n",
-@@ -697,11 +687,48 @@ static void oss_write_data(struct oss_stream *stream)
-         in_oss_frames = stream->in_oss_frames;
-     }
- 
++
++    if(in_oss_frames > stream->in_oss_frames){
++        TRACE("Capping reported frames from %u to %u\n",
++                in_oss_frames, stream->in_oss_frames);
++        in_oss_frames = stream->in_oss_frames;
++    }
++
 +    max_period = stream->period_frames;
 +
 +    /* How full to keep the device. Upstream tops up to three periods and that
@@ -923,11 +3034,9 @@ index 431264faf31..1c56bacb493 100644
 +    if(buffer_frames > 0 && (UINT32)buffer_frames > fill_target)
 +        fill_target = buffer_frames;
 +
-     write_limit = 0;
--    while(write_limit + in_oss_frames < max_period * 3)
++    write_limit = 0;
 +    while(write_limit + in_oss_frames < fill_target)
-         write_limit += max_period;
--    if(write_limit == 0)
++        write_limit += max_period;
 +    if(write_limit == 0){
 +        /* The device is as full as we intend to keep it. Traced because this is
 +         * the one path out of here that writes nothing and says nothing, and
@@ -935,192 +3044,242 @@ index 431264faf31..1c56bacb493 100644
 +         * above. */
 +        TRACE("device full: %u of %u frames queued, nothing to add\n",
 +                in_oss_frames, fill_target);
-         return;
++        return;
 +    }
- 
-     /*        vvvvvv - in_oss_frames
-      * [--xxxxxxxxxx]
-@@ -732,7 +759,6 @@ static void oss_write_data(struct oss_stream *stream)
-         to_write_frames = new_frames;
- 
-     to_write_frames = min(to_write_frames, write_limit);
--    to_write_bytes = to_write_frames * stream->fmt->nBlockAlign;
-     TRACE("going to write %lu frames from %u (%lu of %u)\n", to_write_frames,
-             write_offs_frames, to_write_frames + write_offs_frames,
-             stream->bufsize_frames);
-@@ -742,18 +768,61 @@ static void oss_write_data(struct oss_stream *stream)
-     if(stream->mute)
-         silence_buffer(stream, buf, to_write_frames);
- 
--    written_bytes = write(stream->fd, buf, to_write_bytes);
--    if(written_bytes < 0){
--        /* EAGAIN is OSS buffer full, log that too */
--        WARN("write failed: %d (%s)\n", errno, strerror(errno));
++
++    /*        vvvvvv - in_oss_frames
++     * [--xxxxxxxxxx]
++     *       [xxxxxxxxxx--]
++     *        ^^^^^^^^^^ - held_frames
++     *        ^ - lcl_offs_frames
++     */
++    advanced = stream->in_oss_frames - in_oss_frames;
++    if(advanced > stream->held_frames)
++        advanced = stream->held_frames;
++    stream->lcl_offs_frames += advanced;
++    stream->lcl_offs_frames %= stream->bufsize_frames;
++    stream->held_frames -= advanced;
++    stream->in_oss_frames = in_oss_frames;
++    TRACE("advanced by %lu, lcl_offs: %u, held: %u, in_oss: %u\n",
++            advanced, stream->lcl_offs_frames, stream->held_frames, stream->in_oss_frames);
++
++
++    if(stream->held_frames == stream->in_oss_frames)
++        return;
++
++    write_offs_frames = (stream->lcl_offs_frames + stream->in_oss_frames) % stream->bufsize_frames;
++    new_frames = stream->held_frames - stream->in_oss_frames;
++
++    if(write_offs_frames + new_frames > stream->bufsize_frames)
++        to_write_frames = stream->bufsize_frames - write_offs_frames;
++    else
++        to_write_frames = new_frames;
++
++    to_write_frames = min(to_write_frames, write_limit);
++    TRACE("going to write %lu frames from %u (%lu of %u)\n", to_write_frames,
++            write_offs_frames, to_write_frames + write_offs_frames,
++            stream->bufsize_frames);
++
++    buf = stream->local_buffer + write_offs_frames * stream->fmt->nBlockAlign;
++
++    if(stream->mute)
++        silence_buffer(stream, buf, to_write_frames);
++
++    if(stream->convert_to_i16 && !(buf = (BYTE *)convert_to_i16_frames(stream, buf, to_write_frames)))
++        return;
++
 +    written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
 +    if(written < 0){
 +        WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
-         return;
-     }
--    written_frames = written_bytes / stream->fmt->nBlockAlign;
++        return;
++    }
 +    written_frames = written;
 +    TRACE("wrote %d of %lu frames, state %s, queued %u\n", written, to_write_frames,
 +          AAudio_convertStreamStateToText(AAudioStream_getState(stream->aas)),
 +          aaudio_queued_frames(stream));
- 
-     stream->in_oss_frames += written_frames;
- 
-+    /* **Now the track is running, give it room for a whole burst.**
-+     *
-+     * The start threshold forced the buffer down to the client's own size at
-+     * create time: AudioFlinger will not start a track until its queue reaches
-+     * the buffer size, and at that moment the driver has never written more than
-+     * the client's whole buffer. That is a constraint on *starting*, and it stops
-+     * applying the instant the device consumes a frame -- the device queue fills
-+     * across passes as the guest keeps producing, so it can hold more than the
-+     * guest's ring ever holds at once. Reading it as a permanent ceiling is the
-+     * mistake this undoes.
-+     *
-+     * Leaving it there is what made the audio buzz. Measured on the device
-+     * 2026-08-11 with the oss channel at every level: burst 868, capacity 1736,
-+     * buffer left at the client's 1440. AAudio drains a whole burst in one go
-+     * while this tops up 480 to 960 a pass, so the queue moved
-+     * 1440 -> 576 -> 1056 -> 192 -> 0 and the trace shows "in_oss: 0" outright:
-+     * the queue running dry. AudioFlinger counted 54,240 underrun frames in ten
-+     * seconds, 11% of the stream, which is what a continuous buzz is.
-+     *
-+     * 1440 is 1.66 bursts, and a buffer that cannot hold one gulp plus the next
-+     * top-up must run dry. Two bursts leaves the trough a burst deep instead of
-+     * empty. fill_target above reads the buffer size fresh each pass, so the
-+     * top-up follows it up without being told separately.
-+     *
-+     * Once, and only after the device has actually taken frames: doing it before
-+     * the track starts would restore the very cap this exists to undo. */
-+    if(!stream->buffer_raised && AAudioStream_getFramesRead(stream->aas) > 0){
-+        int32_t capacity = AAudioStream_getBufferCapacityInFrames(stream->aas);
-+        int32_t burst = AAudioStream_getFramesPerBurst(stream->aas);
-+        int32_t want = 2 * (burst > 0 ? burst : (int32_t)stream->period_frames);
 +
-+        stream->buffer_raised = TRUE;
-+        if(capacity > 0 && want > capacity)
-+            want = capacity;
-+        if(want > AAudioStream_getBufferSizeInFrames(stream->aas)){
-+            AAudioStream_setBufferSizeInFrames(stream->aas, want);
-+            TRACE("running: buffer raised to %d frames (wanted %d, burst %d, capacity %d)\n",
-+                  AAudioStream_getBufferSizeInFrames(stream->aas), want, burst, capacity);
++    stream->in_oss_frames += written_frames;
++
++    /* **Grow the device buffer when, and only when, it actually runs dry.**
++     *
++     * This was a one-shot jump to two bursts the moment the track started. That
++     * fixed nothing measurable here -- the binding constraint is the guest's own
++     * ring, see the floor in oss_create_stream -- and it charged every stream on
++     * every device a burst of latency for a cushion most of them never need.
++     *
++     * AAudio counts its own underruns, so ask rather than guess: grow by one
++     * burst each time the count moves, up to the capacity, and never shrink.
++     * That is the sizing loop Android documents, and it converges on the
++     * smallest buffer this device and this guest actually get away with.
++     *
++     * Never shrinking is deliberate. A buffer that grew on a burst of xruns and
++     * shrank when they stopped would oscillate around the threshold, and the
++     * audible cost of being one burst too large is nothing while the audible
++     * cost of being one burst too small is the buzz this whole patch is about.
++     *
++     * Only after the device has taken frames: before that, the start threshold
++     * is still the constraint and raising the buffer would push it out of reach.
++     * `fill_target` reads the buffer size fresh each pass, so the top-up above
++     * follows this up without being told separately. */
++    if(AAudioStream_getFramesRead(stream->aas) > 0){
++        int32_t xruns = AAudioStream_getXRunCount(stream->aas);
++
++        if(xruns > stream->last_xruns){
++            int32_t size = AAudioStream_getBufferSizeInFrames(stream->aas);
++            int32_t capacity = AAudioStream_getBufferCapacityInFrames(stream->aas);
++            int32_t burst = AAudioStream_getFramesPerBurst(stream->aas);
++            int32_t want = size + (burst > 0 ? burst : (int32_t)stream->period_frames);
++
++            if(capacity > 0 && want > capacity)
++                want = capacity;
++            if(want > size){
++                AAudioStream_setBufferSizeInFrames(stream->aas, want);
++                TRACE("%d underruns: buffer %d -> %d frames (burst %d, capacity %d)\n",
++                      xruns, size, AAudioStream_getBufferSizeInFrames(stream->aas),
++                      burst, capacity);
++            }
++            stream->last_xruns = xruns;
 +        }
 +    }
 +
-     if(written_frames < to_write_frames){
--        /* OSS buffer probably full */
++    if(written_frames < to_write_frames){
 +        /* AAudio buffer probably full */
-         return;
-     }
- 
-@@ -761,39 +830,37 @@ static void oss_write_data(struct oss_stream *stream)
-         /* wrapped and have some data back at the start to write */
- 
-         to_write_frames = min(write_limit - written_frames, new_frames - written_frames);
--        to_write_bytes = to_write_frames * stream->fmt->nBlockAlign;
- 
-         if(stream->mute)
-             silence_buffer(stream, stream->local_buffer, to_write_frames);
- 
-         TRACE("wrapping to write %lu frames from beginning\n", to_write_frames);
- 
--        written_bytes = write(stream->fd, stream->local_buffer, to_write_bytes);
--        if(written_bytes < 0){
--            WARN("write failed: %d (%s)\n", errno, strerror(errno));
-+        written = AAudioStream_write(stream->aas, stream->local_buffer, to_write_frames, 0);
++        return;
++    }
++
++    if(new_frames > written_frames && written_frames < write_limit){
++        /* wrapped and have some data back at the start to write */
++
++        to_write_frames = min(write_limit - written_frames, new_frames - written_frames);
++
++        if(stream->mute)
++            silence_buffer(stream, stream->local_buffer, to_write_frames);
++
++        TRACE("wrapping to write %lu frames from beginning\n", to_write_frames);
++
++        buf = stream->local_buffer;
++        if(stream->convert_to_i16 && !(buf = (BYTE *)convert_to_i16_frames(stream, buf, to_write_frames)))
++            return;
++
++        written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
 +        if(written < 0){
 +            WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
-             return;
-         }
--        written_frames = written_bytes / stream->fmt->nBlockAlign;
--        stream->in_oss_frames += written_frames;
++            return;
++        }
 +        stream->in_oss_frames += written;
-     }
- }
- 
- static void oss_read_data(struct oss_stream *stream)
- {
--    UINT64 pos, readable;
--    ssize_t nread;
++    }
++}
++
++static void oss_read_data(struct oss_stream *stream)
++{
 +    UINT64 pos, readable_frames;
 +    aaudio_result_t nread;
- 
-     pos = (stream->held_frames + stream->lcl_offs_frames) % stream->bufsize_frames;
--    readable = (stream->bufsize_frames - pos) * stream->fmt->nBlockAlign;
++
++    pos = (stream->held_frames + stream->lcl_offs_frames) % stream->bufsize_frames;
 +    readable_frames = stream->bufsize_frames - pos;
- 
--    nread = read(stream->fd, stream->local_buffer + pos * stream->fmt->nBlockAlign,
--            readable);
++
 +    nread = AAudioStream_read(stream->aas,
 +            stream->local_buffer + pos * stream->fmt->nBlockAlign, readable_frames, 0);
-     if(nread < 0){
--        WARN("read failed: %d (%s)\n", errno, strerror(errno));
++    if(nread < 0){
 +        WARN("read failed: %d (%s)\n", nread, AAudio_convertResultToText(nread));
-         return;
-     }
- 
--    stream->held_frames += nread / stream->fmt->nBlockAlign;
++        return;
++    }
++
 +    stream->held_frames += nread;
- 
-     if(stream->held_frames > stream->bufsize_frames){
-         WARN("Overflow of unread data\n");
-@@ -815,6 +882,12 @@ static void oss_timer_loop(void *args)
-     NtQueryPerformanceCounter(&now, NULL);
-     next.QuadPart = now.QuadPart + stream->period;
- 
++
++    if(stream->held_frames > stream->bufsize_frames){
++        WARN("Overflow of unread data\n");
++        stream->lcl_offs_frames += stream->held_frames;
++        stream->lcl_offs_frames %= stream->bufsize_frames;
++        stream->held_frames = stream->bufsize_frames;
++    }
++}
++
++static void oss_timer_loop(void *args)
++{
++    struct oss_stream *stream = args;
++    LARGE_INTEGER delay, now, next;
++    int adjust;
++
++    oss_lock(stream);
++
++    delay.QuadPart = -stream->period;
++    NtQueryPerformanceCounter(&now, NULL);
++    next.QuadPart = now.QuadPart + stream->period;
++
 +    /* This loop is the only caller of oss_write_data, so if it ever stops
 +     * iterating the guest goes silent with nothing else in the log to say so.
 +     * One line at each end costs nothing per stream and tells a future reader
 +     * which half of the driver to suspect. */
 +    TRACE("timer loop entered, period %d hns\n", (int)stream->period);
 +
-     while(!stream->please_quit){
-         if(stream->playing){
-             if(stream->flow == eRender && stream->held_frames)
-@@ -839,6 +912,8 @@ static void oss_timer_loop(void *args)
-         next.QuadPart += stream->period;
-     }
- 
++    while(!stream->please_quit){
++        if(stream->playing){
++            if(stream->flow == eRender && stream->held_frames)
++                oss_write_data(stream);
++            else if(stream->flow == eCapture)
++                oss_read_data(stream);
++        }
++        if(stream->event)
++            NtSetEvent(stream->event, NULL);
++        oss_unlock(stream);
++
++        NtDelayExecution(FALSE, &delay);
++
++        oss_lock(stream);
++        NtQueryPerformanceCounter(&now, NULL);
++        adjust = next.QuadPart - now.QuadPart;
++        if(adjust > stream->period / 2)
++            adjust = stream->period / 2;
++        else if(adjust < -stream->period / 2)
++            adjust = -stream->period / 2;
++        delay.QuadPart = -(stream->period + adjust);
++        next.QuadPart += stream->period;
++    }
++
 +    TRACE("timer loop leaving: quit=%d playing=%d held=%u\n",
 +          stream->please_quit, stream->playing, stream->held_frames);
-     oss_unlock(stream);
- }
- 
-@@ -847,6 +922,7 @@ static NTSTATUS oss_start(void *args)
-     struct start_params *params = args;
-     struct oss_stream *stream = handle_get_stream(params->stream);
-     static const WCHAR name[] = {'a','u','d','i','o','_','c','l','i','e','n','t','_','t','i','m','e','r',0};
++    oss_unlock(stream);
++}
++
++static NTSTATUS oss_start(void *args)
++{
++    struct start_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    static const WCHAR name[] = {'a','u','d','i','o','_','c','l','i','e','n','t','_','t','i','m','e','r',0};
 +    aaudio_result_t res;
- 
-     oss_lock(stream);
- 
-@@ -856,6 +932,12 @@ static NTSTATUS oss_start(void *args)
-     if(stream->playing)
-         return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
- 
++
++    oss_lock(stream);
++
++    if((stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) && !stream->event)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_EVENTHANDLE_NOT_SET);
++
++    if(stream->playing)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
++
 +    if((res = AAudioStream_requestStart(stream->aas)) != AAUDIO_OK)
 +        WARN("requestStart failed: %d (%s)\n", res, AAudio_convertResultToText(res));
 +    else
 +        aaudio_await(stream->aas, AAUDIO_STREAM_STATE_STARTING,
 +                     AAUDIO_STREAM_STATE_STARTED);
 +
-     stream->playing = TRUE;
-     if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
- 
-@@ -866,12 +948,29 @@ static NTSTATUS oss_stop(void *args)
- {
-     struct stop_params *params = args;
-     struct oss_stream *stream = handle_get_stream(params->stream);
++    stream->playing = TRUE;
++    if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_stop(void *args)
++{
++    struct stop_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
 +    aaudio_result_t res;
- 
-     oss_lock(stream);
- 
-     if(!stream->playing)
-         return oss_unlock_result(stream, &params->result, S_FALSE);
- 
++
++    oss_lock(stream);
++
++    if(!stream->playing)
++        return oss_unlock_result(stream, &params->result, S_FALSE);
++
 +    /* Pause rather than stop: Stop() on an audio client freezes the clock,
 +     * it does not flush. For capture there is no pause, stop is it. */
 +    if(stream->flow == eRender){
@@ -1137,21 +3296,27 @@ index 431264faf31..1c56bacb493 100644
 +    if(res != AAUDIO_OK)
 +        WARN("pause/stop failed: %d (%s)\n", res, AAudio_convertResultToText(res));
 +
-     stream->playing = FALSE;
-     stream->in_oss_frames = 0;
- 
-@@ -882,6 +981,7 @@ static NTSTATUS oss_reset(void *args)
- {
-     struct reset_params *params = args;
-     struct oss_stream *stream = handle_get_stream(params->stream);
++    stream->playing = FALSE;
++    stream->in_oss_frames = 0;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_reset(void *args)
++{
++    struct reset_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
 +    aaudio_result_t res;
- 
-     oss_lock(stream);
- 
-@@ -892,6 +992,23 @@ static NTSTATUS oss_reset(void *args)
-         return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
- 
-     if(stream->flow == eRender){
++
++    oss_lock(stream);
++
++    if(stream->playing)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
++
++    if(stream->getbuf_last)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
++
++    if(stream->flow == eRender){
 +        /* Drop what the device still holds; the paused stream would
 +         * otherwise play stale audio when restarted. */
 +        /* Only from PAUSED or STOPPED -- AAudio refuses a flush from any
@@ -1169,181 +3334,444 @@ index 431264faf31..1c56bacb493 100644
 +                             AAUDIO_STREAM_STATE_FLUSHED);
 +        }else
 +            TRACE("no flush from %s\n", AAudio_convertStreamStateToText(fstate));
-         stream->written_frames = 0;
-         stream->last_pos_frames = 0;
-     }else{
-@@ -1107,16 +1224,8 @@ static NTSTATUS oss_release_capture_buffer(void *args)
- static NTSTATUS oss_is_format_supported(void *args)
- {
-     struct is_format_supported_params *params = args;
--    int fd;
- 
--    fd = open_device(params->device, params->flow);
--    if(fd < 0){
--        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
--        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
--        return STATUS_SUCCESS;
--    }
--    params->result = setup_oss_device(params->share, fd, params->fmt_in);
--    close(fd);
++        stream->written_frames = 0;
++        stream->last_pos_frames = 0;
++    }else{
++        stream->written_frames += stream->held_frames;
++    }
++    stream->held_frames = 0;
++    stream->lcl_offs_frames = 0;
++    stream->in_oss_frames = 0;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_render_buffer(void *args)
++{
++    struct get_render_buffer_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT32 write_pos, frames = params->frames;
++    BYTE **data = params->data;
++    SIZE_T size;
++
++    oss_lock(stream);
++
++    if(stream->getbuf_last)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
++
++    if(!frames)
++        return oss_unlock_result(stream, &params->result, S_OK);
++
++    if(stream->held_frames + frames > stream->bufsize_frames)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_TOO_LARGE);
++
++    write_pos =
++        (stream->lcl_offs_frames + stream->held_frames) % stream->bufsize_frames;
++    if(write_pos + frames > stream->bufsize_frames){
++        if(stream->tmp_buffer_frames < frames){
++            if(stream->tmp_buffer){
++                size = 0;
++                NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
++                stream->tmp_buffer = NULL;
++            }
++            size = frames * stream->fmt->nBlockAlign;
++            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits,
++                                       &size, MEM_COMMIT, PAGE_READWRITE)){
++                stream->tmp_buffer_frames = 0;
++                return oss_unlock_result(stream, &params->result, E_OUTOFMEMORY);
++            }
++            stream->tmp_buffer_frames = frames;
++        }
++        *data = stream->tmp_buffer;
++        stream->getbuf_last = -frames;
++    }else{
++        *data = stream->local_buffer + write_pos * stream->fmt->nBlockAlign;
++        stream->getbuf_last = frames;
++    }
++
++    silence_buffer(stream, *data, frames);
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static void oss_wrap_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 written_frames)
++{
++    UINT32 write_offs_frames =
++        (stream->lcl_offs_frames + stream->held_frames) % stream->bufsize_frames;
++    UINT32 write_offs_bytes = write_offs_frames * stream->fmt->nBlockAlign;
++    UINT32 chunk_frames = stream->bufsize_frames - write_offs_frames;
++    UINT32 chunk_bytes = chunk_frames * stream->fmt->nBlockAlign;
++    UINT32 written_bytes = written_frames * stream->fmt->nBlockAlign;
++
++    if(written_bytes <= chunk_bytes){
++        memcpy(stream->local_buffer + write_offs_bytes, buffer, written_bytes);
++    }else{
++        memcpy(stream->local_buffer + write_offs_bytes, buffer, chunk_bytes);
++        memcpy(stream->local_buffer, buffer + chunk_bytes,
++                written_bytes - chunk_bytes);
++    }
++}
++
++static NTSTATUS oss_release_render_buffer(void *args)
++{
++    struct release_render_buffer_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT32 written_frames = params->written_frames;
++    UINT flags = params->flags;
++    BYTE *buffer;
++
++    oss_lock(stream);
++
++    if(!written_frames){
++        stream->getbuf_last = 0;
++        return oss_unlock_result(stream, &params->result, S_OK);
++    }
++
++    if(!stream->getbuf_last)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
++
++    if(written_frames > (stream->getbuf_last >= 0 ? stream->getbuf_last : -stream->getbuf_last))
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_INVALID_SIZE);
++
++    if(stream->getbuf_last >= 0)
++        buffer = stream->local_buffer + stream->fmt->nBlockAlign *
++          ((stream->lcl_offs_frames + stream->held_frames) % stream->bufsize_frames);
++    else
++        buffer = stream->tmp_buffer;
++
++    if(flags & AUDCLNT_BUFFERFLAGS_SILENT)
++        silence_buffer(stream, buffer, written_frames);
++
++    if(stream->getbuf_last < 0)
++        oss_wrap_buffer(stream, buffer, written_frames);
++
++    stream->held_frames += written_frames;
++    stream->written_frames += written_frames;
++    stream->getbuf_last = 0;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_capture_buffer(void *args)
++{
++    struct get_capture_buffer_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT64 *devpos = params->devpos, *qpcpos = params->qpcpos;
++    UINT32 *frames = params->frames;
++    UINT *flags = params->flags;
++    BYTE **data = params->data;
++    SIZE_T size;
++
++    oss_lock(stream);
++
++    if(stream->getbuf_last)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
++
++    if(stream->held_frames < stream->period_frames){
++        *frames = 0;
++        return oss_unlock_result(stream, &params->result, AUDCLNT_S_BUFFER_EMPTY);
++    }
++
++    *flags = 0;
++
++    *frames = stream->period_frames;
++
++    if(stream->lcl_offs_frames + *frames > stream->bufsize_frames){
++        UINT32 chunk_bytes, offs_bytes, frames_bytes;
++        if(stream->tmp_buffer_frames < *frames){
++            if(stream->tmp_buffer){
++                size = 0;
++                NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
++                stream->tmp_buffer = NULL;
++            }
++            size = *frames * stream->fmt->nBlockAlign;
++            if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits,
++                                       &size, MEM_COMMIT, PAGE_READWRITE)){
++                stream->tmp_buffer_frames = 0;
++                return oss_unlock_result(stream, &params->result, E_OUTOFMEMORY);
++            }
++            stream->tmp_buffer_frames = *frames;
++        }
++
++        *data = stream->tmp_buffer;
++        chunk_bytes = (stream->bufsize_frames - stream->lcl_offs_frames) *
++            stream->fmt->nBlockAlign;
++        offs_bytes = stream->lcl_offs_frames * stream->fmt->nBlockAlign;
++        frames_bytes = *frames * stream->fmt->nBlockAlign;
++        memcpy(stream->tmp_buffer, stream->local_buffer + offs_bytes, chunk_bytes);
++        memcpy(stream->tmp_buffer + chunk_bytes, stream->local_buffer,
++                frames_bytes - chunk_bytes);
++    }else
++        *data = stream->local_buffer +
++            stream->lcl_offs_frames * stream->fmt->nBlockAlign;
++
++    stream->getbuf_last = *frames;
++
++    if(devpos)
++       *devpos = stream->written_frames;
++    if(qpcpos){
++        LARGE_INTEGER stamp, freq;
++        NtQueryPerformanceCounter(&stamp, &freq);
++        *qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
++    }
++
++    return oss_unlock_result(stream, &params->result, *frames ? S_OK : AUDCLNT_S_BUFFER_EMPTY);
++}
++
++static NTSTATUS oss_release_capture_buffer(void *args)
++{
++    struct release_capture_buffer_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT32 done = params->done;
++
++    oss_lock(stream);
++
++    if(!done){
++        stream->getbuf_last = 0;
++        return oss_unlock_result(stream, &params->result, S_OK);
++    }
++
++    if(!stream->getbuf_last)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
++
++    if(stream->getbuf_last != done)
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_INVALID_SIZE);
++
++    stream->written_frames += done;
++    stream->held_frames -= done;
++    stream->lcl_offs_frames += done;
++    stream->lcl_offs_frames %= stream->bufsize_frames;
++    stream->getbuf_last = 0;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_is_format_supported(void *args)
++{
++    struct is_format_supported_params *params = args;
++
 +    params->result = check_format(params->share, params->fmt_in);
- 
-     return STATUS_SUCCESS;
- }
-@@ -1125,95 +1234,24 @@ static NTSTATUS oss_get_mix_format(void *args)
- {
-     struct get_mix_format_params *params = args;
-     WAVEFORMATEXTENSIBLE *fmt = params->fmt;
--    oss_audioinfo ai;
--    int formats, fd;
- 
-     if(params->flow != eRender && params->flow != eCapture){
-         params->result = E_UNEXPECTED;
-         return STATUS_SUCCESS;
-     }
- 
--    fd = open_device(params->device, params->flow);
--    if(fd < 0){
--        WARN("Unable to open device %s: %d (%s)\n", params->device, errno, strerror(errno));
--        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
--        return STATUS_SUCCESS;
--    }
--
--    ai.dev = -1;
--    if(ioctl(fd, SNDCTL_ENGINEINFO, &ai) < 0){
--        WARN("Unable to get audio info for device %s: %d (%s)\n", params->device, errno, strerror(errno));
--        close(fd);
--        params->result = E_FAIL;
--        return STATUS_SUCCESS;
--    }
--    close(fd);
--
--    if(params->flow == eRender)
--        formats = ai.oformats;
--    else
--        formats = ai.iformats;
--
++
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_get_mix_format(void *args)
++{
++    struct get_mix_format_params *params = args;
++    WAVEFORMATEXTENSIBLE *fmt = params->fmt;
++
++    if(params->flow != eRender && params->flow != eCapture){
++        params->result = E_UNEXPECTED;
++        return STATUS_SUCCESS;
++    }
++
 +    /* 48 kHz stereo signed 16-bit: the native rate of effectively every
 +     * Android device, and AAUDIO_FORMAT_PCM_I16 needs no conversion. */
-     fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
--    if(formats & AFMT_S16_LE){
--        fmt->Format.wBitsPerSample = 16;
--        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
--#ifdef AFMT_FLOAT
--    }else if(formats & AFMT_FLOAT){
--        fmt->Format.wBitsPerSample = 32;
--        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
--#endif
--    }else if(formats & AFMT_U8){
--        fmt->Format.wBitsPerSample = 8;
--        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
--    }else if(formats & AFMT_S32_LE){
--        fmt->Format.wBitsPerSample = 32;
--        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
--    }else if(formats & AFMT_S24_LE){
--        fmt->Format.wBitsPerSample = 24;
--        fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
--    }else{
--        WARN("Didn't recognize any available OSS formats: %x\n", formats);
--        params->result = E_FAIL;
--        return STATUS_SUCCESS;
--    }
--
--    /* some OSS drivers are buggy, so set reasonable defaults if
--     * the reported values seem wacky */
--    fmt->Format.nChannels = max(ai.max_channels, ai.min_channels);
--    if(fmt->Format.nChannels == 0 || fmt->Format.nChannels > 8)
--        fmt->Format.nChannels = 2;
--
--    /* For most hardware on Windows, users must choose a configuration with an even
--     * number of channels (stereo, quad, 5.1, 7.1). Users can then disable
--     * channels, but those channels are still reported to applications from
--     * GetMixFormat! Some applications behave badly if given an odd number of
--     * channels (e.g. 2.1). */
--    if(fmt->Format.nChannels > 1 && (fmt->Format.nChannels & 0x1))
--    {
--        if(fmt->Format.nChannels < ai.max_channels)
--            fmt->Format.nChannels += 1;
--        else
--            /* We could "fake" more channels and downmix the emulated channels,
--             * but at that point you really ought to tweak your OSS setup or
--             * just use PulseAudio. */
--            WARN("Some Windows applications behave badly with an odd number of channels (%u)!\n", fmt->Format.nChannels);
--    }
--
--    if(ai.max_rate == 0)
--        fmt->Format.nSamplesPerSec = 44100;
--    else
--        fmt->Format.nSamplesPerSec = min(ai.max_rate, 44100);
--    if(fmt->Format.nSamplesPerSec < ai.min_rate)
--        fmt->Format.nSamplesPerSec = ai.min_rate;
--
++    fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
 +    fmt->Format.wBitsPerSample = 16;
 +    fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 +    fmt->Format.nChannels = 2;
 +    fmt->Format.nSamplesPerSec = 48000;
-     fmt->dwChannelMask = get_channel_mask(fmt->Format.nChannels);
--
-     fmt->Format.nBlockAlign = (fmt->Format.wBitsPerSample *
-             fmt->Format.nChannels) / 8;
-     fmt->Format.nAvgBytesPerSec = fmt->Format.nSamplesPerSec *
-         fmt->Format.nBlockAlign;
--
-     fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
-     fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
- 
-@@ -1321,20 +1359,7 @@ static NTSTATUS oss_get_position(void *args)
-         if(*pos < stream->last_pos_frames)
-             *pos = stream->last_pos_frames;
-     }else if(stream->flow == eCapture){
--        audio_buf_info bi;
--        UINT32 held;
--
--        if(ioctl(stream->fd, SNDCTL_DSP_GETISPACE, &bi) < 0){
--            TRACE("GETISPACE failed: %d (%s)\n", errno, strerror(errno));
--            held = 0;
--        }else{
--            if(bi.bytes <= bi.fragsize)
--                held = 0;
--            else
--                held = bi.bytes / stream->fmt->nBlockAlign;
--        }
--
--        *pos = stream->written_frames + held;
++    fmt->dwChannelMask = get_channel_mask(fmt->Format.nChannels);
++    fmt->Format.nBlockAlign = (fmt->Format.wBitsPerSample *
++            fmt->Format.nChannels) / 8;
++    fmt->Format.nAvgBytesPerSec = fmt->Format.nSamplesPerSec *
++        fmt->Format.nBlockAlign;
++    fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
++    fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
++
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_get_device_period(void *args)
++{
++    struct get_device_period_params *params = args;
++
++    if (params->def_period)
++        *params->def_period = def_period;
++    if (params->min_period)
++        *params->min_period = min_period;
++
++    params->result = S_OK;
++
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_get_buffer_size(void *args)
++{
++    struct get_buffer_size_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++
++    oss_lock(stream);
++
++    *params->frames = stream->bufsize_frames;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_latency(void *args)
++{
++    struct get_latency_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++
++    oss_lock(stream);
++
++    /* pretend we process audio in Period chunks, so max latency includes
++     * the period time.  Some native machines add .6666ms in shared mode. */
++    *params->latency = stream->period + 6666;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_current_padding(void *args)
++{
++    struct get_current_padding_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++
++    oss_lock(stream);
++
++    *params->padding = stream->held_frames;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_next_packet_size(void *args)
++{
++    struct get_next_packet_size_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT32 *frames = params->frames;
++
++    oss_lock(stream);
++
++    *frames = stream->held_frames < stream->period_frames ? 0 : stream->period_frames;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_frequency(void *args)
++{
++    struct get_frequency_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT64 *freq = params->freq;
++
++    oss_lock(stream);
++
++    if(stream->share == AUDCLNT_SHAREMODE_SHARED)
++        *freq = (UINT64)stream->fmt->nSamplesPerSec * stream->fmt->nBlockAlign;
++    else
++        *freq = stream->fmt->nSamplesPerSec;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_get_position(void *args)
++{
++    struct get_position_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT64 *pos = params->pos, *qpctime = params->qpctime;
++
++    if (params->device) {
++        FIXME("Device position reporting not implemented\n");
++        params->result = E_NOTIMPL;
++        return STATUS_SUCCESS;
++    }
++
++    oss_lock(stream);
++
++    if(stream->flow == eRender){
++        *pos = stream->written_frames - stream->held_frames;
++        if(*pos < stream->last_pos_frames)
++            *pos = stream->last_pos_frames;
++    }else if(stream->flow == eCapture){
 +        *pos = stream->written_frames + aaudio_queued_frames(stream);
-     }
- 
-     stream->last_pos_frames = *pos;
-@@ -1413,220 +1438,94 @@ static NTSTATUS oss_get_prop_value(void *args)
-     return STATUS_SUCCESS;
- }
- 
--/* Aux driver */
--
--static unsigned int num_aux;
++    }
++
++    stream->last_pos_frames = *pos;
++
++    TRACE("returning: %s\n", wine_dbgstr_longlong(*pos));
++    if(stream->share == AUDCLNT_SHAREMODE_SHARED)
++        *pos *= stream->fmt->nBlockAlign;
++
++    if(qpctime){
++        LARGE_INTEGER stamp, freq;
++        NtQueryPerformanceCounter(&stamp, &freq);
++        *qpctime = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
++    }
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_set_volumes(void *args)
++{
++    struct set_volumes_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++    UINT16 i;
++
++    if (params->master_volume) {
++        for (i = 0; i < stream->fmt->nChannels; ++i) {
++            if (params->master_volume * params->volumes[i] * params->session_volumes[i] != 1.0f) {
++                FIXME("Volume control is not implemented\n");
++                break;
++            }
++        }
++    }
++
++    oss_lock(stream);
++    stream->mute = !params->master_volume;
++    oss_unlock(stream);
++
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_set_event_handle(void *args)
++{
++    struct set_event_handle_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++
++    oss_lock(stream);
++
++    if(!(stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK))
++        return oss_unlock_result(stream, &params->result, AUDCLNT_E_EVENTHANDLE_NOT_EXPECTED);
++
++    if (stream->event){
++        FIXME("called twice\n");
++        return oss_unlock_result(stream, &params->result, HRESULT_FROM_WIN32(ERROR_INVALID_NAME));
++    }
++
++    stream->event = params->event;
++
++    return oss_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS oss_is_started(void *args)
++{
++    struct is_started_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
++
++    oss_lock(stream);
++
++    return oss_unlock_result(stream, &params->result, stream->playing ? S_OK : S_FALSE);
++}
++
++static NTSTATUS oss_get_prop_value(void *args)
++{
++    struct get_prop_value_params *params = args;
++
++    params->result = E_NOTIMPL;
++
++    return STATUS_SUCCESS;
++}
++
 +/* Aux driver: OSS exposed the /dev/mixer channels here. Android has no
 + * mixer device, so there are no aux devices. */
- 
--#define MIXER_DEV "/dev/mixer"
--
--static UINT aux_init(void)
++
 +static NTSTATUS oss_aux_message(void *args)
- {
--    int mixer;
--
--    TRACE("()\n");
++{
 +    struct aux_message_params *params = args;
- 
--    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
--    {
--        WARN("mixer device not available !\n");
--        num_aux = 0;
--    }
--    else
++
 +    switch (params->msg)
-     {
--        close(mixer);
--        num_aux = 6;
++    {
 +    case DRVM_INIT:
 +    case DRVM_EXIT:
 +    case DRVM_ENABLE:
@@ -1356,228 +3784,66 @@ index 431264faf31..1c56bacb493 100644
 +    default:
 +        *params->err = MMSYSERR_NOTENABLED;
 +        break;
-     }
--    return 0;
--}
- 
--static UINT aux_exit(void)
--{
--    TRACE("()\n");
--    return 0;
++    }
++
 +    return STATUS_SUCCESS;
- }
- 
--static UINT aux_get_devcaps(WORD dev_id, AUXCAPSW *caps, UINT size)
--{
--    int mixer, volume;
--    static const WCHAR ini[] = {'O','S','S',' ','A','u','x',' ','#','0',0};
--
--    TRACE("(%04X, %p, %u);\n", dev_id, caps, size);
--    if (caps == NULL) return MMSYSERR_NOTENABLED;
--    if (dev_id >= num_aux) return MMSYSERR_BADDEVICEID;
--    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
--    {
--        WARN("mixer device not available !\n");
--        return MMSYSERR_NOTENABLED;
--    }
--    if (ioctl(mixer, SOUND_MIXER_READ_LINE, &volume) == -1)
--    {
--        close(mixer);
--        WARN("unable to read mixer !\n");
--        return MMSYSERR_NOTENABLED;
--    }
--    close(mixer);
--    caps->wMid = 0xAA;
--    caps->wPid = 0x55 + dev_id;
--    caps->vDriverVersion = 0x0100;
--    memcpy(caps->szPname, ini, sizeof(ini));
--    caps->szPname[9] = '0' + dev_id; /* 6  at max */
--    caps->wTechnology = (dev_id == 2) ? AUXCAPS_CDAUDIO : AUXCAPS_AUXIN;
--    caps->wReserved1 = 0;
--    caps->dwSupport = AUXCAPS_VOLUME | AUXCAPS_LRVOLUME;
++}
++
 +/* MIDI: the OSS sequencer devices do not exist on Android. Report zero
 + * devices and keep every entry point well-behaved so winmm sees an empty
 + * but healthy MIDI world. */
- 
--    return MMSYSERR_NOERROR;
--}
--
--static UINT aux_get_volume(WORD dev_id, UINT *vol)
++
 +NTSTATUS oss_midi_release(void *args)
- {
--    int mixer, volume, left, right, cmd;
--
--    TRACE("(%04X, %p);\n", dev_id, vol);
--    if (vol == NULL) return MMSYSERR_NOTENABLED;
--    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
--    {
--        WARN("mixer device not available !\n");
--        return MMSYSERR_NOTENABLED;
--    }
--    switch(dev_id)
--    {
--    case 0:
--        TRACE("SOUND_MIXER_READ_PCM !\n");
--        cmd = SOUND_MIXER_READ_PCM;
--        break;
--    case 1:
--        TRACE("SOUND_MIXER_READ_SYNTH !\n");
--        cmd = SOUND_MIXER_READ_SYNTH;
--        break;
--    case 2:
--        TRACE("SOUND_MIXER_READ_CD !\n");
--        cmd = SOUND_MIXER_READ_CD;
--        break;
--    case 3:
--        TRACE("SOUND_MIXER_READ_LINE !\n");
--        cmd = SOUND_MIXER_READ_LINE;
--        break;
--    case 4:
--        TRACE("SOUND_MIXER_READ_MIC !\n");
--        cmd = SOUND_MIXER_READ_MIC;
--        break;
--    case 5:
--        TRACE("SOUND_MIXER_READ_VOLUME !\n");
--        cmd = SOUND_MIXER_READ_VOLUME;
--        break;
--    default:
--        WARN("invalid device id=%04X !\n", dev_id);
--        close(mixer);
--        return MMSYSERR_NOTENABLED;
--    }
--    if (ioctl(mixer, cmd, &volume) == -1)
--    {
--        WARN("unable to read mixer !\n");
--        close(mixer);
--        return MMSYSERR_NOTENABLED;
--    }
--    close(mixer);
--    left = LOBYTE(LOWORD(volume));
--    right = HIBYTE(LOWORD(volume));
--    TRACE("left=%d right=%d !\n", left, right);
--    *vol = MAKELONG((left * 0xFFFFL) / 100, (right * 0xFFFFL) / 100);
--    return MMSYSERR_NOERROR;
++{
 +    return STATUS_SUCCESS;
- }
- 
--static UINT aux_set_volume(WORD dev_id, UINT vol)
++}
++
 +NTSTATUS oss_midi_out_message(void *args)
- {
--    int mixer;
--    int volume, left, right;
--    int cmd;
--
--    TRACE("(%04X, %08X);\n", dev_id, vol);
--
--    left   = (LOWORD(vol) * 100) >> 16;
--    right  = (HIWORD(vol) * 100) >> 16;
--    volume = (right << 8) | left;
++{
 +    struct midi_out_message_params *params = args;
- 
--    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
--    {
--        WARN("mixer device not available !\n");
--        return MMSYSERR_NOTENABLED;
--    }
--
--    switch(dev_id)
++
 +    params->notify->send_notify = FALSE;
 +    switch (params->msg)
-     {
--    case 0:
--        TRACE("SOUND_MIXER_WRITE_PCM !\n");
--        cmd = SOUND_MIXER_WRITE_PCM;
--        break;
--    case 1:
--        TRACE("SOUND_MIXER_WRITE_SYNTH !\n");
--        cmd = SOUND_MIXER_WRITE_SYNTH;
--        break;
--    case 2:
--        TRACE("SOUND_MIXER_WRITE_CD !\n");
--        cmd = SOUND_MIXER_WRITE_CD;
--        break;
--    case 3:
--        TRACE("SOUND_MIXER_WRITE_LINE !\n");
--        cmd = SOUND_MIXER_WRITE_LINE;
--        break;
--    case 4:
--        TRACE("SOUND_MIXER_WRITE_MIC !\n");
--        cmd = SOUND_MIXER_WRITE_MIC;
++    {
 +    case DRVM_INIT:
 +    case DRVM_EXIT:
 +    case DRVM_ENABLE:
 +    case DRVM_DISABLE:
 +        *params->err = MMSYSERR_NOERROR;
-         break;
--    case 5:
--        TRACE("SOUND_MIXER_WRITE_VOLUME !\n");
--        cmd = SOUND_MIXER_WRITE_VOLUME;
++        break;
 +    case MODM_GETNUMDEVS:
 +        *params->err = 0;
-         break;
-     default:
--        WARN("invalid device id=%04X !\n", dev_id);
--        close(mixer);
--        return MMSYSERR_NOTENABLED;
--    }
--    if (ioctl(mixer, cmd, &volume) == -1)
--    {
--        WARN("unable to set mixer !\n");
--        close(mixer);
--        return MMSYSERR_NOTENABLED;
++        break;
++    default:
 +        *params->err = MMSYSERR_NOTENABLED;
 +        break;
-     }
--    close(mixer);
--    return MMSYSERR_NOERROR;
-+    return STATUS_SUCCESS;
- }
- 
--static NTSTATUS oss_aux_message(void *args)
-+NTSTATUS oss_midi_in_message(void *args)
- {
--    struct aux_message_params *params = args;
-+    struct midi_in_message_params *params = args;
- 
-+    params->notify->send_notify = FALSE;
-     switch (params->msg)
-     {
-     case DRVM_INIT:
--        *params->err = aux_init();
--        break;
-     case DRVM_EXIT:
--        *params->err = aux_exit();
--        break;
-     case DRVM_ENABLE:
-     case DRVM_DISABLE:
--        /* FIXME: Pretend this is supported */
--        *params->err = 0;
--        break;
--    case AUXDM_GETDEVCAPS:
--        *params->err = aux_get_devcaps(params->dev_id, (AUXCAPSW *)params->param_1, params->param_2);
-+        *params->err = MMSYSERR_NOERROR;
-         break;
--    case AUXDM_GETNUMDEVS:
--        TRACE("return %d;\n", num_aux);
--        *params->err = num_aux;
--        break;
--    case AUXDM_GETVOLUME:
--        *params->err = aux_get_volume(params->dev_id, (UINT *)params->param_1);
--        break;
--    case AUXDM_SETVOLUME:
--        *params->err = aux_set_volume(params->dev_id, params->param_1);
-+    case MIDM_GETNUMDEVS:
-+        *params->err = 0;
-         break;
-     default:
--        WARN("unknown message !\n");
--        *params->err = MMSYSERR_NOTSUPPORTED;
-+        *params->err = MMSYSERR_NOTENABLED;
-         break;
-     }
++    }
 +    return STATUS_SUCCESS;
 +}
- 
++
++NTSTATUS oss_midi_in_message(void *args)
++{
++    struct midi_in_message_params *params = args;
++
++    params->notify->send_notify = FALSE;
++    switch (params->msg)
++    {
++    case DRVM_INIT:
++    case DRVM_EXIT:
++    case DRVM_ENABLE:
++    case DRVM_DISABLE:
++        *params->err = MMSYSERR_NOERROR;
++        break;
++    case MIDM_GETNUMDEVS:
++        *params->err = 0;
++        break;
++    default:
++        *params->err = MMSYSERR_NOTENABLED;
++        break;
++    }
++    return STATUS_SUCCESS;
++}
++
 +NTSTATUS oss_midi_notify_wait(void *args)
 +{
 +    struct midi_notify_wait_params *params = args;
@@ -1585,13 +3851,499 @@ index 431264faf31..1c56bacb493 100644
 +    /* No devices ever notify; end the notify thread immediately. */
 +    params->notify->send_notify = FALSE;
 +    *params->quit = TRUE;
-     return STATUS_SUCCESS;
- }
- 
-@@ -2120,6 +2019,93 @@ static NTSTATUS oss_wow64_aux_message(void *args)
-     return oss_aux_message(&params);
- }
- 
++    return STATUS_SUCCESS;
++}
++
++const unixlib_entry_t __wine_unix_call_funcs[] =
++{
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_get_endpoint_ids,
++    oss_create_stream,
++    oss_release_stream,
++    oss_start,
++    oss_stop,
++    oss_reset,
++    oss_get_render_buffer,
++    oss_release_render_buffer,
++    oss_get_capture_buffer,
++    oss_release_capture_buffer,
++    oss_is_format_supported,
++    oss_not_implemented,
++    oss_get_mix_format,
++    oss_get_device_period,
++    oss_get_buffer_size,
++    oss_get_latency,
++    oss_get_current_padding,
++    oss_get_next_packet_size,
++    oss_get_frequency,
++    oss_get_position,
++    oss_set_volumes,
++    oss_set_event_handle,
++    oss_not_implemented,
++    oss_test_connect,
++    oss_is_started,
++    oss_get_prop_value,
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_midi_release,
++    oss_midi_out_message,
++    oss_midi_in_message,
++    oss_midi_notify_wait,
++    oss_aux_message,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
++
++#ifdef _WIN64
++
++typedef UINT PTR32;
++
++static NTSTATUS oss_wow64_process_attach(void *args)
++{
++    SYSTEM_BASIC_INFORMATION info;
++
++    NtQuerySystemInformation(SystemEmulationBasicInformation, &info, sizeof(info), NULL);
++    zero_bits = (ULONG_PTR)info.HighestUserAddress | 0x7fffffff;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_test_connect(void *args)
++{
++    struct
++    {
++        PTR32 name;
++        enum driver_priority priority;
++    } *params32 = args;
++    struct test_connect_params params =
++    {
++        .name = ULongToPtr(params32->name),
++    };
++    oss_test_connect(&params);
++    params32->priority = params.priority;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_endpoint_ids(void *args)
++{
++    struct
++    {
++        EDataFlow flow;
++        PTR32 endpoints;
++        unsigned int size;
++        HRESULT result;
++        unsigned int num;
++        unsigned int default_idx;
++    } *params32 = args;
++    struct get_endpoint_ids_params params =
++    {
++        .flow = params32->flow,
++        .endpoints = ULongToPtr(params32->endpoints),
++        .size = params32->size
++    };
++    oss_get_endpoint_ids(&params);
++    params32->size = params.size;
++    params32->result = params.result;
++    params32->num = params.num;
++    params32->default_idx = params.default_idx;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_create_stream(void *args)
++{
++    struct
++    {
++        PTR32 name;
++        PTR32 device;
++        EDataFlow flow;
++        AUDCLNT_SHAREMODE share;
++        UINT flags;
++        REFERENCE_TIME duration;
++        REFERENCE_TIME period;
++        PTR32 fmt;
++        HRESULT result;
++        PTR32 channel_count;
++        PTR32 stream;
++    } *params32 = args;
++    struct create_stream_params params =
++    {
++        .name = ULongToPtr(params32->name),
++        .device = ULongToPtr(params32->device),
++        .flow = params32->flow,
++        .share = params32->share,
++        .flags = params32->flags,
++        .duration = params32->duration,
++        .period = params32->period,
++        .fmt = ULongToPtr(params32->fmt),
++        .channel_count = ULongToPtr(params32->channel_count),
++        .stream = ULongToPtr(params32->stream)
++    };
++    oss_create_stream(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_release_stream(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++    } *params32 = args;
++    struct release_stream_params params =
++    {
++        .stream = params32->stream,
++    };
++    oss_release_stream(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_render_buffer(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        UINT32 frames;
++        HRESULT result;
++        PTR32 data;
++    } *params32 = args;
++    BYTE *data = NULL;
++    struct get_render_buffer_params params =
++    {
++        .stream = params32->stream,
++        .frames = params32->frames,
++        .data = &data
++    };
++    oss_get_render_buffer(&params);
++    params32->result = params.result;
++    *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_capture_buffer(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++        PTR32 data;
++        PTR32 frames;
++        PTR32 flags;
++        PTR32 devpos;
++        PTR32 qpcpos;
++    } *params32 = args;
++    BYTE *data = NULL;
++    struct get_capture_buffer_params params =
++    {
++        .stream = params32->stream,
++        .data = &data,
++        .frames = ULongToPtr(params32->frames),
++        .flags = ULongToPtr(params32->flags),
++        .devpos = ULongToPtr(params32->devpos),
++        .qpcpos = ULongToPtr(params32->qpcpos)
++    };
++    oss_get_capture_buffer(&params);
++    params32->result = params.result;
++    *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
++    return STATUS_SUCCESS;
++};
++
++static NTSTATUS oss_wow64_is_format_supported(void *args)
++{
++    struct
++    {
++        PTR32 device;
++        EDataFlow flow;
++        AUDCLNT_SHAREMODE share;
++        PTR32 fmt_in;
++        HRESULT result;
++    } *params32 = args;
++    struct is_format_supported_params params =
++    {
++        .device = ULongToPtr(params32->device),
++        .flow = params32->flow,
++        .share = params32->share,
++        .fmt_in = ULongToPtr(params32->fmt_in),
++    };
++    oss_is_format_supported(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_mix_format(void *args)
++{
++    struct
++    {
++        PTR32 device;
++        EDataFlow flow;
++        PTR32 fmt;
++        HRESULT result;
++    } *params32 = args;
++    struct get_mix_format_params params =
++    {
++        .device = ULongToPtr(params32->device),
++        .flow = params32->flow,
++        .fmt = ULongToPtr(params32->fmt)
++    };
++    oss_get_mix_format(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_device_period(void *args)
++{
++    struct
++    {
++        PTR32 device;
++        EDataFlow flow;
++        HRESULT result;
++        PTR32 def_period;
++        PTR32 min_period;
++    } *params32 = args;
++    struct get_device_period_params params =
++    {
++        .device = ULongToPtr(params32->device),
++        .flow = params32->flow,
++        .def_period = ULongToPtr(params32->def_period),
++        .min_period = ULongToPtr(params32->min_period),
++    };
++    oss_get_device_period(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_buffer_size(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++        PTR32 frames;
++    } *params32 = args;
++    struct get_buffer_size_params params =
++    {
++        .stream = params32->stream,
++        .frames = ULongToPtr(params32->frames)
++    };
++    oss_get_buffer_size(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_latency(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++        PTR32 latency;
++    } *params32 = args;
++    struct get_latency_params params =
++    {
++        .stream = params32->stream,
++        .latency = ULongToPtr(params32->latency)
++    };
++    oss_get_latency(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_current_padding(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++        PTR32 padding;
++    } *params32 = args;
++    struct get_current_padding_params params =
++    {
++        .stream = params32->stream,
++        .padding = ULongToPtr(params32->padding)
++    };
++    oss_get_current_padding(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_next_packet_size(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++        PTR32 frames;
++    } *params32 = args;
++    struct get_next_packet_size_params params =
++    {
++        .stream = params32->stream,
++        .frames = ULongToPtr(params32->frames)
++    };
++    oss_get_next_packet_size(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_frequency(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        HRESULT result;
++        PTR32 freq;
++    } *params32 = args;
++    struct get_frequency_params params =
++    {
++        .stream = params32->stream,
++        .freq = ULongToPtr(params32->freq)
++    };
++    oss_get_frequency(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_position(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        BOOL device;
++        HRESULT result;
++        PTR32 pos;
++        PTR32 qpctime;
++    } *params32 = args;
++    struct get_position_params params =
++    {
++        .stream = params32->stream,
++        .device = params32->device,
++        .pos = ULongToPtr(params32->pos),
++        .qpctime = ULongToPtr(params32->qpctime)
++    };
++    oss_get_position(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_set_volumes(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        float master_volume;
++        PTR32 volumes;
++        PTR32 session_volumes;
++    } *params32 = args;
++    struct set_volumes_params params =
++    {
++        .stream = params32->stream,
++        .master_volume = params32->master_volume,
++        .volumes = ULongToPtr(params32->volumes),
++        .session_volumes = ULongToPtr(params32->session_volumes),
++    };
++    return oss_set_volumes(&params);
++}
++
++static NTSTATUS oss_wow64_set_event_handle(void *args)
++{
++    struct
++    {
++        stream_handle stream;
++        PTR32 event;
++        HRESULT result;
++    } *params32 = args;
++    struct set_event_handle_params params =
++    {
++        .stream = params32->stream,
++        .event = ULongToHandle(params32->event)
++    };
++
++    oss_set_event_handle(&params);
++    params32->result = params.result;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_get_prop_value(void *args)
++{
++    struct propvariant32
++    {
++        WORD vt;
++        WORD pad1, pad2, pad3;
++        union
++        {
++            ULONG ulVal;
++            PTR32 ptr;
++            ULARGE_INTEGER uhVal;
++        };
++    } *value32;
++    struct
++    {
++        PTR32 device;
++        EDataFlow flow;
++        PTR32 guid;
++        PTR32 prop;
++        HRESULT result;
++        PTR32 value;
++        PTR32 buffer; /* caller allocated buffer to hold value's strings */
++        PTR32 buffer_size;
++    } *params32 = args;
++    PROPVARIANT value;
++    struct get_prop_value_params params =
++    {
++        .device = ULongToPtr(params32->device),
++        .flow = params32->flow,
++        .guid = ULongToPtr(params32->guid),
++        .prop = ULongToPtr(params32->prop),
++        .value = &value,
++        .buffer = ULongToPtr(params32->buffer),
++        .buffer_size = ULongToPtr(params32->buffer_size)
++    };
++    oss_get_prop_value(&params);
++    params32->result = params.result;
++    if (SUCCEEDED(params.result))
++    {
++        value32 = UlongToPtr(params32->value);
++        value32->vt = value.vt;
++        switch (value.vt)
++        {
++        case VT_UI4:
++            value32->ulVal = value.ulVal;
++            break;
++        case VT_LPWSTR:
++            value32->ptr = params32->buffer;
++            break;
++        default:
++            FIXME("Unhandled vt %04x\n", value.vt);
++        }
++    }
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_wow64_aux_message(void *args)
++{
++    struct
++    {
++        UINT dev_id;
++        UINT msg;
++        UINT user;
++        UINT param_1;
++        UINT param_2;
++        PTR32 err;
++    } *params32 = args;
++    struct aux_message_params params =
++    {
++        .dev_id = params32->dev_id,
++        .msg = params32->msg,
++        .user = params32->user,
++        .param_1 = params32->param_1,
++        .param_2 = params32->param_2,
++        .err = ULongToPtr(params32->err),
++    };
++    return oss_aux_message(&params);
++}
++
 +struct notify_context32
 +{
 +    BOOL send_notify;
@@ -1679,6 +4431,47 @@ index 431264faf31..1c56bacb493 100644
 +    return oss_midi_notify_wait(&params);
 +}
 +
- const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
- {
-     oss_wow64_process_attach,
++const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++{
++    oss_wow64_process_attach,
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_wow64_get_endpoint_ids,
++    oss_wow64_create_stream,
++    oss_wow64_release_stream,
++    oss_start,
++    oss_stop,
++    oss_reset,
++    oss_wow64_get_render_buffer,
++    oss_release_render_buffer,
++    oss_wow64_get_capture_buffer,
++    oss_release_capture_buffer,
++    oss_wow64_is_format_supported,
++    oss_not_implemented,
++    oss_wow64_get_mix_format,
++    oss_wow64_get_device_period,
++    oss_wow64_get_buffer_size,
++    oss_wow64_get_latency,
++    oss_wow64_get_current_padding,
++    oss_wow64_get_next_packet_size,
++    oss_wow64_get_frequency,
++    oss_wow64_get_position,
++    oss_wow64_set_volumes,
++    oss_wow64_set_event_handle,
++    oss_not_implemented,
++    oss_wow64_test_connect,
++    oss_is_started,
++    oss_wow64_get_prop_value,
++    oss_not_implemented,
++    oss_not_implemented,
++    oss_midi_release,
++    oss_wow64_midi_out_message,
++    oss_wow64_midi_in_message,
++    oss_wow64_midi_notify_wait,
++    oss_wow64_aux_message,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == funcs_count);
++
++#endif /* _WIN64 */

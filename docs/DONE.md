@@ -51,11 +51,33 @@ been watched working on the device.
   zero. Confirmed by ear: the buzz is gone. The cost is honest — track latency
   went from 43–48 ms to 80–85 ms.
 
-  **The driver now asks for `AAUDIO_SHARING_MODE_EXCLUSIVE` first.** This device
-  refuses it, so the measurements above are the shared path; where it is granted
-  the burst is ~6x smaller and the floor becomes inert, which would put latency
-  *below* where it started rather than above. One `ERR` per stream says which
-  path was granted, because guessing that is what cost the two rebuilds.
+  **The driver now asks for `AAUDIO_SHARING_MODE_EXCLUSIVE` first**, and it is
+  refused on this device. The measurements above are therefore the shared path.
+
+  *A theory that was wrong, kept because it was expensive.* The HAL's
+  `mmap_no_irq_out` port declares one profile — `AUDIO_FORMAT_PCM_16_BIT`, 48000,
+  stereo — and an AudioFlinger dump appeared to show the track as `PCM_FLOAT`, so
+  a float-to-int16 conversion was written to unlock the low-latency path. The
+  stream then opened as `format 1`, `AAUDIO_FORMAT_PCM_I16`: the guest had been
+  sending 16-bit all along, the conversion branch never ran, **and MMAP was
+  refused anyway**. Why it is refused is not known, and no third explanation has
+  been invented for it. The conversion stays because it is correct and inert for
+  a 16-bit guest; the `ERR` line now prints the format so the next person reads
+  it rather than deduces it.
+
+  **The device buffer grows on measured underruns**, `AAudioStream_getXRunCount`,
+  a burst at a time up to capacity, never shrinking — Android's own sizing loop,
+  in place of a one-shot jump to two bursts that charged every stream a burst of
+  latency for a cushion most never need. It has not fired once on this device,
+  which is the right outcome for insurance.
+
+  *Final, measured on the same session:* **288 underrun frames per ten seconds,
+  0.06% of the stream**, from 54,240 and 11%. The last of that came from
+  somewhere unpredicted: with the ring floored at 2604 the create-time device
+  buffer stops being clamped by the client and lands on 1736 immediately, so the
+  floor paid twice. Latency sits at 81 ms against the 43-48 ms it started at, and
+  giving some of that back by floor-of-two-bursts plus the xrun loop is the next
+  thing to try rather than a thing that has been tried.
 
 - [x] **A gamepad reaches the guest as a gamepad, not as keystrokes.**
   `patches/wine/0016` adds a `winebus` backend fed by the app over a unix socket.
