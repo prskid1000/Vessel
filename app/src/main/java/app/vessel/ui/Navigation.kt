@@ -30,6 +30,8 @@ import app.vessel.ui.components.VOutcomeDialog
 import app.vessel.ui.components.VOutcomeTone
 import app.vessel.ui.screens.FilesScreen
 import app.vessel.ui.screens.HomeScreen
+import app.vessel.ui.screens.InputEditorActions
+import app.vessel.ui.screens.InputEditorState
 import app.vessel.ui.screens.LicenceTextScreen
 import app.vessel.ui.screens.LicencesScreen
 import app.vessel.ui.screens.SessionDesktop
@@ -291,13 +293,51 @@ fun VesselApp(
             // for the same reason `frameRate` is: the panel takes a value, so only
             // the rows that light are invalidated rather than the desktop.
             val heldControls by session.heldControls.collectAsStateWithLifecycle()
+            val inputProfiles by session.inputProfileList
+                .collectAsStateWithLifecycle(emptyList())
+            val activeInputProfileId by session.activeInputProfileId
+                .collectAsStateWithLifecycle(null)
+            val touchVisible by session.touchControlsVisible.collectAsStateWithLifecycle()
+            val touchEditing by session.touchEditing.collectAsStateWithLifecycle()
+            val selectedTouchControl by session.selectedTouchControl
+                .collectAsStateWithLifecycle()
+            val inputNotice by session.inputNotice.collectAsStateWithLifecycle()
             SessionDesktop(
                 state = state,
                 surface = surface,
                 pointerMode = pointerMode,
-                inputProfile = inputProfile,
-                heldControls = heldControls,
-                onInputProfile = session::setInputProfile,
+                input = InputEditorState(
+                    profile = inputProfile,
+                    profiles = inputProfiles,
+                    activeProfileId = activeInputProfileId,
+                    // A container naming a profile that has been deleted resolves
+                    // to the default and is not rewritten, so the two disagree —
+                    // which is exactly the case worth saying out loud.
+                    missingProfile = activeInputProfileId != null &&
+                        inputProfiles.none { it.id == activeInputProfileId },
+                    containerName = state.containerName,
+                    guest = state.geometry,
+                    live = true,
+                    held = heldControls,
+                    touchVisible = touchVisible,
+                    editing = touchEditing,
+                    selected = selectedTouchControl,
+                    notice = inputNotice,
+                ),
+                inputActions = InputEditorActions(
+                    onProfile = session::setInputProfile,
+                    onPickProfile = session::pickInputProfile,
+                    onRename = { session.setInputProfile(inputProfile.copy(name = it)) },
+                    onNewProfile = session::newInputProfile,
+                    onDuplicate = session::duplicateInputProfile,
+                    onDelete = session::deleteInputProfile,
+                    onImportText = session::importInputProfile,
+                    onExportText = { session.exportInputProfile(it) },
+                    onTouchVisible = session::setTouchControlsVisible,
+                    onEditing = session::setTouchEditing,
+                    onSelect = session::selectTouchControl,
+                    onDismissNotice = session::dismissInputNotice,
+                ),
                 windows = windows,
                 frameRate = frameRate,
                 shortcuts = shortcuts,

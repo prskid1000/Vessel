@@ -97,6 +97,16 @@ fun VSheet(
      * way.
      */
     header: (@Composable ColumnScope.() -> Unit)? = null,
+    /**
+     * Whether the body scrolls, which almost every sheet wants and one does not.
+     *
+     * The Input takeover brings its own scrolling — a tabbed editor with a lazy
+     * list under each tab — and a scrolling column around a scrolling column is
+     * the measurement error where the inner one is given infinite height and
+     * throws. False hands the body the sheet's real height instead and lets it
+     * decide what moves.
+     */
+    scrollable: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     BackHandler(onBack = onDismiss)
@@ -229,7 +239,15 @@ fun VSheet(
                 // column an unweighted scrolling child measures at its content's
                 // height and pushes the header off the top instead of scrolling
                 // underneath it.
-                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                Modifier
+                    .weight(1f, fill = !scrollable)
+                    .then(
+                        if (scrollable) {
+                            Modifier.verticalScroll(rememberScrollState())
+                        } else {
+                            Modifier
+                        },
+                    ),
                 verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
                 content = content,
             )
@@ -306,6 +324,14 @@ fun VSheetRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    /**
+     * A chip on the right, for a route whose destination has a current *value*.
+     *
+     * Input is the case: the row is about bindings and the chip is which named
+     * arrangement of them this container starts on. Putting that in the title
+     * instead reads as two settings joined by a dot.
+     */
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Row(
@@ -336,6 +362,7 @@ fun VSheetRow(
                 )
             }
         }
+        trailing?.invoke()
     }
 }
 

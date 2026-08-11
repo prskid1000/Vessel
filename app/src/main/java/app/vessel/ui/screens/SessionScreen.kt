@@ -384,12 +384,15 @@ fun SessionDesktop(
     onTogglePointerMode: () -> Unit,
     onShowKeyboard: () -> Unit,
     onLaunchApp: (AppShortcut) -> Unit,
-    /** The bindings this session is running, for the Input panel. */
-    inputProfile: InputProfile = InputProfile.Default,
-    /** Which pad controls are down right now - the panel's live-press rows. */
-    heldControls: Set<GamepadControl> = emptySet(),
-    /** Persist and push a change. There is no draft: see [InputPanel]. */
-    onInputProfile: (InputProfile) -> Unit = {},
+    /**
+     * Everything the Input panel draws, already resolved.
+     *
+     * A whole state object rather than the four values this used to take: the
+     * panel grew from one tab to three, and the alternative was fourteen
+     * parameters on this function whose only reader is one composable.
+     */
+    input: InputEditorState = InputEditorState(profile = InputProfile.Default),
+    inputActions: InputEditorActions = InputEditorActions(),
     onFocusWindow: (Int) -> Unit,
     onMinimizeWindow: (Int) -> Unit,
     onCloseWindow: (Int) -> Unit,
@@ -429,6 +432,17 @@ fun SessionDesktop(
      * that opened it instead of on top of it.
      */
     var inputOpen by remember { mutableStateOf(false) }
+
+    /** Which of the panel's three tabs is showing. Here, so closing it remembers. */
+    var inputTab by remember { mutableStateOf(InputTab.PAD) }
+
+    // **Laying the overlay out takes the rail away, and that is deliberate.** The
+    // rail plus the panel is 820 dp of a 927 dp window, and the controls being
+    // placed are underneath all of it. Edit mode collapses to the rail's own
+    // column and the rail itself goes, which leaves two thirds of the screen to
+    // aim at. Leaving the panel is how you get both back.
+    val laying = inputOpen && input.editing
+    LaunchedEffect(inputOpen) { if (!inputOpen) inputActions.onEditing(false) }
 
     /** The window whose actions are showing, or null. Held here, not in the bar. */
     var windowMenu by remember { mutableStateOf<GuestWindow?>(null) }
@@ -505,7 +519,7 @@ fun SessionDesktop(
 
         Row(Modifier.fillMaxHeight(), verticalAlignment = Alignment.CenterVertically) {
             AnimatedVisibility(
-                visible = railOpen,
+                visible = railOpen && !laying,
                 enter = expandHorizontally(tween(Vessel.metrics.durationStandardMs)),
                 exit = shrinkHorizontally(tween(Vessel.metrics.durationStandardMs)),
             ) {
@@ -533,14 +547,15 @@ fun SessionDesktop(
                 exit = shrinkHorizontally(tween(Vessel.metrics.durationStandardMs)),
             ) {
                 InputPanel(
-                    profile = inputProfile,
-                    held = heldControls,
-                    onProfile = onInputProfile,
+                    state = input,
+                    actions = inputActions,
+                    tab = inputTab,
+                    onTab = { inputTab = it },
                     onClose = { inputOpen = false },
                 )
             }
 
-            if (!railOpen) {
+            if (!railOpen && !laying) {
                 // The edge handle. A full-height target, so it is reachable
                 // without looking on a screen the user is not looking at.
                 Box(

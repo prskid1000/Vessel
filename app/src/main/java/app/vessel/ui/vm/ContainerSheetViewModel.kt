@@ -5,7 +5,10 @@ import androidx.lifecycle.viewModelScope
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.ContainerProfile
+import app.vessel.core.DisplayGeometry
 import app.vessel.core.SessionLogLimits
+import app.vessel.core.DisplayParams
+import app.vessel.core.parseGeometry
 import kotlinx.coroutines.flow.first
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamType
@@ -14,7 +17,9 @@ import app.vessel.core.params.ResolvedParam
 import app.vessel.core.params.resolve
 import app.vessel.data.AndroidDrives
 import app.vessel.data.ContainerRepository
+import app.vessel.data.ImportResult
 import app.vessel.data.InputProfileRepository
+import app.vessel.data.InputProfileTransfer
 import app.vessel.data.InstalledComponents
 import app.vessel.input.InputProfile
 import app.vessel.data.ParamManifestStore
@@ -26,6 +31,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import java.util.UUID
 import javax.inject.Inject
 
 /** The id the sheet is given when there is no container yet. */
@@ -90,6 +97,17 @@ data class ContainerSheetUiState(
      */
     val canMapStorage: Boolean = true,
     val input: InputUiState = InputUiState(),
+    /**
+     * The desktop size this container will come up at, for the Input screen's
+     * subtitle.
+     *
+     * Resolved from `display.resolution` rather than stored, because `native`
+     * only becomes a number once something has measured the panel — and null is
+     * the honest answer for a container that has never been launched.
+     */
+    val guestGeometry: DisplayGeometry? = null,
+    /** Whether this container draws the touch overlay. See `ContainerInput`. */
+    val touchVisible: Boolean = true,
 )
 
 /**
@@ -106,15 +124,22 @@ data class InputUiState(
     val profileId: String? = null,
     val profileName: String = "",
     val missing: Boolean = false,
-    val choices: List<InputChoice> = emptyList(),
-)
-
-/** One row in the profile picker. [id] is null for the built-in default. */
-data class InputChoice(
-    val id: String?,
-    val name: String,
-    /** `20 bound · 6 on the overlay`. */
-    val note: String,
+    /** The resolved profile, which is what the cold editor edits. */
+    val profile: InputProfile = InputProfile.Default,
+    /** Every stored profile, for the Profiles tab. The built-in default is not one. */
+    val profiles: List<InputProfile> = emptyList(),
+    /** How many controls the resolved profile puts on the overlay. */
+    val overlayCount: Int = 0,
+    /** An import that was refused, said once. */
+    val notice: String? = null,
+    /**
+     * Which overlay control the cold editor has selected.
+     *
+     * Here rather than on the display seam, which is where the *session's*
+     * selection lives: nothing is running, so there is no overlay to select on
+     * and no second writer to keep in step.
+     */
+    val selectedTouchControl: String? = null,
 )
 
 /**
@@ -177,6 +202,7 @@ class ContainerSheetViewModel @Inject constructor(
     private val sessionLogs: SessionLogStore,
     private val drives: AndroidDrives,
     private val inputProfiles: InputProfileRepository,
+    private val json: Json,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ContainerSheetUiState())
@@ -258,6 +284,102 @@ class ContainerSheetViewModel @Inject constructor(
         refreshInput()
     }
 
+    /**
+     * Store an edit made in the cold editor.
+     *
+     * **Immediate, and not held in the draft like every other field on this
+     * sheet.** A profile lives in its own document and is shared between
+     * containers, so it is not this container's to hold: deferring it to Save
+     * would mean a binding change vanishing when the sheet is swiped away, and
+     * committing it would mean this container's Save writing a second document
+     * that another container is also using. The same rule Delete and *Copy
+     * diagnostics to* already follow.
+     *
+     * **The first edit on the built-in default adopts a copy.** The default is a
+     * constant and is never written to disk, which is what keeps an untouched
+     * container's bytes unchanged — so editing it makes a real profile, points
+     * *this* container at it, and leaves every other container on the default
+     * exactly as it was.
+     */
+    fun saveInputProfile(next: InputProfile) {
+        val current = draft ?: return
+        viewModelScope.launch {
+            var profile = next
+            if (profile.isBuiltInDefault) {
+                profile = profile.copy(
+                    id = UUID.randomUUID().toString(),
+                    name = inputProfiles.nextName(
+                        profile.name,
+                        inputProfiles.profiles.first().map { it.name },
+                    ),
+                )
+                draft = current.copy(input = current.input.copy(profileId = profile.id))
+            }
+            inputProfiles.save(profile)
+            refreshInput()
+        }
+    }
+
+    /** A copy of what this container is on, and this container moves to it. */
+    fun newInputProfile() {
+        viewModelScope.launch {
+            val copy = inputProfiles.duplicate(_state.value.input.profile)
+            setInputProfile(copy.id)
+        }
+    }
+
+    fun duplicateInputProfile(profile: InputProfile) {
+        viewModelScope.launch {
+            inputProfiles.duplicate(profile)
+            refreshInput()
+        }
+    }
+
+    /**
+     * Delete a profile, and leave every container's pointer at it alone.
+     *
+     * A stale id resolves to the built-in default on the next launch and the
+     * sheet says so in words; hunting the container document to clear pointers
+     * would make deleting a profile a write to the *other* file, which is the
+     * coupling the two documents exist to avoid. This container's own draft moves
+     * to the default only because it is the one on screen.
+     */
+    fun deleteInputProfile(profile: InputProfile) {
+        if (profile.isBuiltInDefault) return
+        viewModelScope.launch {
+            inputProfiles.delete(profile.id)
+            if (draft?.input?.profileId == profile.id) setInputProfile(null) else refreshInput()
+        }
+    }
+
+    fun exportInputProfile(profile: InputProfile): String =
+        InputProfileTransfer.export(json, profile)
+
+    fun importInputProfile(text: String) {
+        viewModelScope.launch {
+            if (text.isBlank()) {
+                _state.update { it.copy(input = it.input.copy(notice = "That file could not be read.")) }
+                return@launch
+            }
+            val taken = inputProfiles.profiles.first().map { it.name }
+            when (val result = InputProfileTransfer.import(json, text, taken)) {
+                is ImportResult.Refused ->
+                    _state.update { it.copy(input = it.input.copy(notice = result.reason)) }
+
+                is ImportResult.Ok -> {
+                    inputProfiles.save(result.profile)
+                    setInputProfile(result.profile.id)
+                }
+            }
+        }
+    }
+
+    fun dismissInputNotice() =
+        _state.update { it.copy(input = it.input.copy(notice = null)) }
+
+    fun selectTouchControl(id: String?) =
+        _state.update { it.copy(input = it.input.copy(selectedTouchControl = id)) }
+
     private fun refreshInput() {
         val current = draft ?: return
         viewModelScope.launch {
@@ -265,26 +387,21 @@ class ContainerSheetViewModel @Inject constructor(
             val wanted = current.input.profileId
             val found = stored.firstOrNull { it.id == wanted }
             val resolved = found ?: InputProfile.Default
+            val geometry = (current.params[DisplayParams.RESOLUTION] as? ParamValue.Text)
+                ?.value
+                ?.takeIf { text -> text.contains('x', ignoreCase = true) }
+                ?.let { text -> runCatching { parseGeometry(text) }.getOrNull() }
             _state.update {
                 it.copy(
-                    input = InputUiState(
+                    guestGeometry = geometry,
+                    touchVisible = current.input.touchVisible,
+                    input = it.input.copy(
                         profileId = wanted,
                         profileName = resolved.name,
                         missing = wanted != null && found == null,
-                        choices = listOf(
-                            InputChoice(
-                                id = null,
-                                name = InputProfile.Default.name,
-                                note = "built in · ${InputProfile.Default.boundCount} bound",
-                            ),
-                        ) + stored.map { profile ->
-                            InputChoice(
-                                id = profile.id,
-                                name = profile.name,
-                                note = "${profile.boundCount} bound · " +
-                                    "${profile.touch.controls.size} on the overlay",
-                            )
-                        },
+                        profile = resolved,
+                        profiles = stored,
+                        overlayCount = resolved.touch.controls.size,
                     ),
                 )
             }

@@ -42,6 +42,7 @@ import app.vessel.ui.components.VComponentReadout
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VDropdownField
+import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
 import app.vessel.ui.components.VRule
@@ -107,7 +108,20 @@ fun ContainerSheet(
         onDelete = viewModel::delete,
         onOpenLogs = { onOpenLogs(state.containerId) },
         onDiagnostics = viewModel::setDiagnostics,
-        onInputProfile = viewModel::setInputProfile,
+        inputActions = InputEditorActions(
+            onProfile = viewModel::saveInputProfile,
+            onPickProfile = viewModel::setInputProfile,
+            onRename = { name ->
+                viewModel.saveInputProfile(viewModel.state.value.input.profile.copy(name = name))
+            },
+            onNewProfile = viewModel::newInputProfile,
+            onDuplicate = viewModel::duplicateInputProfile,
+            onDelete = viewModel::deleteInputProfile,
+            onImportText = viewModel::importInputProfile,
+            onExportText = { viewModel.exportInputProfile(it) },
+            onSelect = { viewModel.selectTouchControl(it) },
+            onDismissNotice = viewModel::dismissInputNotice,
+        ),
         onDeleteLogs = viewModel::deleteLogs,
         onCopyDiagnostics = viewModel::copyDiagnosticsTo,
         onGrantStorage = {
@@ -133,7 +147,7 @@ private fun ContainerSheetContent(
     onDelete: () -> Unit,
     onOpenLogs: () -> Unit,
     onDiagnostics: (ContainerDiagnostics) -> Unit,
-    onInputProfile: (String?) -> Unit,
+    inputActions: InputEditorActions,
     onDeleteLogs: () -> Unit,
     onCopyDiagnostics: (String) -> Unit,
     onGrantStorage: () -> Unit,
@@ -155,14 +169,36 @@ private fun ContainerSheetContent(
      */
     var inputOpen by remember { mutableStateOf(false) }
 
+    /** Which of the editor's three tabs is showing, kept across a takeover. */
+    var inputTab by remember { mutableStateOf(InputTab.PAD) }
+
     // Back closes Diagnostics before it closes the sheet. Registered inside
     // VSheet's own handler, so it wins while it is enabled — the innermost
     // enabled callback is the one the dispatcher runs.
     BackHandler(enabled = diagnosticsOpen) { diagnosticsOpen = false }
     BackHandler(enabled = inputOpen) { inputOpen = false }
 
+    val editorState = InputEditorState(
+        profile = state.input.profile,
+        profiles = state.input.profiles,
+        activeProfileId = state.input.profileId,
+        missingProfile = state.input.missing,
+        containerName = state.name,
+        guest = state.guestGeometry,
+        // Cold: the diagram cannot light up, the overlay is a preview, and there
+        // is no session for a change to take effect in.
+        live = false,
+        touchVisible = state.touchVisible,
+        selected = state.input.selectedTouchControl,
+        notice = state.input.notice,
+    )
+
     VSheet(
         onDismiss = onDismiss,
+        // The editor brings its own scrolling — a tabbed body with a lazy list
+        // under each tab — and a scroll inside a scroll measures the inner one
+        // with infinite height.
+        scrollable = !inputOpen,
         header = {
             if (diagnosticsOpen) {
                 DiagnosticsHeader(
@@ -170,11 +206,16 @@ private fun ContainerSheetContent(
                     onCollapse = { diagnosticsOpen = false },
                 )
             } else if (inputOpen) {
-                VSheetHeader(
-                    title = "Input",
-                    subtitle = state.name.ifBlank { "Container" },
-                    trailing = {
-                        VButton("Done", { inputOpen = false }, style = VButtonStyle.Secondary)
+                InputEditorHeader(
+                    state = editorState,
+                    actions = inputActions,
+                    leading = {
+                        VIconAction(
+                            icon = VIcons.ArrowLeft,
+                            contentDescription = "Back to the container's settings",
+                            onClick = { inputOpen = false },
+                            style = VButtonStyle.Ghost,
+                        )
                     },
                 )
             } else {
@@ -216,7 +257,12 @@ private fun ContainerSheetContent(
             return@VSheet
         }
         if (inputOpen) {
-            InputProfilePanel(state.input, onInputProfile)
+            InputEditor(
+                state = editorState,
+                actions = inputActions,
+                tab = inputTab,
+                onTab = { inputTab = it },
+            )
             return@VSheet
         }
         when {
@@ -282,14 +328,20 @@ private fun ContainerSheetContent(
                 VRule(verticalMargin = Vessel.metrics.s6)
                 VSheetRow(
                     icon = VIcons.Gamepad,
-                    title = "Input · ${state.input.profileName}",
+                    title = "Input",
                     help = if (state.input.missing) {
                         "The profile this container named has been deleted, so it " +
                             "starts on the default."
                     } else {
-                        "Which pad bindings and touch overlay this container starts with."
+                        "Pad bindings and the touch overlay. " +
+                            "${state.input.overlayCount} controls on the overlay."
                     },
                     onClick = { inputOpen = true },
+                    // The profile's name is a chip rather than part of the title:
+                    // the row is about input and the chip is which arrangement of
+                    // it, which is the same shape every value-carrying row in this
+                    // product takes.
+                    trailing = { BindingChip(state.input.profileName, bound = true) },
                 )
 
                 // Nothing below this line changes a setting: one destructive
@@ -388,66 +440,6 @@ private fun ParamGroup(group: EditorGroup, onParam: (String, ParamValue) -> Unit
             }
         }
     }
-}
-
-/**
- * Which profile this container starts with.
- *
- * **The picker and nothing else, and that is deliberate for now.** Editing a
- * binding is a question about the game that is running — whether `R2` should be
- * left-click or `Space` is not knowable from a sheet — so the table itself is
- * edited from the session rail, over the running desktop. What belongs here is
- * the one part that is genuinely a property of the container: which table it
- * starts on.
- */
-@Composable
-private fun InputProfilePanel(state: InputUiState, onPick: (String?) -> Unit) {
-    if (state.missing) {
-        VCaution(
-            "This container names a profile that has been deleted. It starts on the " +
-                "default until something else is chosen — nothing was rewritten, so " +
-                "restoring the profile restores the choice.",
-        )
-    }
-    state.choices.forEach { choice ->
-        val selected = choice.id == state.profileId
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clickable(onClickLabel = choice.name) { onPick(choice.id) }
-                .heightIn(min = Vessel.metrics.touchTarget)
-                .padding(vertical = Vessel.metrics.s6),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // A check on the chosen one rather than a radio ring: the sheet has no
-            // other radio anywhere, and a tick is the mark the rest of the product
-            // already uses for "this is the one".
-            Icon(
-                VIcons.Check,
-                contentDescription = null,
-                Modifier
-                    .size(Vessel.metrics.iconMd)
-                    .alpha(if (selected) 1f else 0f),
-                tint = Vessel.colors.accent,
-            )
-            Column(
-                Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
-            ) {
-                Text(choice.name, style = Vessel.type.body)
-                Text(choice.note, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
-            }
-        }
-    }
-    Text(
-        "A profile belongs to no container until one selects it, and several " +
-            "containers can share one. The default is what a container gets when it " +
-            "has never been given anything, and it is never written to disk.",
-        style = Vessel.type.bodySmall,
-        color = Vessel.colors.textMuted,
-        modifier = Modifier.padding(top = Vessel.metrics.s6),
-    )
 }
 
 /** A short closed choice, which is what can sit in half a sheet's width. */
@@ -642,7 +634,7 @@ private fun ContainerSheetPreview() {
             onDelete = {},
             onOpenLogs = {},
             onDiagnostics = {},
-            onInputProfile = {},
+            inputActions = InputEditorActions(),
             onDeleteLogs = {},
             onCopyDiagnostics = {},
             onGrantStorage = {},

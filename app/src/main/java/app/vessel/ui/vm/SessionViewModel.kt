@@ -8,7 +8,9 @@ import app.vessel.core.DisplayGeometry
 import app.vessel.core.FrameRate
 import app.vessel.core.SessionDisplayServer
 import app.vessel.data.ContainerRepository
+import app.vessel.data.ImportResult
 import app.vessel.data.InputProfileRepository
+import app.vessel.data.InputProfileTransfer
 import app.vessel.data.SessionMetricsRecorder
 import app.vessel.data.SessionMetricsState
 import app.vessel.data.SessionPhase
@@ -33,6 +35,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 import java.util.UUID
 import javax.inject.Inject
 
@@ -65,12 +68,14 @@ class SessionViewModel @Inject constructor(
     private val display: SessionDisplayServer,
     private val shell: ShellHost,
     private val inputProfiles: InputProfileRepository,
+    private val json: Json,
     registry: AppRegistry,
     recorder: SessionMetricsRecorder,
 ) : ViewModel() {
 
     init {
         awaitPendingProgram()
+        collectTouchLayoutEdits()
     }
 
     /** The taskbar's list of guest windows. Empty while nothing is running. */
@@ -248,6 +253,149 @@ class SessionViewModel @Inject constructor(
             }
             inputProfiles.save(profile)
             display.setInputProfile(profile)
+        }
+    }
+
+    // — the overlay and the profile list -----------------------------------------
+
+    /** Every stored profile, for the panel's Profiles tab. */
+    val inputProfileList: Flow<List<InputProfile>> = inputProfiles.profiles
+
+    /**
+     * Which profile the running container points at, or null for the built-in
+     * default.
+     *
+     * Read from the container rather than from [inputProfile], because the two
+     * answer different questions: the seam says what the session is *running*,
+     * and this says what the container will start on next time. They are the same
+     * until a profile is switched mid-session, which is the moment the radio in
+     * the Profiles tab has to move.
+     */
+    val activeInputProfileId: Flow<String?> =
+        combine(runtime.state, containers.containers) { session, all ->
+            all.firstOrNull { it.id == session.containerId }?.input?.profileId
+        }
+
+    val touchControlsVisible: StateFlow<Boolean> = display.touchControlsVisible
+
+    val touchEditing: StateFlow<Boolean> = display.touchEditing
+
+    val selectedTouchControl: StateFlow<String?> = display.selectedTouchControl
+
+    /**
+     * A profile whose overlay was just dragged, persisted.
+     *
+     * The drag happens in the view — it has to, because the view is the only
+     * thing that owns the surface's pixels — and it publishes once per finished
+     * gesture rather than once per frame. Persisting here rather than in the
+     * display adapter keeps the adapter free of the store, which is the same
+     * division every other seam member follows.
+     */
+    private fun collectTouchLayoutEdits() {
+        viewModelScope.launch {
+            display.touchLayoutEdits.collect { layout ->
+                setInputProfile(display.inputProfile.value.copy(touch = layout))
+            }
+        }
+    }
+
+    fun setTouchControlsVisible(visible: Boolean) {
+        display.setTouchControlsVisible(visible)
+        // Remembered on the container, not the profile: a profile shared with a
+        // container played on a real pad should not have to choose.
+        viewModelScope.launch {
+            val id = state.value.containerId ?: return@launch
+            containers.get(id)?.let {
+                containers.save(it.copy(input = it.input.copy(touchVisible = visible)))
+            }
+        }
+    }
+
+    fun setTouchEditing(editing: Boolean) = display.setTouchEditing(editing)
+
+    fun selectTouchControl(id: String?) = display.selectTouchControl(id)
+
+    /**
+     * Point this container at a different profile, and switch the running session
+     * onto it.
+     *
+     * Both halves, because they are two different documents saying two different
+     * things: the container remembers for next time and the seam changes what is
+     * happening now. Doing only the first is the *edit → relaunch → discover* loop
+     * the in-session editor exists to break.
+     */
+    fun pickInputProfile(id: String?) {
+        viewModelScope.launch {
+            state.value.containerId?.let { containerId ->
+                containers.get(containerId)?.let {
+                    containers.save(it.copy(input = it.input.copy(profileId = id)))
+                }
+            }
+            display.setInputProfile(inputProfiles.resolve(id))
+        }
+    }
+
+    /** A copy of what is running, under a new name, and this container moves to it. */
+    fun newInputProfile() {
+        viewModelScope.launch {
+            val copy = inputProfiles.duplicate(display.inputProfile.value)
+            pickInputProfile(copy.id)
+        }
+    }
+
+    fun duplicateInputProfile(profile: InputProfile) {
+        viewModelScope.launch { inputProfiles.duplicate(profile) }
+    }
+
+    /**
+     * Delete a profile.
+     *
+     * Containers naming it are **not** rewritten — a stale id resolves to the
+     * built-in default on the next launch and the sheet says so. What does change
+     * is the running session, if it was the one deleted: leaving it on a table
+     * that no longer exists anywhere would be a session nothing could explain.
+     */
+    fun deleteInputProfile(profile: InputProfile) {
+        if (profile.isBuiltInDefault) return
+        viewModelScope.launch {
+            inputProfiles.delete(profile.id)
+            if (display.inputProfile.value.id == profile.id) pickInputProfile(null)
+        }
+    }
+
+    /** One profile as a file. Null when there is nothing to write. */
+    fun exportInputProfile(profile: InputProfile): String =
+        InputProfileTransfer.export(json, profile)
+
+    private val _inputNotice = MutableStateFlow<String?>(null)
+    val inputNotice: StateFlow<String?> = _inputNotice.asStateFlow()
+
+    fun dismissInputNotice() {
+        _inputNotice.value = null
+    }
+
+    /**
+     * A file the user chose, read, sanitised and stored — or refused out loud.
+     *
+     * **The one place in the app that consults a version number.** See
+     * [InputProfileTransfer]: reading a newer schema optimistically is how a
+     * keycode the server would throw on ends up in a table, and refusing costs
+     * nothing because the user chose the file and can be told why.
+     */
+    fun importInputProfile(text: String) {
+        viewModelScope.launch {
+            if (text.isBlank()) {
+                _inputNotice.value = "That file could not be read."
+                return@launch
+            }
+            val taken = inputProfiles.profiles.first().map { it.name }
+            when (val result = InputProfileTransfer.import(json, text, taken)) {
+                is ImportResult.Refused -> _inputNotice.value = result.reason
+                is ImportResult.Ok -> {
+                    inputProfiles.save(result.profile)
+                    pickInputProfile(result.profile.id)
+                }
+            }
         }
     }
 
