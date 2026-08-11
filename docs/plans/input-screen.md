@@ -65,6 +65,25 @@ doing selection while a list below did the same selection differently. The list
 in §5 selects; the header names and acts: new, duplicate, delete, import,
 export.
 
+### Adding, removing, and the two kinds of row
+
+Stated plainly, because this is the part that has to work:
+
+- **A control you add is a full control.** Name it, bind it, place it on the
+  overlay, drag and resize it in the arranger, change its opacity, delete it.
+  Nothing about it is second-class next to a pad row.
+- **A pad row cannot be deleted** — the 24 are what a controller *has*, and a
+  profile missing `A` is not a profile. It can be renamed, rebound, put on the
+  glass, taken off the glass, moved and resized. Only *delete* is absent, and
+  the row says so rather than offering a control that refuses.
+- **Both appear in the same list, in the same shape.** The difference is one
+  missing action on one kind of row, not two sections with two vocabularies.
+
+So `Add a control` creates a row with a name field, a binding, and **On the
+glass** already on, dropped at the centre of the overlay for the arranger to
+place. That is the answer to "if I add a custom one I should be able to place it
+in the overlay too".
+
 ## What must not be lost
 
 Everything that exists today keeps working: stick roles including `Pad`, the
