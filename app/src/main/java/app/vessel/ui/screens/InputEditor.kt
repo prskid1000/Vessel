@@ -2,6 +2,7 @@ package app.vessel.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -36,6 +37,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -421,12 +424,23 @@ private fun TouchOverlayPreview(
                         y = with(density) { (control.centreY(h) - radius).toDp() },
                     )
                     .size(diameter)
-                    .clip(if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeMd)
-                    .background(Vessel.colors.surfaceFloating)
-                    .border(
-                        if (isSelected) 2.dp else Vessel.metrics.hairline,
-                        if (isSelected) Vessel.colors.accent else Vessel.colors.accent700,
-                        if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeMd,
+                    // A d-pad is a cross, and a cross is not a `Shape` any of the
+                    // theme's rounded rectangles can make. Everything else clips
+                    // and rings itself the ordinary way; the cross draws itself
+                    // below, and takes neither.
+                    .then(
+                        if (control.kind == TouchKind.DPAD) {
+                            Modifier
+                        } else {
+                            Modifier
+                                .clip(if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeMd)
+                                .background(Vessel.colors.surfaceFloating)
+                                .border(
+                                    if (isSelected) 2.dp else Vessel.metrics.hairline,
+                                    if (isSelected) Vessel.colors.accent else Vessel.colors.accent700,
+                                    if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeMd,
+                                )
+                        },
                     )
                     .pointerInput(control.id, w, h) {
                         detectDragGestures(
@@ -446,17 +460,65 @@ private fun TouchOverlayPreview(
                     .clickable(onClickLabel = control.designation) { onSelect(control.id) },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    control.face,
-                    style = Vessel.type.overline,
-                    color = Vessel.colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Clip,
-                )
+                if (control.kind == TouchKind.DPAD) {
+                    DpadCross(
+                        selected = isSelected,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Text(
+                        control.face,
+                        style = Vessel.type.overline,
+                        color = Vessel.colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                    )
+                }
             }
         }
     }
 }
+
+/**
+ * The plus a d-pad is, in the preview.
+ *
+ * The same twelve corners `TouchOverlayPainter` draws over a running session,
+ * because the preview's whole job is to be a picture of what the overlay will
+ * look like — and the two disagreeing about the shape of a control would make it
+ * a picture of something else.
+ */
+@Composable
+private fun DpadCross(selected: Boolean, modifier: Modifier = Modifier) {
+    val fill = Vessel.colors.surfaceFloating
+    val ring = if (selected) Vessel.colors.accent else Vessel.colors.accent700
+    val width = if (selected) 2.dp else Vessel.metrics.hairline
+    Canvas(modifier) {
+        val r = size.minDimension / 2f
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val a = r * DPAD_ARM
+        val path = Path().apply {
+            moveTo(cx - a, cy - r)
+            lineTo(cx + a, cy - r)
+            lineTo(cx + a, cy - a)
+            lineTo(cx + r, cy - a)
+            lineTo(cx + r, cy + a)
+            lineTo(cx + a, cy + a)
+            lineTo(cx + a, cy + r)
+            lineTo(cx - a, cy + r)
+            lineTo(cx - a, cy + a)
+            lineTo(cx - r, cy + a)
+            lineTo(cx - r, cy - a)
+            lineTo(cx - a, cy - a)
+            close()
+        }
+        drawPath(path, fill)
+        drawPath(path, ring, style = Stroke(width = width.toPx()))
+    }
+}
+
+/** The same proportion `TouchOverlayPainter.ARM` uses. */
+private const val DPAD_ARM = 0.42f
 
 /** Play or lay out, whether it is drawn at all, and how solid. */
 @Composable

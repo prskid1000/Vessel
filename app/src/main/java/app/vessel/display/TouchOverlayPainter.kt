@@ -3,6 +3,7 @@ package app.vessel.display
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import app.vessel.input.TouchControl
@@ -36,6 +37,7 @@ internal class TouchOverlayPainter(private val density: Float) {
         isFakeBoldText = false
     }
     private val bounds = Rect()
+    private val cross = Path()
     private val box = RectF()
 
     /**
@@ -97,7 +99,19 @@ internal class TouchOverlayPainter(private val density: Float) {
         }
         stroke.strokeWidth = (if (selected) 2f else 1f) * density
 
-        if (control.round) {
+        // **A d-pad is drawn as a cross, not as a square with a cross on it.**
+        // The silhouette is the whole affordance: a thumb finds four directions
+        // by feel from the shape, and a rounded box with two scratched lines
+        // reads as a button somebody drew a plus on.
+        //
+        // Its *hit* area stays the full square — see `TouchControl.contains`.
+        // The corners are where a diagonal lives, and a d-pad you cannot go
+        // north-east on is not one.
+        if (control.kind == TouchKind.DPAD) {
+            crossPath(cx, cy, r)
+            canvas.drawPath(cross, fill)
+            canvas.drawPath(cross, stroke)
+        } else if (control.round) {
             canvas.drawCircle(cx, cy, r, fill)
             canvas.drawCircle(cx, cy, r, stroke)
         } else {
@@ -106,11 +120,6 @@ internal class TouchOverlayPainter(private val density: Float) {
             canvas.drawRoundRect(box, radius, radius, fill)
             canvas.drawRoundRect(box, radius, radius, stroke)
         }
-
-        // A d-pad gets its cross drawn, because a rounded square with "Arrows" in
-        // it is not a picture of a d-pad and the whole value of the shape is that
-        // a thumb can find its four directions without reading anything.
-        if (control.kind == TouchKind.DPAD) drawCross(canvas, cx, cy, r)
 
         val label = control.face
         if (label.isNotEmpty()) {
@@ -123,12 +132,29 @@ internal class TouchOverlayPainter(private val density: Float) {
         if (editing && selected) drawHandle(canvas, control, width, height)
     }
 
-    /** The two bars of a d-pad, at the ring's own strength. */
-    private fun drawCross(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        val arm = r * CROSS_ARM
-        stroke.strokeWidth = 1f * density
-        canvas.drawLine(cx - arm, cy, cx + arm, cy, stroke)
-        canvas.drawLine(cx, cy - arm, cx, cy + arm, stroke)
+    /**
+     * The twelve corners of a plus, inscribed in the control's square.
+     *
+     * [ARM] is the half-width of each arm as a fraction of the radius. 0.42 is
+     * the proportion a real d-pad has: much thinner and the arms stop being
+     * thumb-width, much fatter and it reads as a square again.
+     */
+    private fun crossPath(cx: Float, cy: Float, r: Float) {
+        val a = r * ARM
+        cross.reset()
+        cross.moveTo(cx - a, cy - r)
+        cross.lineTo(cx + a, cy - r)
+        cross.lineTo(cx + a, cy - a)
+        cross.lineTo(cx + r, cy - a)
+        cross.lineTo(cx + r, cy + a)
+        cross.lineTo(cx + a, cy + a)
+        cross.lineTo(cx + a, cy + r)
+        cross.lineTo(cx - a, cy + r)
+        cross.lineTo(cx - a, cy + a)
+        cross.lineTo(cx - r, cy + a)
+        cross.lineTo(cx - r, cy - a)
+        cross.lineTo(cx - a, cy - a)
+        cross.close()
     }
 
     /** The grip that resizes the selected control, on its lower-right diagonal. */
@@ -187,7 +213,7 @@ internal class TouchOverlayPainter(private val density: Float) {
         /** How much of a control's width a label may take. */
         const val LABEL_FIT = 1.1f
 
-        /** A d-pad's arms, as a fraction of its radius. */
-        const val CROSS_ARM = 0.55f
+        /** A d-pad arm's half-width, as a fraction of its radius. */
+        const val ARM = 0.42f
     }
 }

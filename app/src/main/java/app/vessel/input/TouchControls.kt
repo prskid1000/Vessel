@@ -184,6 +184,12 @@ data class TouchControl(
      */
     val face: String
         get() = when {
+            // **A d-pad never wears a word.** Its shape says everything — four
+            // directions arranged as a cross — and the alternative is what it
+            // used to draw: `Up Left Down Right` crammed into an 80 dp box,
+            // which is illegible and tells a thumb nothing it did not already
+            // know from the shape.
+            kind == TouchKind.DPAD -> ""
             padStick != null -> if (padStick == Stick.LEFT) "L" else "R"
             pad != null -> pad.padGlyph()
             else -> bindingLabel
@@ -421,42 +427,51 @@ object TouchLayouts {
      */
     val Gamepad: TouchLayout = TouchLayout(
         listOf(
-            // The two thumbs, low and outboard, where they rest when the phone is
-            // held. Everything else is placed around them.
-            stick("stick-l", Stick.LEFT, 0.085f, 0.72f, 0.115f),
-            stick("stick-r", Stick.RIGHT, 0.915f, 0.72f, 0.115f),
+            // **The two thumbs own the bottom corners, and each cluster sits
+            // directly above its own thumb.** A phone is held by its ends, so
+            // the reachable ground is two arcs swept up from the lower corners —
+            // not the middle, which is where the d-pad used to sit and where
+            // neither thumb goes without the hand letting go of the phone.
+            //
+            // So the left mirrors the right exactly: stick low and outboard,
+            // its cluster above it, its stick-click inboard. That symmetry is
+            // also the fastest thing to learn — whatever is true of one hand is
+            // true of the other.
+            stick("stick-l", Stick.LEFT, 0.090f, 0.72f, 0.120f),
+            stick("stick-r", Stick.RIGHT, 0.910f, 0.72f, 0.120f),
 
             TouchControl(
                 id = "dpad",
                 kind = TouchKind.DPAD,
-                cx = 0.245f,
-                cy = 0.42f,
-                size = 0.075f,
+                cx = 0.115f,
+                cy = 0.40f,
+                size = 0.085f,
                 pad = GamepadControl.DPAD_UP,
             ),
 
-            // The face diamond, in the arrangement the Pad tab draws it.
-            padButton("btn-y", GamepadControl.Y, 0.845f, 0.29f, 0.05f),
-            padButton("btn-x", GamepadControl.X, 0.790f, 0.40f, 0.05f),
-            padButton("btn-b", GamepadControl.B, 0.900f, 0.40f, 0.05f),
-            padButton("btn-a", GamepadControl.A, 0.845f, 0.51f, 0.05f),
+            // The face diamond, in the arrangement the Pad tab draws it, above
+            // the right thumb exactly as the d-pad is above the left.
+            padButton("btn-y", GamepadControl.Y, 0.885f, 0.29f, 0.05f),
+            padButton("btn-x", GamepadControl.X, 0.830f, 0.40f, 0.05f),
+            padButton("btn-b", GamepadControl.B, 0.940f, 0.40f, 0.05f),
+            padButton("btn-a", GamepadControl.A, 0.885f, 0.51f, 0.05f),
 
             // Along the top edge, which is where an index finger reaches on a
             // phone held in two hands.
-            padButton("btn-l1", GamepadControl.L1, 0.060f, 0.08f, 0.048f),
-            padButton("btn-l2", GamepadControl.L2, 0.145f, 0.08f, 0.048f),
-            padButton("btn-r2", GamepadControl.R2, 0.855f, 0.08f, 0.048f),
-            padButton("btn-r1", GamepadControl.R1, 0.940f, 0.08f, 0.048f),
+            padButton("btn-l1", GamepadControl.L1, 0.055f, 0.09f, 0.048f),
+            padButton("btn-l2", GamepadControl.L2, 0.140f, 0.09f, 0.048f),
+            padButton("btn-r2", GamepadControl.R2, 0.860f, 0.09f, 0.048f),
+            padButton("btn-r1", GamepadControl.R1, 0.945f, 0.09f, 0.048f),
 
-            padButton("btn-select", GamepadControl.SELECT, 0.460f, 0.08f, 0.040f),
-            padButton("btn-start", GamepadControl.START, 0.540f, 0.08f, 0.040f),
+            padButton("btn-select", GamepadControl.SELECT, 0.460f, 0.09f, 0.040f),
+            padButton("btn-start", GamepadControl.START, 0.540f, 0.09f, 0.040f),
 
             // **The one place this is not a picture of a pad.** A thumb cannot
             // press a stick it is steering with, so the stick clicks are their
             // own small buttons inboard of each stick rather than a press on the
             // stick itself.
-            padButton("btn-l3", GamepadControl.THUMB_L, 0.235f, 0.72f, 0.040f),
-            padButton("btn-r3", GamepadControl.THUMB_R, 0.765f, 0.72f, 0.040f),
+            padButton("btn-l3", GamepadControl.THUMB_L, 0.245f, 0.72f, 0.040f),
+            padButton("btn-r3", GamepadControl.THUMB_R, 0.755f, 0.72f, 0.040f),
         ),
     )
 
