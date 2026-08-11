@@ -6,6 +6,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
+import android.hardware.input.InputManager
 import android.os.VibrationEffect
 import android.view.InputDevice
 import android.view.KeyCharacterMap
@@ -1310,7 +1311,22 @@ private class SessionSurfaceView(
 
     init {
         padBridge.onRumble = ::rumble
-        refreshPads()
+    }
+
+    /**
+     * A controller arriving or leaving while the session is up.
+     *
+     * **Without this the pad has to be connected before the game is.** `winebus`
+     * asks once, at its own device start, and a game that polls `XInputGetState`
+     * on its title screen asks about as often — so a pad switched on two minutes
+     * in would exist in Android and nowhere else. Bluetooth pads sleep and
+     * reconnect on their own, which makes "connected before launch" a state that
+     * does not survive a cutscene.
+     */
+    private val pads = object : InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = refreshPads()
+        override fun onInputDeviceRemoved(deviceId: Int) = refreshPads()
+        override fun onInputDeviceChanged(deviceId: Int) = refreshPads()
     }
 
     private val xServerView = PacedXServerView(context, xServer, fpsLimit)
@@ -1484,6 +1500,13 @@ private class SessionSurfaceView(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         requestFocus()
+        runCatching {
+            context.getSystemService(InputManager::class.java)
+                ?.registerInputDeviceListener(pads, handler)
+        }.onFailure { Log.w("VesselDisplay", "no input device listener", it) }
+        // Once now as well as on every change, because a pad that was already
+        // connected when the session started fires no callback at all.
+        refreshPads()
     }
 
     override fun onDetachedFromWindow() {
@@ -1501,6 +1524,10 @@ private class SessionSurfaceView(
         releaseOverlay()
         publishHeld()
         sink.releaseAll()
+        runCatching {
+            context.getSystemService(InputManager::class.java)
+                ?.unregisterInputDeviceListener(pads)
+        }
         super.onDetachedFromWindow()
     }
 

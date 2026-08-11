@@ -263,5 +263,32 @@ Phases 3–5 of `docs/plans/input-mapping.md`, against the design comp
    and the title this was reported against is not guaranteed to use XInput. One
    HID device answers every API a Windows game can ask.
 
-   Not started. `tools/input/padwin.c` is the probe it would be measured with;
-   run it before and after.
+   **Built 2026-08-11, not yet watched with a controller in a hand.**
+   `patches/wine/0016` adds `bus_vessel.c`, a fourth backend beside sdl, udev and
+   iohid; `app/vessel/display/PadBridge.kt` is the server it dials. Twenty-byte
+   frames, native order, both ways, unit-tested against the offsets the C reads
+   — because the two ends are Kotlin and C and a field at the wrong offset is
+   invisible until somebody is holding a pad.
+
+   Three things confirmed without a controller, and worth separating from what
+   has not been:
+
+   - The rebuild **was** incremental, as this entry predicted: `wine.sh` logged
+     *"reusing the configured cross tree … same configure args, same source"*,
+     and the only configure work was Wine's own `config.status --recheck`,
+     triggered by the new file in `dlls/winebus.sys/Makefile.in`. No wipe.
+   - `bus_vessel.o` compiles and links into `winebus.so` for all three
+     architectures.
+   - **`winebus` genuinely runs in this prefix**, which was the quiet risk in the
+     whole plan — a backend added to a driver nobody starts would look identical
+     to a backend that does not work. `system.reg` has `ROOT\WINE\WINEBUS` with
+     `"Service"="winebus"` and a live `WINEBUS\VID_845E&PID_…` child, which is
+     Wine's own HID mouse. The bus starts and creates devices today.
+
+   What is **not** established: that a real pad reaches it. Nothing here has been
+   tested with a controller, and it deliberately has not been faked —
+   `ExternalController.isGameController` rejects `device.isVirtual()`, and
+   `adb shell input gamepad` injects through a virtual device, so that route
+   proves nothing about the path a Bluetooth pad takes. Run
+   `tools/input/run-guest-pad.sh` with a pad paired and connected: the four
+   `rc1167` lines becoming `caps=yes state=yes` is the result that closes this.
