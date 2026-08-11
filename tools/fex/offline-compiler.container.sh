@@ -11,6 +11,14 @@
 
 set -u
 
+# **What this harness cannot do, and it is not a bug in the thing being tested.**
+# `run-as` runs as the app's uid but without its runtime permission grants, so
+# /storage/emulated/0 -- where `dosdevices/d:` points, and where games are
+# installed -- comes back Permission denied. Cache generation for a module on
+# D: therefore fails here and succeeds in a real session, where the app's own
+# process does the same work with its own permissions. If every C: module
+# generates and every D: one does not, that is this, and the answer is to start
+# a session rather than to debug FEX.
 CONTAINER="$1"
 shift
 
@@ -18,7 +26,25 @@ FEX_DIR=files/components/FEXCore/2608
 WINE_DIR=files/components/Wine/1114
 BASE=files/containers/$CONTAINER
 PREFIX=$BASE/prefix
-HOST_CACHE=$BASE/caches/fex/probe
+# Whichever cache key actually has codemaps waiting, falling back to a scratch
+# one. The key is a digest of the whole FEX configuration, so it is not
+# guessable from here — and pointing this at the wrong key is the difference
+# between compiling a real session's work and compiling an empty directory.
+# `new` first, then `ready` — a key whose codemaps have already been imported is
+# still the one to work on, and looking only at `new` sent the second run of
+# this script to the scratch key the moment the first run succeeded.
+HOST_CACHE=""
+for d in "$BASE"/caches/fex/*/; do
+  if [ -n "$(ls -A "$d/codemap/new" 2>/dev/null)" ]; then HOST_CACHE="${d%/}"; break; fi
+done
+if [ -z "$HOST_CACHE" ]; then
+  for d in "$BASE"/caches/fex/*/; do
+    if [ -n "$(ls -A "$d/codemap/ready" 2>/dev/null)" ]; then HOST_CACHE="${d%/}"; break; fi
+  done
+fi
+[ -n "$HOST_CACHE" ] || HOST_CACHE=$BASE/caches/fex/probe
+mkdir -p "$HOST_CACHE/codemap/new"
+echo "cache key: $HOST_CACHE"
 
 # The link that makes the DOS path resolve. Recreated every run: a container
 # that has not started since the path change has none, and the point of this
@@ -61,10 +87,22 @@ if [ "${1:-}" = "--pe" ]; then
   exit 0
 fi
 
+# **Launched by a DOS path, and that is load-bearing.** ProcessAll does not call
+# GenerateCache in-process on Windows -- it re-execs itself, once per module,
+# with `_spawnv(_P_WAIT, SelfPath, ...)` where SelfPath is GetModuleFileNameA
+# (Main.cpp:786, :834). Started from a unix path, that self-path is not
+# something _spawnv can launch, every child fails, and the parent prints
+# "ERROR: Cache generation failed for ..." for all of them without ever saying
+# why. So both compilers are linked under drive_c and invoked as C:\... --
+# FEX rewrites the trailing name to pick the 32- or 64-bit sibling, so both have
+# to be there.
+ln -sf "$PWD/$FEX_DIR/FEXOfflineCompiler64.exe" "$PREFIX/drive_c/vessel/FEXOfflineCompiler64.exe"
+ln -sf "$PWD/$FEX_DIR/FEXOfflineCompiler32.exe" "$PREFIX/drive_c/vessel/FEXOfflineCompiler32.exe"
+
 # Backgrounded and redirected: a Wine process that inherits the adb pipe hangs
 # adb shell forever, which tools/device-bench.sh documents at length.
 ( timeout 180 /system/bin/linker64 "$PWD/$WINE_DIR/bin/wine" \
-    "$PWD/$FEX_DIR/FEXOfflineCompiler64.exe" "$@" \
+    'C:\vessel\FEXOfflineCompiler64.exe' "$@" \
     > "$BASE/tmp/fexc.log" 2>&1 < /dev/null )
 echo "EXIT=$?"
 cat "$BASE/tmp/fexc.log"

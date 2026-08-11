@@ -602,9 +602,36 @@ audit's; they are pointers, not independently re-verified.
   tone; it is the wrong workload. The three Metro codemaps this entry recorded
   earlier may well have had content, but they were cleared before anyone looked.
 
-  *Done when:* a real title runs, leaves a non-zero codemap, `process-all`
-  imports it into `cache/`, and the same title is then launched twice with
-  `caches/fex` wiped before the first — including if the second is no faster.
+  **All of that happened 2026-08-11, except the timing.** A clean install, then
+  a Metro run, left **two real codemaps of 151 KB and 139 KB** — so the
+  zero-size one above was the three-second tone and nothing else. `process-all`
+  then imported them into `codemap/ready/` (metro.exe, d3d11, physx3, ntdll and
+  the rest) and generated **21 cache files, 550 KB**.
+
+  Two more things had to be true first, both found by running it:
+
+  - *The compiler must be launched by a DOS path.* `ProcessAll` does not call
+    `GenerateCache` in-process on Windows — it re-execs itself once per module
+    with `_spawnv(_P_WAIT, SelfPath, …)` where `SelfPath` is
+    `GetModuleFileNameA` (`Main.cpp:786`, `:834`). Started from a unix path,
+    that self-path is not something `_spawnv` can launch: every child failed and
+    the parent printed `ERROR: Cache generation failed for …` for all of them
+    without ever saying why. Both compilers are linked under `drive_c` and the
+    tool is invoked as `C:\vessel\FEXOfflineCompiler64.exe` — both, because FEX
+    rewrites the trailing name to pick the 32- or 64-bit sibling.
+  - *`run-as` cannot read `/storage/emulated/0`.* It runs as the app's uid but
+    without its runtime grants, and `dosdevices/d:` points there. So in the
+    harness every `C:` module generated and every `D:` one — `metro.exe`,
+    `physx3_x64`, `steam_api64` — failed silently, because `GenerateSingleCache`
+    could not open the binary and returns `nullopt` with no message. **That is
+    the harness, not the cache**: the app's own process has the permission,
+    which is how Metro launched from `D:` in the first place.
+
+  *Done when:* a session start compiles `metro.exe` itself — visible as
+  `FEX code cache built in N ms` in the session log and a
+  `metro.exe-…-0000000000000000` in `cache/` — and the same title is then
+  launched twice with `caches/fex` wiped before the first, including if the
+  second is no faster.
 
   The fix is one value, not one code path: `FEX_APP_CACHE_LOCATION` has to be a
   **DOS path ending in `\`**, which satisfies both uses at once — `C:\…\codemap
