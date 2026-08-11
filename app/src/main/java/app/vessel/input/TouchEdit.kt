@@ -101,8 +101,19 @@ object TouchEdit {
      * middle of the desktop, already selected, and the user drags it where their
      * thumb actually is. A control that placed itself cleverly would be a control
      * the user has to find.
+     *
+     * **It is born with a name.** A control used to arrive anonymous and stay
+     * that way until a binding gave it a word, so the thing on the glass read
+     * `Unbound` and the row above it read nothing at all. [name] defaults to what
+     * the shape is called, which is a poor name and a real one — the editor puts
+     * the field in front of the user the moment it is placed.
      */
-    fun placed(layout: TouchLayout, kind: TouchKind, role: StickRole = StickRole.Keys): TouchControl {
+    fun placed(
+        layout: TouchLayout,
+        kind: TouchKind,
+        role: StickRole = StickRole.Keys,
+        name: String = TouchControls.designationOf(kind, role),
+    ): TouchControl {
         val size = TouchControls.defaultSize(kind)
         var cx = 0.5f
         val cy = 0.5f
@@ -118,9 +129,37 @@ object TouchEdit {
             cy = cy,
             size = size,
             role = role,
-            label = "",
+            label = name,
         )
     }
+
+    /**
+     * The control a pad row becomes when it is put on the glass.
+     *
+     * The link, not a copy of the binding: what it sends stays the pad table's
+     * answer, resolved by [InputProfile.overlay]. A d-pad and a stick each name
+     * one of the four controls they speak for, because the model has one field
+     * and a cross is one control with four bindings.
+     */
+    fun placedPad(layout: TouchLayout, control: GamepadControl): TouchControl {
+        val stick = Stick.entries.firstOrNull { control in it.halfAxes }
+        val kind = when {
+            stick != null -> TouchKind.STICK
+            control in DPAD -> TouchKind.DPAD
+            else -> TouchKind.BUTTON
+        }
+        return placed(layout, kind, name = "").copy(
+            pad = if (stick == null) control else null,
+            padStick = stick,
+        )
+    }
+
+    private val DPAD = setOf(
+        GamepadControl.DPAD_UP,
+        GamepadControl.DPAD_DOWN,
+        GamepadControl.DPAD_LEFT,
+        GamepadControl.DPAD_RIGHT,
+    )
 
     private fun near(control: TouchControl, cx: Float, cy: Float): Boolean =
         kotlin.math.abs(control.cx - cx) < STEP && kotlin.math.abs(control.cy - cy) < STEP

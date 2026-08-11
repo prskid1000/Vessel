@@ -185,8 +185,6 @@ private fun ContainerSheetContent(
      */
     var inputOpen by remember { mutableStateOf(false) }
 
-    /** Which of the editor's three tabs is showing, kept across a takeover. */
-
     // Back closes Diagnostics before it closes the sheet. Registered inside
     // VSheet's own handler, so it wins while it is enabled — the innermost
     // enabled callback is the one the dispatcher runs.
@@ -210,8 +208,8 @@ private fun ContainerSheetContent(
 
     VSheet(
         onDismiss = onDismiss,
-        // The editor brings its own scrolling — a tabbed body with a lazy list
-        // under each tab — and a scroll inside a scroll measures the inner one
+        // The editor brings its own scrolling — it is one lazy list from the map
+        // to the profile — and a scroll inside a scroll measures the inner one
         // with infinite height.
         scrollable = !inputOpen,
         header = {

@@ -149,38 +149,61 @@ data class TouchControl(
      * look pad *and* have four half-axis bindings, which is a state nothing can
      * act on.
      */
-    val designation: String
-        get() = when (kind) {
-            TouchKind.BUTTON -> "Button"
-            TouchKind.DPAD -> "D-pad"
-            TouchKind.STICK -> when {
-                padStick == Stick.LEFT -> "Left stick"
-                padStick == Stick.RIGHT -> "Right stick"
-                role == StickRole.Look -> "Look pad"
-                else -> "Stick"
-            }
+    val designation: String get() = TouchControls.designationOf(kind, role, padStick)
+
+    /**
+     * Which of the twenty-four this control *is*.
+     *
+     * **The editor's one list is built on this.** A control on the glass and the
+     * pad row for the same control are one thing, and showing both is the
+     * duplication the redesign exists to remove — so the list draws the glass
+     * control and then everything this set does not already speak for. A stick
+     * speaks for its four half-axes and a d-pad for its four directions, because
+     * each is one control with four bindings. Empty for a control the user
+     * placed, which is one the pad table has never heard of.
+     */
+    val padControls: Set<GamepadControl>
+        get() {
+            padStick?.let { return it.halfAxes.toSet() }
+            val linked = pad ?: return emptySet()
+            if (kind != TouchKind.DPAD) return setOf(linked)
+            return setOf(
+                GamepadControl.DPAD_UP,
+                GamepadControl.DPAD_DOWN,
+                GamepadControl.DPAD_LEFT,
+                GamepadControl.DPAD_RIGHT,
+            )
         }
 
     /**
-     * What the control is called in a list.
+     * What the control is called, in a list and on the glass.
      *
-     * A control that *is* a pad control is named after it — `A`, `L2 trigger`,
-     * `Left stick click` — because "Button" twelve times over is a list that says
-     * nothing. One the user placed keeps its shape as its name.
+     * **[label] first, because a control has a name and the name is a field the
+     * user owns.** That is the field the redesign added: a control you place is
+     * named when you place it and renamed whenever you like, rather than being
+     * anonymous until a binding gives it a word. A control that *is* a pad
+     * control and has not been renamed falls back on the pad's own name — `A`,
+     * `L2 trigger`, `Left stick click` — because "Button" twelve times over is a
+     * list that says nothing.
+     *
+     * A d-pad is the exception, and takes its shape's name: it *names* one of its
+     * four directions because the model has one field for the link, so borrowing
+     * that name would call the whole cross `D-pad up`.
      */
-    val title: String get() = pad?.padLabel() ?: designation
+    val title: String
+        get() = label.ifBlank {
+            if (kind == TouchKind.DPAD) designation else pad?.padLabel() ?: designation
+        }
 
     /**
      * The mark drawn *on* the control.
      *
-     * A pad control wears its own name — `A`, `L2`, `SEL` — and not the key it
-     * happens to send. That is what a controller looks like, and it is also the
-     * only thing that fits: `Left Ctrl` in a 42 dp circle is `Lef`, and four
-     * buttons all reading `Lef` is a pad nobody can aim at. What each one sends
-     * is in the list beside the preview, where there is room for it.
-     *
-     * A control the user placed has no such name, so it wears its binding, which
-     * is the only thing it has.
+     * The name, when it has one. Otherwise a pad control wears its own glyph —
+     * `A`, `L2`, `SEL` — and not the key it happens to send: that is what a
+     * controller looks like, and it is also the only thing that fits, since
+     * `Left Ctrl` in a 42 dp circle is `Lef` and four buttons all reading `Lef`
+     * is a pad nobody can aim at. What each one sends is in the list beside the
+     * preview, where there is room for it.
      */
     val face: String
         get() = when {
@@ -190,6 +213,7 @@ data class TouchControl(
             // which is illegible and tells a thumb nothing it did not already
             // know from the shape.
             kind == TouchKind.DPAD -> ""
+            label.isNotBlank() -> label
             padStick != null -> if (padStick == Stick.LEFT) "L" else "R"
             pad != null -> pad.padGlyph()
             else -> bindingLabel
@@ -205,7 +229,17 @@ data class TouchControl(
     val bindingLabel: String
         get() = when (kind) {
             TouchKind.BUTTON -> X11KeyCatalog.label(action)
-            TouchKind.STICK -> if (role == StickRole.Look) "Mouse look" else directionLabel()
+            // A stick that is not sending keys has no keys to name, and saying
+            // `Unbound` of one the guest reads as a stick is the opposite of the
+            // truth — [StickRole.Pad] is the one role that reaches the guest as
+            // itself.
+            TouchKind.STICK -> when (role) {
+                StickRole.Look -> "Mouse look"
+                StickRole.Pad -> "Gamepad axis"
+                StickRole.None -> X11KeyCatalog.UNBOUND
+                StickRole.Keys -> directionLabel()
+            }
+
             TouchKind.DPAD -> directionLabel()
         }
 
@@ -314,6 +348,29 @@ object TouchControls {
         TouchKind.BUTTON -> 0.07f
         TouchKind.STICK -> 0.12f
         TouchKind.DPAD -> 0.13f
+    }
+
+    /**
+     * What a control of this shape is called before anyone has named it.
+     *
+     * Taken out of [TouchControl.designation] so the editor can name a control
+     * it is *about to* create — the whole point of the redesign's name field is
+     * that a control has a name from the moment it is placed, and until it
+     * exists there is no `TouchControl` to ask.
+     */
+    fun designationOf(
+        kind: TouchKind,
+        role: StickRole = StickRole.Keys,
+        padStick: Stick? = null,
+    ): String = when (kind) {
+        TouchKind.BUTTON -> "Button"
+        TouchKind.DPAD -> "D-pad"
+        TouchKind.STICK -> when {
+            padStick == Stick.LEFT -> "Left stick"
+            padStick == Stick.RIGHT -> "Right stick"
+            role == StickRole.Look -> "Look pad"
+            else -> "Stick"
+        }
     }
 }
 
@@ -519,6 +576,14 @@ object TouchLayouts {
         pad = control,
     )
 
+    /**
+     * No `label`: a stock button wears whatever it sends, and follows a rebinding.
+     *
+     * It used to be given `X11KeyCatalog.label(action)` as a name, which was the
+     * same string one frame later and a *stale* one the moment the key changed —
+     * the name is the user's field now, and a layout the user has not named
+     * anything is better read straight off its binding.
+     */
     private fun button(id: String, cx: Float, cy: Float, size: Float, action: GamepadAction) =
         TouchControl(
             id = id,
@@ -526,7 +591,6 @@ object TouchLayouts {
             cx = cx,
             cy = cy,
             size = size,
-            label = X11KeyCatalog.label(action),
             action = action,
         )
 }

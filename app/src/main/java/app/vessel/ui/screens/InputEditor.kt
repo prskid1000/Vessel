@@ -6,30 +6,27 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,7 +37,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -55,6 +51,7 @@ import app.vessel.display.TouchOverlayPainter
 import app.vessel.input.GamepadAction
 import app.vessel.input.GamepadControl
 import app.vessel.input.InputProfile
+import app.vessel.input.Stick
 import app.vessel.input.StickRole
 import app.vessel.input.TouchControl
 import app.vessel.input.TouchControls
@@ -66,7 +63,6 @@ import app.vessel.input.X11KeyCatalog
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VCaution
-import app.vessel.ui.components.VDropdownField
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
@@ -78,20 +74,34 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * There are no tabs any more, and this is the note that says why.
+ * One list of controls, and this is the note that says why.
  *
- * The screen was Pad / Touch / Profiles, from the design deliverable, split by
- * the question each answered: what does this button send, where is it on the
- * glass, which arrangement is this container using. That reads well and it
- * described three views of one table — both the first two drew a picture of the
- * controller you tap to pick a control, and both listed the same controls. Once
- * every overlay control carried its pad identity the split was duplication
- * rather than structure, and the profile picker in the header already answered
- * the third question on every tab.
+ * The screen used to show **one controller under two mental models**. The overlay
+ * half was free-form — controls had positions, sizes and opacity, and you added
+ * and removed them — and it answered "what is on my glass". The pad half was a
+ * fixed table of twenty-four rows you could only bind, and it answered "what does
+ * each control send". Nothing on the screen said that the glass d-pad *is* the row
+ * called `D-pad up`, and reading top to bottom you met a d-pad in a picture, then
+ * `Add a control`, then a second list containing d-pad rows you could not delete.
+ * Taking the tabs out did not fix that; it moved the seam into the middle of one
+ * scroll, where it became visible rather than gone.
  *
- * So: one screen. The map, the control you have selected, every control, the
- * settings, the profiles — in that order, in one list. `Vessel Input
- * Mapping.dc.html` still shows three tabs and is out of date by this commit.
+ * So: **every row is a control, and a control can be on the glass, on the pad, or
+ * both.** That was already true of the data — a `TouchControl` carries
+ * `pad`/`padStick` and borrows the pad table's binding — and this screen was the
+ * last place still pretending otherwise. A row has a name, a thing it sends, a
+ * toggle for whether it is drawn, and, when it is drawn, a place and a size. The
+ * twenty-four are rows whose toggle happens to be off; `Add a control` makes a row
+ * with it on. The only difference between the two kinds is that a pad row cannot
+ * be deleted, because a profile missing `A` is not a profile — and the row says
+ * so rather than offering a control that refuses.
+ *
+ * The order, top to bottom: the map, the selected control, every control, the
+ * settings, the profile. **One layout, at every width.** There used to be a
+ * two-column variant for the 560 dp session panel and a single column for the
+ * 421 dp container sheet, which meant the same editor read two different ways
+ * depending on where it was opened. `Vessel Input Mapping.dc.html` still shows
+ * three tabs and is out of date by this commit.
  */
 
 /**
@@ -119,6 +129,13 @@ data class InputEditorState(
     val held: Set<GamepadControl> = emptySet(),
     val touchVisible: Boolean = false,
     val editing: Boolean = false,
+    /**
+     * Which row is expanded, as its key.
+     *
+     * A control on the glass is its own `TouchControl.id`; one that is only on
+     * the pad is [padRowKey], which no placed control can collide with — the
+     * stock ids are words and a placed one is `c<base36>`.
+     */
     val selected: String? = null,
     /** An import that was refused, or anything else worth saying once. */
     val notice: String? = null,
@@ -142,14 +159,26 @@ data class InputEditorActions(
     val onDismissNotice: () -> Unit = {},
 )
 
+// — the header -------------------------------------------------------------------
+
 /**
- * The header: where you are, which container, and which profile.
+ * The profile's name, and the five things you can do to a profile.
  *
- * The profile picker is in the header rather than buried in the Profiles tab
- * because it is the one control that changes what every other tab is showing.
- * Putting it on its own tab would mean switching tabs to find out what the first
- * two were about.
+ * **No picker.** The header used to hold a dropdown that chose the profile while
+ * the list at the bottom of the screen chose it differently, so one screen had two
+ * answers to the same question. The list selects; the header names what is
+ * selected and acts on it — new, duplicate, import, export, delete.
+ *
+ * **It wraps rather than clips, and that is the whole of the layout.** Five icon
+ * actions at [app.vessel.ui.theme.VMetrics.iconButton] plus their gaps are 212 dp;
+ * with a 40 dp leading control and a name that has to stay readable, they do not
+ * fit beside the title on the 387 dp the container sheet has inside its gutters.
+ * A previous attempt put them in a fixed-width `Row` and the last two — import and
+ * export — were simply not on screen. Below [HEADER_INLINE_WIDTH] they take a line
+ * of their own, and the `FlowRow` means that even a width nobody anticipated wraps
+ * instead of losing a button.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun InputEditorHeader(
     state: InputEditorState,
@@ -157,104 +186,111 @@ fun InputEditorHeader(
     leading: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        leading()
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3)) {
-            Text(
-                "Input",
-                style = Vessel.type.subtitle,
-                color = Vessel.colors.textPrimary,
-                maxLines = 1,
-            )
-            Text(
-                state.subtitle(),
-                style = Vessel.type.monoSmall,
-                color = Vessel.colors.textMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        // Not width(PROFILE_FIELD_WIDTH) any more: that was sized for a field
-        // alone, and five actions beside it ran off the end -- import and export
-        // simply were not on screen. The field keeps a sensible width; the
-        // actions take what they need.
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val ids = listOf(InputProfile.DEFAULT_ID) + state.profiles.map { it.id }
-            // The profile being edited is in the map even before the list of
-            // stored ones has arrived. Without it the field renders a UUID for
-            // the first frame or two after the screen opens, which is the one
-            // string on it that means nothing to anybody.
-            val names = (listOf(InputProfile.Default, state.profile) + state.profiles)
-                .associate { it.id to it.name }
-            // **The pointer can outlive the thing it points at, so the field
-            // follows the profile in use rather than the pointer.** A container
-            // naming a deleted profile resolves to the built-in default and is
-            // deliberately *not* rewritten — `InputProfileRepository.resolve` and
-            // `SessionRuntime` both leave the stale id alone, so that plugging a
-            // sideloaded profile back in restores the container. The cost is that
-            // `activeProfileId` names nothing on those frames, and the old code
-            // fell back to printing the id: a UUID, in the one field whose only
-            // job is to say which arrangement is in use. `state.profile` is the
-            // arrangement actually in use, and it always has a name.
-            val selected = (state.activeProfileId ?: InputProfile.DEFAULT_ID)
-                .takeIf { it in ids }
-                ?: state.profile.id
-            VDropdownField(
-                modifier = Modifier.widthIn(max = PROFILE_FIELD_WIDTH),
-                options = ids,
-                labelFor = { names[it] ?: InputProfile.Default.name },
-                selected = selected,
-                onSelect = { actions.onPickProfile(it.takeIf { id -> id != InputProfile.DEFAULT_ID }) },
-            )
-            // **Beside the picker, not inside it.** Putting delete on each row of
-            // an open dropdown was the other idea, and a destructive action a few
-            // pixels from the row you meant to *switch to* is the wrong place for
-            // it. Out here it acts on the profile named to its left, which is the
-            // one you are looking at.
-            VIconAction(VIcons.Plus, "New profile", actions.onNewProfile)
-            VIconAction(
-                VIcons.Copy,
-                "Duplicate this profile",
-                { actions.onDuplicate(state.profile) },
-            )
-            ProfileTransferButtons(state, actions, compact = true)
-            // The built-in default is never deletable, and the control is absent
-            // rather than disabled: a dead button asks to be pressed once.
-            if (!state.profile.isBuiltInDefault) {
-                VIconAction(
-                    VIcons.Trash,
-                    "Delete this profile",
-                    { actions.onDelete(state.profile) },
-                    style = VButtonStyle.Danger,
-                )
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val inline = maxWidth >= HEADER_INLINE_WIDTH
+        Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                leading()
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+                ) {
+                    Text(
+                        state.profile.name,
+                        style = Vessel.type.subtitle,
+                        color = Vessel.colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        state.subtitle(),
+                        style = Vessel.type.monoSmall,
+                        color = Vessel.colors.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (inline) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ProfileActions(state, actions)
+                    }
+                }
+            }
+            if (!inline) {
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(
+                        Vessel.metrics.s3,
+                        Alignment.End,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
+                ) {
+                    ProfileActions(state, actions)
+                }
             }
         }
+    }
+}
+
+/**
+ * The five, emitted bare so the same set can sit in a `Row` or wrap in a
+ * `FlowRow`.
+ *
+ * **Delete is beside the name, not on a row of the list.** Putting it on each row
+ * of an open picker was the other idea, and a destructive action a few pixels from
+ * the row you meant to *switch to* is the wrong place for it. Out here it acts on
+ * the profile named to its left, which is the one you are looking at.
+ */
+@Composable
+private fun ProfileActions(state: InputEditorState, actions: InputEditorActions) {
+    VIconAction(VIcons.Plus, "New profile", actions.onNewProfile)
+    VIconAction(VIcons.Copy, "Duplicate this profile", { actions.onDuplicate(state.profile) })
+    ProfileTransferButtons(state, actions, compact = true)
+    // The built-in default is never deletable, and the control is absent rather
+    // than disabled: a dead button asks to be pressed once.
+    if (!state.profile.isBuiltInDefault) {
+        VIconAction(
+            VIcons.Trash,
+            "Delete this profile",
+            { actions.onDelete(state.profile) },
+            style = VButtonStyle.Danger,
+        )
     }
 }
 
 private fun InputEditorState.subtitle(): String {
     val name = containerName.ifBlank { "This container" }
     val size = guest?.let { "${it.width}×${it.height}" }
-    return if (size == null) name else "$name · $size"
+    return listOfNotNull("Input", name, size).joinToString(" · ")
 }
 
-private val PROFILE_FIELD_WIDTH = 150.dp
+/**
+ * Below this the five actions take a line of their own.
+ *
+ * 420 dp, from the arithmetic in [InputEditorHeader]: the session panel is 560 dp
+ * less 22 dp of card padding, so 538 dp keeps them inline; the container sheet is
+ * 421 dp less 34 dp of gutters, so 387 dp wraps them.
+ */
+private val HEADER_INLINE_WIDTH = 420.dp
+
+// — the screen -------------------------------------------------------------------
 
 /**
- * The tabs and whatever is under the one that is open.
+ * The map, the selected control, every control, the settings, the profile — in
+ * that order, in one `LazyColumn`.
  *
- * `BoxWithConstraints` rather than a flag from the caller: the panel over a
- * session is 560 dp and the sheet is 421 dp, and the difference that matters is
- * whether the settings fit beside the list — which is a question about width, not
- * about which screen this is. A two-column layout squeezed into 421 dp is two
- * columns of nothing.
+ * **One lazy list and nothing nested inside it.** A `LazyColumn` measured inside a
+ * `verticalScroll` is given an infinite maximum height and throws, which this
+ * feature hit on the device the first time the Touch tab was opened; so the
+ * sections that are lists are `LazyListScope` extensions on this one and the
+ * sections that are not are single items.
  */
 @Composable
 fun InputEditor(
@@ -262,7 +298,66 @@ fun InputEditor(
     actions: InputEditorActions,
     modifier: Modifier = Modifier,
 ) {
-    val onLayout: (TouchLayout) -> Unit = { actions.onProfile(state.profile.copy(touch = it)) }
+    val profile = state.profile
+
+    /** Learn: a press on the pad opens that control's picker instead of its row. */
+    var learn by remember { mutableStateOf(false) }
+
+    /** The row and slot whose key is being chosen, or null while the list is showing. */
+    var picking by remember { mutableStateOf<Picking?>(null) }
+
+    /** A control tapped on the diagram, which the list scrolls to. */
+    var pinned by remember { mutableStateOf<GamepadControl?>(null) }
+
+    val entries = remember(profile) { controlEntries(profile) }
+
+    // A physical press wins over a tap, always: the whole point of the indicator
+    // is to answer "which row is the button under my thumb", and a stale tap
+    // highlight sitting next to a live one would answer it wrongly.
+    val highlighted = if (state.held.isNotEmpty()) state.held else setOfNotNull(pinned)
+
+    // Learn, driven by the pad itself. `GamepadControl` already names every
+    // physical control, so this is free — and it is the best answer to "which of
+    // these rows is the button I am pressing".
+    LaunchedEffect(learn, state.held, entries) {
+        if (!learn) return@LaunchedEffect
+        val control = state.held.firstOrNull() ?: return@LaunchedEffect
+        picking = entries.pickingFor(control)
+    }
+
+    // **"A press on the diagram still finds its row" has to be true.** The
+    // settings say that in as many words, and a tint on a row nobody can see is
+    // indistinguishable from doing nothing — which is exactly how it was
+    // reported. The index is read off the entry list rather than recomputed by a
+    // parallel walk, so the scroll cannot drift from what was emitted.
+    val listState = rememberLazyListState()
+    LaunchedEffect(pinned, entries) {
+        val control = pinned ?: return@LaunchedEffect
+        val index = entries.indexOfFirst { it is ControlEntry.Row && control in it.speaksFor }
+        if (index >= 0) listState.animateScrollToItem(index + LEADING_ITEMS)
+    }
+
+    // A tap that opens the picker is not also a tap that scrolls: the picker
+    // replaces the list, so the highlight would be waiting behind it for a
+    // question that has already been answered.
+    val pin: (GamepadControl) -> Unit = { control ->
+        val row = entries.rowFor(control)
+        if (learn) {
+            picking = entries.pickingFor(control)
+            pinned = null
+        } else {
+            pinned = control
+            actions.onSelect(row?.key)
+        }
+    }
+
+    val selected = entries.rowByKey(state.selected)
+    val target = picking?.let { pick ->
+        entries.rowByKey(pick.row)?.let { row ->
+            row.slots.firstOrNull { it.name == pick.slot }?.let { row to it }
+        }
+    }
+
     Column(modifier.fillMaxSize()) {
         state.notice?.let { notice ->
             Column(Modifier.padding(top = Vessel.metrics.s8)) {
@@ -270,109 +365,78 @@ fun InputEditor(
                 VButton("Dismiss", actions.onDismissNotice, style = VButtonStyle.Ghost)
             }
         }
-        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
-            val wide = maxWidth >= TWO_COLUMN_WIDTH
-            PadTab(
-                profile = state.profile,
-                lit = state.held,
-                live = state.live,
-                wide = wide,
-                onProfile = actions.onProfile,
-                modifier = Modifier.padding(top = Vessel.metrics.s8),
-                before = {
-                    item {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
-                            modifier = Modifier.padding(bottom = Vessel.metrics.s11),
-                        ) {
-                            TouchPreviewCard(state, onLayout, actions)
-                            TouchSettings(state, actions)
-                            TouchSelectionEditor(state, actions, onLayout)
-                            TouchAddRow(state.profile.overlay, actions, onLayout)
-                        }
-                    }
+
+        if (target != null) {
+            val (row, slot) = target
+            KeyPicker(
+                title = "${row.name} · ${slot.name}",
+                current = slot.action,
+                onClose = { picking = null },
+                onChoose = { action ->
+                    actions.onProfile(profile.rebound(row, slot, action))
+                    picking = null
                 },
-                after = {
-                    item {
-                        Column(Modifier.padding(top = Vessel.metrics.s11)) {
-                            ProfilesTab(state, actions)
-                        }
-                    }
-                },
+                modifier = Modifier.fillMaxWidth().weight(1f),
             )
+            return@Column
+        }
+
+        val shortEdge = sessionShortEdgeDp()
+        LazyColumn(
+            Modifier.fillMaxWidth().weight(1f),
+            state = listState,
+            contentPadding = LIST_PADDING,
+        ) {
+            item(key = "map") {
+                TouchPreviewCard(state, actions, Modifier.padding(top = Vessel.metrics.s8))
+            }
+            item(key = "selected") {
+                SelectedControl(
+                    state = state,
+                    actions = actions,
+                    row = selected,
+                    onPick = { slot -> picking = Picking(selected?.key.orEmpty(), slot) },
+                    modifier = Modifier.padding(vertical = Vessel.metrics.s11),
+                )
+            }
+            controlItems(
+                entries = entries,
+                state = state,
+                actions = actions,
+                lit = highlighted,
+                shortEdge = shortEdge,
+            )
+            item(key = "settings") {
+                InputSettings(
+                    state = state,
+                    actions = actions,
+                    learn = learn,
+                    onLearn = { learn = it },
+                    lit = highlighted,
+                    onPin = pin,
+                    modifier = Modifier.padding(top = Vessel.metrics.s22),
+                )
+            }
+            item(key = "profiles") {
+                ProfilesSection(state, actions, Modifier.padding(top = Vessel.metrics.s22))
+            }
         }
     }
 }
 
-/** Below this the settings cannot sit beside the list, so they sit above it. */
-private val TWO_COLUMN_WIDTH = 500.dp
+/**
+ * How many items the list emits before the control entries begin.
+ *
+ * The map and the selected control, both unconditional. It is a constant rather
+ * than a count because the scroll-to-row arithmetic has to agree with the emitter
+ * exactly, and a number written beside the two `item` calls it counts is the
+ * cheapest way to notice when a third is added.
+ */
+private const val LEADING_ITEMS = 2
 
+private val LIST_PADDING = PaddingValues(bottom = 22.dp)
 
-private val TAB_HEIGHT = 28.dp
-
-// — Touch -----------------------------------------------------------------------
-
-@Composable
-private fun TouchTab(state: InputEditorState, actions: InputEditorActions, wide: Boolean) {
-    // Resolved, because a pad-linked control's binding lives in the pad table
-    // and only the resolved layout knows what it sends. Edits still write the
-    // stored form, which keeps the link.
-    val layout = state.profile.overlay
-    val onLayout: (TouchLayout) -> Unit = { actions.onProfile(state.profile.copy(touch = it)) }
-
-    if (wide) {
-        Row(Modifier.fillMaxSize().padding(top = Vessel.metrics.s8)) {
-            Column(
-                Modifier
-                    .width(TOUCH_COLUMN_WIDTH)
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-                    .padding(end = Vessel.metrics.s11),
-                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
-            ) {
-                TouchSettings(state, actions)
-                TouchSelectionEditor(state, actions, onLayout)
-                TouchAddRow(layout, actions, onLayout)
-            }
-            Box(
-                Modifier
-                    .width(Vessel.metrics.hairline)
-                    .fillMaxHeight()
-                    .background(Vessel.colors.divider),
-            )
-            Column(
-                Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .verticalScroll(rememberScrollState())
-                    .padding(start = Vessel.metrics.s11),
-            ) {
-                TouchPreviewCard(state, onLayout, actions)
-                TouchControlList(state, actions)
-            }
-        }
-        return
-    }
-
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(top = Vessel.metrics.s8, bottom = Vessel.metrics.s22),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
-    ) {
-        // Not while the real overlay is on screen behind this panel. A picture of
-        // the thing you are dragging, next to the thing you are dragging, is one
-        // of them lying.
-        if (!(state.live && state.editing)) TouchPreviewCard(state, onLayout, actions)
-        TouchSettings(state, actions)
-        TouchControlList(state, actions)
-        TouchSelectionEditor(state, actions, onLayout)
-        TouchAddRow(layout, actions, onLayout)
-    }
-}
-
-private val TOUCH_COLUMN_WIDTH = 232.dp
+// — the map ----------------------------------------------------------------------
 
 /**
  * The callout and the preview.
@@ -388,12 +452,12 @@ private val TOUCH_COLUMN_WIDTH = 232.dp
 @Composable
 private fun TouchPreviewCard(
     state: InputEditorState,
-    onLayout: (TouchLayout) -> Unit,
     actions: InputEditorActions,
+    modifier: Modifier = Modifier,
 ) {
     val short = sessionShortEdgeDp()
     val long = sessionLongEdgeDp()
-    Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
         InputNote(
             "Laid out against the screen in landscape, which is the shape the overlay " +
                 "will have — not the shape of the screen you are holding. A control's " +
@@ -405,7 +469,6 @@ private fun TouchPreviewCard(
             layout = state.profile.overlay,
             aspect = long.value / short.value.coerceAtLeast(1f),
             selected = state.selected,
-            onArrange = actions.onArrange,
             onSelect = actions.onSelect,
         )
         VButton(
@@ -423,14 +486,13 @@ private fun TouchPreviewCard(
  * **A picture, and only a picture.** It used to be draggable, and dragging a
  * 15 dp button around a 232 dp thumbnail is not placing a control — it is
  * guessing where one will land, at a seventh of the scale it will land at. Its
- * one gesture now is a tap, which hands the whole screen over to [TouchArrange].
+ * one gesture now is a tap, which selects the control whose row you want.
  */
 @Composable
 private fun TouchOverlayPreview(
     layout: TouchLayout,
     aspect: Float,
     selected: String?,
-    onArrange: () -> Unit,
     onSelect: (String?) -> Unit,
 ) {
     var size by remember { mutableStateOf(0f to 0f) }
@@ -476,12 +538,10 @@ private fun TouchOverlayPreview(
                         },
                     )
                     // **A tap selects, and no longer opens the arranger.** This
-                    // is the only picture of the controller now -- the abstract
-                    // pin diagram below it was a second one, drawn from the same
-                    // table -- so a tap here has to do what a tap there did:
-                    // choose the control whose row you want. Arranging is a
-                    // button of its own, because it is a different intent and
-                    // deserved more than "you touched the card".
+                    // is the only picture of the controller here, so a tap has to
+                    // do what a tap on a row does: choose the control you want.
+                    // Arranging is a button of its own, because it is a different
+                    // intent and deserved more than "you touched the card".
                     .clickable(onClickLabel = control.title) { onSelect(control.id) },
                 contentAlignment = Alignment.Center,
             ) {
@@ -576,145 +636,428 @@ private fun DpadCross(selected: Boolean, modifier: Modifier = Modifier) {
     }
 }
 
-/** Play or lay out, whether it is drawn at all, and how solid. */
-@Composable
-private fun TouchSettings(state: InputEditorState, actions: InputEditorActions) {
-    Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-        // **The Play / Edit layout toggle used to be here, and it is gone.**
-        // Editing in place meant editing *under this panel*: the panel covers the
-        // left of the screen, so the d-pad, the left stick and L3 sat beneath it
-        // and could not be dragged at all. The full-screen arrange surface exists
-        // precisely to give the whole screen to placing controls, and it is one
-        // tap away on the map above — two ways to do the same thing, one of which
-        // cannot reach half its own controls, is a choice not worth offering.
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            VToggle(checked = state.touchVisible, onCheckedChange = actions.onTouchVisible)
-            Text(
-                "Show the overlay",
-                style = Vessel.type.body,
-                color = Vessel.colors.textPrimary,
-                modifier = Modifier.weight(1f),
-            )
+// — the one list -----------------------------------------------------------------
+
+/**
+ * One line of the one list.
+ *
+ * A sealed list of what the controls section can emit, built once and then walked
+ * twice: by the emitter, and by the scroll that has to find a control's index. Two
+ * walks over the same list cannot disagree; two pieces of arithmetic over the same
+ * rules did, and that is the bug this shape retires.
+ */
+private sealed interface ControlEntry {
+    val key: String
+
+    /** A group heading, and at most one action that applies to the group. */
+    data class Heading(
+        override val key: String,
+        val title: String,
+        val reset: Reset? = null,
+    ) : ControlEntry
+
+    /** A control: on the glass, on the pad, or both. */
+    data class Row(
+        override val key: String,
+        val name: String,
+        /** The overlay control, when this row is drawn. Null for a pad-only row. */
+        val glass: TouchControl?,
+        /** The pad control this row is, when it is one of the twenty-four. */
+        val pad: GamepadControl?,
+        val slots: List<Slot>,
+        /** What it sends, as one chip. */
+        val sends: String,
+        val bound: Boolean,
+        val round: Boolean,
+        /** Every pad control this row answers for, which is what a press looks up. */
+        val speaksFor: Set<GamepadControl>,
+    ) : ControlEntry {
+        /** A pad row cannot be deleted; a control the user placed is only ever theirs. */
+        val deletable: Boolean get() = glass != null && speaksFor.isEmpty()
+    }
+
+    /** The sentence that stands in for a stick's four rows when they cannot fire. */
+    data class Note(override val key: String, val text: String) : ControlEntry
+
+    /** `Add a control`, at the end of the glass group. */
+    data object Add : ControlEntry {
+        override val key: String get() = "add"
+    }
+
+    /** The stock layouts, offered in place of an empty glass group. */
+    data object Stock : ControlEntry {
+        override val key: String get() = "stock"
+    }
+}
+
+/** The two ways back: the shipped arrangement, and the shipped bindings. */
+private enum class Reset { Layout, All }
+
+/**
+ * One binding a row owns.
+ *
+ * [pad] is what makes the glass and the pad one table: a slot naming a pad control
+ * writes the *pad table*, so rebinding the on-screen `A` and rebinding the
+ * physical `A` are the same edit. A slot with no pad control holds its binding on
+ * the control itself, which is every slot of a layout built by hand.
+ */
+private data class Slot(val name: String, val action: GamepadAction, val pad: GamepadControl?)
+
+/** Which row and which of its slots the key picker is open for. */
+private data class Picking(val row: String, val slot: String)
+
+private const val SLOT_SENDS = "Sends"
+
+/**
+ * Every control the profile has, once each.
+ *
+ * **Once each is the point.** A control on the glass and the pad row for the same
+ * control are one thing seen twice, and listing both is the duplication that made
+ * the screen unreadable — so the glass rows come first and the pad group is
+ * whatever [TouchControl.padControls] has not already spoken for. On the built-in
+ * profile that leaves the pad group empty, because a whole controller is on the
+ * glass; on a hand-built layout it leaves all twenty-four, because none of them
+ * is.
+ */
+private fun controlEntries(profile: InputProfile): List<ControlEntry> {
+    val layout = profile.overlay
+    val covered = layout.controls.flatMap { it.padControls }.toSet()
+    val rest = PAD_READING_ORDER.filterNot { it in covered }
+    val out = mutableListOf<ControlEntry>()
+
+    out += ControlEntry.Heading(
+        key = "h-all",
+        title = "${layout.controls.size + rest.size} CONTROLS · " +
+            "${profile.boundCount} OF ${GamepadControl.entries.size} BOUND",
+        reset = Reset.All,
+    )
+
+    out += ControlEntry.Heading(
+        key = "h-glass",
+        title = if (layout.isEmpty) {
+            "NOTHING ON THE GLASS"
+        } else {
+            "ON THE GLASS · ${layout.controls.size}"
+        },
+        // The *stored* layout, not the resolved one: resolution fills a
+        // pad-linked control's action in from the binding table, so the resolved
+        // form never equals the stock constant and the way back would be offered
+        // on an arrangement nobody has touched.
+        reset = Reset.Layout.takeIf { !layout.isEmpty && profile.touch != TouchLayouts.Gamepad },
+    )
+    if (layout.isEmpty) {
+        out += ControlEntry.Stock
+    } else {
+        layout.controls.forEach { out += glassRow(it) }
+    }
+    out += ControlEntry.Add
+
+    if (rest.isNotEmpty()) {
+        out += ControlEntry.Heading("h-pad", "ON THE PAD ONLY · ${rest.size}")
+        val noted = mutableSetOf<Stick>()
+        rest.forEach { control ->
+            val stick = Stick.entries.firstOrNull { control in it.halfAxes }
+            val role = stick?.let { profile.pad.roleOf(it) }
+            // **A row that cannot fire is worse than a missing one.** A stick
+            // sending the pointer, an axis or nothing has no half-axes to bind, so
+            // its four rows are one sentence saying how to get them back.
+            if (stick != null && role != StickRole.Keys) {
+                if (noted.add(stick)) {
+                    out += ControlEntry.Note("n-${stick.name}", stickNote(stick, role!!))
+                }
+                return@forEach
+            }
+            out += padRow(profile, control)
         }
+    }
+    return out
+}
 
-        // One slider for the whole overlay rather than one per control. The model
-        // stores opacity per control — a stick a thumb rests on wants to be
-        // fainter than a button you have to find — but nothing yet asks for that
-        // difference, and two dozen sliders to express it would be a worse
-        // editor than one.
-        val opacity = state.profile.touch.controls.firstOrNull()?.opacity
-            ?: TouchControls.DEFAULT_OPACITY
-        InputSlider(
-            label = "Opacity",
-            value = opacity,
-            min = TouchControls.MIN_OPACITY,
-            max = TouchControls.MAX_OPACITY,
-            readout = "${(opacity * 100).roundToInt()} %",
-            help = "The overlay is on top of the guest, so it takes the touch before Wine " +
-                "does. Anywhere a control is not, the touch goes through.",
-            onValue = { next ->
-                actions.onProfile(
-                    state.profile.copy(
-                        touch = TouchLayout(
-                            state.profile.touch.controls.map { it.copy(opacity = next) },
-                        ),
-                    ),
-                )
-            },
-        )
+private fun glassRow(control: TouchControl) = ControlEntry.Row(
+    key = control.id,
+    name = control.title,
+    glass = control,
+    pad = control.pad,
+    slots = control.slotNames().map { Slot(it, control.actionFor(it), control.padFor(it)) },
+    sends = control.bindingLabel,
+    bound = control.bindingLabel != X11KeyCatalog.UNBOUND,
+    round = control.round,
+    speaksFor = control.padControls,
+)
 
-        if (state.editing) {
-            InputNote("The guest is not receiving input while you edit.")
+private fun padRow(profile: InputProfile, control: GamepadControl): ControlEntry.Row {
+    val action = profile.pad.bindings[control] ?: GamepadAction.None
+    return ControlEntry.Row(
+        key = padRowKey(control),
+        name = control.rowLabel(),
+        glass = null,
+        pad = control,
+        slots = listOf(Slot(SLOT_SENDS, action, control)),
+        sends = X11KeyCatalog.label(action),
+        bound = action != GamepadAction.None,
+        round = control !in DPAD_CONTROLS,
+        speaksFor = setOf(control),
+    )
+}
+
+/** The selection key of a control that is only on the pad. See [InputEditorState.selected]. */
+private fun padRowKey(control: GamepadControl): String = "pad:${control.name}"
+
+private val DPAD_CONTROLS = setOf(
+    GamepadControl.DPAD_UP,
+    GamepadControl.DPAD_DOWN,
+    GamepadControl.DPAD_LEFT,
+    GamepadControl.DPAD_RIGHT,
+)
+
+private fun stickNote(stick: Stick, role: StickRole): String {
+    val which = if (stick == Stick.LEFT) "The left stick" else "The right stick"
+    return when (role) {
+        StickRole.Look -> "$which moves the mouse. Set it to Keys below to bind its four directions."
+        StickRole.Pad -> "$which is a stick in the guest. Set it to Keys below to bind its four " +
+            "directions instead."
+
+        else -> "$which sends nothing. Set it to Keys below to bind its four directions."
+    }
+}
+
+private fun List<ControlEntry>.rowByKey(key: String?): ControlEntry.Row? =
+    firstOrNull { it is ControlEntry.Row && it.key == key } as ControlEntry.Row?
+
+private fun List<ControlEntry>.rowFor(control: GamepadControl): ControlEntry.Row? =
+    firstOrNull { it is ControlEntry.Row && control in it.speaksFor } as ControlEntry.Row?
+
+/** The row and the one of its slots that this control writes, for Learn. */
+private fun List<ControlEntry>.pickingFor(control: GamepadControl): Picking? {
+    val row = rowFor(control) ?: return null
+    val slot = row.slots.firstOrNull { it.pad == control } ?: row.slots.firstOrNull() ?: return null
+    return Picking(row.key, slot.name)
+}
+
+/**
+ * The profile with one slot rebound.
+ *
+ * **A pad-linked slot rebinds the pad table, not the control.** The glass `A`
+ * button and the physical `A` button are the same control seen twice; editing one
+ * to disagree with the other would undo the whole reason the link exists. The
+ * write goes to the *stored* layout rather than the resolved one, so a pad link is
+ * never flattened into a copy of the binding it was borrowing.
+ */
+private fun InputProfile.rebound(
+    row: ControlEntry.Row,
+    slot: Slot,
+    action: GamepadAction,
+): InputProfile {
+    if (slot.pad != null) return withBinding(slot.pad, action)
+    val stored = touch.byId(row.key) ?: return this
+    return copy(touch = touch.with(stored.withAction(slot.name, action)))
+}
+
+private fun LazyListScope.controlItems(
+    entries: List<ControlEntry>,
+    state: InputEditorState,
+    actions: InputEditorActions,
+    lit: Set<GamepadControl>,
+    shortEdge: Dp,
+) {
+    val profile = state.profile
+    items(entries.size, key = { entries[it].key }) { index ->
+        when (val entry = entries[index]) {
+            is ControlEntry.Heading -> ControlHeading(entry, profile, actions)
+
+            is ControlEntry.Row -> ControlRowView(
+                row = entry,
+                selected = entry.key == state.selected,
+                lit = entry.speaksFor.any { it in lit },
+                shortEdge = shortEdge,
+                onClick = { actions.onSelect(entry.key) },
+                onGlass = glassSwitch(profile, entry, actions),
+            )
+
+            is ControlEntry.Note -> InputNote(entry.text)
+
+            ControlEntry.Add -> TouchAddRow(state, actions)
+
+            ControlEntry.Stock -> StockLayoutOffer(state, actions)
         }
     }
 }
 
-/** `6 CONTROLS ON THE OVERLAY`, and the six rows. */
 @Composable
-private fun TouchControlList(
-    state: InputEditorState,
+private fun ControlHeading(
+    heading: ControlEntry.Heading,
+    profile: InputProfile,
     actions: InputEditorActions,
-    modifier: Modifier = Modifier,
 ) {
-    val layout = state.profile.overlay
-    val short = sessionShortEdgeDp()
-    Column(modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().padding(
-                top = Vessel.metrics.s11,
-                bottom = Vessel.metrics.s3,
-            ),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                if (layout.isEmpty) {
-                    "NOTHING ON THE OVERLAY"
-                } else {
-                    "${layout.controls.size} CONTROLS ON THE OVERLAY"
-                },
-                style = Vessel.type.overline,
-                color = Vessel.colors.textMuted,
-                modifier = Modifier.weight(1f),
+    Row(
+        Modifier.fillMaxWidth().padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s3),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            heading.title,
+            style = Vessel.type.overline,
+            color = Vessel.colors.textMuted,
+            modifier = Modifier.weight(1f),
+        )
+        when (heading.reset) {
+            // **The way back from a layout dragged into a mess.** Placing controls
+            // is a fiddly one-finger operation with no undo, and without this the
+            // only route back to the shipped arrangement is deleting every control
+            // to reach the stock offer. It reads `Reset layout` rather than `Reset
+            // positions` because it restores sizes and membership too.
+            Reset.Layout -> VButton(
+                "Reset layout",
+                { actions.onProfile(profile.copy(touch = TouchLayouts.Gamepad)) },
+                style = VButtonStyle.Ghost,
             )
-            // **The way back from a layout you have dragged into a mess.**
-            // Placing controls is a destructive, fiddly, one-finger operation
-            // with no undo, and without this the only route back to the shipped
-            // arrangement is deleting every control to reach the stock offer
-            // below. It reads `Reset layout` rather than `Reset positions`
-            // because it restores sizes and membership too, and a button that
-            // does more than its label says is worse than a longer label.
-            // The *stored* layout, not the resolved one: resolution fills a
-            // pad-linked control's action in from the binding table, so the
-            // resolved form never equals the stock constant and the button would
-            // be offered on a layout nobody has touched.
-            if (!layout.isEmpty && state.profile.touch != TouchLayouts.Gamepad) {
-                VButton(
-                    "Reset layout",
-                    { actions.onProfile(state.profile.copy(touch = TouchLayouts.Gamepad)) },
-                    style = VButtonStyle.Ghost,
-                )
-            }
-        }
-        if (layout.isEmpty) {
-            StockLayoutOffer(state, actions)
-            return@Column
-        }
-        // **A plain column, not a lazy one, and that is not laziness about
-        // laziness.** In the one-column layout this list sits inside the tab's
-        // own scroll, and a `LazyColumn` there is measured with an infinite
-        // maximum height and throws — which it did, on the device, the first
-        // time the Touch tab was opened. An overlay holds a dozen controls at the
-        // outside; there is nothing here for a lazy list to save.
-        Column(Modifier.padding(bottom = Vessel.metrics.s11)) {
-            layout.controls.forEach { control ->
-                TouchControlRow(
-                    control = control,
-                    selected = control.id == state.selected,
-                    shortEdge = short,
-                    onClick = { actions.onSelect(control.id) },
-                )
-            }
+
+            Reset.All -> VButton(
+                "Reset all",
+                { actions.onProfile(profile.resetToDefaults()) },
+                style = VButtonStyle.Ghost,
+            )
+
+            null -> Unit
         }
     }
 }
 
 /**
+ * What the row's toggle does, or null for a row that has no glass toggle to offer.
+ *
+ * A pad row goes on the glass as a link rather than as a copy, and comes off it by
+ * being removed from the layout — it is still one of the twenty-four, so nothing
+ * is lost. **A control the user placed has no toggle**, because the model has
+ * nowhere to keep a control that is neither drawn nor one of the twenty-four:
+ * taking it off the glass would be deleting it, and the row already offers Delete
+ * by that name.
+ */
+private fun glassSwitch(
+    profile: InputProfile,
+    row: ControlEntry.Row,
+    actions: InputEditorActions,
+): ((Boolean) -> Unit)? {
+    if (row.glass != null) {
+        if (row.speaksFor.isEmpty()) return null
+        return { on ->
+            if (!on) {
+                actions.onProfile(profile.copy(touch = profile.touch.without(row.glass.id)))
+                actions.onSelect(row.pad?.let { padRowKey(it) })
+            }
+        }
+    }
+    val control = row.pad ?: return null
+    return { on ->
+        if (on) {
+            val placed = TouchEdit.placedPad(profile.touch, control)
+            actions.onProfile(profile.copy(touch = profile.touch.with(placed)))
+            actions.onSelect(placed.id)
+        }
+    }
+}
+
+/**
+ * A control, in one row: its shape, its name, where it is, and what it sends.
+ *
+ * The accent bar on the left is the live-press indicator, and it is on every row
+ * for the same reason every row is here — a glass button and a pad row are one
+ * control, so a press has to light whichever of them the profile is using.
+ */
+@Composable
+private fun ControlRowView(
+    row: ControlEntry.Row,
+    selected: Boolean,
+    lit: Boolean,
+    shortEdge: Dp,
+    onClick: () -> Unit,
+    onGlass: ((Boolean) -> Unit)?,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(Vessel.metrics.shapeMd)
+            .background(
+                when {
+                    selected -> Vessel.colors.accentHover
+                    lit -> Vessel.colors.accentGhostHover
+                    else -> Color.Transparent
+                },
+            )
+            .clickable(onClickLabel = row.name, onClick = onClick)
+            .heightIn(min = Vessel.metrics.touchTarget)
+            .padding(horizontal = Vessel.metrics.s6),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(width = 2.dp, height = 20.dp)
+                .clip(Vessel.metrics.shapePill)
+                .background(if (lit) Vessel.colors.accent else Color.Transparent),
+        )
+        // The dot is the control's own shape at 20 dp: round for a stick or a
+        // button, square for a d-pad. A list of identical dots would say nothing
+        // the name does not already say in words — the shape is the one thing it
+        // can add.
+        Box(
+            Modifier
+                .size(20.dp)
+                .clip(if (row.round) Vessel.metrics.shapePill else Vessel.metrics.shapeSm)
+                .border(
+                    Vessel.metrics.hairline,
+                    if (selected) Vessel.colors.accent else Vessel.colors.border,
+                    if (row.round) Vessel.metrics.shapePill else Vessel.metrics.shapeSm,
+                ),
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                row.name,
+                style = Vessel.type.body,
+                color = Vessel.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                row.glass?.metrics(shortEdge) ?: "not on the glass",
+                style = Vessel.type.monoSmall,
+                color = Vessel.colors.textMuted,
+                maxLines = 1,
+            )
+        }
+        BindingChip(row.sends, bound = row.bound)
+        if (onGlass != null) {
+            VToggle(checked = row.glass != null, onCheckedChange = onGlass)
+        }
+    }
+}
+
+/**
+ * `11% · 66% · 141 dp`.
+ *
+ * The third figure is the control's **diameter in dp of the landscape session**,
+ * not in guest pixels. The design comp said guest pixels; the model says a
+ * control's size is a fraction of the surface, and quoting it against the guest
+ * desktop would be a number that changes when the resolution does while the
+ * control on screen does not move at all.
+ */
+private fun TouchControl.metrics(shortEdge: Dp): String {
+    val across = (size * 2f * shortEdge.value).roundToInt()
+    return "${(cx * 100).roundToInt()}% · ${(cy * 100).roundToInt()}% · $across dp"
+}
+
+/**
  * What an empty overlay offers instead of an empty canvas.
  *
- * Plan §4.5's three stock layouts, and this is the moment they are for: a profile
- * whose overlay has never been touched, where the alternative is a rectangle with
+ * Plan §4.5's stock layouts, and this is the moment they are for: a profile whose
+ * overlay has never been touched, where the alternative is a rectangle with
  * nothing in it and a user who has to guess that Add is the way in.
  */
 @Composable
 private fun StockLayoutOffer(state: InputEditorState, actions: InputEditorActions) {
     Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
         Text(
-            "This profile draws nothing on the screen. Start from one of these, or add " +
-                "controls one at a time.",
+            "This profile draws nothing on the screen. Start from one of these, add controls " +
+                "one at a time, or put a control from the list below on the glass.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
         )
@@ -745,182 +1088,173 @@ private fun StockLayoutOffer(state: InputEditorState, actions: InputEditorAction
     }
 }
 
-@Composable
-private fun TouchControlRow(
-    control: TouchControl,
-    selected: Boolean,
-    shortEdge: Dp,
-    onClick: () -> Unit,
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(Vessel.metrics.shapeMd)
-            .background(if (selected) Vessel.colors.accentHover else Color.Transparent)
-            .clickable(onClickLabel = control.designation, onClick = onClick)
-            .heightIn(min = Vessel.metrics.touchTarget)
-            .padding(horizontal = Vessel.metrics.s6),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // The dot is the control's own shape at 20 dp: round for a stick or a
-        // button, square for a d-pad. A list of six identical dots would say
-        // nothing that the kind column does not already say in words.
-        Box(
-            Modifier
-                .size(20.dp)
-                .clip(if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeSm)
-                .border(
-                    Vessel.metrics.hairline,
-                    if (selected) Vessel.colors.accent else Vessel.colors.border,
-                    if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeSm,
-                ),
-        )
-        Column(Modifier.weight(1f)) {
-            Text(control.title, style = Vessel.type.body, maxLines = 1)
-            Text(
-                control.metrics(shortEdge),
-                style = Vessel.type.monoSmall,
-                color = Vessel.colors.textMuted,
-                maxLines = 1,
-            )
-        }
-        BindingChip(control.bindingLabel, bound = control.bindingLabel != "Unbound")
-    }
-}
+// — the selected control ---------------------------------------------------------
 
 /**
- * `11% · 66% · 141 dp`.
+ * The row above, expanded: name, what it sends, whether it is drawn, and — only
+ * when it is drawn — where and how big.
  *
- * The third figure is the control's **diameter in dp of the landscape session**,
- * not in guest pixels. The design comp said guest pixels; the model says a
- * control's size is a fraction of the surface, and quoting it against the guest
- * desktop would be a number that changes when the resolution does while the
- * control on screen does not move at all.
- */
-private fun TouchControl.metrics(shortEdge: Dp): String {
-    val across = (size * 2f * shortEdge.value).roundToInt()
-    return "${(cx * 100).roundToInt()}% · ${(cy * 100).roundToInt()}% · $across dp"
-}
-
-/**
- * The selected control's own settings: what it sends, how big, and Remove.
- *
- * A stick and a d-pad get four pickers rather than one, because they are four
- * keys — and a look pad gets none at all, because a pointer velocity is not a
- * key and pretending otherwise is what the [StickRole] distinction exists to
- * prevent.
+ * All four for a control that is both, the first two for one that is only on the
+ * pad. Nothing here is a special case: the same fields in the same order for a
+ * control the user placed and for one of the twenty-four, and the only difference
+ * is that one of them can be deleted.
  */
 @Composable
-private fun TouchSelectionEditor(
+private fun SelectedControl(
     state: InputEditorState,
     actions: InputEditorActions,
-    onLayout: (TouchLayout) -> Unit,
+    row: ControlEntry.Row?,
+    onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val layout = state.profile.overlay
-    val control = layout.byId(state.selected)
-    var picking by remember { mutableStateOf<String?>(null) }
-
-    if (control == null) {
-        if (!layout.isEmpty) {
-            InputNote(
-                if (state.editing) {
-                    "Drag a control to move it, drag its corner to resize. Tap one to " +
-                        "change what it sends."
-                } else {
-                    "Tap a control to change what it sends, how big it is, or to remove it."
-                },
-            )
-        }
-        return
-    }
-
-    val slot = picking
-    if (slot != null) {
-        KeyPicker(
-            title = "${control.title} · $slot",
-            current = control.actionFor(slot),
-            onClose = { picking = null },
-            onChoose = { action ->
-                // **A pad-linked control rebinds the pad table, not itself.** The
-                // glass A button and the physical A button are the same control
-                // seen twice; editing one to disagree with the other would undo
-                // the whole reason the link exists.
-                val linked = control.padFor(slot)
-                if (linked != null) {
-                    actions.onProfile(
-                        state.profile.copy(
-                            pad = state.profile.pad.copy(
-                                bindings = state.profile.pad.bindings + (linked to action),
-                            ),
-                        ),
-                    )
-                } else {
-                    onLayout(layout.with(control.withAction(slot, action)))
-                }
-                picking = null
-            },
-            modifier = Modifier.fillMaxWidth().height(KEY_PICKER_HEIGHT),
+    val profile = state.profile
+    if (row == null) {
+        InputNote(
+            "Tap a control — on the map, or in the list below — to name it, change what it " +
+                "sends, or take it off the glass.",
+            modifier = modifier,
         )
         return
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
+    val glass = row.glass
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
         VRule(verticalMargin = Vessel.metrics.s3)
-        Text(control.title, style = Vessel.type.cardTitle)
+        Text(row.name, style = Vessel.type.cardTitle)
 
-        control.slots().forEach { name ->
-            VLabeledField(label = if (name == SLOT_SENDS) "Sends" else name) {
+        // **The field the redesign added.** A placed control used to be anonymous
+        // until a binding gave it a word, so what it was called on the glass was
+        // whatever key it happened to send. The name is a value the user owns; the
+        // placeholder is what it falls back to when they clear it.
+        VLabeledField(
+            label = "Name",
+            help = if (glass == null) {
+                "Put it on the glass to give it a name of your own. Off the glass there is " +
+                    "nothing to draw a name on."
+            } else {
+                null
+            },
+        ) {
+            VTextField(
+                value = glass?.label.orEmpty(),
+                onValueChange = { name ->
+                    glass?.let {
+                        actions.onProfile(profile.withControl(it.id) { c -> c.copy(label = name) })
+                    }
+                },
+                enabled = glass != null,
+                placeholder = row.name,
+            )
+        }
+
+        row.slots.forEach { slot ->
+            VLabeledField(label = slot.name) {
                 VButton(
-                    X11KeyCatalog.label(control.actionFor(name)),
-                    { picking = name },
+                    X11KeyCatalog.label(slot.action),
+                    { onPick(slot.name) },
                     style = VButtonStyle.Secondary,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
-        if (control.kind == TouchKind.STICK && control.role == StickRole.Look) {
+        if (row.slots.isEmpty() && glass != null) {
             InputNote(
-                "A look pad moves the mouse. There is no analogue axis a Windows game " +
-                    "can read, so this is the only thing it can be.",
+                when (glass.role) {
+                    StickRole.Pad -> "It is a stick the guest reads as a stick, so there is no " +
+                        "key to bind. Change what the stick sends in the settings below."
+
+                    StickRole.Look -> "A look pad moves the mouse. There is no analogue axis a " +
+                        "Windows game can read, so this is the only thing it can be."
+
+                    else -> "It sends nothing. Change what the stick sends in the settings below."
+                },
             )
         }
 
-        val short = sessionShortEdgeDp()
-        InputSlider(
-            label = "Size",
-            value = control.size,
-            min = TouchControls.MIN_SIZE,
-            max = TouchControls.MAX_SIZE,
-            readout = "${(control.size * 2f * short.value).roundToInt()} dp",
-            help = null,
-            onValue = { onLayout(layout.with(control.copy(size = it))) },
-        )
-        Text(
-            "${(control.cx * 100).roundToInt()}% from the left · " +
-                "${(control.cy * 100).roundToInt()}% down",
-            style = Vessel.type.monoSmall,
-            color = Vessel.colors.textMuted,
-        )
-        VButton(
-            "Remove",
-            {
-                onLayout(layout.without(control.id))
-                actions.onSelect(null)
-            },
-            style = VButtonStyle.Danger,
-            icon = VIcons.Trash,
-        )
+        val toggle = glassSwitch(profile, row, actions)
+        if (toggle != null) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                VToggle(checked = glass != null, onCheckedChange = toggle)
+                Text(
+                    "On the glass",
+                    style = Vessel.type.body,
+                    color = Vessel.colors.textPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        if (glass != null) {
+            val short = sessionShortEdgeDp()
+            InputSlider(
+                label = "Size",
+                value = glass.size,
+                min = TouchControls.MIN_SIZE,
+                max = TouchControls.MAX_SIZE,
+                readout = "${(glass.size * 2f * short.value).roundToInt()} dp",
+                help = null,
+                onValue = { next ->
+                    actions.onProfile(profile.withControl(glass.id) { it.copy(size = next) })
+                },
+            )
+            Text(
+                "${(glass.cx * 100).roundToInt()}% from the left · " +
+                    "${(glass.cy * 100).roundToInt()}% down",
+                style = Vessel.type.monoSmall,
+                color = Vessel.colors.textMuted,
+            )
+        }
+
+        if (row.deletable && glass != null) {
+            VButton(
+                "Delete",
+                {
+                    actions.onProfile(profile.copy(touch = profile.touch.without(glass.id)))
+                    actions.onSelect(null)
+                },
+                style = VButtonStyle.Danger,
+                icon = VIcons.Trash,
+            )
+        } else {
+            // The row says it rather than offering a control that refuses. The
+            // twenty-four are what a controller *has*, and a profile missing `A`
+            // is not a profile.
+            InputNote(
+                "This is one of the controller's own controls, so it cannot be deleted. " +
+                    "Take it off the glass instead.",
+            )
+        }
     }
 }
 
-private val KEY_PICKER_HEIGHT = 420.dp
+/**
+ * Change one control in the **stored** layout.
+ *
+ * Not the resolved one: resolution fills a pad-linked control's action in from the
+ * binding table, and writing that back would freeze a copy of the binding into the
+ * control — which is the same as breaking the link, silently, at the next
+ * rebinding.
+ */
+private fun InputProfile.withControl(id: String, edit: (TouchControl) -> TouchControl): InputProfile {
+    val stored = touch.byId(id) ?: return this
+    return copy(touch = touch.with(edit(stored)))
+}
 
-private const val SLOT_SENDS = "Sends"
-
-private fun TouchControl.slots(): List<String> = when {
+/**
+ * Which binding fields this control has.
+ *
+ * A stick and a d-pad get four rather than one, because they are four keys — and a
+ * stick that is not sending keys gets none at all, because a pointer velocity and
+ * a guest axis are not keys and pretending otherwise is what the [StickRole]
+ * distinction exists to prevent.
+ */
+private fun TouchControl.slotNames(): List<String> = when {
     kind == TouchKind.BUTTON -> listOf(SLOT_SENDS)
-    kind == TouchKind.STICK && role == StickRole.Look -> emptyList()
+    kind == TouchKind.STICK && role != StickRole.Keys -> emptyList()
     else -> listOf("Up", "Down", "Left", "Right")
 }
 
@@ -961,13 +1295,23 @@ private fun TouchControl.actionFor(slot: String): GamepadAction = when (slot) {
     else -> action
 }
 
+/**
+ * The control with one of its own bindings changed.
+ *
+ * **It no longer renames the control.** It used to write
+ * `label = X11KeyCatalog.label(next)` alongside, which is exactly the fault the
+ * redesign names: a control whose name came from its binding is a control with no
+ * name of its own.
+ */
 private fun TouchControl.withAction(slot: String, next: GamepadAction): TouchControl = when (slot) {
     "Up" -> copy(up = next)
     "Down" -> copy(down = next)
     "Left" -> copy(left = next)
     "Right" -> copy(right = next)
-    else -> copy(action = next, label = X11KeyCatalog.label(next))
+    else -> copy(action = next)
 }
+
+// — adding -----------------------------------------------------------------------
 
 /**
  * Add a control, having first asked what kind.
@@ -976,13 +1320,15 @@ private fun TouchControl.withAction(slot: String, next: GamepadAction): TouchCon
  * left stick, one hat and one right stick to give them — so a second is offered
  * as unavailable rather than hidden. Hiding it would make the limit look like a
  * missing feature.
+ *
+ * What it makes is **a full control**: a name, a binding, a place on the glass and
+ * everything a pad row has except the one thing a pad row lacks, which is that
+ * this one can be deleted.
  */
 @Composable
-private fun TouchAddRow(
-    layout: TouchLayout,
-    actions: InputEditorActions,
-    onLayout: (TouchLayout) -> Unit,
-) {
+private fun TouchAddRow(state: InputEditorState, actions: InputEditorActions) {
+    val profile = state.profile
+    val layout = profile.overlay
     var adding by remember { mutableStateOf(false) }
     if (!adding) {
         VButton(
@@ -990,11 +1336,14 @@ private fun TouchAddRow(
             { adding = true },
             style = VButtonStyle.Secondary,
             icon = VIcons.Plus,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s6),
         )
         return
     }
-    Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
+    Column(
+        Modifier.padding(vertical = Vessel.metrics.s6),
+        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "WHAT KIND",
@@ -1022,8 +1371,8 @@ private fun TouchAddRow(
                         Vessel.metrics.shapeMd,
                     )
                     .clickable(enabled = !taken, onClickLabel = kind.title) {
-                        val control = TouchEdit.placed(layout, kind.kind, kind.role)
-                        onLayout(layout.with(control))
+                        val control = TouchEdit.placed(profile.touch, kind.kind, kind.role)
+                        actions.onProfile(profile.copy(touch = profile.touch.with(control)))
                         actions.onSelect(control.id)
                         adding = false
                     }
@@ -1037,7 +1386,7 @@ private fun TouchAddRow(
                         color = if (taken) Vessel.colors.textMuted else Vessel.colors.textPrimary,
                     )
                     Text(
-                        if (taken) "already on the overlay" else kind.note,
+                        if (taken) "already on the glass" else kind.note,
                         style = Vessel.type.bodySmall,
                         color = Vessel.colors.textMuted,
                     )
@@ -1045,8 +1394,8 @@ private fun TouchAddRow(
             }
         }
         InputNote(
-            "It lands in the middle of the screen, already selected. Drag it where your " +
-                "thumb actually is.",
+            "It lands in the middle of the screen, already selected and already named. Give " +
+                "it a name and a key above, then drag it where your thumb actually is.",
         )
     }
 }
@@ -1066,7 +1415,92 @@ private val KINDS = listOf(
     AddableKind("Look pad", "relative mouse", TouchKind.STICK, StickRole.Look, unique = true),
 )
 
-// — Profiles ---------------------------------------------------------------------
+// — the settings -----------------------------------------------------------------
+
+/**
+ * Whether the overlay is drawn, how solid, and everything about the pad in your
+ * hands.
+ *
+ * **The Play / Edit layout toggle used to be here, and it is gone.** Editing in
+ * place meant editing *under this panel*: the panel covers the left of the screen,
+ * so the d-pad, the left stick and L3 sat beneath it and could not be dragged at
+ * all. The full-screen arrange surface exists precisely to give the whole screen
+ * to placing controls, and it is one tap away on the map above.
+ */
+@Composable
+private fun InputSettings(
+    state: InputEditorState,
+    actions: InputEditorActions,
+    learn: Boolean,
+    onLearn: (Boolean) -> Unit,
+    lit: Set<GamepadControl>,
+    onPin: (GamepadControl) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val profile = state.profile
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
+        Text(
+            "SETTINGS",
+            style = Vessel.type.overline,
+            color = Vessel.colors.textMuted,
+        )
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            VToggle(checked = state.touchVisible, onCheckedChange = actions.onTouchVisible)
+            Text(
+                "Show the overlay",
+                style = Vessel.type.body,
+                color = Vessel.colors.textPrimary,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        // One slider for the whole overlay rather than one per control. The model
+        // stores opacity per control — a stick a thumb rests on wants to be
+        // fainter than a button you have to find — but nothing yet asks for that
+        // difference, and two dozen sliders to express it would be a worse editor
+        // than one.
+        val opacity = profile.touch.controls.firstOrNull()?.opacity
+            ?: TouchControls.DEFAULT_OPACITY
+        InputSlider(
+            label = "Opacity",
+            value = opacity,
+            min = TouchControls.MIN_OPACITY,
+            max = TouchControls.MAX_OPACITY,
+            readout = "${(opacity * 100).roundToInt()} %",
+            help = "The overlay is on top of the guest, so it takes the touch before Wine " +
+                "does. Anywhere a control is not, the touch goes through.",
+            onValue = { next ->
+                actions.onProfile(
+                    profile.copy(
+                        touch = TouchLayout(profile.touch.controls.map { it.copy(opacity = next) }),
+                    ),
+                )
+            },
+        )
+
+        VRule(verticalMargin = Vessel.metrics.s3)
+
+        PadSettings(
+            profile = profile,
+            live = state.live,
+            learn = learn,
+            onLearn = onLearn,
+            lit = lit,
+            onPin = onPin,
+            onProfile = actions.onProfile,
+        )
+
+        if (state.editing) {
+            InputNote("The guest is not receiving input while you edit.")
+        }
+    }
+}
+
+// — the profile ------------------------------------------------------------------
 
 /**
  * Every named arrangement on the device, and which one this container starts on.
@@ -1078,15 +1512,19 @@ private val KINDS = listOf(
  * document.
  */
 @Composable
-private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
-    // No scroll of its own: it is one item inside the screen's single list, and
-    // a scroller nested in a scroller measures to nothing.
+private fun ProfilesSection(
+    state: InputEditorState,
+    actions: InputEditorActions,
+    modifier: Modifier = Modifier,
+) {
+    // No scroll of its own: it is one item inside the screen's single list, and a
+    // scroller nested in a scroller measures to nothing.
     Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s22),
+        modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
+        Text("PROFILE", style = Vessel.type.overline, color = Vessel.colors.textMuted)
+
         if (state.missingProfile) {
             VCaution(
                 "This container names a profile that has been deleted. It starts on the " +
@@ -1095,9 +1533,9 @@ private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
             )
         }
 
-        // Rename is the current profile's name field rather than a button on
-        // every row: renaming is the one profile action that is a *value*, and a
-        // field is what this product uses for a value everywhere else.
+        // Rename is the current profile's name field rather than a button on every
+        // row: renaming is the one profile action that is a *value*, and a field is
+        // what this product uses for a value everywhere else.
         VLabeledField(
             label = "Name",
             help = if (state.profile.isBuiltInDefault) {
@@ -1134,11 +1572,6 @@ private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
                 "is what a container gets when it has never been given one, and it is never " +
                 "written to disk.",
         )
-
-        // New, duplicate, delete, import and export are all in the header now,
-        // beside the picker they act on. What is left here is the list -- which
-        // says what the picker cannot, how much each profile carries -- and the
-        // name of the one in use.
     }
 }
 
@@ -1185,7 +1618,7 @@ private fun ProfileRow(
             Text(profile.name, style = Vessel.type.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 "${profile.boundCount} bound · " +
-                    "${profile.touch.controls.size} on the overlay" +
+                    "${profile.touch.controls.size} on the glass" +
                     if (profile.isBuiltInDefault) " · built in" else "",
                 style = Vessel.type.monoSmall,
                 color = Vessel.colors.textMuted,

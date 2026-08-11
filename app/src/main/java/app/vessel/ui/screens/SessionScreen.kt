@@ -388,8 +388,8 @@ fun SessionDesktop(
      * Everything the Input panel draws, already resolved.
      *
      * A whole state object rather than the four values this used to take: the
-     * panel grew from one tab to three, and the alternative was fourteen
-     * parameters on this function whose only reader is one composable.
+     * panel grew from a binding table to a whole editor, and the alternative was
+     * fourteen parameters on this function whose only reader is one composable.
      */
     input: InputEditorState = InputEditorState(profile = InputProfile.Default),
     inputActions: InputEditorActions = InputEditorActions(),
@@ -432,8 +432,6 @@ fun SessionDesktop(
      * that opened it instead of on top of it.
      */
     var inputOpen by remember { mutableStateOf(false) }
-
-    /** Which of the panel's three tabs is showing. Here, so closing it remembers. */
 
     // **Laying the overlay out takes the rail away, and that is deliberate.** The
     // rail plus the panel is 820 dp of a 927 dp window, and the controls being

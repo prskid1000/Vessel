@@ -270,4 +270,85 @@ class TouchLayoutTest {
         assertEquals("W A S D", stick.bindingLabel)
         assertEquals("Mouse look", TouchLayouts.Wasd.byId("look")!!.bindingLabel)
     }
+
+    /** The one role that reaches the guest as itself must not read as `Unbound`. */
+    @Test
+    fun `a stick the guest reads as a stick says so`() {
+        val stick = TouchLayouts.Wasd.byId("stick")!!.copy(role = StickRole.Pad)
+        assertEquals("Gamepad axis", stick.bindingLabel)
+    }
+
+    /**
+     * **Nothing is listed twice.**
+     *
+     * The editor is one list: the controls on the glass, then whatever of the
+     * twenty-four they do not already speak for. A whole controller on the glass
+     * therefore leaves no remainder at all — and if [TouchControl.padControls]
+     * ever stopped covering one, that control would appear both as a button in
+     * the picture and as a row underneath it, which is the duplication the
+     * redesign exists to remove.
+     */
+    @Test
+    fun `the built-in default speaks for every pad control exactly once`() {
+        val spoken = InputProfile.Default.touch.controls.flatMap { it.padControls }
+        assertEquals(GamepadControl.entries.size, spoken.size)
+        assertEquals(GamepadControl.entries.toSet(), spoken.toSet())
+    }
+
+    /** A stick speaks for four half-axes and a d-pad for four directions. */
+    @Test
+    fun `a stick and a d-pad each speak for four`() {
+        val stored = InputProfile.Default.touch
+        assertEquals(
+            Stick.LEFT.halfAxes.toSet(),
+            stored.controls.first { it.padStick == Stick.LEFT }.padControls,
+        )
+        assertEquals(4, stored.controls.first { it.kind == TouchKind.DPAD }.padControls.size)
+        // And it is called after its shape, not after the one direction it names.
+        assertEquals("D-pad", stored.controls.first { it.kind == TouchKind.DPAD }.title)
+    }
+
+    /**
+     * A control you add is a full control, and that starts with having a name.
+     *
+     * It used to arrive anonymous and stay that way until a binding gave it a
+     * word, so the thing drawn on the glass read `Unbound`.
+     */
+    @Test
+    fun `a control you place is born with a name and can be renamed`() {
+        val placed = TouchEdit.placed(TouchLayout(), TouchKind.BUTTON)
+        assertEquals("Button", placed.label)
+        assertEquals("Button", placed.title)
+        assertEquals("Button", placed.face)
+
+        val named = placed.copy(label = "Jump")
+        assertEquals("Jump", named.title)
+        assertEquals("Jump", named.face)
+        // Renaming does not touch what it sends, and binding does not rename it.
+        assertEquals(GamepadAction.None, named.action)
+    }
+
+    /** A pad row put on the glass is a *link*, so it still follows the pad table. */
+    @Test
+    fun `a pad row put on the glass borrows rather than copies`() {
+        val placed = TouchEdit.placedPad(TouchLayout(), GamepadControl.A)
+        assertEquals(GamepadControl.A, placed.pad)
+        assertEquals(GamepadAction.None, placed.action)
+        assertEquals("A", placed.title)
+
+        val stick = TouchEdit.placedPad(TouchLayout(), GamepadControl.STICK_R_UP)
+        assertEquals(Stick.RIGHT, stick.padStick)
+        assertEquals(TouchKind.STICK, stick.kind)
+
+        val dpad = TouchEdit.placedPad(TouchLayout(), GamepadControl.DPAD_LEFT)
+        assertEquals(TouchKind.DPAD, dpad.kind)
+        assertEquals(4, dpad.padControls.size)
+
+        // And what it borrows is the profile's answer, resolved on the way out.
+        val profile = InputProfile.Default.copy(touch = TouchLayout(listOf(placed)))
+        assertEquals(
+            GamepadProfile.Default.bindings[GamepadControl.A],
+            profile.overlay.controls.single().action,
+        )
+    }
 }

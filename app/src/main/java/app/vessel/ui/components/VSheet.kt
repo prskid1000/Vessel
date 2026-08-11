@@ -100,8 +100,8 @@ fun VSheet(
     /**
      * Whether the body scrolls, which almost every sheet wants and one does not.
      *
-     * The Input takeover brings its own scrolling — a tabbed editor with a lazy
-     * list under each tab — and a scrolling column around a scrolling column is
+     * The Input takeover brings its own scrolling — one lazy list from the map
+     * to the profile — and a scrolling column around a scrolling column is
      * the measurement error where the inner one is given infinite height and
      * throws. False hands the body the sheet's real height instead and lets it
      * decide what moves.

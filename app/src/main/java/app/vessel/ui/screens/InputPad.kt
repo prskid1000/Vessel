@@ -25,10 +25,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -82,213 +78,24 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * The Pad tab: a picture of a controller, the two numbers that tune a stick, and
- * a table of twenty-four rows.
+ * The physical pad: a picture of a controller, Learn, the stick roles and the two
+ * numbers that tune a stick.
  *
- * **Nothing on it implies a gamepad reaches the guest.** Vessel ships no XInput:
- * the only channel into a Windows program is the X server, which carries keys and
- * a pointer. Every row therefore resolves to a keystroke, a mouse button or
- * pointer motion, and the word "pad" names the *device in your hands*, never what
- * the game sees. There is no rumble, no gyro and no "controller detected".
+ * **Nothing on it implies a gamepad reaches the guest through this table.** The
+ * table carries keystrokes and pointer motion, and the word "pad" names the
+ * *device in your hands*, never what the game sees; a stick set to
+ * [StickRole.Pad] bypasses it entirely and reaches the guest's own HID device.
+ * There is no rumble, no gyro and no "controller detected".
  *
- * It is laid out two ways from one set of pieces. Over a running session the
- * panel is 560 dp and the settings sit beside the table, which is what keeps the
- * diagram — and therefore Learn — on screen while a key is being chosen. On the
- * container sheet the same content is 421 dp and reads down one column, because
- * two 210 dp columns in 421 dp is two columns of nothing.
+ * **It is a section of one screen now, not a tab and not a second column.** The
+ * twenty-four binding rows that used to live under here are gone from this file:
+ * every control the profile has — on the glass, on the pad, or both — is one list
+ * in [InputEditor], because the two halves were one table seen twice and saying
+ * it twice is what made the screen unreadable. What is left here is the pad
+ * itself.
  */
 @Composable
-internal fun PadTab(
-    profile: InputProfile,
-    lit: Set<GamepadControl>,
-    live: Boolean,
-    wide: Boolean,
-    onProfile: (InputProfile) -> Unit,
-    modifier: Modifier = Modifier,
-    /**
-     * The overlay's own sections, emitted into this list rather than beside it.
-     *
-     * **Why they are passed in instead of drawn here.** This screen is one
-     * LazyColumn and the binding rows are `LazyListScope` items; a Column of
-     * touch controls placed above it would have to be a second scroller, and a
-     * LazyColumn inside a scroll is the crash this feature already hit once.
-     * Handing the caller the same scope is what lets "the map, then the
-     * settings, then every control" be one list instead of three.
-     */
-    before: (LazyListScope.() -> Unit)? = null,
-    after: (LazyListScope.() -> Unit)? = null,
-) {
-    /** The control whose key is being chosen, or null while the list is showing. */
-    var picking by remember { mutableStateOf<GamepadControl?>(null) }
-
-    /** Learn: a press on the pad opens that control's picker instead of the list. */
-    var learn by remember { mutableStateOf(false) }
-
-    /** The row lit by a tap on the diagram, when no physical control is down. */
-    var pinned by remember { mutableStateOf<GamepadControl?>(null) }
-
-    // A physical press wins over a tap, always: the whole point of the indicator
-    // is to answer "which row is the button under my thumb", and a stale tap
-    // highlight sitting next to a live one would answer it wrongly.
-    val highlighted = if (lit.isNotEmpty()) lit else setOfNotNull(pinned)
-
-    // Learn, driven by the pad itself. `gamepadControl` already names every
-    // physical control, so this is free — and it is the best answer to "which of
-    // these twenty-four rows is the button I am pressing".
-    LaunchedEffect(learn, lit) {
-        if (learn) lit.firstOrNull()?.let { picking = it }
-    }
-
-    val control = picking
-    val choose: (GamepadAction) -> Unit = { action ->
-        control?.let { onProfile(profile.withBinding(it, action)) }
-        picking = null
-    }
-
-    // **"A press on the diagram still finds its row" has to be true.** The tab
-    // says that in as many words, and until now it only tinted the row — which
-    // for the d-pad, the triggers and everything below them is a row nobody can
-    // see. Tinting something off-screen is indistinguishable from doing nothing,
-    // and "clicking on these does nothing" is exactly how it was reported.
-    //
-    // One item earlier than the row itself, so its group heading comes with it
-    // and the highlight lands in context rather than flush against the top edge.
-    val listState = rememberLazyListState()
-    val leadingItems = if (wide) 0 else 1
-    LaunchedEffect(pinned, profile) {
-        val row = pinned?.let { bindingRowIndex(profile, it) } ?: return@LaunchedEffect
-        listState.animateScrollToItem((row + leadingItems - 1).coerceAtLeast(0))
-    }
-
-    // A tap that opens the picker is not also a tap that pins a row: the picker
-    // replaces the list, so the highlight would be waiting behind it for a
-    // question that has already been answered.
-    val pin: (GamepadControl) -> Unit = {
-        if (learn) {
-            picking = it
-            pinned = null
-        } else {
-            pinned = it
-        }
-    }
-
-    if (wide) {
-        Row(modifier.fillMaxWidth().fillMaxHeight()) {
-            PadSettingsColumn(
-                profile = profile,
-                live = live,
-                learn = learn,
-                onLearn = { learn = it },
-                lit = highlighted,
-                onPin = pin,
-                onProfile = onProfile,
-            )
-            Box(
-                Modifier
-                    .width(Vessel.metrics.hairline)
-                    .fillMaxHeight()
-                    .background(Vessel.colors.divider),
-            )
-            Box(Modifier.weight(1f).fillMaxHeight()) {
-                if (control == null) {
-                    LazyColumn(
-                        Modifier.fillMaxHeight(),
-                        state = listState,
-                        contentPadding = LIST_PADDING,
-                    ) {
-                        before?.invoke(this)
-                        bindingListItems(profile, highlighted, { pinned = it; picking = it }, onProfile)
-                        after?.invoke(this)
-                    }
-                } else {
-                    KeyPicker(
-                        title = control.rowLabel(),
-                        current = profile.pad.bindings[control] ?: GamepadAction.None,
-                        onClose = { picking = null },
-                        onChoose = choose,
-                    )
-                }
-            }
-        }
-        return
-    }
-
-    if (control != null) {
-        KeyPicker(
-            title = control.rowLabel(),
-            current = profile.pad.bindings[control] ?: GamepadAction.None,
-            onClose = { picking = null },
-            onChoose = choose,
-            modifier = modifier,
-        )
-        return
-    }
-
-    LazyColumn(
-        modifier.fillMaxWidth().fillMaxHeight(),
-        state = listState,
-        contentPadding = LIST_PADDING,
-    ) {
-        before?.invoke(this)
-        padSettingsItems(
-            profile = profile,
-            live = live,
-            learn = learn,
-            onLearn = { learn = it },
-            lit = highlighted,
-            onPin = pin,
-            onProfile = onProfile,
-        )
-        bindingListItems(profile, highlighted, { pinned = it; picking = it }, onProfile)
-        after?.invoke(this)
-    }
-}
-
-private val LIST_PADDING = PaddingValues(bottom = 22.dp)
-
-// — the settings: the pad, the roles, the two numbers ----------------------------
-
-@Composable
-private fun PadSettingsColumn(
-    profile: InputProfile,
-    live: Boolean,
-    learn: Boolean,
-    onLearn: (Boolean) -> Unit,
-    lit: Set<GamepadControl>,
-    onPin: (GamepadControl) -> Unit,
-    onProfile: (InputProfile) -> Unit,
-) {
-    Column(
-        Modifier
-            .width(PAD_COLUMN_WIDTH)
-            .fillMaxHeight()
-            .verticalScroll(rememberScrollState())
-            .padding(end = Vessel.metrics.s11, bottom = Vessel.metrics.s11),
-        verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
-    ) {
-        PadSettings(profile, live, learn, onLearn, lit, onPin, onProfile)
-    }
-}
-
-/** The same settings as items, for the single column the sheet reads down. */
-private fun LazyListScope.padSettingsItems(
-    profile: InputProfile,
-    live: Boolean,
-    learn: Boolean,
-    onLearn: (Boolean) -> Unit,
-    lit: Set<GamepadControl>,
-    onPin: (GamepadControl) -> Unit,
-    onProfile: (InputProfile) -> Unit,
-) {
-    item(key = "pad-settings") {
-        Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-            PadSettings(profile, live, learn, onLearn, lit, onPin, onProfile)
-        }
-    }
-}
-
-@Composable
-private fun PadSettings(
+internal fun PadSettings(
     profile: InputProfile,
     live: Boolean,
     learn: Boolean,
@@ -302,7 +109,7 @@ private fun PadSettings(
     // is drawn faintly rather than at full strength.
     if (!live) {
         InputNote(
-            "No session is running, so the diagram cannot light up. Every row still " +
+            "No session is running, so the diagram cannot light up. Every control still " +
                 "binds, and a press on the diagram still finds its row.",
         )
     }
@@ -322,6 +129,11 @@ private fun PadSettings(
         Text("Learn", style = Vessel.type.bodySmall, color = Vessel.colors.textLabel)
     }
 
+    // **Drawn again, after a refactor quietly dropped it.** The sentence above
+    // promises that a press on the diagram finds its row, and for a while there
+    // was no diagram on the screen at all — a promise about a picture nobody
+    // could see. It is also the only way to reach a row without a pad plugged in.
+    PadDiagram(lit = lit, dim = !live, onPin = onPin)
 
     Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
         Stick.entries.forEach { stick ->
@@ -622,8 +434,6 @@ private val PAD_PINS = listOf(
     PadPin(GamepadControl.START, 108.dp, 60.dp, 30.dp, 13.dp, label = "STA"),
 )
 
-private val PAD_COLUMN_WIDTH = 232.dp
-
 /** The clear cross and the picker's back arrow, both inside a 44 dp row. */
 internal val CLEAR_TARGET = 28.dp
 private val PAD_DIAGRAM_WIDTH = 210.dp
@@ -706,38 +516,38 @@ internal fun InputSlider(
     }
 }
 
-// — the rows, and the picker that replaces them ---------------------------------
+// — reading order, and the picker ------------------------------------------------
 
-/** One heading in the binding list, and the rows under it. */
-private data class BindingGroup(
-    val title: String,
-    val controls: List<GamepadControl>,
-    val stick: Stick? = null,
-)
-
-private val BINDING_GROUPS = listOf(
-    BindingGroup("Left stick", Stick.LEFT.halfAxes.reversedForReading(), Stick.LEFT),
-    BindingGroup("Right stick", Stick.RIGHT.halfAxes.reversedForReading(), Stick.RIGHT),
-    BindingGroup(
-        "D-pad",
+/**
+ * The twenty-four, in the order a person looks for them.
+ *
+ * **Flat, and no longer seven headed groups.** The groups were the shape of a
+ * table of its own; the editor has one list now and this is only the order the
+ * controls a profile has not put on the glass come out in. Sticks first because
+ * they are the two a thumb reaches for, then the cross, then the face diamond,
+ * then the fingers, then the two things nobody presses by accident.
+ */
+internal val PAD_READING_ORDER: List<GamepadControl> =
+    Stick.LEFT.halfAxes.reversedForReading() +
+        Stick.RIGHT.halfAxes.reversedForReading() +
         listOf(
             GamepadControl.DPAD_UP,
             GamepadControl.DPAD_DOWN,
             GamepadControl.DPAD_LEFT,
             GamepadControl.DPAD_RIGHT,
-        ),
-    ),
-    BindingGroup(
-        "Face buttons",
-        listOf(GamepadControl.A, GamepadControl.B, GamepadControl.X, GamepadControl.Y),
-    ),
-    BindingGroup(
-        "Shoulders and triggers",
-        listOf(GamepadControl.L1, GamepadControl.R1, GamepadControl.L2, GamepadControl.R2),
-    ),
-    BindingGroup("Stick clicks", listOf(GamepadControl.THUMB_L, GamepadControl.THUMB_R)),
-    BindingGroup("System", listOf(GamepadControl.SELECT, GamepadControl.START)),
-)
+            GamepadControl.A,
+            GamepadControl.B,
+            GamepadControl.X,
+            GamepadControl.Y,
+            GamepadControl.L1,
+            GamepadControl.R1,
+            GamepadControl.L2,
+            GamepadControl.R2,
+            GamepadControl.THUMB_L,
+            GamepadControl.THUMB_R,
+            GamepadControl.SELECT,
+            GamepadControl.START,
+        )
 
 /** Up, down, left, right — how a person reads a stick, not how the enum is ordered. */
 private fun List<GamepadControl>.reversedForReading(): List<GamepadControl> =
@@ -765,102 +575,6 @@ internal fun GamepadControl.rowLabel(): String = when (this) {
     else -> name
 }
 
-private fun LazyListScope.bindingListItems(
-    profile: InputProfile,
-    lit: Set<GamepadControl>,
-    onPick: (GamepadControl) -> Unit,
-    onProfile: (InputProfile) -> Unit,
-) {
-    item(key = "bound-count") {
-        Row(
-            Modifier.fillMaxWidth().padding(
-                top = Vessel.metrics.s11,
-                bottom = Vessel.metrics.s6,
-            ),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "${profile.boundCount} of ${GamepadControl.entries.size} bound",
-                style = Vessel.type.overline,
-                color = Vessel.colors.textMuted,
-                modifier = Modifier.weight(1f),
-            )
-            VButton(
-                "Reset all",
-                { onProfile(profile.resetToDefaults()) },
-                style = VButtonStyle.Ghost,
-            )
-        }
-    }
-    BINDING_GROUPS.forEach { group ->
-        val role = group.stick?.let { profile.pad.roleOf(it) }
-        item(key = "h-${group.title}") {
-            Text(
-                group.title,
-                style = Vessel.type.overline,
-                color = Vessel.colors.textMuted,
-                modifier = Modifier.padding(
-                    top = Vessel.metrics.s11,
-                    bottom = Vessel.metrics.s3,
-                ),
-            )
-        }
-        // **A row that cannot fire is worse than a missing one.** A stick
-        // sending the pointer has no half-axes to bind, so the four rows
-        // are replaced by the sentence that says how to get them back.
-        if (role != null && role != StickRole.Keys) {
-            item(key = "n-${group.title}") {
-                InputNote(
-                    if (role == StickRole.Look) {
-                        "Moves the mouse. Set it to Keys to bind its four directions."
-                    } else {
-                        "Sends nothing. Set it to Keys to bind its four directions."
-                    },
-                )
-            }
-        } else {
-            items(group.controls.size, key = { "r-${group.controls[it]}" }) { index ->
-                val control = group.controls[index]
-                BindingRow(
-                    control = control,
-                    action = profile.pad.bindings[control] ?: GamepadAction.None,
-                    lit = control in lit,
-                    onClick = { onPick(control) },
-                    onClear = {
-                        onProfile(profile.withBinding(control, GamepadAction.None))
-                    },
-                )
-            }
-        }
-    }
-}
-
-/**
- * Where a control's row sits in the binding list, or null if it has none.
- *
- * **It walks the list the same way [bindingListItems] emits it, and the two have
- * to move together.** A `LazyColumn` scrolls by index and nothing else; the index
- * is only knowable by repeating the walk, because whether a stick contributes one
- * note or four rows depends on the profile's role for it. Written immediately
- * above the emitter so that a change to one is in front of the eye that changes
- * the other.
- */
-private fun bindingRowIndex(profile: InputProfile, control: GamepadControl): Int? {
-    var index = 1 // `bound-count`, which the list opens with.
-    BINDING_GROUPS.forEach { group ->
-        index++ // the group's own heading
-        val role = group.stick?.let { profile.pad.roleOf(it) }
-        if (role != null && role != StickRole.Keys) {
-            index++ // the note that stands in for the four rows
-        } else {
-            val at = group.controls.indexOf(control)
-            if (at >= 0) return index + at
-            index += group.controls.size
-        }
-    }
-    return null
-}
-
 /** An icon and a sentence — the shape every explanatory line in this editor takes. */
 @Composable
 internal fun InputNote(text: String, modifier: Modifier = Modifier) {
@@ -878,64 +592,7 @@ internal fun InputNote(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * Name, what it sends, and a cross.
- *
- * The same shape as `VDiagnosticRow`, because it is the same kind of list and the
- * product already has a rendering for it. The accent bar on the left is the
- * live-press indicator: it appears the instant the physical control goes down.
- */
-@Composable
-private fun BindingRow(
-    control: GamepadControl,
-    action: GamepadAction,
-    lit: Boolean,
-    onClick: () -> Unit,
-    onClear: () -> Unit,
-) {
-    val unbound = action == GamepadAction.None
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(Vessel.metrics.shapeMd)
-            .background(if (lit) Vessel.colors.accentHover else Color.Transparent)
-            .clickable(onClickLabel = control.rowLabel(), onClick = onClick)
-            .heightIn(min = Vessel.metrics.touchTarget)
-            .padding(horizontal = Vessel.metrics.s6),
-        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .width(2.dp)
-                .height(20.dp)
-                .clip(Vessel.metrics.shapePill)
-                .background(if (lit) Vessel.colors.accent else Color.Transparent),
-        )
-        Text(
-            control.rowLabel(),
-            style = Vessel.type.body,
-            color = Vessel.colors.textPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        BindingChip(X11KeyCatalog.label(action), bound = !unbound)
-        if (unbound) {
-            Box(Modifier.size(CLEAR_TARGET))
-        } else {
-            VIconAction(
-                icon = VIcons.X,
-                contentDescription = "Clear ${control.rowLabel()}",
-                onClick = onClear,
-                style = VButtonStyle.Ghost,
-                size = CLEAR_TARGET,
-            )
-        }
-    }
-}
-
-/** What a control sends, as one chip. The same mark on a pad row and a touch row. */
+/** What a control sends, as one chip. The same mark on every row of the list. */
 @Composable
 internal fun BindingChip(label: String, bound: Boolean) {
     Box(
