@@ -65,6 +65,7 @@ import app.vessel.input.X11KeyCatalog
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VCaution
+import app.vessel.ui.components.VDisclosureHeader
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
@@ -968,51 +969,6 @@ private fun LazyListScope.controlItems(
     }
 }
 
-/**
- * The caret every folding header shows, pointing down when open.
- *
- * One definition for the three headers that fold — the two control groups, the
- * settings and the profile — because a caret that rotated one way in one place
- * and the other way elsewhere is the kind of thing nobody reports and everybody
- * notices.
- */
-@Composable
-private fun FoldCaret(collapsed: Boolean) {
-    Icon(
-        VIcons.CaretDown,
-        contentDescription = null,
-        tint = Vessel.colors.textMuted,
-        modifier = Modifier
-            .size(Vessel.metrics.iconSm)
-            .rotate(if (collapsed) -90f else 0f)
-            .padding(end = Vessel.metrics.s3),
-    )
-}
-
-/**
- * A section title that folds its body away.
- *
- * The whole row is the target rather than the caret: a 14 dp glyph is not
- * something to aim at with a thumb, and the row is already the full width.
- */
-@Composable
-private fun FoldingHeader(
-    title: String,
-    collapsed: Boolean,
-    onToggle: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clickable(onClickLabel = if (collapsed) "Show" else "Hide", onClick = onToggle),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FoldCaret(collapsed)
-        Text(title, style = Vessel.type.overline, color = Vessel.colors.textMuted)
-    }
-}
-
 @Composable
 private fun ControlHeading(
     heading: ControlEntry.Heading,
@@ -1020,31 +976,39 @@ private fun ControlHeading(
     actions: InputEditorActions,
     onToggle: (ControlGroup) -> Unit,
 ) {
-    // **The whole heading is the target, not the chevron.** A 12 dp glyph is not
-    // something to aim at with a thumb, and the row is already the full width.
     val group = heading.group
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .then(
-                if (group == null) {
-                    Modifier
-                } else {
-                    Modifier.clickable(
-                        onClickLabel = if (heading.collapsed) "Show" else "Hide",
-                    ) { onToggle(group) }
-                },
+    if (group == null) {
+        Row(
+            Modifier.fillMaxWidth().padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s3),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                heading.title,
+                style = Vessel.type.overline,
+                color = Vessel.colors.textMuted,
+                modifier = Modifier.weight(1f),
             )
-            .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s3),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (group != null) FoldCaret(heading.collapsed)
-        Text(
-            heading.title,
-            style = Vessel.type.overline,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.weight(1f),
-        )
+            ResetAction(heading, profile, actions)
+        }
+        return
+    }
+
+    VDisclosureHeader(
+        text = heading.title,
+        expanded = !heading.collapsed,
+        onToggle = { onToggle(group) },
+        trailing = { ResetAction(heading, profile, actions) },
+    )
+}
+
+/** The way back a group offers, if it offers one. */
+@Composable
+private fun ResetAction(
+    heading: ControlEntry.Heading,
+    profile: InputProfile,
+    actions: InputEditorActions,
+) {
+    run {
         when (heading.reset) {
             // **The way back from a layout dragged into a mess.** Placing controls
             // is a fiddly one-finger operation with no undo, and without this the
@@ -1636,7 +1600,7 @@ private fun InputSettings(
 ) {
     val profile = state.profile
     Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-        FoldingHeader("SETTINGS", collapsed, onToggle)
+        VDisclosureHeader("Settings", expanded = !collapsed, onToggle = onToggle)
         if (collapsed) return@Column
         Row(
             Modifier.fillMaxWidth(),
@@ -1717,7 +1681,12 @@ private fun ProfilesSection(
         modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
-        FoldingHeader("PROFILE", collapsed, onToggle)
+        VDisclosureHeader(
+            "Profile",
+            expanded = !collapsed,
+            onToggle = onToggle,
+            summary = state.profiles.size.takeIf { it > 0 }?.let { "$it saved" },
+        )
         if (collapsed) return@Column
 
         if (state.missingProfile) {

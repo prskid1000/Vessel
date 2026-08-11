@@ -544,34 +544,62 @@ fun VDisclosure(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(modifier.fillMaxWidth()) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onToggle)
-                .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s6),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text.uppercase(),
-                style = Vessel.type.overline,
-                color = Vessel.colors.textMuted,
-            )
-            if (summary != null) {
-                Text(summary, style = Vessel.type.bodySmall, color = Vessel.colors.textMuted)
-            }
-            Row(Modifier.weight(1f)) {}
-            Icon(
-                VIcons.CaretDown,
-                // The chevron is the whole affordance, so it has to be the thing
-                // that announces the state rather than a decoration beside it.
-                contentDescription = if (expanded) "Collapse $text" else "Expand $text",
-                tint = Vessel.colors.textMuted,
-                modifier = Modifier
-                    .size(Vessel.metrics.iconSm)
-                    .rotate(if (expanded) 180f else 0f),
-            )
-        }
+        VDisclosureHeader(text, expanded, onToggle, summary = summary)
         if (expanded) content()
+    }
+}
+
+/**
+ * The header half of [VDisclosure], on its own.
+ *
+ * **For a section whose body cannot be a lambda.** The input editor's control
+ * groups are rows of one `LazyColumn` — the screen is a single lazy list from the
+ * map to the profile — so their bodies are sibling items rather than content
+ * nested under a header, and wrapping them would mean giving up lazy layout and
+ * the index arithmetic that scrolls to a row. They still have to *look* like
+ * every other folding section, so the header is shared and only the body
+ * differs.
+ *
+ * [trailing] is for an action that belongs to the section rather than to the
+ * fold — `Reset all` and `Reset layout` — placed before the caret so the caret
+ * stays where the eye learned to find it.
+ */
+@Composable
+fun VDisclosureHeader(
+    text: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    summary: String? = null,
+    trailing: @Composable RowScope.() -> Unit = {},
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s6),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text.uppercase(),
+            style = Vessel.type.overline,
+            color = Vessel.colors.textMuted,
+        )
+        if (summary != null) {
+            Text(summary, style = Vessel.type.bodySmall, color = Vessel.colors.textMuted)
+        }
+        Row(Modifier.weight(1f)) {}
+        trailing()
+        Icon(
+            VIcons.CaretDown,
+            // The chevron is the whole affordance, so it has to be the thing
+            // that announces the state rather than a decoration beside it.
+            contentDescription = if (expanded) "Collapse $text" else "Expand $text",
+            tint = Vessel.colors.textMuted,
+            modifier = Modifier
+                .size(Vessel.metrics.iconSm)
+                .rotate(if (expanded) 180f else 0f),
+        )
     }
 }
