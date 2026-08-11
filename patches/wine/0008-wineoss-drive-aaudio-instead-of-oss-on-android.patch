@@ -14,7 +14,7 @@ index 8923911bba3..49600beca5e 100644
 -	ossmidi.c
 +	oss.c
 diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
-index 431264faf31..18a0092953b 100644
+index 431264faf31..97b95fcd192 100644
 --- a/dlls/wineoss.drv/oss.c
 +++ b/dlls/wineoss.drv/oss.c
 @@ -1,5 +1,5 @@
@@ -398,15 +398,15 @@ index 431264faf31..18a0092953b 100644
 -            continue;
 -        }
 -        close(fd);
-+    offset = sizeof(*endpoint);
-+    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
- 
+-
 -        if((params->flow == eCapture && !(ai.caps & PCM_CAP_INPUT)) ||
 -           (params->flow == eRender && !(ai.caps & PCM_CAP_OUTPUT)))
 -            continue;
 -
 -        strcpy(info[num].device, devnode);
--
++    offset = sizeof(*endpoint);
++    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
+ 
 -        if(params->flow == eRender){
 -            prefix = outW;
 -            prefix_len = ARRAY_SIZE(outW) - 1;
@@ -669,7 +669,7 @@ index 431264faf31..18a0092953b 100644
      if(stream->local_buffer){
          size = 0;
          NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
-@@ -658,38 +492,67 @@ static NTSTATUS oss_release_stream(void *args)
+@@ -658,38 +492,69 @@ static NTSTATUS oss_release_stream(void *args)
  
  static void silence_buffer(struct oss_stream *stream, BYTE *buffer, UINT32 frames)
  {
@@ -740,8 +740,10 @@ index 431264faf31..18a0092953b 100644
      UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
 -    SIZE_T to_write_frames, to_write_bytes, advanced;
 -    audio_buf_info bi;
++    UINT32 fill_target;
 +    SIZE_T to_write_frames, advanced;
 +    aaudio_result_t written;
++    int32_t buffer_frames;
      BYTE *buf;
  
 -    if(ioctl(stream->fd, SNDCTL_DSP_GETOSPACE, &bi) < 0){
@@ -762,16 +764,58 @@ index 431264faf31..18a0092953b 100644
  
      if(in_oss_frames > stream->in_oss_frames){
          TRACE("Capping reported frames from %u to %u\n",
-@@ -697,6 +560,8 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -697,11 +562,48 @@ static void oss_write_data(struct oss_stream *stream)
          in_oss_frames = stream->in_oss_frames;
      }
  
 +    max_period = stream->period_frames;
 +
++    /* How full to keep the device. Upstream tops up to three periods and that
++     * is enough for OSS, which starts playing whatever you give it. AudioFlinger
++     * does not: it holds the track inactive until the queue reaches the stream's
++     * buffer size (Track::isReady against mStartThresholdInFrames), so a target
++     * below that size is a queue that is never once long enough to start.
++     *
++     * Measured on the device 2026-08-11 with tools/audio/aaudiotone.c --stall,
++     * which writes a fixed number of frames and then only watches. At a buffer
++     * size of 3472, stopping at 1440 frames — three 10 ms periods, exactly what
++     * upstream's target works out to here — left framesRead at 0 for two full
++     * seconds with the stream reporting STARTED. Writing one chunk past 3472 had
++     * it draining before the last write returned. Nothing between those two runs
++     * differed but the number of frames queued.
++     *
++     * That is the whole of the "guest audio is silent" bug, and it hid for two
++     * sessions because falling short is silent: with the queue stuck at 1440 the
++     * loop below computes a write_limit of zero and returns without a trace, so
++     * a timer thread doing its job once every 10 ms looked exactly like a timer
++     * thread that had died after one pass.
++     *
++     * Read fresh each pass rather than cached at create time: AAudio is entitled
++     * to move the buffer size, and a target that has drifted below it brings the
++     * silence straight back. */
++    fill_target = max_period * 3;
++    buffer_frames = AAudioStream_getBufferSizeInFrames(stream->aas);
++    if(buffer_frames > 0 && (UINT32)buffer_frames > fill_target)
++        fill_target = buffer_frames;
++
      write_limit = 0;
-     while(write_limit + in_oss_frames < max_period * 3)
+-    while(write_limit + in_oss_frames < max_period * 3)
++    while(write_limit + in_oss_frames < fill_target)
          write_limit += max_period;
-@@ -732,7 +597,6 @@ static void oss_write_data(struct oss_stream *stream)
+-    if(write_limit == 0)
++    if(write_limit == 0){
++        /* The device is as full as we intend to keep it. Traced because this is
++         * the one path out of here that writes nothing and says nothing, and
++         * reading its silence as a dead thread is what cost the two sessions
++         * above. */
++        TRACE("device full: %u of %u frames queued, nothing to add\n",
++                in_oss_frames, fill_target);
+         return;
++    }
+ 
+     /*        vvvvvv - in_oss_frames
+      * [--xxxxxxxxxx]
+@@ -732,7 +634,6 @@ static void oss_write_data(struct oss_stream *stream)
          to_write_frames = new_frames;
  
      to_write_frames = min(to_write_frames, write_limit);
@@ -779,7 +823,7 @@ index 431264faf31..18a0092953b 100644
      TRACE("going to write %lu frames from %u (%lu of %u)\n", to_write_frames,
              write_offs_frames, to_write_frames + write_offs_frames,
              stream->bufsize_frames);
-@@ -742,18 +606,20 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -742,18 +643,20 @@ static void oss_write_data(struct oss_stream *stream)
      if(stream->mute)
          silence_buffer(stream, buf, to_write_frames);
  
@@ -806,7 +850,7 @@ index 431264faf31..18a0092953b 100644
          return;
      }
  
-@@ -761,39 +627,37 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -761,39 +664,37 @@ static void oss_write_data(struct oss_stream *stream)
          /* wrapped and have some data back at the start to write */
  
          to_write_frames = min(write_limit - written_frames, new_frames - written_frames);
@@ -857,24 +901,20 @@ index 431264faf31..18a0092953b 100644
  
      if(stream->held_frames > stream->bufsize_frames){
          WARN("Overflow of unread data\n");
-@@ -815,6 +679,16 @@ static void oss_timer_loop(void *args)
+@@ -815,6 +716,12 @@ static void oss_timer_loop(void *args)
      NtQueryPerformanceCounter(&now, NULL);
      next.QuadPart = now.QuadPart + stream->period;
  
-+    /* This loop is the only caller of oss_write_data, so if it stops iterating
-+     * the guest goes silent with nothing in the log to say so — which is
-+     * exactly what happened. Measured 2026-08-10: one write of a full buffer
-+     * and then never again, and `ps -T` on the guest showed no
-+     * audio_client_timer thread at all while the client was still polling
-+     * GetPosition. Whether the loop is never entered, exits after one pass, or
-+     * blocks forever in the delay are three different bugs and the log could
-+     * not tell them apart. */
++    /* This loop is the only caller of oss_write_data, so if it ever stops
++     * iterating the guest goes silent with nothing else in the log to say so.
++     * One line at each end costs nothing per stream and tells a future reader
++     * which half of the driver to suspect. */
 +    TRACE("timer loop entered, period %d hns\n", (int)stream->period);
 +
      while(!stream->please_quit){
          if(stream->playing){
              if(stream->flow == eRender && stream->held_frames)
-@@ -839,6 +713,8 @@ static void oss_timer_loop(void *args)
+@@ -839,6 +746,8 @@ static void oss_timer_loop(void *args)
          next.QuadPart += stream->period;
      }
  
@@ -883,7 +923,7 @@ index 431264faf31..18a0092953b 100644
      oss_unlock(stream);
  }
  
-@@ -847,6 +723,7 @@ static NTSTATUS oss_start(void *args)
+@@ -847,6 +756,7 @@ static NTSTATUS oss_start(void *args)
      struct start_params *params = args;
      struct oss_stream *stream = handle_get_stream(params->stream);
      static const WCHAR name[] = {'a','u','d','i','o','_','c','l','i','e','n','t','_','t','i','m','e','r',0};
@@ -891,7 +931,7 @@ index 431264faf31..18a0092953b 100644
  
      oss_lock(stream);
  
-@@ -856,6 +733,12 @@ static NTSTATUS oss_start(void *args)
+@@ -856,6 +766,12 @@ static NTSTATUS oss_start(void *args)
      if(stream->playing)
          return oss_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
  
@@ -904,7 +944,7 @@ index 431264faf31..18a0092953b 100644
      stream->playing = TRUE;
      if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
  
-@@ -866,12 +749,29 @@ static NTSTATUS oss_stop(void *args)
+@@ -866,12 +782,29 @@ static NTSTATUS oss_stop(void *args)
  {
      struct stop_params *params = args;
      struct oss_stream *stream = handle_get_stream(params->stream);
@@ -934,7 +974,7 @@ index 431264faf31..18a0092953b 100644
      stream->playing = FALSE;
      stream->in_oss_frames = 0;
  
-@@ -882,6 +782,7 @@ static NTSTATUS oss_reset(void *args)
+@@ -882,6 +815,7 @@ static NTSTATUS oss_reset(void *args)
  {
      struct reset_params *params = args;
      struct oss_stream *stream = handle_get_stream(params->stream);
@@ -942,7 +982,7 @@ index 431264faf31..18a0092953b 100644
  
      oss_lock(stream);
  
-@@ -892,6 +793,23 @@ static NTSTATUS oss_reset(void *args)
+@@ -892,6 +826,23 @@ static NTSTATUS oss_reset(void *args)
          return oss_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
  
      if(stream->flow == eRender){
@@ -966,7 +1006,7 @@ index 431264faf31..18a0092953b 100644
          stream->written_frames = 0;
          stream->last_pos_frames = 0;
      }else{
-@@ -1107,16 +1025,8 @@ static NTSTATUS oss_release_capture_buffer(void *args)
+@@ -1107,16 +1058,8 @@ static NTSTATUS oss_release_capture_buffer(void *args)
  static NTSTATUS oss_is_format_supported(void *args)
  {
      struct is_format_supported_params *params = args;
@@ -984,7 +1024,7 @@ index 431264faf31..18a0092953b 100644
  
      return STATUS_SUCCESS;
  }
-@@ -1125,95 +1035,24 @@ static NTSTATUS oss_get_mix_format(void *args)
+@@ -1125,95 +1068,24 @@ static NTSTATUS oss_get_mix_format(void *args)
  {
      struct get_mix_format_params *params = args;
      WAVEFORMATEXTENSIBLE *fmt = params->fmt;
@@ -1086,7 +1126,7 @@ index 431264faf31..18a0092953b 100644
      fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
      fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
  
-@@ -1321,20 +1160,7 @@ static NTSTATUS oss_get_position(void *args)
+@@ -1321,20 +1193,7 @@ static NTSTATUS oss_get_position(void *args)
          if(*pos < stream->last_pos_frames)
              *pos = stream->last_pos_frames;
      }else if(stream->flow == eCapture){
@@ -1108,7 +1148,7 @@ index 431264faf31..18a0092953b 100644
      }
  
      stream->last_pos_frames = *pos;
-@@ -1413,220 +1239,94 @@ static NTSTATUS oss_get_prop_value(void *args)
+@@ -1413,220 +1272,94 @@ static NTSTATUS oss_get_prop_value(void *args)
      return STATUS_SUCCESS;
  }
  
@@ -1382,7 +1422,7 @@ index 431264faf31..18a0092953b 100644
      return STATUS_SUCCESS;
  }
  
-@@ -2120,6 +1820,93 @@ static NTSTATUS oss_wow64_aux_message(void *args)
+@@ -2120,6 +1853,93 @@ static NTSTATUS oss_wow64_aux_message(void *args)
      return oss_aux_message(&params);
  }
  

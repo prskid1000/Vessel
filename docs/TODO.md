@@ -1892,4 +1892,15 @@ call site and not applied to the next one.
 Honestly unfinished: no D3D window; FEX asserts on large PEs in a container;
 presentation is a CPU copy and zero-copy is specified but unstarted; `ipconfig`
 still prints nothing and the patch that should fix it has never had its output
-read; `.msi` packages reach their UI and do not install; and there is no sound.
+read; and `.msi` packages reach their UI and do not install.
+
+Sound came off that list on 2026-08-11. A `waveOut` tone played from inside a
+container reaches AAudio and drains completely — `blocks_done=6 of 6`, the play
+position walking 0 → 28992 → 124896 → 144000 where it had been frozen at 4800.
+The cause was not where two sessions of notes said it was, and the note left
+behind is worth more than the fix: `oss_write_data` topped the device up to
+three periods, AudioFlinger will not start a track until its queue reaches the
+stream's buffer size, and on this device the first number is smaller than the
+second. Falling short of a start threshold looks exactly like a dead timer
+thread, because the code path that decides "nothing to add" returned without
+saying so. It says so now.
