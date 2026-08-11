@@ -128,6 +128,7 @@ fun ContainerSheet(
             onDismissNotice = viewModel::dismissInputNotice,
             onArrange = { arranging = true },
             onTouchVisible = viewModel::setTouchVisible,
+            onSaveProfile = viewModel::commitInputProfile,
         ),
         onDeleteLogs = viewModel::deleteLogs,
         onCopyDiagnostics = viewModel::copyDiagnosticsTo,
@@ -205,6 +206,7 @@ private fun ContainerSheetContent(
         touchVisible = state.touchVisible,
         selected = state.input.selectedTouchControl,
         notice = state.input.notice,
+        dirty = state.input.dirty,
     )
 
     VSheet(

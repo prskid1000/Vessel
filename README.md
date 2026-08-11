@@ -101,6 +101,19 @@ The server-side copy inside that path costs **252 us** for 1280x720 — 3.6 MB a
 currently deferred rather than scheduled. A game renders a frame every 80-125 ms,
 so presentation is under half a percent of it.
 
+**Sound plays, and a gamepad reaches the guest as a gamepad.** Wine's
+`wineoss.drv` was rewritten to speak AAudio (`patches/wine/0008`) — the NDK's
+only low-latency output — and `mmdevapi` probes `oss` by default, so guest audio
+works with no other change. Vessel never attenuates: the guest outputs at full
+scale and Android's volume keys own the rest.
+
+`/dev/input` is `root:input` 0660 and an untrusted app is in neither group, so
+SDL, udev and libusb can never enumerate a controller here. `patches/wine/0016`
+adds a `winebus` backend fed by the app over a unix socket instead: the app is
+the bus, and the guest gets a real HID device that XInput, DirectInput and winmm
+all see as an Xbox 360 pad, rumble included. Verified 2026-08-11 with a Bluetooth
+controller driving a Windows program.
+
 All three CPU paths are verified by `./tools/device-session.sh`, which checks the
 arithmetic each program produces rather than that it started:
 
@@ -136,12 +149,19 @@ actually got past it was `patches/mesa/0004` (a pseudo-DRM platform for KGSL)
 and `0006` (compiling the WSI's DRM image backend without libdrm), after which
 DRI3 present works and is the measured 0.546 ms above.
 
-**What is actually left is a frame rate nobody can yet explain.** Metro's intro
-runs at 8-12 fps while the CPU sits at 0-4%, no core rises above 1.7 GHz of 3.3,
-the GPU reports 14%, and every one of the game's 47 threads is asleep when
-sampled. Presentation is 0.5 ms of a 100 ms frame, so it is not that either.
-Neither compute, nor the GPU, nor the present path, nor — since `setFrameRate`
-landed — the panel's refresh mode accounts for it. It is the open question.
+**The frame rate nobody could explain was the audio, and it is fixed.** Metro's
+intro ran at 8-12 fps while the CPU sat at 0-4%, no core rose above 1.7 GHz of
+3.3, the GPU reported 14%, and all 47 game threads were asleep when sampled.
+Every explanation assumed the frame cost something, and measured — correctly —
+that nothing did. `wineoss.drv` was queueing Metro's whole 1440-frame buffer
+into a device whose start threshold was 1736, so AudioFlinger never started the
+track and the driver logged `advanced by 0, held: 1440` for 2072 consecutive
+passes. A game whose audio never drains does not spin, it *waits*. Sizing the
+AAudio buffer to `min(client, device)` took the intro from 12 fps to **28**, and
+gameplay is now GPU-bound at 97-98%.
+
+That signature is worth keeping: **~85% idle at 10 fps means a stall, not a
+cost.** The next time it appears, the question is what a thread is waiting on.
 
 `tools/gfx/` holds probes for D3D8/9/10/11/12 and OpenGL — 21 binaries across
 three architectures, each clearing to blue, drawing one red triangle and

@@ -144,6 +144,16 @@ data class InputEditorState(
     val selected: String? = null,
     /** An import that was refused, or anything else worth saying once. */
     val notice: String? = null,
+    /**
+     * Whether the profile on screen differs from the one on disk.
+     *
+     * **Edits are a draft now.** They apply immediately to a running guest —
+     * that is the whole argument for editing bindings from inside a session —
+     * but nothing is written until Save, which is what stops a slider drag from
+     * being forty document writes and what makes "did that stick?" answerable
+     * by looking at one button.
+     */
+    val dirty: Boolean = false,
 )
 
 /**
@@ -172,6 +182,8 @@ data class InputEditorActions(
     val onArrange: () -> Unit = {},
     val onSelect: (String?) -> Unit = {},
     val onDismissNotice: () -> Unit = {},
+    /** Write the edited profile to disk. Everything else here only drafts. */
+    val onSaveProfile: () -> Unit = {},
 )
 
 // — the header -------------------------------------------------------------------
@@ -1705,16 +1717,12 @@ private fun ProfilesSection(
             )
         }
 
-        // **Typed, then saved, rather than saved per keystroke.** The field used
-        // to write the profile document on every character — twelve writes to
-        // name something "My controller" — and the name is the one profile value
-        // a half-finished state of is meaningless. The button is beside the field
-        // because that is what it applies to; everything else on this screen still
-        // takes effect as you change it, which is what you want for a binding you
-        // are testing and not for a word you are in the middle of typing.
-        var typed by remember(state.profile.id, state.profile.name) {
-            mutableStateOf(state.profile.name)
-        }
+        // **Save is for the whole profile, and it sits beside the name because
+        // that is where the eye lands.** Everything on this screen — a binding, a
+        // slider, a control dragged across the glass, this name — edits a draft
+        // that applies to a running guest at once and is written to disk only
+        // here. The button is enabled exactly when the draft differs from what is
+        // stored, so "did that stick?" is answered by looking at it.
         VLabeledField(
             label = "Name",
             help = if (state.profile.isBuiltInDefault) {
@@ -1732,18 +1740,16 @@ private fun ProfilesSection(
             ) {
                 Box(Modifier.weight(1f)) {
                     VTextField(
-                        typed,
-                        { typed = it },
+                        state.profile.name,
+                        actions.onRename,
                         placeholder = "My controller",
                     )
                 }
                 VButton(
-                    "Save",
-                    { actions.onRename(typed.trim()) },
-                    style = VButtonStyle.Secondary,
-                    // A name that is blank, or already the one it has, has nothing
-                    // to save — and a disabled button says which without a dialog.
-                    enabled = typed.isNotBlank() && typed.trim() != state.profile.name,
+                    if (state.dirty) "Save" else "Saved",
+                    actions.onSaveProfile,
+                    style = if (state.dirty) VButtonStyle.Primary else VButtonStyle.Secondary,
+                    enabled = state.dirty && state.profile.name.isNotBlank(),
                 )
             }
         }

@@ -230,14 +230,28 @@ class SessionViewModel @Inject constructor(
      * of every other shared profile.
      */
     fun setInputProfile(next: InputProfile) {
-        // Saved under its own id, whatever that id is. The default is a profile
-        // like any other now — see `InputProfileRepository` — so there is no
-        // adopt-a-copy dance and no container document to repoint.
-        viewModelScope.launch {
-            inputProfiles.save(next)
-            display.setInputProfile(next)
-        }
+        // **Pushed, not written.** The guest sees the change at once, which is
+        // the whole argument for editing bindings from inside a session; the disc
+        // waits for [commitInputProfile]. The push releases every held control
+        // first — see [SessionDisplayServer.setInputProfile].
+        display.setInputProfile(next)
     }
+
+    /** Write what is on screen. The Save button beside the profile's name. */
+    fun commitInputProfile() {
+        viewModelScope.launch { inputProfiles.save(display.inputProfile.value) }
+    }
+
+    /**
+     * Whether the running profile differs from the stored one.
+     *
+     * Compared against the whole list rather than a single lookup so that a
+     * profile deleted underneath a live session reads as unsaved — which it is.
+     */
+    val inputProfileDirty: Flow<Boolean> =
+        combine(display.inputProfile, inputProfiles.profiles) { live, stored ->
+            stored.firstOrNull { it.id == live.id } != live
+        }
 
     // — the overlay and the profile list -----------------------------------------
 

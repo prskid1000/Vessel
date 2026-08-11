@@ -310,6 +310,8 @@ fun VesselApp(
                 val selectedTouchControl by session.selectedTouchControl
                     .collectAsStateWithLifecycle()
                 val inputNotice by session.inputNotice.collectAsStateWithLifecycle()
+                val inputDirty by session.inputProfileDirty
+                    .collectAsStateWithLifecycle(false)
                 SessionDesktop(
                     state = state,
                     surface = surface,
@@ -331,6 +333,7 @@ fun VesselApp(
                         editing = touchEditing,
                         selected = selectedTouchControl,
                         notice = inputNotice,
+                        dirty = inputDirty,
                     ),
                     inputActions = InputEditorActions(
                         onProfile = session::setInputProfile,
@@ -345,6 +348,7 @@ fun VesselApp(
                         onEditing = session::setTouchEditing,
                         onSelect = session::selectTouchControl,
                         onDismissNotice = session::dismissInputNotice,
+                        onSaveProfile = session::commitInputProfile,
                     ),
                     windows = windows,
                     frameRate = frameRate,

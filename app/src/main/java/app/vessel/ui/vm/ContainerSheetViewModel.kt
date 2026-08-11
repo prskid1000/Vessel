@@ -132,6 +132,10 @@ data class InputUiState(
     val overlayCount: Int = 0,
     /** An import that was refused, said once. */
     val notice: String? = null,
+    /** The profile as it is stored, for [dirty] to compare the draft against. */
+    val saved: InputProfile = InputProfile.Default,
+    /** Whether [profile] has edits that are not on disk. */
+    val dirty: Boolean = false,
     /**
      * Which overlay control the cold editor has selected.
      *
@@ -300,7 +304,10 @@ class ContainerSheetViewModel @Inject constructor(
     fun setTouchVisible(visible: Boolean) {
         val current = draft ?: return
         draft = current.copy(input = current.input.copy(touchVisible = visible))
-        refreshInput()
+        // **Not `refreshInput()`.** That re-reads the profile from disk and would
+        // throw away an unsaved binding edit — toggling the overlay is not a
+        // reason to lose one. This is a container field; it moves on its own.
+        _state.update { it.copy(touchVisible = visible) }
     }
 
     /**
@@ -322,9 +329,18 @@ class ContainerSheetViewModel @Inject constructor(
      * has not chosen something else, which is what a shared default means.
      */
     fun saveInputProfile(next: InputProfile) {
-        // One rule for every profile, the default included. The fork that used to
-        // live here — mint a UUID, rename, repoint the container — is gone with
-        // the constant it existed for; see `InputProfileRepository`.
+        // Drafted, not written. Nothing is running for it to apply to, so this is
+        // purely what the editor shows until [commitInputProfile]. One rule for
+        // every profile, the default included — the fork that used to live here
+        // is gone with the constant it existed for; see `InputProfileRepository`.
+        _state.update {
+            it.copy(input = it.input.copy(profile = next, dirty = next != it.input.saved))
+        }
+    }
+
+    /** Write the drafted profile. The Save button beside its name. */
+    fun commitInputProfile() {
+        val next = _state.value.input.profile
         viewModelScope.launch {
             inputProfiles.save(next)
             refreshInput()
@@ -415,6 +431,8 @@ class ContainerSheetViewModel @Inject constructor(
                         profileName = resolved.name,
                         missing = wanted != null && found == null,
                         profile = resolved,
+                        saved = resolved,
+                        dirty = false,
                         profiles = stored,
                         overlayCount = resolved.touch.controls.size,
                     ),
