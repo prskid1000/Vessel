@@ -637,11 +637,41 @@ audit's; they are pointers, not independently re-verified.
     the harness, not the cache**: the app's own process has the permission,
     which is how Metro launched from `D:` in the first place.
 
-  *Done when:* a session start compiles `metro.exe` itself — visible as
-  `FEX code cache built in N ms` in the session log and a
-  `metro.exe-…-0000000000000000` in `cache/` — and the same title is then
-  launched twice with `caches/fex` wiped before the first, including if the
-  second is no faster.
+  **Done, 2026-08-11.** A session start compiled it unaided:
+
+  ```
+  IV building the FEX code cache from 3 new codemap(s) in …/caches/fex/96a6dacbc994
+  IV FEX code cache built in 4897 ms
+  ```
+
+  25 cache files, `metro.exe-1b95a19fe798bdda-0000000000000000` among them —
+  and with it `physx3_x64`, `physx3common_x64` and `steam_api64`, the `D:`
+  modules that fail under `run-as` for want of a storage grant and succeed from
+  the app's own process.
+
+  **The prediction above is falsified, which was the point of running it.** This
+  entry said warm would equal cold and `Loaded cache:` would never appear,
+  because `LoadAOTImages` composes `\??\` + the cache directory and
+  `nt_to_unix_file_name_no_root` refuses a unix path. Handed a DOS path, it
+  reads: the next launch logged **`Loaded cache:` 25 times**, starting with
+  `[metro.exe] Loaded cache: metro.exe-1b95a19fe798bdda`.
+
+  | | 10 s | 20 s | 30 s | 40 s | 50 s | 60 s |
+  |---|---|---|---|---|---|---|
+  | cold | 0.0 | 25.9 | 24.0 | 28.0 | 25.9 | 25.9 |
+  | warm | **26.0** | 25.9 | 26.0 | 27.9 | 25.9 | 27.9 |
+
+  Warm is rendering at the sample where cold is still at zero, and steady-state
+  fps is unchanged — which is what a translation cache should do and a rendering
+  change should not.
+
+  **Read the first column as "at least one interval", not as ten seconds.** The
+  trace samples every 10 s, and its zero is the *session's* start rather than
+  the game's: a human taps Metro somewhere in between, and that gap is not
+  controlled. A launch-to-first-window mark in the session log would make this
+  exact, and does not exist. The load-path evidence needs no such caveat —
+  `Loaded cache:` either appears or it does not, and for the whole life of this
+  entry it did not.
 
   The fix is one value, not one code path: `FEX_APP_CACHE_LOCATION` has to be a
   **DOS path ending in `\`**, which satisfies both uses at once — `C:\…\codemap
