@@ -213,11 +213,13 @@ fun InputEditorHeader(
             // pixels from the row you meant to *switch to* is the wrong place for
             // it. Out here it acts on the profile named to its left, which is the
             // one you are looking at.
+            VIconAction(VIcons.Plus, "New profile", actions.onNewProfile)
             VIconAction(
                 VIcons.Copy,
                 "Duplicate this profile",
                 { actions.onDuplicate(state.profile) },
             )
+            ProfileTransferButtons(state, actions, compact = true)
             // The built-in default is never deletable, and the control is absent
             // rather than disabled: a dead button asks to be pressed once.
             if (!state.profile.isBuiltInDefault) {
@@ -1117,17 +1119,10 @@ private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
                 "written to disk.",
         )
 
-        VRule(verticalMargin = Vessel.metrics.s3)
-
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            VButton("New", actions.onNewProfile, style = VButtonStyle.Secondary, icon = VIcons.Plus)
-            Box(Modifier.weight(1f))
-            ProfileTransferButtons(state, actions)
-        }
+        // New, duplicate, delete, import and export are all in the header now,
+        // beside the picker they act on. What is left here is the list -- which
+        // says what the picker cannot, how much each profile carries -- and the
+        // name of the one in use.
     }
 }
 
@@ -1212,7 +1207,18 @@ private fun ProfileRow(
  * where; the app never guesses.
  */
 @Composable
-private fun ProfileTransferButtons(state: InputEditorState, actions: InputEditorActions) {
+private fun ProfileTransferButtons(
+    state: InputEditorState,
+    actions: InputEditorActions,
+    /**
+     * Icons rather than labelled buttons, for the header.
+     *
+     * The launchers have to live wherever the buttons do — `rememberLauncher…`
+     * is composition-scoped — so this is one composable in two shapes rather
+     * than two copies of the SAF plumbing.
+     */
+    compact: Boolean = false,
+) {
     val context = LocalContext.current
     var pending by remember { mutableStateOf<String?>(null) }
 
@@ -1235,24 +1241,23 @@ private fun ProfileTransferButtons(state: InputEditorState, actions: InputEditor
         actions.onImportText(text.orEmpty())
     }
 
-    VButton(
-        "Import",
-        { open.launch(arrayOf(EXPORT_MIME, "text/*", "*/*")) },
-        style = VButtonStyle.Secondary,
-        icon = VIcons.Import,
-    )
-    VButton(
-        "Export",
-        {
-            val text = actions.onExportText(state.profile)
-            if (text != null) {
-                pending = text
-                create.launch(InputProfileTransfer.fileName(state.profile))
-            }
-        },
-        style = VButtonStyle.Secondary,
-        icon = VIcons.Export,
-    )
+    val onImport = { open.launch(arrayOf(EXPORT_MIME, "text/*", "*/*")); Unit }
+    val onExport = {
+        val text = actions.onExportText(state.profile)
+        if (text != null) {
+            pending = text
+            create.launch(InputProfileTransfer.fileName(state.profile))
+        }
+    }
+
+    if (compact) {
+        VIconAction(VIcons.Import, "Import a profile", onImport)
+        VIconAction(VIcons.Export, "Export this profile", onExport)
+        return
+    }
+
+    VButton("Import", onImport, style = VButtonStyle.Secondary, icon = VIcons.Import)
+    VButton("Export", onExport, style = VButtonStyle.Secondary, icon = VIcons.Export)
 }
 
 private const val EXPORT_MIME = "application/json"
