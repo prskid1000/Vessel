@@ -1,0 +1,717 @@
+winebus: a bus the app feeds over a socket, because /dev/input is not ours.
+
+Wine ships every piece of the gamepad stack -- xinput1_1..1_4, xinputuap,
+dinput, dinput8, hid, hidclass, winexinput and winebus itself -- and on this
+device all of them work. A probe run inside a live container (tools/input/
+run-guest-pad.sh) loads all five XInput DLLs, calls XInputGetCapabilities on
+all four slots, and gets 1167 back from every one: ERROR_DEVICE_NOT_CONNECTED.
+Nothing is broken. There is simply no device.
+
+There is no device because winebus has no backend that can see one here:
+
+    $ adb shell ls -l /dev/input/
+    crw-rw---- 1 root input 13, 64 event0        ...and eleven more
+    $ adb shell run-as app.vessel ls -l /dev/input/
+    ls: /dev/input/: Permission denied
+
+/dev/input is root:input 0660 and untrusted_app is in neither group. SDL's
+evdev backend, bus_udev.c and libusb all open those nodes, so --without-sdl
+--without-udev --without-usb is not an omission in build/wine.sh that could be
+reverted to fix this -- it is the only correct setting for the platform. A Wine
+built --with-sdl would enumerate exactly as many pads as this one does.
+
+The only thing on the device that can see a gamepad is Android's InputDevice
+API, and that lives in the app. So the app is the bus, and this is its client
+half: a fourth backend alongside sdl, udev and iohid, which connects to an
+AF_UNIX socket named by WINE_PAD_SOCKET, and turns what arrives into a HID
+gamepad through the same hid_device_* helpers bus_sdl.c uses.
+
+Doing it here rather than shipping our own xinput1_3.dll is the whole point.
+One HID device reaches hidclass and winexinput, and XInput, DirectInput, winmm
+and raw HID light up together -- a shim answers XInputGetState and leaves every
+other API as dead as it is today, which for a title older than XInput is the
+original problem again. Rumble comes back down the same socket for the same
+reason: it is a property of the device, not of one API's view of it.
+
+The transport is the shape patches/wine/0005 already established for MIT-SHM:
+one env var, one connect(2), and nothing at all when the variable is unset, so
+a container started outside the app behaves exactly as it did before. Frames
+are a fixed 20 bytes in both directions, native byte order -- fixed rather than
+length-prefixed because there is one producer, one consumer and four message
+shapes, and a short read is then a torn frame the reader can keep accumulating
+rather than a stream that has lost its place.
+
+    app -> guest
+      0x01 ADDED    index                       a pad appeared in slot index
+      0x02 REMOVED  index                       it went away
+      0x03 STATE    index, buttons, hat, axes   its current state
+
+    guest -> app
+      0x81 RUMBLE   index, low, high, duration  play this on the pad's motors
+
+Three details worth naming, because each was chosen against an alternative:
+
+  - The pad presents as 045e:028e, a wired Xbox 360 controller. winexinput
+    only attaches to a device winebus marked is_gamepad, and games sniff the
+    vid/pid directly far more often than they should. It also has to stay off
+    is_hidraw_enabled's prefer-hidraw list, or the bus thread drops a device
+    that wants hidraw and is not hidraw.
+
+  - Y and RY are inverted on the way into the report with the same `-v - 1`
+    bus_sdl.c applies, so the wire can carry Android's convention (which is
+    SDL's) and the extremes stay each other's opposite after the flip.
+
+  - The wait loop polls the socket and a self-pipe. A timeout instead would
+    make every session teardown wait out the timeout, on a device where
+    sessions are stopped constantly.
+
+  - A path beginning '@' is a name in the abstract namespace, which is what the
+    app actually serves: binding a filesystem socket from an app needs
+    android.system.UnixSocketAddress, which is not public API, so
+    LocalServerSocket and the abstract namespace are the only route a
+    Play-installable app has. libxcb already reaches the app's X server the
+    same way. The filesystem form is kept because it costs three lines.
+
+diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
+index c2823e13f8d..cfaaeb3b286 100644
+--- a/dlls/winebus.sys/Makefile.in
++++ b/dlls/winebus.sys/Makefile.in
+@@ -9,6 +9,7 @@ EXTRADLLFLAGS = -Wl,--subsystem,native
+ SOURCES = \
+ 	bus_iohid.c \
+ 	bus_sdl.c \
++	bus_vessel.c \
+ 	bus_udev.c \
+ 	hid.c \
+ 	main.c \
+diff --git a/dlls/winebus.sys/bus_vessel.c b/dlls/winebus.sys/bus_vessel.c
+new file mode 100644
+index 00000000000..6927f5dec42
+--- /dev/null
++++ b/dlls/winebus.sys/bus_vessel.c
+@@ -0,0 +1,537 @@
++/*
++ * A winebus backend fed by the Android app over a unix socket.
++ *
++ * Copyright 2026 The Vessel authors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <stdarg.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <stddef.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "windef.h"
++#include "winbase.h"
++#include "winternl.h"
++#include "ddk/hidtypes.h"
++
++#include "wine/debug.h"
++#include "wine/list.h"
++
++#include "unix_private.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(plugplay);
++
++/*
++ * Every other backend in this directory opens a device node. On Android an app
++ * cannot: /dev/input is root:input 0660 and untrusted_app is in neither group,
++ * which is why this build configures --without-sdl --without-udev --without-usb
++ * and why winebus has enumerated nothing at all. The only thing on the device
++ * that can see a gamepad is Android's own InputDevice API, and that lives in
++ * the app -- so the app is the bus, and this is its client half.
++ *
++ * The transport is the same shape as patches/wine/0005: a filesystem AF_UNIX
++ * SOCK_STREAM socket whose path arrives in an environment variable, absent when
++ * the app did not open one, in which case this backend reports itself
++ * unimplemented and winebus carries on exactly as it did before.
++ *
++ * The frame is fixed at 20 bytes in both directions, native byte order. Fixed
++ * rather than length-prefixed because there is one producer, one consumer and
++ * six message shapes between them; a short read is then a torn frame rather
++ * than a desynchronised stream, and the reader can simply keep accumulating.
++ *
++ *   app -> guest
++ *     0x01 ADDED    index                       a pad appeared in slot `index`
++ *     0x02 REMOVED  index                       it went away
++ *     0x03 STATE    index, buttons, hat, axes   its current state
++ *
++ *   guest -> app
++ *     0x81 RUMBLE   index, low, high, duration  play this on the pad's motors
++ *
++ * Axis values are Android's convention, which is also SDL's: signed, full
++ * scale, and Y positive *downwards*. They are negated on the way into the HID
++ * report exactly as bus_sdl.c does, with the same `-v - 1` so that the extremes
++ * stay symmetrical -- see the "match XUSB / GIP protocol" comment there.
++ */
++
++#define VESSEL_FRAME_SIZE 20
++
++#define VESSEL_MSG_ADDED   0x01
++#define VESSEL_MSG_REMOVED 0x02
++#define VESSEL_MSG_STATE   0x03
++#define VESSEL_MSG_RUMBLE  0x81
++
++/* Four, because XInput has four slots and there is no fifth thing to be. */
++#define VESSEL_PAD_MAX 4
++
++/*
++ * The pad presents as a wired Xbox 360 controller.
++ *
++ * Not vanity: `winexinput.sys` only attaches to a device winebus marked
++ * `is_gamepad`, and a great many games sniff the vid/pid directly and take a
++ * different path for "an Xbox controller" than for "a gamepad". 045e:028e is
++ * the one every title has been tested against for fifteen years. It is also
++ * absent from `is_hidraw_enabled`'s prefer-hidraw list, which matters: a device
++ * that wants hidraw but is not hidraw is dropped by the bus thread.
++ */
++#define VESSEL_VID 0x045e
++#define VESSEL_PID 0x028e
++
++struct vessel_device
++{
++    struct unix_device unix_device;
++    UINT index;
++};
++
++static inline struct vessel_device *impl_from_unix_device(struct unix_device *iface)
++{
++    return CONTAINING_RECORD(iface, struct vessel_device, unix_device);
++}
++
++static int vessel_fd = -1;
++static int vessel_stop_read = -1;
++static int vessel_stop_write = -1;
++static struct unix_device *vessel_devices[VESSEL_PAD_MAX];
++static struct list vessel_event_queue = LIST_INIT(vessel_event_queue);
++
++/* Buffered because a stream socket may hand back a torn frame at any boundary. */
++static BYTE vessel_partial[VESSEL_FRAME_SIZE];
++static UINT vessel_partial_len;
++
++static void vessel_write_frame(const BYTE *frame)
++{
++    UINT written = 0;
++    ssize_t ret;
++
++    if (vessel_fd < 0) return;
++    while (written < VESSEL_FRAME_SIZE)
++    {
++        ret = write(vessel_fd, frame + written, VESSEL_FRAME_SIZE - written);
++        if (ret > 0) written += ret;
++        else if (ret < 0 && errno == EINTR) continue;
++        else
++        {
++            /* The app went away. Say so once; the read side will notice too and
++             * take the devices down in order. */
++            WARN("vessel: could not write to the pad socket: %s\n", strerror(errno));
++            return;
++        }
++    }
++}
++
++static void vessel_device_destroy(struct unix_device *iface)
++{
++}
++
++static NTSTATUS vessel_device_start(struct unix_device *iface)
++{
++    return STATUS_SUCCESS;
++}
++
++static void vessel_device_stop(struct unix_device *iface)
++{
++    struct vessel_device *impl = impl_from_unix_device(iface);
++    if (impl->index < VESSEL_PAD_MAX && vessel_devices[impl->index] == iface)
++        vessel_devices[impl->index] = NULL;
++}
++
++/*
++ * Rumble goes back up the same socket.
++ *
++ * This is the whole argument for a HID device over an XInput shim, so it is
++ * wired even though the pad on the desk may have no motors: the app forwards it
++ * to the controller's own vibrator if it has one and drops it otherwise, which
++ * is a decision only the app can make.
++ */
++static NTSTATUS vessel_device_haptics_start(struct unix_device *iface, UINT duration_ms,
++                                            USHORT rumble_intensity, USHORT buzz_intensity,
++                                            USHORT left_intensity, USHORT right_intensity)
++{
++    struct vessel_device *impl = impl_from_unix_device(iface);
++    BYTE frame[VESSEL_FRAME_SIZE] = {0};
++
++    TRACE("iface %p, duration_ms %u, rumble %u, buzz %u.\n", iface, duration_ms,
++          rumble_intensity, buzz_intensity);
++
++    frame[0] = VESSEL_MSG_RUMBLE;
++    frame[1] = impl->index;
++    memcpy(frame + 2, &rumble_intensity, sizeof(USHORT));
++    memcpy(frame + 4, &buzz_intensity, sizeof(USHORT));
++    memcpy(frame + 6, &duration_ms, sizeof(UINT));
++    vessel_write_frame(frame);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS vessel_device_haptics_stop(struct unix_device *iface)
++{
++    return vessel_device_haptics_start(iface, 0, 0, 0, 0, 0);
++}
++
++static NTSTATUS vessel_device_physical_device_control(struct unix_device *iface, USAGE control)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS vessel_device_physical_device_set_gain(struct unix_device *iface, BYTE percent)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS vessel_device_physical_effect_control(struct unix_device *iface, BYTE index,
++                                                      USAGE control, BYTE iterations)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS vessel_device_physical_effect_update(struct unix_device *iface, BYTE index,
++                                                     struct effect_params *params)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++static const struct hid_device_vtbl vessel_device_vtbl =
++{
++    vessel_device_destroy,
++    vessel_device_start,
++    vessel_device_stop,
++    vessel_device_haptics_start,
++    vessel_device_haptics_stop,
++    vessel_device_physical_device_control,
++    vessel_device_physical_device_set_gain,
++    vessel_device_physical_effect_control,
++    vessel_device_physical_effect_update,
++};
++
++static void vessel_add_device(UINT index)
++{
++    const USAGE_AND_PAGE device_usage = {.UsagePage = HID_USAGE_PAGE_GENERIC,
++                                         .Usage = HID_USAGE_GENERIC_GAMEPAD};
++    struct device_desc desc =
++    {
++        .vid = VESSEL_VID,
++        .pid = VESSEL_PID,
++        .version = 0x0114,
++        .input = -1,
++        .uid = index,
++        .bus_type = BUS_TYPE_USB,
++        .is_gamepad = TRUE,
++        .is_hidraw = FALSE,
++        .manufacturer = {'V','e','s','s','e','l',0},
++        .product = {'V','e','s','s','e','l',' ','C','o','n','t','r','o','l','l','e','r',0},
++        .serialnumber = {'0','0','0','0',0},
++    };
++    struct vessel_device *impl;
++    struct unix_device *iface;
++
++    if (index >= VESSEL_PAD_MAX) return;
++    if (vessel_devices[index]) return;
++
++    desc.serialnumber[3] = '0' + index;
++
++    if (!(iface = hid_device_create(&vessel_device_vtbl, sizeof(struct vessel_device))))
++    {
++        ERR("vessel: out of memory creating pad %u\n", index);
++        return;
++    }
++    impl = impl_from_unix_device(iface);
++    impl->index = index;
++
++    /* Built here rather than in `start`, because the bus thread asks for the
++     * report descriptor the moment it sees DEVICE_CREATED -- it has to know the
++     * usages before it can decide whether the device is wanted at all. */
++    if (!hid_device_begin_report_descriptor(iface, &device_usage) ||
++        !hid_device_add_gamepad(iface) ||
++        !hid_device_add_haptics(iface) ||
++        !hid_device_end_report_descriptor(iface))
++    {
++        ERR("vessel: could not build the report descriptor for pad %u\n", index);
++        return;
++    }
++
++    /* Centred, not zeroed: an unread report is a stick held hard left until the
++     * first state frame arrives, and on a menu that is a cursor that will not
++     * stop moving. */
++    hid_device_set_abs_axis(iface, 0, 0);
++    hid_device_set_abs_axis(iface, 1, 0);
++    hid_device_set_abs_axis(iface, 2, 0);
++    hid_device_set_abs_axis(iface, 3, 0);
++    hid_device_set_abs_axis(iface, 4, 0);
++    hid_device_set_abs_axis(iface, 5, 0);
++    hid_device_move_hatswitch(iface, 0, 0, 0);
++
++    vessel_devices[index] = iface;
++    if (!bus_event_queue_device_created(&vessel_event_queue, iface, &desc))
++        ERR("vessel: could not queue the arrival of pad %u\n", index);
++    else
++        TRACE("vessel: pad %u arrived\n", index);
++}
++
++static void vessel_remove_device(UINT index)
++{
++    struct unix_device *iface;
++
++    if (index >= VESSEL_PAD_MAX) return;
++    if (!(iface = vessel_devices[index])) return;
++
++    vessel_devices[index] = NULL;
++    bus_event_queue_device_removed(&vessel_event_queue, iface);
++    TRACE("vessel: pad %u went away\n", index);
++}
++
++static void vessel_set_state(UINT index, const BYTE *frame)
++{
++    struct unix_device *iface;
++    UINT16 buttons;
++    INT16 axis[4];
++    UINT16 trigger[2];
++    BYTE hat;
++    UINT i;
++
++    if (index >= VESSEL_PAD_MAX) return;
++    if (!(iface = vessel_devices[index])) return;
++
++    memcpy(&buttons, frame + 2, sizeof(buttons));
++    hat = frame[4];
++    memcpy(axis, frame + 6, sizeof(axis));
++    memcpy(trigger, frame + 14, sizeof(trigger));
++
++    /* Buttons are HID usages 1..16, so bit n is usage n+1 -- which is A, B, X,
++     * Y, LB, RB, Back, Start, LThumb, RThumb, Guide, in the order xinput1_3
++     * reads them. The app owns that order; nothing here reinterprets it. */
++    for (i = 0; i < 16; i++) hid_device_set_button(iface, i, (buttons >> i) & 1);
++
++    /* Y and RY inverted on the way in, the same `-v - 1` bus_sdl.c applies, so
++     * that -32768 and 32767 stay each other's opposite after the flip. */
++    hid_device_set_abs_axis(iface, 0, axis[0]);
++    hid_device_set_abs_axis(iface, 1, -axis[1] - 1);
++    hid_device_set_abs_axis(iface, 2, axis[2]);
++    hid_device_set_abs_axis(iface, 3, -axis[3] - 1);
++    hid_device_set_abs_axis(iface, 4, trigger[0]);
++    hid_device_set_abs_axis(iface, 5, trigger[1]);
++
++    /* The hat is a bitmask on the wire and a direction in the report, because a
++     * d-pad can be pressed in two directions at once and a HID hatswitch has one
++     * value for each of the eight that means. */
++    hid_device_set_hatswitch_x(iface, 0, ((hat & 8) ? 1 : 0) - ((hat & 4) ? 1 : 0));
++    hid_device_set_hatswitch_y(iface, 0, ((hat & 2) ? 1 : 0) - ((hat & 1) ? 1 : 0));
++
++    if (!hid_device_sync_report(iface))
++        TRACE("vessel: pad %u report unchanged\n", index);
++}
++
++static void vessel_handle_frame(const BYTE *frame)
++{
++    switch (frame[0])
++    {
++    case VESSEL_MSG_ADDED: vessel_add_device(frame[1]); break;
++    case VESSEL_MSG_REMOVED: vessel_remove_device(frame[1]); break;
++    case VESSEL_MSG_STATE: vessel_set_state(frame[1], frame); break;
++    default: WARN("vessel: unknown frame type %#x\n", frame[0]); break;
++    }
++}
++
++/* Every pad the app told us about, withdrawn -- the app is gone. */
++static void vessel_remove_all(void)
++{
++    UINT i;
++    for (i = 0; i < VESSEL_PAD_MAX; i++) vessel_remove_device(i);
++}
++
++/*
++ * Connect to `path`, which is abstract if it starts with '@'.
++ *
++ * Abstract is what the app actually serves, and the '@' is the convention every
++ * unix tool uses to say so. The reason is on the app's side: binding a
++ * filesystem socket needs `android.system.UnixSocketAddress`, which is not
++ * public API, so `LocalServerSocket` and the abstract namespace are the only
++ * route a Play-installable app has. It is the better address here anyway --
++ * nothing to unlink after a kill, and no 108-byte path to fit a sandbox path
++ * into. libxcb already reaches the app's X server exactly this way.
++ *
++ * The filesystem form is kept because it costs three lines and it is what every
++ * other unix socket in this tree looks like.
++ */
++static int vessel_connect(const char *path)
++{
++    struct sockaddr_un addr = {0};
++    socklen_t len;
++    int fd;
++
++    if (strlen(path) >= sizeof(addr.sun_path))
++    {
++        ERR("vessel: pad socket path is %zu bytes and sun_path holds %zu\n",
++            strlen(path), sizeof(addr.sun_path));
++        return -1;
++    }
++
++    if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
++    {
++        ERR("vessel: could not create the pad socket: %s\n", strerror(errno));
++        return -1;
++    }
++
++    addr.sun_family = AF_UNIX;
++    if (path[0] == '@')
++    {
++        /* A leading NUL is what makes the kernel read the rest as a name in the
++         * abstract namespace, and the length must stop at the end of that name
++         * -- sizeof(addr) would pad it with NULs that become part of it. */
++        addr.sun_path[0] = '\0';
++        strcpy(addr.sun_path + 1, path + 1);
++        len = offsetof(struct sockaddr_un, sun_path) + 1 + strlen(path + 1);
++    }
++    else
++    {
++        strcpy(addr.sun_path, path);
++        len = sizeof(addr);
++    }
++
++    if (connect(fd, (struct sockaddr *)&addr, len) < 0)
++    {
++        /* Not an error: a container started outside the app has no app to talk
++         * to, and the rest of winebus is unaffected. */
++        WARN("vessel: no pad server at %s: %s\n", path, strerror(errno));
++        close(fd);
++        return -1;
++    }
++
++    return fd;
++}
++
++NTSTATUS vessel_bus_init(void *args)
++{
++    const char *path = getenv("WINE_PAD_SOCKET");
++    int pipefd[2];
++
++    TRACE("args %p\n", args);
++
++    if (!path || !*path)
++    {
++        TRACE("vessel: WINE_PAD_SOCKET is not set, no pad bus\n");
++        return STATUS_NOT_IMPLEMENTED;
++    }
++
++    if ((vessel_fd = vessel_connect(path)) < 0) return STATUS_NOT_SUPPORTED;
++
++    /* A self-pipe, so that stopping the bus does not have to wait out a poll.
++     * The alternative -- a timeout on the poll -- makes shutdown take as long as
++     * the timeout, every time, on a device where a session is stopped often. */
++    if (pipe(pipefd) < 0)
++    {
++        ERR("vessel: could not create the stop pipe: %s\n", strerror(errno));
++        close(vessel_fd);
++        vessel_fd = -1;
++        return STATUS_UNSUCCESSFUL;
++    }
++    vessel_stop_read = pipefd[0];
++    vessel_stop_write = pipefd[1];
++    vessel_partial_len = 0;
++
++    ERR("vessel: pad bus connected to %s\n", path);
++    return STATUS_SUCCESS;
++}
++
++NTSTATUS vessel_bus_wait(void *args)
++{
++    struct bus_event *result = args;
++    struct pollfd pfd[2];
++    BYTE buffer[VESSEL_FRAME_SIZE * 16];
++    ssize_t got;
++    UINT offset;
++
++    for (;;)
++    {
++        if (bus_event_queue_pop(&vessel_event_queue, result)) return STATUS_PENDING;
++
++        pfd[0].fd = vessel_fd;
++        pfd[0].events = POLLIN;
++        pfd[0].revents = 0;
++        pfd[1].fd = vessel_stop_read;
++        pfd[1].events = POLLIN;
++        pfd[1].revents = 0;
++
++        if (poll(pfd, 2, -1) < 0)
++        {
++            if (errno == EINTR) continue;
++            ERR("vessel: poll failed: %s\n", strerror(errno));
++            break;
++        }
++
++        if (pfd[1].revents) break;
++        if (!pfd[0].revents) continue;
++
++        got = read(vessel_fd, buffer, sizeof(buffer));
++        if (got < 0 && errno == EINTR) continue;
++        if (got <= 0)
++        {
++            /* The app closed the socket, which on this device means the session
++             * is going down. Withdraw the pads rather than leaving a game
++             * holding a device that answers nothing. */
++            if (got < 0) WARN("vessel: pad socket read failed: %s\n", strerror(errno));
++            else TRACE("vessel: the app closed the pad socket\n");
++            vessel_remove_all();
++            close(vessel_fd);
++            vessel_fd = -1;
++            /* Drain what the withdrawal queued before saying there is no more. */
++            if (bus_event_queue_pop(&vessel_event_queue, result)) return STATUS_PENDING;
++            break;
++        }
++
++        for (offset = 0; offset < (UINT)got; )
++        {
++            UINT want = VESSEL_FRAME_SIZE - vessel_partial_len;
++            UINT have = (UINT)got - offset;
++            UINT take = have < want ? have : want;
++
++            memcpy(vessel_partial + vessel_partial_len, buffer + offset, take);
++            vessel_partial_len += take;
++            offset += take;
++
++            if (vessel_partial_len < VESSEL_FRAME_SIZE) break;
++            vessel_partial_len = 0;
++            vessel_handle_frame(vessel_partial);
++        }
++    }
++
++    vessel_remove_all();
++    bus_event_queue_destroy(&vessel_event_queue);
++    result->type = BUS_EVENT_TYPE_NONE;
++    return STATUS_SUCCESS;
++}
++
++NTSTATUS vessel_bus_stop(void *args)
++{
++    char wake = 1;
++
++    if (vessel_stop_write < 0) return STATUS_SUCCESS;
++    if (write(vessel_stop_write, &wake, 1) != 1)
++        WARN("vessel: could not wake the pad bus: %s\n", strerror(errno));
++    return STATUS_SUCCESS;
++}
+diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
+index a6227be9908..b3c2f74501f 100644
+--- a/dlls/winebus.sys/main.c
++++ b/dlls/winebus.sys/main.c
+@@ -1263,6 +1263,24 @@ static NTSTATUS iohid_driver_init(void)
+     return bus_main_thread_start(&bus);
+ }
+ 
++/*
++ * The bus the Android app feeds, over a unix socket. See bus_vessel.c: on this
++ * platform it is the only backend that can produce a device at all, because an
++ * app is not allowed to open /dev/input, which leaves SDL, udev and libusb all
++ * blind here however they are configured.
++ */
++static NTSTATUS vessel_driver_init(void)
++{
++    struct bus_main_params bus =
++    {
++        .name = L"VESSEL",
++        .init_args = &options,
++        .init_code = vessel_init,
++        .wait_code = vessel_wait,
++    };
++    return bus_main_thread_start(&bus);
++}
++
+ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+ {
+     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation(irp);
+@@ -1282,6 +1300,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+         if (!sdl_driver_init()) options.disable_input = TRUE;
+         udev_driver_init();
+         iohid_driver_init();
++        vessel_driver_init();
+ 
+         irp->IoStatus.Status = STATUS_SUCCESS;
+         break;
+@@ -1292,6 +1311,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+         winebus_call(sdl_stop, NULL);
+         winebus_call(udev_stop, NULL);
+         winebus_call(iohid_stop, NULL);
++        winebus_call(vessel_stop, NULL);
+ 
+         WaitForMultipleObjects(bus_count, bus_thread, TRUE, INFINITE);
+         while (bus_count--) CloseHandle(bus_thread[bus_count]);
+diff --git a/dlls/winebus.sys/unix_private.h b/dlls/winebus.sys/unix_private.h
+index c39c8787247..b3d09ceacbf 100644
+--- a/dlls/winebus.sys/unix_private.h
++++ b/dlls/winebus.sys/unix_private.h
+@@ -234,6 +234,10 @@ extern NTSTATUS iohid_bus_init(void *);
+ extern NTSTATUS iohid_bus_wait(void *);
+ extern NTSTATUS iohid_bus_stop(void *);
+ 
++extern NTSTATUS vessel_bus_init(void *);
++extern NTSTATUS vessel_bus_wait(void *);
++extern NTSTATUS vessel_bus_stop(void *);
++
+ extern void bus_event_cleanup(struct bus_event *event);
+ extern void bus_event_queue_destroy(struct list *queue);
+ extern BOOL bus_event_queue_device_removed(struct list *queue, struct unix_device *device);
+diff --git a/dlls/winebus.sys/unixlib.c b/dlls/winebus.sys/unixlib.c
+index e3cabbc8c34..306c7247f39 100644
+--- a/dlls/winebus.sys/unixlib.c
++++ b/dlls/winebus.sys/unixlib.c
+@@ -310,6 +310,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     iohid_bus_init,
+     iohid_bus_wait,
+     iohid_bus_stop,
++    vessel_bus_init,
++    vessel_bus_wait,
++    vessel_bus_stop,
+     mouse_device_create,
+     keyboard_device_create,
+     unix_device_remove,
+diff --git a/dlls/winebus.sys/unixlib.h b/dlls/winebus.sys/unixlib.h
+index d2b17f4c6d3..85f4a2de900 100644
+--- a/dlls/winebus.sys/unixlib.h
++++ b/dlls/winebus.sys/unixlib.h
+@@ -145,6 +145,9 @@ enum unix_funcs
+     iohid_init,
+     iohid_wait,
+     iohid_stop,
++    vessel_init,
++    vessel_wait,
++    vessel_stop,
+     mouse_create,
+     keyboard_create,
+     device_remove,

@@ -6,6 +6,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
+import android.os.VibrationEffect
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -23,6 +24,7 @@ import app.vessel.core.GuestViewport
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayRequest
 import app.vessel.core.FrameRate
+import app.vessel.core.PAD_SOCKET_ENV
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDisplayServer
 import app.vessel.core.TopLevelWindow
@@ -30,6 +32,7 @@ import app.vessel.core.WindowBounds
 import app.vessel.core.displayNumber
 import app.vessel.core.xSocketName
 import app.vessel.input.GamepadControl
+import com.winlator.inputcontrols.ExternalController
 import app.vessel.input.GamepadTranslator
 import app.vessel.input.GuestInput
 import app.vessel.input.InputProfile
@@ -919,6 +922,18 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     fun processOf(id: Int): Int =
         runCatching { xServer.windowManager.getWindow(id)?.processId ?: 0 }.getOrDefault(0)
 
+    /**
+     * Where the guest's `winebus` will dial: an abstract socket, like the X one.
+     *
+     * The `@` is the convention every unix tool uses for "this name is in the
+     * abstract namespace, not on disk", and it is what `patches/wine/0016` looks
+     * for before it decides which kind of address to build.
+     */
+    private val padSocketName: String = PadBridge.socketName(displayNumber(request.display))
+    private val padSocketPath: String = "@$padSocketName"
+
+    private val padBridge = PadBridge(padSocketName)
+
     init {
         xServer.setDebugSink { line -> Log.d("VesselDisplay", line) }
         // MIT-SHM is advertised unconditionally by XServer.setupExtensions, and
@@ -932,7 +947,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
             UnixSocketConfig.SYSVSHM_SERVER_PATH,
         )
 
-        val surface = SessionSurfaceView(context, xServer, request.fpsLimit)
+        val surface = SessionSurfaceView(context, xServer, request.fpsLimit, padBridge)
         view = surface
         xServer.setRenderer(surface.renderer)
 
@@ -1026,6 +1041,13 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
                 SysVSHMConnectionHandler(sharedMemory),
                 SysVSHMRequestHandler(),
             ).apply { start() }
+
+            // The gamepad bus. It binds before the guest starts because winebus
+            // connects once, during its own device start, and never retries --
+            // a socket that appears a second later is a socket nobody dials.
+            // The view fills it: everything that knows what a pad is doing is
+            // input handling, and that lives there.
+            padBridge.start()
         } catch (t: Throwable) {
             stop()
             throw t
@@ -1041,6 +1063,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
             // patch refuses anything longer, so a path that would not fit is
             // dropped here — slower, but not a silent connect(2) failure per
             // damaged region.
+            if (padBridge.listening) put(PAD_SOCKET_ENV, padSocketPath)
             if (socket.path.length < SUN_PATH_MAX) {
                 put(SYSVSHM_SOCKET_ENV, socket.path)
             } else {
@@ -1062,6 +1085,7 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         xConnector = null
         shmConnector?.destroy()
         shmConnector = null
+        padBridge.stop()
         sharedMemory.deleteAll()
         view.shutdown()
     }
@@ -1076,6 +1100,8 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 
         /** `sizeof(sockaddr_un.sun_path)` on Linux, and what patch 0005 checks. */
         const val SUN_PATH_MAX = 108
+
+
 
         /**
          * How far down the window tree the taskbar walk goes.
@@ -1275,7 +1301,17 @@ private class SessionSurfaceView(
     context: Context,
     private val xServer: XServer,
     fpsLimit: Int?,
+    /** The guest's gamepad bus. See [PadBridge]; `DisplaySession` owns its socket. */
+    private val padBridge: PadBridge,
 ) : FrameLayout(context) {
+
+    /** The physical pad, accumulated, because a HID report carries whole state. */
+    private var padState = PadBridge.State()
+
+    init {
+        padBridge.onRumble = ::rumble
+        refreshPads()
+    }
 
     private val xServerView = PacedXServerView(context, xServer, fpsLimit)
 
@@ -1740,33 +1776,158 @@ private class SessionSurfaceView(
     // — gamepad -------------------------------------------------------------------------
 
     private fun joystick(event: MotionEvent): Boolean {
-        sink.accept(
-            gamepad.onSticks(
-                lx = event.getAxisValue(MotionEvent.AXIS_X),
-                ly = event.getAxisValue(MotionEvent.AXIS_Y),
-                rx = event.getAxisValue(MotionEvent.AXIS_Z),
-                ry = event.getAxisValue(MotionEvent.AXIS_RZ),
-            ),
+        val lt = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE))
+        val rt = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS))
+        val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        padState = padState.copy(
+            lx = padAxis(event.getAxisValue(MotionEvent.AXIS_X)),
+            ly = padAxis(event.getAxisValue(MotionEvent.AXIS_Y)),
+            rx = padAxis(event.getAxisValue(MotionEvent.AXIS_Z)),
+            ry = padAxis(event.getAxisValue(MotionEvent.AXIS_RZ)),
+            lt = (lt.coerceIn(0f, 1f) * PadBridge.AXIS_MAX).toInt(),
+            rt = (rt.coerceIn(0f, 1f) * PadBridge.AXIS_MAX).toInt(),
+            // A hat axis and four d-pad keycodes are the same four directions
+            // reported two ways, and a pad sends whichever it prefers. Only the
+            // axis is folded in here; the keys arrive through `padButton`.
+            hat = (padState.hat and (PadBridge.HAT_UP or PadBridge.HAT_DOWN or
+                PadBridge.HAT_LEFT or PadBridge.HAT_RIGHT).inv()) or
+                (if (hatY < -HAT_EDGE) PadBridge.HAT_UP else 0) or
+                (if (hatY > HAT_EDGE) PadBridge.HAT_DOWN else 0) or
+                (if (hatX < -HAT_EDGE) PadBridge.HAT_LEFT else 0) or
+                (if (hatX > HAT_EDGE) PadBridge.HAT_RIGHT else 0),
         )
-        sink.accept(gamepad.onHat(event.getAxisValue(MotionEvent.AXIS_HAT_X), event.getAxisValue(MotionEvent.AXIS_HAT_Y)))
+        publishPad()
+
+        // **The translator still runs, and its output is dropped while a real
+        // HID pad exists in the guest.** Running it keeps the look timer's idea
+        // of stick deflection honest whichever path is live; dropping the output
+        // is what stops a game that reads XInput *and* the keyboard from walking
+        // twice as far per stick. With no bridge attached -- an older Wine, or a
+        // guest that has not connected yet -- nothing is dropped and the
+        // behaviour is exactly what it was before the bridge existed.
+        val muted = padBridge.attached
+        val sticks = gamepad.onSticks(
+            lx = event.getAxisValue(MotionEvent.AXIS_X),
+            ly = event.getAxisValue(MotionEvent.AXIS_Y),
+            rx = event.getAxisValue(MotionEvent.AXIS_Z),
+            ry = event.getAxisValue(MotionEvent.AXIS_RZ),
+        )
+        if (!muted) sink.accept(sticks)
+        val hat = gamepad.onHat(hatX, hatY)
+        if (!muted) sink.accept(hat)
         // BRAKE/GAS are what a pad reports when it has no LTRIGGER/RTRIGGER axis;
         // taking the larger covers both without knowing which kind this is.
-        sink.accept(
-            gamepad.onTrigger(
-                GamepadControl.L2,
-                maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)),
-            ),
-        )
-        sink.accept(
-            gamepad.onTrigger(
-                GamepadControl.R2,
-                maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)),
-            ),
-        )
+        val left = gamepad.onTrigger(GamepadControl.L2, lt)
+        if (!muted) sink.accept(left)
+        val right = gamepad.onTrigger(GamepadControl.R2, rt)
+        if (!muted) sink.accept(right)
         syncLookTimer()
         publishHeld()
         return true
     }
+
+    // — the pad the guest sees ------------------------------------------------------
+
+    /**
+     * Whether a controller exists, as far as the guest is concerned.
+     *
+     * **Asked of Android rather than inferred from events**, because a game that
+     * polls `XInputGetState` once at startup and never again has to find the pad
+     * already there. Waiting for the first button press would mean the pad
+     * arrives after the menu that asked for it.
+     *
+     * `ExternalController.isGameController` is the test, unchanged: source is
+     * `GAMEPAD` or `JOYSTICK`, and the device is not virtual. Transport-agnostic,
+     * so a Bluetooth pad and a USB pad arrive here identically.
+     */
+    private fun refreshPads() {
+        val found = controllers().size
+        for (slot in 0 until PadBridge.SLOTS) padBridge.setPresent(slot, slot < found)
+        Log.i("VesselDisplay", "$found controller(s) offered to the guest")
+    }
+
+    /** Every non-virtual game controller Android currently knows about. */
+    private fun controllers(): List<InputDevice> = runCatching {
+        InputDevice.getDeviceIds()
+            .toList()
+            .mapNotNull { id -> InputDevice.getDevice(id) }
+            .filter { device -> ExternalController.isGameController(device) }
+    }.getOrDefault(emptyList())
+
+    /**
+     * Rumble, back down the same socket, onto the pad's own motors.
+     *
+     * The guest asked for it through the HID haptics report, which is the whole
+     * argument for a HID device over an XInput shim. `InputDevice.getVibrator`
+     * is the only route to a *controller's* motors — `Context.VIBRATOR_SERVICE`
+     * is the phone's, and buzzing the handset because a game shook a gamepad
+     * would be worse than doing nothing.
+     */
+    private fun rumble(index: Int, low: Int, high: Int, durationMs: Int) {
+        val device = controllers().getOrNull(index) ?: return
+        runCatching {
+            val vibrator = device.vibratorManager.defaultVibrator
+            if (!vibrator.hasVibrator()) return
+            val strength = maxOf(low, high)
+            if (strength == 0 || durationMs == 0) {
+                vibrator.cancel()
+                return
+            }
+            val amplitude = (strength * 255 / MAX_INTENSITY).coerceIn(1, 255)
+            vibrator.vibrate(VibrationEffect.createOneShot(durationMs.toLong(), amplitude))
+        }.onFailure { Log.d("VesselDisplay", "the pad would not rumble", it) }
+    }
+
+    /** Everything the pad is holding right now, as one HID report. */
+    private fun publishPad() {
+        padBridge.submit(0, padState)
+    }
+
+    private fun padButton(control: GamepadControl, pressed: Boolean) {
+        val bit = when (control) {
+            GamepadControl.A -> PadBridge.BTN_A
+            GamepadControl.B -> PadBridge.BTN_B
+            GamepadControl.X -> PadBridge.BTN_X
+            GamepadControl.Y -> PadBridge.BTN_Y
+            GamepadControl.L1 -> PadBridge.BTN_L1
+            GamepadControl.R1 -> PadBridge.BTN_R1
+            GamepadControl.SELECT -> PadBridge.BTN_SELECT
+            GamepadControl.START -> PadBridge.BTN_START
+            GamepadControl.THUMB_L -> PadBridge.BTN_THUMB_L
+            GamepadControl.THUMB_R -> PadBridge.BTN_THUMB_R
+            // The triggers are axes on a HID gamepad, not buttons. A pad that
+            // reports them as keys instead -- and many Bluetooth ones do -- gets
+            // them turned back into a full deflection here.
+            GamepadControl.L2 -> {
+                padState = padState.copy(lt = if (pressed) PadBridge.AXIS_MAX else 0)
+                return
+            }
+            GamepadControl.R2 -> {
+                padState = padState.copy(rt = if (pressed) PadBridge.AXIS_MAX else 0)
+                return
+            }
+            GamepadControl.DPAD_UP -> return padHat(PadBridge.HAT_UP, pressed)
+            GamepadControl.DPAD_DOWN -> return padHat(PadBridge.HAT_DOWN, pressed)
+            GamepadControl.DPAD_LEFT -> return padHat(PadBridge.HAT_LEFT, pressed)
+            GamepadControl.DPAD_RIGHT -> return padHat(PadBridge.HAT_RIGHT, pressed)
+            else -> return
+        }
+        val mask = 1 shl bit
+        padState = padState.copy(
+            buttons = if (pressed) padState.buttons or mask else padState.buttons and mask.inv(),
+        )
+    }
+
+    private fun padHat(mask: Int, pressed: Boolean) {
+        padState = padState.copy(
+            hat = if (pressed) padState.hat or mask else padState.hat and mask.inv(),
+        )
+    }
+
+    /** -1.0..1.0 as Android reports it, to the full signed range the wire wants. */
+    private fun padAxis(value: Float): Int =
+        (value.coerceIn(-1f, 1f) * PadBridge.AXIS_MAX).toInt()
 
     /** A held stick emits no events at all, so the cursor needs a heartbeat. */
     private fun syncLookTimer() {
@@ -1806,9 +1967,18 @@ private class SessionSurfaceView(
 
         gamepadControl(event)?.let { control ->
             when (event.action) {
-                KeyEvent.ACTION_DOWN -> sink.accept(gamepad.onButton(control, true))
-                KeyEvent.ACTION_UP -> sink.accept(gamepad.onButton(control, false))
+                KeyEvent.ACTION_DOWN -> {
+                    padButton(control, true)
+                    val out = gamepad.onButton(control, true)
+                    if (!padBridge.attached) sink.accept(out)
+                }
+                KeyEvent.ACTION_UP -> {
+                    padButton(control, false)
+                    val out = gamepad.onButton(control, false)
+                    if (!padBridge.attached) sink.accept(out)
+                }
             }
+            publishPad()
             publishHeld()
             return true
         }
@@ -1869,6 +2039,18 @@ private class SessionSurfaceView(
 
         /** ~120 Hz. Faster than the panel is pointless; slower is visibly steppy. */
         const val LOOK_INTERVAL_MS = 8L
+
+        /**
+         * How far a hat axis has to move to count as pressed.
+         *
+         * A hat reports -1, 0 or +1 and nothing between, so any threshold in the
+         * open interval works; a half keeps a pad that reports its hat as a noisy
+         * analogue axis -- some cheap Bluetooth ones do -- from chattering.
+         */
+        const val HAT_EDGE = 0.5f
+
+        /** Full scale for a HID haptics intensity, which is a `USHORT`. */
+        const val MAX_INTENSITY = 65535
     }
 }
 

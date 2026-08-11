@@ -570,6 +570,18 @@ interface SessionDisplayServer {
 const val SYSVSHM_SOCKET_ENV: String = "WINE_SYSVSHM_SOCKET"
 
 /**
+ * Where the guest's `winebus` finds the app's gamepad bus.
+ *
+ * `patches/wine/0016` reads this and nothing else; unset, winebus enumerates
+ * nothing and a pad reaches the guest only as the keystrokes
+ * `GamepadTranslator` makes of it, exactly as it did before the bridge
+ * existed. That fallback is the reason this is an environment variable rather
+ * than a build-time constant: a container running an older Wine simply does
+ * not connect.
+ */
+const val PAD_SOCKET_ENV: String = "WINE_PAD_SOCKET"
+
+/**
  * The display number in a `DISPLAY` string, or 0 when there is not one.
  *
  * `:0`, `:0.0` and `localhost:0` all name display 0. Anything unparseable falls
