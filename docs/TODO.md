@@ -418,6 +418,27 @@ audit's; they are pointers, not independently re-verified.
   game thread asleep; 252 us cannot be what is missing, and this item should
   wait until whatever costs the other 99.75% of the frame is named.
 
+  **It has been named, and it was the audio.** 2026-08-11, after
+  `0bbd8b0` sized the AAudio buffer to `min(client, device)`, Metro's intro went
+  from 12 fps to **28** — reported by the ear-and-eye that had been watching it
+  all along, not by a harness.
+
+  The mechanism fits the one fact that never fitted anything else. `wineoss.drv`
+  was queueing Metro's whole 1440-frame buffer into a device whose start
+  threshold was 1736, so AudioFlinger never started the track, `framesRead`
+  never moved, and the driver's trace read `advanced by 0, held: 1440` for 2072
+  consecutive passes. A game whose audio never drains does not spin — it
+  *waits*, and so does whatever it feeds. **That is why the SoC was idle: the
+  frame was not expensive, it was blocked.** Every explanation this file tried
+  before assumed the frame cost something, and measured, correctly, that nothing
+  did.
+
+  Two consequences worth carrying forward. First, "~85% idle at 10 fps" is a
+  signature, not a puzzle: it means a stall, and the next time it appears the
+  question to ask is what a thread is waiting *on*. Second, item 27's arithmetic
+  gets better rather than worse — 252 us against a 36 ms frame is 0.7%, still
+  not the thing to fix.
+
 - [ ] **Measure the shader cache, cold against warm.** `docs/OPTIMIZATION.md:31`
   calls pipeline recompilation "the single largest avoidable cost in the whole
   stack". It was fixed (`SessionEnvironment.kt:430-433`) and explicitly left
