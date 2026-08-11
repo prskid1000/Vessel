@@ -50,9 +50,28 @@ static void report(const char *what, AAudioStream *s)
     fflush(stdout);
 }
 
-static int opt_setbuf;      /* mimic the driver's setBufferSizeInFrames(capacity) */
+/* --setbuf mimics the driver's setBufferSizeInFrames(capacity); --setbuf=N asks
+ * for a specific size, which is how the size is shown to be the thing that
+ * decides whether a fixed queue ever starts playing. -1 means "capacity". */
+static int opt_setbuf;
 static int opt_predecessor;  /* mimic oss_test_connect opening a stream first */
 static int opt_rate = RATE;
+
+/* --stall=N: write N frames and then stop writing, polling the counters.
+ *
+ * The plain probe writes continuously for three seconds, and that is precisely
+ * what the driver does NOT do. oss_write_data refuses to queue more than three
+ * periods — 1440 frames at this rate — and then returns without a trace until
+ * AAudio reports some of them consumed. So "keep writing until it plays" is a
+ * behaviour the probe had and the driver never has, and every earlier PASS here
+ * was measuring the wrong program.
+ *
+ * With this switch the probe stops at N frames and just watches, which is the
+ * driver's actual shape: queue a fixed amount, then wait for the device to take
+ * it. If framesRead never leaves zero, the device is waiting for more than N
+ * frames before it will start, and the driver's ceiling is the bug.
+ */
+static int opt_stall;
 
 int main(int argc, char **argv)
 {
@@ -60,9 +79,16 @@ int main(int argc, char **argv)
     int a;
 
     for (a = 1; a < argc; a++) {
-        if (!strcmp(argv[a], "--setbuf")) opt_setbuf = 1;
+        if (!strcmp(argv[a], "--setbuf")) opt_setbuf = -1;
+        else if (!strncmp(argv[a], "--setbuf=", 9)) opt_setbuf = atoi(argv[a] + 9);
         else if (!strcmp(argv[a], "--predecessor")) opt_predecessor = 1;
         else if (!strncmp(argv[a], "--rate=", 7)) opt_rate = atoi(argv[a] + 7);
+        /* --stall=buf rather than a number, because the device renegotiates its
+         * burst and capacity between runs — 868/1736 on one open and 1736/3472
+         * on the next — so a hard-coded frame count silently stops being the
+         * comparison you meant to make. */
+        else if (!strcmp(argv[a], "--stall=buf")) opt_stall = -1;
+        else if (!strncmp(argv[a], "--stall=", 8)) opt_stall = atoi(argv[a] + 8);
     }
 
     AAudioStreamBuilder *builder = NULL;
@@ -113,10 +139,16 @@ int main(int argc, char **argv)
            AAudioStream_getBufferCapacityInFrames(stream),
            AAudioStream_getPerformanceMode(stream), AAudioStream_getSharingMode(stream));
     if (opt_setbuf) {
-        int32_t cap = AAudioStream_getBufferCapacityInFrames(stream);
-        int32_t got = AAudioStream_setBufferSizeInFrames(stream, cap);
-        printf("VESSEL-TONE setBufferSizeInFrames(%d) -> %d\n", cap, got);
+        int32_t want = opt_setbuf < 0
+                     ? AAudioStream_getBufferCapacityInFrames(stream)
+                     : opt_setbuf;
+        int32_t got = AAudioStream_setBufferSizeInFrames(stream, want);
+        printf("VESSEL-TONE setBufferSizeInFrames(%d) -> %d\n", want, got);
     }
+    printf("VESSEL-TONE buffer size in effect %d\n",
+           AAudioStream_getBufferSizeInFrames(stream));
+    if (opt_stall < 0)
+        opt_stall = AAudioStream_getBufferSizeInFrames(stream) + CHUNK;
     report("after-open", stream);
 
     res = AAudioStream_requestStart(stream);
@@ -132,7 +164,7 @@ int main(int argc, char **argv)
         printf("VESSEL-TONE settled state=%s\n", AAudio_convertStreamStateToText(state));
     }
 
-    chunks = (RATE * SECONDS) / CHUNK;
+    chunks = opt_stall ? (opt_stall + CHUNK - 1) / CHUNK : (RATE * SECONDS) / CHUNK;
     for (i = 0; i < chunks; i++) {
         int f;
         for (f = 0; f < CHUNK; f++) {
@@ -160,6 +192,23 @@ int main(int argc, char **argv)
     }
 
     report("after-writes", stream);
+
+    if (opt_stall) {
+        /* Two seconds of watching a queue nobody asked us to top up. The driver
+         * spends its whole run here, once per period, deciding there is nothing
+         * to do. Twenty samples at 100 ms so a late start is still visible as a
+         * start rather than as a flat line. */
+        for (i = 0; i < 20; i++) {
+            usleep(100000);
+            printf("VESSEL-TONE stalled t=%4dms written=%lld read=%lld state=%s\n",
+                   (i + 1) * 100,
+                   (long long)AAudioStream_getFramesWritten(stream),
+                   (long long)AAudioStream_getFramesRead(stream),
+                   AAudio_convertStreamStateToText(AAudioStream_getState(stream)));
+            fflush(stdout);
+        }
+    }
+
     AAudioStream_requestStop(stream);
     report("after-stop", stream);
 
