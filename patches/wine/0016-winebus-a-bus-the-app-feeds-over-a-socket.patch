@@ -1,95 +1,9 @@
-winebus: a bus the app feeds over a socket, because /dev/input is not ours.
-
-Wine ships every piece of the gamepad stack -- xinput1_1..1_4, xinputuap,
-dinput, dinput8, hid, hidclass, winexinput and winebus itself -- and on this
-device all of them work. A probe run inside a live container (tools/input/
-run-guest-pad.sh) loads all five XInput DLLs, calls XInputGetCapabilities on
-all four slots, and gets 1167 back from every one: ERROR_DEVICE_NOT_CONNECTED.
-Nothing is broken. There is simply no device.
-
-There is no device because winebus has no backend that can see one here:
-
-    $ adb shell ls -l /dev/input/
-    crw-rw---- 1 root input 13, 64 event0        ...and eleven more
-    $ adb shell run-as app.vessel ls -l /dev/input/
-    ls: /dev/input/: Permission denied
-
-/dev/input is root:input 0660 and untrusted_app is in neither group. SDL's
-evdev backend, bus_udev.c and libusb all open those nodes, so --without-sdl
---without-udev --without-usb is not an omission in build/wine.sh that could be
-reverted to fix this -- it is the only correct setting for the platform. A Wine
-built --with-sdl would enumerate exactly as many pads as this one does.
-
-The only thing on the device that can see a gamepad is Android's InputDevice
-API, and that lives in the app. So the app is the bus, and this is its client
-half: a fourth backend alongside sdl, udev and iohid, which connects to an
-AF_UNIX socket named by WINE_PAD_SOCKET, and turns what arrives into a HID
-gamepad through the same hid_device_* helpers bus_sdl.c uses.
-
-Doing it here rather than shipping our own xinput1_3.dll is the whole point.
-One HID device reaches hidclass and winexinput, and XInput, DirectInput, winmm
-and raw HID light up together -- a shim answers XInputGetState and leaves every
-other API as dead as it is today, which for a title older than XInput is the
-original problem again. Rumble comes back down the same socket for the same
-reason: it is a property of the device, not of one API's view of it.
-
-The transport is the shape patches/wine/0005 already established for MIT-SHM:
-one env var, one connect(2), and nothing at all when the variable is unset, so
-a container started outside the app behaves exactly as it did before. Frames
-are a fixed 20 bytes in both directions, native byte order -- fixed rather than
-length-prefixed because there is one producer, one consumer and four message
-shapes, and a short read is then a torn frame the reader can keep accumulating
-rather than a stream that has lost its place.
-
-    app -> guest
-      0x01 ADDED    index                       a pad appeared in slot index
-      0x02 REMOVED  index                       it went away
-      0x03 STATE    index, buttons, hat, axes   its current state
-
-    guest -> app
-      0x81 RUMBLE   index, low, high, duration  play this on the pad's motors
-
-Three details worth naming, because each was chosen against an alternative:
-
-  - The pad presents as 045e:028e, a wired Xbox 360 controller. winexinput
-    only attaches to a device winebus marked is_gamepad, and games sniff the
-    vid/pid directly far more often than they should. It also has to stay off
-    is_hidraw_enabled's prefer-hidraw list, or the bus thread drops a device
-    that wants hidraw and is not hidraw.
-
-  - Y and RY are inverted on the way into the report with the same `-v - 1`
-    bus_sdl.c applies, so the wire can carry Android's convention (which is
-    SDL's) and the extremes stay each other's opposite after the flip.
-
-  - The wait loop polls the socket and a self-pipe. A timeout instead would
-    make every session teardown wait out the timeout, on a device where
-    sessions are stopped constantly.
-
-  - A path beginning '@' is a name in the abstract namespace, which is what the
-    app actually serves: binding a filesystem socket from an app needs
-    android.system.UnixSocketAddress, which is not public API, so
-    LocalServerSocket and the abstract namespace are the only route a
-    Play-installable app has. libxcb already reaches the app's X server the
-    same way. The filesystem form is kept because it costs three lines.
-
-diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
-index c2823e13f8d..cfaaeb3b286 100644
---- a/dlls/winebus.sys/Makefile.in
-+++ b/dlls/winebus.sys/Makefile.in
-@@ -9,6 +9,7 @@ EXTRADLLFLAGS = -Wl,--subsystem,native
- SOURCES = \
- 	bus_iohid.c \
- 	bus_sdl.c \
-+	bus_vessel.c \
- 	bus_udev.c \
- 	hid.c \
- 	main.c \
 diff --git a/dlls/winebus.sys/bus_vessel.c b/dlls/winebus.sys/bus_vessel.c
 new file mode 100644
-index 00000000000..6927f5dec42
+index 00000000000..a535d2aa92c
 --- /dev/null
 +++ b/dlls/winebus.sys/bus_vessel.c
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,553 @@
 +/*
 + * A winebus backend fed by the Android app over a unix socket.
 + *
@@ -399,6 +313,7 @@ index 00000000000..6927f5dec42
 +
 +static void vessel_set_state(UINT index, const BYTE *frame)
 +{
++    struct hid_device_state *state;
 +    struct unix_device *iface;
 +    UINT16 buttons;
 +    INT16 axis[4];
@@ -434,8 +349,23 @@ index 00000000000..6927f5dec42
 +    hid_device_set_hatswitch_x(iface, 0, ((hat & 8) ? 1 : 0) - ((hat & 4) ? 1 : 0));
 +    hid_device_set_hatswitch_y(iface, 0, ((hat & 2) ? 1 : 0) - ((hat & 1) ? 1 : 0));
 +
++    /* **Assembling the report is not delivering it.** hid_device_sync_report
++     * only swaps this report against the previous one and answers whether it
++     * changed; it hands nothing to the driver. Every other backend follows it
++     * with bus_event_queue_input_report -- bus_sdl.c at four sites, bus_iohid.c
++     * at one -- and without that call the pad enumerates perfectly, answers
++     * XInput, DirectInput and winmm, and every axis reads dead centre forever.
++     * Nothing errors anywhere, which is exactly how it came to ship: measured
++     * on the device with a real controller held hard left, the guest read
++     * x=32767 y=32767 buttons=0 while the app was submitting frames. */
 +    if (!hid_device_sync_report(iface))
++    {
 +        TRACE("vessel: pad %u report unchanged\n", index);
++        return;
++    }
++
++    state = &iface->hid_device_state;
++    bus_event_queue_input_report(&vessel_event_queue, iface, state->report_buf, state->report_len);
 +}
 +
 +static void vessel_handle_frame(const BYTE *frame)
@@ -627,6 +557,18 @@ index 00000000000..6927f5dec42
 +        WARN("vessel: could not wake the pad bus: %s\n", strerror(errno));
 +    return STATUS_SUCCESS;
 +}
+diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
+index c2823e13f8d..cfaaeb3b286 100644
+--- a/dlls/winebus.sys/Makefile.in
++++ b/dlls/winebus.sys/Makefile.in
+@@ -9,6 +9,7 @@ EXTRADLLFLAGS = -Wl,--subsystem,native
+ SOURCES = \
+ 	bus_iohid.c \
+ 	bus_sdl.c \
++	bus_vessel.c \
+ 	bus_udev.c \
+ 	hid.c \
+ 	main.c \
 diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
 index a6227be9908..b3c2f74501f 100644
 --- a/dlls/winebus.sys/main.c

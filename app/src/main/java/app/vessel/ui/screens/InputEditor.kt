@@ -555,36 +555,13 @@ private fun DpadCross(selected: Boolean, modifier: Modifier = Modifier) {
 @Composable
 private fun TouchSettings(state: InputEditorState, actions: InputEditorActions) {
     Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-        if (state.live) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(Vessel.metrics.shapeTag)
-                    .background(Vessel.colors.neutral900)
-                    .padding(Vessel.metrics.s3),
-                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
-            ) {
-                listOf(false to "Play", true to "Edit layout").forEach { (mode, title) ->
-                    val on = state.editing == mode
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .height(TAB_HEIGHT)
-                            .clip(Vessel.metrics.shapeMd)
-                            .background(if (on) Vessel.colors.accentHover else Color.Transparent)
-                            .clickable(onClickLabel = title) { actions.onEditing(mode) },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            title,
-                            style = Vessel.type.bodySmall,
-                            color = if (on) Vessel.colors.accent else Vessel.colors.textLabel,
-                        )
-                    }
-                }
-            }
-        }
-
+        // **The Play / Edit layout toggle used to be here, and it is gone.**
+        // Editing in place meant editing *under this panel*: the panel covers the
+        // left of the screen, so the d-pad, the left stick and L3 sat beneath it
+        // and could not be dragged at all. The full-screen arrange surface exists
+        // precisely to give the whole screen to placing controls, and it is one
+        // tap away on the map above — two ways to do the same thing, one of which
+        // cannot reach half its own controls, is a choice not worth offering.
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
