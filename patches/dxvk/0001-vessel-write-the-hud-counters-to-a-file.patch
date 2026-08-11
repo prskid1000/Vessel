@@ -1,0 +1,199 @@
+diff --git a/src/dxvk/dxvk_vessel_stats.cpp b/src/dxvk/dxvk_vessel_stats.cpp
+new file mode 100644
+index 00000000..d4fcb5e5
+--- /dev/null
++++ b/src/dxvk/dxvk_vessel_stats.cpp
+@@ -0,0 +1,107 @@
++#include "dxvk_vessel_stats.h"
++
++#include "../util/util_env.h"
++
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <string>
++
++namespace dxvk {
++
++  namespace {
++
++    /* Resolved once. An empty path means "off" and is the common case, so the
++     * whole of sample() past this is a branch not taken. */
++    const std::string& statsPath() {
++      static const std::string path = env::getEnvVar("VESSEL_GFX_STATS");
++      return path;
++    }
++
++    /* Rewritten in place rather than appended. The host samples on its own
++     * schedule and only ever wants the newest line, and a file that grows for
++     * the length of a session is a log nobody asked for. */
++    void writeSnapshot(const std::string& path, const std::string& line) {
++      std::FILE* f = std::fopen(path.c_str(), "w");
++      if (!f)
++        return;
++      std::fwrite(line.data(), 1, line.size(), f);
++      std::fclose(f);
++    }
++
++  }
++
++
++  void VesselStats::sample(const DxvkStatCounters& counters, VkDeviceSize memAllocated, VkDeviceSize memUsed) {
++    const std::string& path = statsPath();
++
++    if (path.empty())
++      return;
++
++    /* Deltas, because every counter here is cumulative for the life of the
++     * device and a running total says nothing about the frame being drawn.
++     * Static rather than a member: there is one device that presents, and
++     * threading a state object through DxvkDevice for a diagnostic would be a
++     * worse trade than a counter that is wrong for one interval if there were
++     * ever two. */
++    static std::atomic<uint64_t> lastWriteNs = { 0 };
++    static DxvkStatCounters prev;
++
++    using clock = std::chrono::steady_clock;
++    const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
++      clock::now().time_since_epoch()).count();
++
++    uint64_t last = lastWriteNs.load(std::memory_order_relaxed);
++    const uint64_t interval = 1000000000ull;
++
++    if (last && now - last < interval)
++      return;
++
++    /* Claim the slot before doing any work, so two presenting threads cannot
++     * both write the same second. */
++    if (!lastWriteNs.compare_exchange_strong(last, now, std::memory_order_relaxed))
++      return;
++
++    const auto ctr = [&] (DxvkStatCounter c) {
++      return counters.getCtr(c) - prev.getCtr(c);
++    };
++
++    const uint64_t presents = ctr(DxvkStatCounter::QueuePresentCount);
++    const double seconds = last ? double(now - last) / 1.0e9 : 1.0;
++    const double frames  = presents ? double(presents) : 1.0;
++
++    char line[768];
++    const int n = std::snprintf(line, sizeof(line),
++      "{\"intervalMs\":%llu,\"presents\":%llu,\"fps\":%.2f,"
++      "\"drawCallsPerFrame\":%.1f,\"dispatchesPerFrame\":%.1f,"
++      "\"renderPassesPerFrame\":%.1f,\"barriersPerFrame\":%.1f,"
++      "\"submissionsPerFrame\":%.1f,\"gpuSyncsPerFrame\":%.1f,"
++      "\"pipelinesGraphics\":%llu,\"pipelineLibraries\":%llu,"
++      "\"pipelinesCompute\":%llu,\"pipeTasksDone\":%llu,\"pipeTasksTotal\":%llu,"
++      "\"memAllocatedMb\":%llu,\"memUsedMb\":%llu}\n",
++      (unsigned long long)((now - last) / 1000000ull),
++      (unsigned long long)presents,
++      seconds > 0.0 ? double(presents) / seconds : 0.0,
++      double(ctr(DxvkStatCounter::CmdDrawCalls))      / frames,
++      double(ctr(DxvkStatCounter::CmdDispatchCalls))  / frames,
++      double(ctr(DxvkStatCounter::CmdRenderPassCount))/ frames,
++      double(ctr(DxvkStatCounter::CmdBarrierCount))   / frames,
++      double(ctr(DxvkStatCounter::QueueSubmitCount))  / frames,
++      double(ctr(DxvkStatCounter::GpuSyncCount))      / frames,
++      /* Absolute, not a delta: these are populations, not events. A pipeline
++       * count that only ever went up by three would hide that there are 900. */
++      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeCountGraphics),
++      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeCountLibrary),
++      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeCountCompute),
++      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeTasksDone),
++      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeTasksTotal),
++      (unsigned long long)(memAllocated >> 20),
++      (unsigned long long)(memUsed >> 20));
++
++    prev = counters;
++
++    if (n > 0)
++      writeSnapshot(path, std::string(line, size_t(n)));
++  }
++
++}
+diff --git a/src/dxvk/dxvk_vessel_stats.h b/src/dxvk/dxvk_vessel_stats.h
+new file mode 100644
+index 00000000..bdcf81d8
+--- /dev/null
++++ b/src/dxvk/dxvk_vessel_stats.h
+@@ -0,0 +1,35 @@
++#pragma once
++
++#include "dxvk_stats.h"
++
++namespace dxvk {
++
++  /**
++   * \brief Periodic counter dump for Vessel's metrics
++   *
++   * DXVK already maintains every counter the HUD draws, whether or not the HUD
++   * is on -- the HUD only reads them. This writes a snapshot to a file once a
++   * second so the host can graph draw calls, submissions, pipelines and vidmem
++   * alongside the fps, GPU load and clocks it already samples, instead of a
++   * person reading numbers off a screenshot.
++   *
++   * Off unless VESSEL_GFX_STATS names a path, and the environment is read once.
++   * When it is unset this costs one predictable branch per present, which is
++   * the bar for anything on this path.
++   */
++  class VesselStats {
++
++  public:
++
++    /**
++     * \brief Records one present
++     *
++     * Called from DxvkDevice::presentImage. Writes at most once a second; the
++     * rest of the time it compares two integers and returns. \c counters is
++     * taken by value because getStatCounters already returns a copy.
++     */
++    static void sample(const DxvkStatCounters& counters, VkDeviceSize memAllocated, VkDeviceSize memUsed);
++
++  };
++
++}
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index a35626f8..b3e88ef0 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -2,6 +2,7 @@
+ #include "dxvk_instance.h"
+ #include "dxvk_latency_builtin.h"
+ #include "dxvk_latency_reflex.h"
++#include "dxvk_vessel_stats.h"
+ 
+ namespace dxvk {
+   
+@@ -543,9 +544,17 @@ namespace dxvk {
+     latencyInfo.frameId = frameId;
+ 
+     m_submissionQueue.present(presentInfo, latencyInfo, status);
+-    
+-    std::lock_guard<sync::Spinlock> statLock(m_statLock);
+-    m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
++
++    {
++      std::lock_guard<sync::Spinlock> statLock(m_statLock);
++      m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
++    }
++
++    /* Vessel: the same counters the HUD draws, written to a file once a second
++     * so the host can graph them instead of a person reading a screenshot. The
++     * lock above is released first: getStatCounters takes it again, and this
++     * used to be the last statement in the function for that reason. */
++    VesselStats::sample(getStatCounters(), getMemoryStats(0).memoryAllocated, getMemoryStats(0).memoryUsed);
+   }
+ 
+ 
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index f58db33e..fcf26dee 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -115,6 +115,7 @@ dxvk_src = [
+   'dxvk_sparse.cpp',
+   'dxvk_staging.cpp',
+   'dxvk_stats.cpp',
++  'dxvk_vessel_stats.cpp',
+   'dxvk_swapchain_blitter.cpp',
+   'dxvk_unbound.cpp',
+   'dxvk_util.cpp',
