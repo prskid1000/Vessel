@@ -171,7 +171,12 @@ fun InputEditorHeader(
         }
         Box(Modifier.width(PROFILE_FIELD_WIDTH)) {
             val ids = listOf(InputProfile.DEFAULT_ID) + state.profiles.map { it.id }
-            val names = (listOf(InputProfile.Default) + state.profiles).associate { it.id to it.name }
+            // The profile being edited is in the map even before the list of
+            // stored ones has arrived. Without it the field renders a UUID for
+            // the first frame or two after the screen opens, which is the one
+            // string on it that means nothing to anybody.
+            val names = (listOf(InputProfile.Default, state.profile) + state.profiles)
+                .associate { it.id to it.name }
             VDropdownField(
                 options = ids,
                 labelFor = { names[it] ?: it },
@@ -298,9 +303,15 @@ private fun TouchTab(state: InputEditorState, actions: InputEditorActions, wide:
                     .fillMaxHeight()
                     .background(Vessel.colors.divider),
             )
-            Column(Modifier.weight(1f).fillMaxHeight().padding(start = Vessel.metrics.s11)) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = Vessel.metrics.s11),
+            ) {
                 TouchPreviewCard(state, onLayout, actions)
-                TouchControlList(state, actions, Modifier.weight(1f))
+                TouchControlList(state, actions)
             }
         }
         return
@@ -318,7 +329,7 @@ private fun TouchTab(state: InputEditorState, actions: InputEditorActions, wide:
         // of them lying.
         if (!(state.live && state.editing)) TouchPreviewCard(state, onLayout, actions)
         TouchSettings(state, actions)
-        TouchControlList(state, actions, Modifier.fillMaxWidth())
+        TouchControlList(state, actions)
         TouchSelectionEditor(state, actions, onLayout)
         TouchAddRow(layout, actions, onLayout)
     }
@@ -551,13 +562,19 @@ private fun TouchControlList(
             StockLayoutOffer(state, actions)
             return@Column
         }
-        LazyColumn(contentPadding = PaddingValues(bottom = Vessel.metrics.s11)) {
-            items(layout.controls.size, key = { layout.controls[it].id }) { index ->
+        // **A plain column, not a lazy one, and that is not laziness about
+        // laziness.** In the one-column layout this list sits inside the tab's
+        // own scroll, and a `LazyColumn` there is measured with an infinite
+        // maximum height and throws — which it did, on the device, the first
+        // time the Touch tab was opened. An overlay holds a dozen controls at the
+        // outside; there is nothing here for a lazy list to save.
+        Column(Modifier.padding(bottom = Vessel.metrics.s11)) {
+            layout.controls.forEach { control ->
                 TouchControlRow(
-                    control = layout.controls[index],
-                    selected = layout.controls[index].id == state.selected,
+                    control = control,
+                    selected = control.id == state.selected,
                     shortEdge = short,
-                    onClick = { actions.onSelect(layout.controls[index].id) },
+                    onClick = { actions.onSelect(control.id) },
                 )
             }
         }

@@ -334,7 +334,8 @@ private fun ContainerSheetContent(
                             "starts on the default."
                     } else {
                         "Pad bindings and the touch overlay. " +
-                            "${state.input.overlayCount} controls on the overlay."
+                            "${state.input.profile.boundCount} controls mapped, " +
+                            "${state.input.overlayCount} on the overlay."
                     },
                     onClick = { inputOpen = true },
                     // The profile's name is a chip rather than part of the title:

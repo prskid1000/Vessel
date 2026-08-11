@@ -41,7 +41,11 @@ class ContainerInputTest {
         val profile = json.decodeFromString(ContainerProfile.serializer(), before)
         assertEquals(ContainerInput(), profile.input)
         assertNull(profile.input.profileId)
-        assertFalse(profile.input.touchVisible)
+        // **On, which is a reversal from the plan and is deliberate.** A phone
+        // that comes up to a Windows desktop with no on-screen controls and no
+        // visible sign that any exist reads as a feature that was never built,
+        // which is how it was reported. See [ContainerInput.touchVisible].
+        assertTrue(profile.input.touchVisible)
         assertTrue(profile.input.isDefault)
     }
 
