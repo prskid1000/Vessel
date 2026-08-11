@@ -543,6 +543,48 @@ audit's; they are pointers, not independently re-verified.
   fix the compiler's startup fault, give `FEX_APP_CACHE_LOCATION` a DOS path.
   Only then is there a measurement to take.
 
+  **All three done 2026-08-11, and the pipeline now runs end to end on the
+  device.** `tools/fex/run-offline-compiler.sh` is the vehicle — it joins the
+  container the app already has, maintains the symlink, and can run an x86 PE
+  with caching on (`--pe`) to make a codemap before compiling one.
+
+  | Step | Before | After |
+  |---|---|---|
+  | compiler starts | `C0000005` at `1400439E8` | prints its usage, `EXIT=1` |
+  | `process-all` | never ran | `EXIT=0`, creates `cache/` and `codemap/ready/` |
+  | codemap written | only via a unix path | `codemap/new/tonewin.exe-9cafc1787594cfda.…bin`, through `C:\vessel\fexcache\` and the symlink |
+
+  - *The startup fault was an ordering bug and is fixed in `patches/fex/0001`.*
+    `main()`'s first statement is `FEX::Windows::Logging::Init()`, which reads
+    `SILENTLOG` through `FEX_CONFIG_OPT`; `Getter` constructs eagerly, so the
+    ctor reaches `Meta->GetConv(Option)` — and `Meta` is a file-static
+    `MetaLayer*` that is null until `Initialize()` assigns it. A member read
+    through a null `this` is exactly a fault at `0x18`. `Initialize()` is
+    reached only from `FEX::Config::LoadConfig`, which `GenerateCache` calls
+    *after* the dispatch and `ProcessAll` never calls at all — so the tool had
+    never run on Windows, for any argument.
+  - *`FEX_APP_CACHE_LOCATION` is now `C:\vessel\fexcache\`*, a symlink in the
+    prefix pointing at `caches/fex/<digest>/`. Confirmed by watching the codemap
+    land under `caches/` while FEX was handed a DOS path.
+  - *The compile step now also runs at session start*, since teardown has still
+    never fired. It is **launched, not awaited** — the first version awaited it,
+    and a compiler crashing on a stale cache then held the desktop for the whole
+    120 s timeout, which from outside looked like a container that would not
+    start.
+
+  **What is left is a codemap with anything in it.** `process-all` correctly
+  reported `Found zero-size code map …, deleting`. That is not a bug in the
+  path: `CodeMapWriter` buffers 4096 bytes and `Flush` runs from
+  `~CodeMapWriter` (`CodeCache.cpp:150`), so a program that translates less than
+  one buffer *and* exits without that destructor running leaves a file that was
+  created by `O_CREAT|O_TRUNC` and never written. `tonewin.exe` is a three-second
+  tone; it is the wrong workload. The three Metro codemaps this entry recorded
+  earlier may well have had content, but they were cleared before anyone looked.
+
+  *Done when:* a real title runs, leaves a non-zero codemap, `process-all`
+  imports it into `cache/`, and the same title is then launched twice with
+  `caches/fex` wiped before the first — including if the second is no faster.
+
   The fix is one value, not one code path: `FEX_APP_CACHE_LOCATION` has to be a
   **DOS path ending in `\`**, which satisfies both uses at once — `C:\…\codemap
   \new\` for the writer, `\??\C:\…\cache\…` for the reader. Where that DOS path
