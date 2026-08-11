@@ -573,8 +573,14 @@ class SessionEnvironmentTest {
                 // FEX package, moves this string — which is exactly the event a
                 // reader of this file should be made to notice. Deriving it from
                 // `fexCacheKey` here would assert nothing at all.
-                "FEX_APP_CACHE_LOCATION" to
-                    File(File(caches, "fex"), "96a6dacbc994").absolutePath + File.separator,
+                //
+                // The digest no longer appears in this value — FEX cannot read a
+                // cache through a unix path, so what it is told is a fixed DOS
+                // path and the digest moved to the symlink's target. The pinned
+                // literal moved with it, to `the FEX cache directory is keyed on
+                // the configuration` below; this row is now only asserting that
+                // the guest is handed something `\??\` can be pasted onto.
+                "FEX_APP_CACHE_LOCATION" to FEX_CACHE_DOS_PATH,
                 "FEX_ENABLECODECACHINGWIP" to "1",
             ),
             environment,
@@ -588,9 +594,38 @@ class SessionEnvironmentTest {
         // The half of the path that is not a digest. `caches/fex/<key>/`, so a
         // container reset takes the code cache with the shader caches and
         // nothing lands in the prefix's LOCALAPPDATA where FEX would default to.
+        //
+        // Asserted against the *host* directory now. What the guest is told is a
+        // DOS path into the prefix, and the two are joined by a symlink that
+        // `SessionRuntime.linkFexCache` maintains — so this property lives on
+        // [fexCacheHost] and the one below it lives on the variable.
+        val host = fexCacheHost(paths, env(driver = turnip), fex)
+        assertTrue(host.absolutePath.startsWith(File(caches, "fex").absolutePath + File.separator))
+    }
+
+    @Test
+    fun `what FEX is told is a DOS path it can also read back`() {
+        // Not a style preference. FEX writes through `std::filesystem`, which
+        // Wine resolves for a unix path, but reads by pasting `\??\` onto this
+        // string and calling `NtOpenFile` — and `\??\/data/...` is refused by
+        // `nt_to_unix_file_name_no_root` before it reaches a file. A drive
+        // letter and a trailing backslash are what make the read work, so both
+        // are the assertion.
         val location = env(driver = turnip)["FEX_APP_CACHE_LOCATION"]!!
-        assertTrue(location.startsWith(File(caches, "fex").absolutePath + File.separator))
-        assertTrue(location.endsWith(File.separator))
+        assertTrue(location.matches(Regex("""^[A-Z]:\\.*\\$""")))
+    }
+
+    @Test
+    fun `the FEX cache directory is keyed on the configuration`() {
+        // **The pinned literal, moved here from the golden environment map.**
+        // Any change to any `FEX_*` variable not in `FEX_CACHE_KEY_IGNORED`, and
+        // any change to the FEX package, moves this string — which is exactly
+        // the event a reader should be made to notice. Deriving it from
+        // `fexCacheKey` would assert nothing at all.
+        assertEquals(
+            File(File(caches, "fex"), "96a6dacbc994"),
+            fexCacheHost(paths, env(driver = turnip), fex),
+        )
     }
 
     @Test
@@ -612,8 +647,8 @@ class SessionEnvironmentTest {
         // FEXOfflineCompiler. So the package has to be in the key.
         val other = fex.copy(identity = "2609/5148700/4616192")
         assertNotEquals(
-            env(driver = turnip)["FEX_APP_CACHE_LOCATION"],
-            env(driver = turnip, fexPackage = other)["FEX_APP_CACHE_LOCATION"],
+            fexCacheHost(paths, env(driver = turnip), fex),
+            fexCacheHost(paths, env(driver = turnip, fexPackage = other), other),
         )
     }
 

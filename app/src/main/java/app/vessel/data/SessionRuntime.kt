@@ -20,6 +20,8 @@ import app.vessel.core.SessionDisplayServer
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
+import app.vessel.core.fexCacheHost
+import app.vessel.core.fexCacheLink
 import app.vessel.core.FexPackage
 import app.vessel.core.TurnipDriver
 import app.vessel.core.WINE_BOOT
@@ -61,6 +63,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.nio.file.Files
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -665,6 +668,7 @@ class SessionRuntime @Inject constructor(
 
         val turnip = turnipDriver(containerId)
         val fex = fexPackage(containerId)
+        val sessionPaths = SessionPaths(prefix = layout.prefix, logs = layout.logs)
         val environment = wineLauncherEnvironment(
             tree = tree,
             scratch = SessionScratch(home = layout.base, tmp = layout.tmp),
@@ -676,7 +680,7 @@ class SessionRuntime @Inject constructor(
         ) + sessionEnvironment(
             profile = profile,
             manifest = manifest,
-            paths = SessionPaths(prefix = layout.prefix, logs = layout.logs),
+            paths = sessionPaths,
             turnip = turnip,
             fex = fex,
             display = DEFAULT_DISPLAY,
@@ -709,12 +713,17 @@ class SessionRuntime @Inject constructor(
             log.line(LogSource.VESSEL, LogLevel.INFO, "input profile ${input.name}")
         }
 
+        // The guest is told `C:\vessel\fexcache\`; this is what that resolves to.
+        val cacheHost = fexCacheHost(sessionPaths, environment, fex)
+        linkFexCache(layout.prefix, cacheHost, log)
+
         val resolved = LaunchPlan(
             layout = layout,
             tree = tree,
             environment = environment,
             log = log,
             offlineCompiler = fex?.offlineCompiler,
+            fexCacheHost = cacheHost,
             input = input,
             touchVisible = profile.input.touchVisible,
         )
@@ -819,6 +828,24 @@ class SessionRuntime @Inject constructor(
         // give the user somewhere to click would put a second, worse shell
         // underneath the real one.
         running.geometry = geometry
+
+        // **The catch-up compile, and the reason it is here and not only in
+        // teardown.** `generateCodeCache` has always run at teardown, which is
+        // the better moment — the codemap is complete and no guest is competing
+        // for the CPU. It had also never once run: every session ever recorded
+        // on the device reads `"exit": "RUNNING", "endedAt": null`, because the
+        // process is killed rather than stopped, and a killed process does not
+        // reach teardown. Three Metro codemaps sat in `codemap/new/` across two
+        // cache keys with no `cache/` directory beside them, which is
+        // `ProcessAll` having never started.
+        //
+        // Start is the moment that cannot be skipped. It is also the moment the
+        // result is worth the most: last session's codemaps become this
+        // session's cache, before the guest that would load it exists. The cost
+        // is paid only when there is something to compile — the first thing
+        // `generateCodeCache` does is count `codemap/new` and return — so a
+        // session that ended cleanly has already emptied it and this is free.
+        generateCodeCache(running, log)
 
         // Opened before the first guest process and read for the whole session,
         // because the guest talks for far longer than any one child of ours
@@ -1449,7 +1476,11 @@ class SessionRuntime @Inject constructor(
      */
     private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog) {
         val compiler = current.offlineCompiler ?: return
-        val cache = current.environment[FEX_CACHE_LOCATION_ENV]?.let(::File) ?: return
+        // The host directory, not `FEX_APP_CACHE_LOCATION` — that is now the DOS
+        // path the guest sees (`C:\vessel\fexcache\`) and reading it back as a
+        // `File` would count codemaps in a directory named `C:` under the
+        // process's cwd, find none, and return without ever saying so.
+        val cache = current.fexCacheHost ?: return
         val pending = withContext(Dispatchers.IO) {
             runCatching { File(File(cache, "codemap"), "new").listFiles()?.size ?: 0 }.getOrDefault(0)
         }
@@ -1499,6 +1530,59 @@ class SessionRuntime @Inject constructor(
                 LogLevel.INFO,
                 "FEX code cache built in ${elapsed} ms",
             )
+        }
+    }
+
+    /**
+     * Point `drive_c/vessel/fexcache` at this session's cache directory.
+     *
+     * FEX is handed [FEX_CACHE_DOS_PATH] because that is the only shape of path
+     * it can both write through Win32 and read back through its hand-built
+     * `\??\` string. The bytes still have to live under `caches/`, so the DOS
+     * path lands on a symlink and the symlink is what moves when the
+     * configuration digest changes.
+     *
+     * Re-pointed rather than created once: [fexCacheHost] is keyed on the whole
+     * FEX configuration, so changing a knob changes the target, and a link left
+     * pointing at the previous key would hand this session the previous
+     * session's cache — the exact silent-wrong-cache failure the digest exists
+     * to prevent.
+     *
+     * Best-effort and never fatal. A prefix that cannot carry a symlink loses
+     * the code cache, which is a performance feature; it does not lose a
+     * session. A real directory already sitting at the link path is left alone
+     * and said out loud, because deleting something in a user's prefix to make
+     * room for a cache is a worse outcome than not having the cache.
+     */
+    private suspend fun linkFexCache(prefix: File, host: File, log: SessionLog) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                host.mkdirs()
+                val link = fexCacheLink(prefix)
+                link.parentFile?.mkdirs()
+                val path = link.toPath()
+                val target = host.toPath()
+
+                if (Files.isSymbolicLink(path)) {
+                    if (Files.readSymbolicLink(path) == target) return@runCatching
+                    Files.delete(path)
+                } else if (link.exists()) {
+                    log.line(
+                        LogSource.VESSEL,
+                        LogLevel.WARN,
+                        "${link.path} is a real directory, not a link; " +
+                            "the FEX code cache will not be under caches/",
+                    )
+                    return@runCatching
+                }
+                Files.createSymbolicLink(path, target)
+            }.onFailure {
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.WARN,
+                    "the FEX code cache could not be linked into the prefix: ${it.message}",
+                )
+            }
         }
     }
 
@@ -1922,6 +2006,16 @@ class SessionRuntime @Inject constructor(
          * class should not be reaching into while it is shutting one down.
          */
         val offlineCompiler: File? = null,
+        /**
+         * `caches/fex/<digest>/` — where the code cache really lives.
+         *
+         * The guest is told `C:\vessel\fexcache\` ([FEX_CACHE_DOS_PATH]) because
+         * that is the only shape FEX can both write and read, and a symlink in
+         * the prefix points at this. Held separately because the environment no
+         * longer carries the host path in any form, and [generateCodeCache]
+         * needs to count codemaps with a `File` before it decides to run.
+         */
+        val fexCacheHost: File? = null,
         /**
          * The bindings this session starts with, already resolved against the
          * profile document. Pushed onto the display seam once the server is up;

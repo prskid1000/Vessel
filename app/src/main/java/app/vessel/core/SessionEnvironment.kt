@@ -544,6 +544,45 @@ internal fun fexCacheKey(environment: Map<String, String>, fex: FexPackage?): St
 }
 
 /**
+ * What FEX is told, and the only shape of string it can both write and read.
+ *
+ * A DOS path ending in a backslash, because `ImageTracker::LoadAOTImages`
+ * concatenates `\??\` onto it and hands the result to `NtOpenFile`. See the
+ * `FEX_APP_CACHE_LOCATION` assignment in `sessionEnvironment` for the whole
+ * asymmetry and why a unix path filled the cache and never read it back.
+ *
+ * A constant rather than a per-container value: it is a path *inside* the
+ * prefix, so it is already scoped to the container, and [fexCacheLink] is what
+ * makes it land in the right place.
+ */
+internal const val FEX_CACHE_DOS_PATH = "C:\\vessel\\fexcache\\"
+
+/**
+ * The host side of [FEX_CACHE_DOS_PATH] — the symlink the session maintains.
+ *
+ * Wine resolves `C:` through `dosdevices/c:` to `drive_c`, so this is the file
+ * that has to exist and point at [fexCacheHost] before the guest starts.
+ */
+internal fun fexCacheLink(prefix: File): File =
+    File(File(File(prefix, DriveMap.DRIVE_C), "vessel"), "fexcache")
+
+/**
+ * Where the bytes actually live: `caches/fex/<digest>/`.
+ *
+ * The digest is [fexCacheKey] over [environment], so this must be called with
+ * the environment as it ended up — after the manifest and diagnostics stages —
+ * or the cache is keyed on a configuration that did not run.
+ *
+ * Under `caches/` rather than in the prefix so that a container reset clears it
+ * and container-size accounting can see it. That was the reason FEX's cache was
+ * moved out of `%LOCALAPPDATA%` in the first place, and pointing
+ * [FEX_CACHE_DOS_PATH] at a real directory inside the prefix would have quietly
+ * undone it.
+ */
+internal fun fexCacheHost(paths: SessionPaths, environment: Map<String, String>, fex: FexPackage?): File =
+    File(File(paths.caches, "fex"), fexCacheKey(environment, fex))
+
+/**
  * The two container directories the environment names.
  *
  * Both are still per container — the prefix is the container, and the logs are
@@ -766,10 +805,39 @@ fun sessionEnvironment(
     // a container is reset. FEX defaulted to `%LOCALAPPDATA%\fex-emu\` inside
     // the prefix, which survives a cache clear and is invisible to anything
     // that reasons about container size.
-    // Rewritten at the end of this function to append the configuration digest;
-    // set here so `LinkedHashMap` keeps the variable in this position, next to
-    // the FEX knobs the digest is taken over.
-    environment["FEX_APP_CACHE_LOCATION"] = File(paths.caches, "fex").absolutePath + File.separator
+    // **A DOS path, and it has to be one.** FEX uses this string two ways and
+    // only a DOS path satisfies both. The writer — `ImageTracker.cpp:158` and
+    // `FEXOfflineCompiler`'s `ProcessAll` — goes through `std::filesystem` and
+    // `_sopen`, which are Win32, and Wine's `RtlGetFullPathName_UEx` resolves a
+    // leading `/` through `\??\unix\…`; that is why a unix path filled
+    // `codemap/new/` and looked like it worked. The reader does not use a Win32
+    // API at all: `ImageTracker::LoadAOTImages` composes an NT path by string
+    // concatenation — `fmt::format("\\??\\{}cache\\{}-{:016x}", …)`
+    // (`ImageTracker.cpp:238`) — and hands it to `NtOpenFile`. Given a unix
+    // path that yields `\??\/data/user/0/…`, and `nt_to_unix_file_name_no_root`
+    // takes everything up to the first backslash as the DOS device prefix and
+    // bails at `if (wcschr( prefix, '/' ))` (`ntdll/unix/file.c:3793`). It logs
+    // nothing when the open fails, so a cache was being written every session
+    // and silently never read.
+    //
+    // `C:\vessel\fexcache\` satisfies both: Win32 resolves it, and `\??\C:\…`
+    // is a DOS device path `nt_to_unix_file_name_no_root` accepts.
+    //
+    // The bytes still live under `caches/`. [fexCacheHost] is the real
+    // directory and the session points `drive_c/vessel/fexcache` at it as a
+    // symlink before the guest starts, so a container reset still clears the
+    // cache and container-size accounting still sees it — which is the whole
+    // reason it was moved out of `%LOCALAPPDATA%`. A drive letter would have
+    // worked too and was rejected: `PrefixRegistry` derives the drive list from
+    // `dosdevices` on purpose, so a cache drive would appear in the Files tab
+    // and in the registry seed, and hiding it again would mean special-casing
+    // the one thing that file exists to keep single-sourced.
+    //
+    // The configuration digest moved out of this value and into the symlink's
+    // target — see [fexCacheHost]. Keeping it here would have meant handing FEX
+    // a DOS path that changes whenever a knob changes, which is the same
+    // information in a place nothing can read it back from.
+    environment["FEX_APP_CACHE_LOCATION"] = FEX_CACHE_DOS_PATH
 
     // **`FEX_ENABLECODECACHINGWIP` is on, and both of the reasons it used to be
     // off are now answered.**
@@ -1061,17 +1129,12 @@ fun sessionEnvironment(
         environment[key] = value
     }
 
-    // **Last, because the key has to be taken over the environment that actually
-    // ran.** A manifest param may add a `FEX_*` variable this file has never
-    // heard of and the diagnostics stage may rewrite one, and either changes what
-    // FEX generates. Computing the digest here is what makes "derived from the
-    // environment, not from a list" true rather than nearly true.
-    //
-    // The reassignment keeps the variable's original position — `LinkedHashMap`
-    // does not move a key on update — so the environment reads in the same order
-    // whatever the digest turns out to be.
-    environment["FEX_APP_CACHE_LOCATION"] =
-        File(File(paths.caches, "fex"), fexCacheKey(environment, fex)).absolutePath + File.separator
+    // The configuration digest used to be appended to `FEX_APP_CACHE_LOCATION`
+    // here, last, so that it was taken over the environment as it actually ended
+    // up. It still is taken over exactly that environment — [fexCacheHost] is
+    // called by the session with this map once it is complete — but the value
+    // itself is now a fixed DOS path, because FEX cannot read a cache through a
+    // unix one. See the comment at the `FEX_APP_CACHE_LOCATION` assignment.
 
     return environment
 }
