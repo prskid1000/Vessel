@@ -322,7 +322,6 @@ private fun PadSettings(
         Text("Learn", style = Vessel.type.bodySmall, color = Vessel.colors.textLabel)
     }
 
-    PadDiagram(lit = lit, dim = !live, onPin = onPin)
 
     Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
         Stick.entries.forEach { stick ->

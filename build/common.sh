@@ -312,8 +312,17 @@ fetch_source() {
     git -c core.autocrlf=false -c core.eol=lf \
       clone --recurse-submodules "$repo" "$dir"
   else
+    # **A failed fetch is not a failed build, when the pin is already here.**
+    # Every source is pinned to an exact ref, so the fetch exists to *acquire*
+    # it, not to decide what to build. gitlab.winehq.org refused three times in
+    # one afternoon -- "not valid: could not determine hash algorithm" -- and
+    # each time the commit being built was already in the local clone, so the
+    # only thing the outage cost was the build. If the pin is missing the
+    # checkout below still fails, loudly, which is the case that should fail.
     info "fetching $name"
-    git -C "$dir" fetch --all --tags --prune
+    if ! git -C "$dir" fetch --all --tags --prune; then
+      warn "$name: fetch failed; continuing against the local clone"
+    fi
   fi
 
   harden_checkout "$dir" "$name"

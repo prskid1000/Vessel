@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -177,8 +178,11 @@ fun InputEditorHeader(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        // Not width(PROFILE_FIELD_WIDTH) any more: that was sized for a field
+        // alone, and five actions beside it ran off the end -- import and export
+        // simply were not on screen. The field keeps a sensible width; the
+        // actions take what they need.
         Row(
-            Modifier.width(PROFILE_FIELD_WIDTH),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s3),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -203,6 +207,7 @@ fun InputEditorHeader(
                 .takeIf { it in ids }
                 ?: state.profile.id
             VDropdownField(
+                modifier = Modifier.widthIn(max = PROFILE_FIELD_WIDTH),
                 options = ids,
                 labelFor = { names[it] ?: InputProfile.Default.name },
                 selected = selected,
@@ -401,6 +406,13 @@ private fun TouchPreviewCard(
             aspect = long.value / short.value.coerceAtLeast(1f),
             selected = state.selected,
             onArrange = actions.onArrange,
+            onSelect = actions.onSelect,
+        )
+        VButton(
+            "Arrange the overlay",
+            actions.onArrange,
+            style = VButtonStyle.Secondary,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }
@@ -419,6 +431,7 @@ private fun TouchOverlayPreview(
     aspect: Float,
     selected: String?,
     onArrange: () -> Unit,
+    onSelect: (String?) -> Unit,
 ) {
     var size by remember { mutableStateOf(0f to 0f) }
     val density = LocalDensity.current
@@ -429,8 +442,7 @@ private fun TouchOverlayPreview(
             .clip(Vessel.metrics.shapeMd)
             .background(Vessel.colors.neutral900)
             .border(Vessel.metrics.hairline, Vessel.colors.border, Vessel.metrics.shapeMd)
-            .onSizeChanged { size = it.width.toFloat() to it.height.toFloat() }
-            .clickable(onClickLabel = "Arrange the overlay", onClick = onArrange),
+            .onSizeChanged { size = it.width.toFloat() to it.height.toFloat() },
     ) {
         val (w, h) = size
         if (w <= 0f || h <= 0f) return@Box
@@ -463,10 +475,14 @@ private fun TouchOverlayPreview(
                                 )
                         },
                     )
-                    // No gesture of its own: every touch inside the card belongs
-                    // to the card, which opens the arranger. A control that
-                    // swallowed the tap would be a control you cannot get past.
-                    ,
+                    // **A tap selects, and no longer opens the arranger.** This
+                    // is the only picture of the controller now -- the abstract
+                    // pin diagram below it was a second one, drawn from the same
+                    // table -- so a tap here has to do what a tap there did:
+                    // choose the control whose row you want. Arranging is a
+                    // button of its own, because it is a different intent and
+                    // deserved more than "you touched the card".
+                    .clickable(onClickLabel = control.title) { onSelect(control.id) },
                 contentAlignment = Alignment.Center,
             ) {
                 if (control.kind == TouchKind.DPAD) {
