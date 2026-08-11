@@ -2,6 +2,7 @@ package com.winlator.renderer;
 
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
+import android.util.Log;
 
 import com.winlator.xserver.Drawable;
 
@@ -143,11 +144,70 @@ public class Texture {
             allocateTexture(owner.width, owner.height, data);
         }
         else if (needsUpdate) {
+            // VESSEL: timed, because the size of this cost has only ever been assumed.
+            final boolean report = Log.isLoggable(UPLOAD_TAG, Log.DEBUG);
+            final long t0 = report ? System.nanoTime() : 0;
+
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId);
             GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, owner.width, owner.height, format, GLES20.GL_UNSIGNED_BYTE, data);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
             needsUpdate = false;
+
+            if (report) recordUpload(System.nanoTime() - t0, owner.width, owner.height);
         }
+    }
+
+    /**
+     * VESSEL: what the whole-window re-upload actually costs, per window size.
+     *
+     * <p>{@code docs/TODO.md} item 27 proposes deleting this call by backing
+     * every window's content with a {@link GPUImage}, on the strength of "3.6 MB
+     * of CPU&rarr;GPU upload per composited frame disappears". That number is an
+     * arithmetic product of a resolution and a pixel size, not a measurement,
+     * and the arithmetic is only the prize if this line runs for the window that
+     * matters. It very likely does not: {@code PresentExtension.selectInput} and
+     * {@code DRI3Extension} already swap a presenting window's content to a
+     * {@code GPUImage}, whose {@code updateFromDrawable} is a no-op — so for a
+     * DXVK client on the Turnip path the big window has been zero-copy all
+     * along, and what is left here is Wine's desktop and whatever GDI draws.
+     *
+     * <p>So this counts, rather than reasons: how many uploads, how long they
+     * take, and at what sizes. If the total is a few hundred microseconds a
+     * second spread over small windows, item 27 is worth closing with a number
+     * instead of building; if a 1280x720 window is really being re-uploaded at
+     * frame rate, the item is worth its medium risk. Either way the answer is
+     * one session away rather than one argument away.
+     *
+     * <p>Off unless {@code adb shell setprop log.tag.VesselUpload DEBUG}, and
+     * the clock is not read at all when it is off — this sits inside the
+     * compositor's per-frame path, which is the one place a diagnostic must not
+     * become the thing it measures.
+     *
+     * <p>Plain statics with no synchronisation: every caller of {@link
+     * #updateFromDrawable()} is already on the GL thread, holding the owning
+     * drawable's {@code renderLock}, and a counter that needed a lock here would
+     * be measuring the lock.
+     */
+    private static final String UPLOAD_TAG = "VesselUpload";
+    private static final int UPLOAD_REPORT_EVERY = 120;
+    private static long uploadCount;
+    private static long uploadNanos;
+    private static long uploadMaxNanos;
+    private static long uploadBytes;
+
+    private static void recordUpload(long dt, short width, short height) {
+        uploadNanos += dt;
+        uploadBytes += (long)width * height * 4;
+        if (dt > uploadMaxNanos) uploadMaxNanos = dt;
+        if (++uploadCount % UPLOAD_REPORT_EVERY != 0) return;
+
+        Log.d(UPLOAD_TAG, "texSubImage x" + uploadCount
+                + " mean=" + (uploadNanos / uploadCount / 1000) + "us"
+                + " max=" + (uploadMaxNanos / 1000) + "us"
+                + " last=" + (dt / 1000) + "us"
+                + " total=" + (uploadNanos / 1000000) + "ms"
+                + " " + (uploadBytes >> 20) + "MiB"
+                + " last_size=" + width + "x" + height);
     }
 
     /**

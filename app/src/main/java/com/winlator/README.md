@@ -525,6 +525,28 @@ The modifications, in the order they were made:
    do — `HAVE_X11_DRM` and `HAVE_SYS_SHM_H` are both in the condition, and
    `patches/mesa/0006` is in the business of moving exactly those.
 
+26. **`Texture.updateFromDrawable()` times the whole-window re-upload** — a
+   nanosecond clock around the one `glTexSubImage2D`, a running mean and max,
+   and a line every 120 uploads, all of it behind
+   `setprop log.tag.VesselUpload DEBUG` with the clock unread when it is off.
+
+   It is here to settle `docs/TODO.md` item 27, which proposes deleting this
+   upload by backing every window's content with a `GPUImage` and prices the
+   change at "3.6 MB of CPU→GPU upload per composited frame". That figure is
+   1280 × 720 × 4 — a product of a resolution and a pixel size, not something
+   anyone has watched happen. And the reason to doubt it is in this same tree:
+   `PresentExtension.selectInput` and `DRI3Extension` already swap a presenting
+   window's content to a `GPUImage`, whose `updateFromDrawable` is a no-op, so
+   on the shipping Turnip → DRI3 path the window the projection is about has
+   been zero-copy since before the item was written. What still runs through
+   here is Wine's desktop and whatever GDI paints.
+
+   Deciding that by measurement rather than by argument is the whole point:
+   an item priced from arithmetic has already been wrong once in this file —
+   the same audit's 0.60 ms fence-wait projection came back as 0.15 ms and then
+   as nothing at all. Kept rather than reverted after the answer arrives,
+   because the answer changes the moment a client stops using Present.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -541,7 +563,7 @@ fails the build.
 | `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
 | `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
 | `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22 |
-| `app/src/main/java/com/winlator/renderer/Texture.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
