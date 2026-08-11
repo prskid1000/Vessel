@@ -21,6 +21,42 @@ been watched working on the device.
   **Wine outputs at full scale and Android owns the volume.** Two attenuations
   in series is a slider that does not mean anything.
 
+- [x] **And it plays without buzzing.** The first fix made the guest audible and
+  left a ~55 Hz rasp over otherwise correct audio. That pitch was the diagnosis:
+  an underrun does not lose frames, it punches a silence into them, so a gap
+  rate *is* a frequency. AudioFlinger counted 54,240 underrun frames per ten
+  seconds — 11% of the stream, about 55 gaps a second of 2 ms each.
+
+  **AAudio does not sip; it takes a whole burst.** 868 frames on this device,
+  18 ms. Metro asks for a 30 ms buffer and, measured with the `oss` channel on,
+  kept between 96 and 960 frames queued — under one gulp. So every pull emptied
+  it and the next found nothing.
+
+  Two rebuilds went into the wrong half of that. `in_oss_frames` is by
+  construction a subset of `held_frames` — the part of the guest's ring already
+  handed over — so **the device queue can never exceed what the guest has
+  produced**, and raising the AAudio buffer changes nothing. Verified rather
+  than reasoned: the buffer was raised to 1736 and `in_oss: 0` still appeared.
+
+  The fix is to floor the *guest's* ring at three bursts, stated in bursts
+  precisely so it costs nothing where it is not needed: a title already asking
+  for more keeps exactly the latency it chose, and on a device granting MMAP the
+  burst is ~192 and the floor never fires at all. WASAPI allows this —
+  `GetBufferSize` returns what the driver chose — and exclusive-mode streams are
+  left alone, where the client owns the timing contract.
+
+  *Measured after, same session, ten seconds apart:* **2,112 underrun frames per
+  ten seconds, down from 54,240** — 0.44% of the stream against 11%, a 96%
+  reduction, with the queue sitting at 1344–1440 of 1736 instead of scraping
+  zero. Confirmed by ear: the buzz is gone. The cost is honest — track latency
+  went from 43–48 ms to 80–85 ms.
+
+  **The driver now asks for `AAUDIO_SHARING_MODE_EXCLUSIVE` first.** This device
+  refuses it, so the measurements above are the shared path; where it is granted
+  the burst is ~6x smaller and the floor becomes inert, which would put latency
+  *below* where it started rather than above. One `ERR` per stream says which
+  path was granted, because guessing that is what cost the two rebuilds.
+
 - [x] **A gamepad reaches the guest as a gamepad, not as keystrokes.**
   `patches/wine/0016` adds a `winebus` backend fed by the app over a unix socket.
   The guest gets a real HID device — vid 045e, pid 028e, the wired Xbox 360 pad
