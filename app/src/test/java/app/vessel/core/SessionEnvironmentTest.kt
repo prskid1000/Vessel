@@ -191,7 +191,7 @@ class SessionEnvironmentTest {
         // `TMPDIR` already points at, and the point of the row is that the two
         // agree. Compared as `File`s rather than as strings because this suite
         // runs on the build host, where a separator is a backslash.
-        assertEquals(tmp.absoluteFile, File(env()["VESSEL_GFX_STATS"]!!).parentFile)
+        assertEquals(tmp.absoluteFile, File(env()["VESSEL_GFX_STATS"]!!).absoluteFile.parentFile!!)
     }
 
     @Test
