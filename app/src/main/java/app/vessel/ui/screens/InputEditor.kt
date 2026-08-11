@@ -51,6 +51,8 @@ import app.vessel.core.DisplayGeometry
 import app.vessel.data.InputProfileTransfer
 import app.vessel.display.TouchOverlayPainter
 import app.vessel.input.GamepadAction
+import app.vessel.input.GamepadConfig
+import app.vessel.input.GamepadProfile
 import app.vessel.input.GamepadControl
 import app.vessel.input.InputProfile
 import app.vessel.input.Stick
@@ -804,7 +806,13 @@ private fun controlEntries(
         key = "h-all",
         title = "${layout.controls.size + rest.size} CONTROLS · " +
             "${profile.boundCount} OF ${GamepadControl.entries.size} BOUND",
-        reset = Reset.All,
+        // Offered only when there is something to undo. Reset all restores the
+        // bindings and the two numbers — not the overlay, which has its own —
+        // so a profile already carrying both is offered nothing, and a press
+        // that would produce the profile it already has cannot happen.
+        reset = Reset.All.takeIf {
+            profile.pad != GamepadProfile.Default || profile.config != GamepadConfig()
+        },
     )
 
     out += ControlEntry.Heading(

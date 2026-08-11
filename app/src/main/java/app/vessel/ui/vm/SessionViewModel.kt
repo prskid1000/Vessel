@@ -244,6 +244,10 @@ class SessionViewModel @Inject constructor(
     private var adoptedName: String? = null
 
     fun setInputProfile(next: InputProfile) {
+        // Adopting a copy is for an edit; a reset of the built-in default back to
+        // the built-in default is not one. See the sheet's copy of this rule.
+        if (next.isBuiltInDefault && next == InputProfile.Default) return
+
         var profile = next
         val adopting = profile.isBuiltInDefault && adoptedId == null
         if (profile.isBuiltInDefault) {

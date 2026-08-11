@@ -330,6 +330,12 @@ class ContainerSheetViewModel @Inject constructor(
         // built-in default, and each minted a fresh UUID. One drag produced eight
         // profiles. Deciding synchronously means the second call sees what the
         // first did, because both run on the same thread before either suspends.
+        // **Adopting a copy is for an edit, and a no-op is not an edit.** Reset
+        // all on the built-in default produces the built-in default, byte for
+        // byte, and forking a profile for it left a "Virtual controller (2)" in
+        // the list that differed from the original in nothing at all.
+        if (next.isBuiltInDefault && next == InputProfile.Default) return
+
         var profile = next
         if (profile.isBuiltInDefault) {
             val adopted = current.input.profileId
