@@ -23,6 +23,7 @@ import app.vessel.core.formatElapsed
 import app.vessel.core.formatMegabytes
 import app.vessel.core.formatMegahertz
 import app.vessel.core.formatWatts
+import app.vessel.core.oneDecimal
 import app.vessel.data.SessionMetricsState
 import app.vessel.ui.components.VEmptyState
 import app.vessel.ui.components.VMetricGraphCard
@@ -238,6 +239,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             unavailable = state.unavailable("gpu"),
         )
 
+        D3dCards(state)
+
         VMetricGraphCard(
             title = "memory",
             value = sample.sessionRssMb?.let(::formatMegabytes),
@@ -320,7 +323,11 @@ private fun FrameRateCard(state: SessionMetricsState) {
     // trace replayed on a different container should not be rescaled to the new
     // one's limit. Absent, 60 is the honest default and the same one the taskbar
     // uses.
-    val ceiling = maxOf(FrameRate.DEFAULT_TARGET, stats?.peak?.roundToInt() ?: 0)
+    // The D3D layer's own present rate shares this axis, so the ceiling has to
+    // clear both: a title rendering faster than the surface is composited is
+    // exactly the case worth seeing, and clipping it would hide it.
+    val presented = history.peak { it.d3dFps.rounded() }
+    val ceiling = maxOf(FrameRate.DEFAULT_TARGET, stats?.peak?.roundToInt() ?: 0, presented ?: 0)
 
     VMetricGraphCard(
         title = "frames",
@@ -334,10 +341,21 @@ private fun FrameRateCard(state: SessionMetricsState) {
             // A minimum equal to the peak means the rate never moved, and two
             // identical columns is a range that is not one.
             if (stats.min < stats.peak) add(VMetricStat("min", formatFps(stats.min)))
+            // **Two different frame rates, and the gap between them is a
+            // finding.** `fps` is what the compositor delivered; this is what
+            // the D3D layer presented. Vessel composites on damage, so a title
+            // drawing faster than the surface reads as the surface — and the
+            // only way to know that is happening is to be told both numbers.
+            history.mean { it.d3dFps.rounded() }?.let {
+                add(VMetricStat("d3d mean", "$it"))
+            }
         },
         series = listOfNotNull(
             history.seriesOrNull(ceiling, VSeriesTone.Primary, VSeriesForm.Area, "fps") {
                 it.fps?.roundToInt()
+            },
+            history.seriesOrNull(ceiling, VSeriesTone.Secondary, VSeriesForm.Line, "d3d") {
+                it.d3dFps.rounded()
             },
         ),
         // **Not `unavailable`, because it is not.** Every other card's empty
@@ -352,6 +370,158 @@ private fun FrameRateCard(state: SessionMetricsState) {
         },
     )
 }
+
+/**
+ * What the D3D layer was asked to do, which is the other half of every other
+ * card on this panel.
+ *
+ * **Everything else here says how hard the phone worked; these say at what.**
+ * The two together are what tell a scene that is genuinely heavy from one that
+ * is slow for a reason graphics has nothing to do with, and that distinction was
+ * worth building this for: Metro's intro reads one draw call and one render pass
+ * a frame with the GPU near idle — a fullscreen video blit bottlenecked on a
+ * single-threaded CPU decode under FEX — while gameplay in the same title reads
+ * thousands of draws with the GPU pinned. Same frame rate, opposite diagnosis,
+ * and no combination of load, clock and temperature can separate them.
+ *
+ * **Three cards when there is something to draw, one sentence when there is
+ * not.** The panel's rule is that a source which cannot be read is left off
+ * rather than drawn empty, because four permanent apologies is not a panel. But
+ * a program that uses no Direct3D is not a permanent fact about the device, it
+ * is a fact about this run — and a user who launched a game and finds no
+ * graphics counters deserves to be told why rather than shown a gap. So the
+ * absence costs one card, not three.
+ */
+@Composable
+private fun D3dCards(state: SessionMetricsState) {
+    val history = state.history
+    val sample = history.latest ?: return
+
+    // Draw calls decide it: they are the counter every D3D program produces on
+    // every frame, so a run that has one has all of them and a run that has none
+    // never loaded the layer at all.
+    val drawPeak = history.peak { it.d3dDrawCallsPerFrame.rounded() }
+    if (drawPeak == null) {
+        VMetricGraphCard(
+            title = "d3d",
+            value = null,
+            series = emptyList(),
+            unavailable = state.unavailable("d3d") ?: NO_D3D,
+        )
+        return
+    }
+
+    // Render passes are drawn against the draw-call ceiling rather than their
+    // own, and that is the point of putting them on this card: a pass is a
+    // container for draws, so the gap between the two lines is the batching, and
+    // normalising them separately would hide exactly that.
+    VMetricGraphCard(
+        title = "d3d · draw calls",
+        value = sample.d3dDrawCallsPerFrame?.let(::oneDecimal),
+        unit = "/frame",
+        stats = buildList {
+            addAll(history.stats { it.d3dDrawCallsPerFrame.rounded() }.stats { "$it" })
+            history.mean { it.d3dRenderPassesPerFrame.rounded() }?.let {
+                add(VMetricStat("passes", "$it"))
+            }
+            // Only when something is actually dispatching: a title that runs no
+            // compute should not carry a permanent zero.
+            history.peak { it.d3dDispatchesPerFrame.rounded() }?.takeIf { it > 0 }?.let {
+                add(VMetricStat("dispatch peak", "$it"))
+            }
+        },
+        series = listOfNotNull(
+            history.seriesOrNull(drawPeak, VSeriesTone.Primary, VSeriesForm.Area, "draws") {
+                it.d3dDrawCallsPerFrame.rounded()
+            },
+            history.seriesOrNull(drawPeak, VSeriesTone.Secondary, VSeriesForm.Line, "passes") {
+                it.d3dRenderPassesPerFrame.rounded()
+            },
+        ),
+    )
+
+    // Submissions and barriers share a ceiling because they are the same kind of
+    // thing at the same order of magnitude — both are per-frame counts of work
+    // the layer had to do around the drawing rather than in it, and both are
+    // small. A submission is a queue round trip and a barrier is a pipeline
+    // stall, so a frame doing many of either is paying for structure.
+    val commandPeak = maxOf(
+        history.peak { it.d3dSubmissionsPerFrame.rounded() } ?: 0,
+        history.peak { it.d3dBarriersPerFrame.rounded() } ?: 0,
+    )
+    VMetricGraphCard(
+        title = "d3d · submissions",
+        value = sample.d3dSubmissionsPerFrame?.let(::oneDecimal),
+        unit = "/frame",
+        stats = buildList {
+            addAll(history.stats { it.d3dSubmissionsPerFrame.rounded() }.stats { "$it" })
+            history.mean { it.d3dBarriersPerFrame.rounded() }?.let {
+                add(VMetricStat("barriers", "$it"))
+            }
+            history.peak { it.d3dGpuSyncsPerFrame.rounded() }?.takeIf { it > 0 }?.let {
+                add(VMetricStat("sync peak", "$it"))
+            }
+        },
+        series = listOfNotNull(
+            history.seriesOrNull(commandPeak, VSeriesTone.Primary, VSeriesForm.Line, "submits") {
+                it.d3dSubmissionsPerFrame.rounded()
+            },
+            history.seriesOrNull(commandPeak, VSeriesTone.Neutral, VSeriesForm.Dashed, "barriers") {
+                it.d3dBarriersPerFrame.rounded()
+            },
+        ),
+    )
+
+    // **Pipelines are numbers and not a line, and vidmem is the line they sit
+    // under.** A pipeline count only ever goes up and then stops, so a graph of
+    // one is a staircase that says less than the two numbers at its ends; what
+    // is worth watching over time is the memory, which moves in both directions
+    // and is the thing that ends a session when it runs out.
+    val vramPeak = history.peak { it.d3dMemAllocatedMb } ?: 0
+    VMetricGraphCard(
+        title = "d3d · video memory",
+        value = sample.d3dMemUsedMb?.let(::formatMegabytes),
+        stats = buildList {
+            addAll(history.stats { it.d3dMemUsedMb }.stats(::formatMegabytes))
+            history.peak { it.d3dMemAllocatedMb }?.let {
+                add(VMetricStat("allocated", formatMegabytes(it)))
+            }
+            // The peak rather than the current value, because these only climb
+            // and the peak is therefore the answer either way — except for a
+            // replayed trace whose last sample predates the last compile.
+            history.peak { it.d3dPipelines }?.let { add(VMetricStat("pipelines", "$it")) }
+            history.peak { it.d3dPipelineLibraries }?.takeIf { it > 0 }?.let {
+                add(VMetricStat("libraries", "$it"))
+            }
+            history.peak { it.d3dPipelinesCompute }?.takeIf { it > 0 }?.let {
+                add(VMetricStat("compute", "$it"))
+            }
+            // A backlog that is still there at the end of a run is a title that
+            // was still compiling, which is a title that was still stuttering.
+            sample.d3dPipeTasksPending?.takeIf { it > 0 }?.let {
+                add(VMetricStat("compiling", "$it"))
+            }
+        },
+        series = listOfNotNull(
+            history.seriesOrNull(vramPeak, VSeriesTone.Primary, VSeriesForm.Area, "used") {
+                it.d3dMemUsedMb
+            },
+            history.seriesOrNull(vramPeak, VSeriesTone.Neutral, VSeriesForm.Line, "allocated") {
+                it.d3dMemAllocatedMb
+            },
+        ),
+    )
+}
+
+/**
+ * A per-frame counter as the graph wants it.
+ *
+ * Rounded here and nowhere earlier. The sample keeps the fraction because a
+ * steady 2.4 submissions a frame stored as an integer alternates 2 and 3 and
+ * puts a sawtooth in a flat line; the graph has a pixel per sample and cannot
+ * show the difference, so this is the last possible moment and the right one.
+ */
+private fun Float?.rounded(): Int? = this?.roundToInt()
 
 /** `58` and `59.4` — a fraction only where it says something. */
 private fun formatFps(value: Float): String {
@@ -569,6 +739,17 @@ private const val PARKED = "parked"
 
 private const val NO_CORE_CLOCKS = "No core reported a clock during this run."
 
+/**
+ * Said when a run produced no D3D counters and the probe had nothing to add.
+ *
+ * Not a failure and phrased so it does not read as one. The counters come from
+ * DXVK, DXVK is only loaded by a program that uses Direct3D, and a container
+ * running an installer or a shell has no graphics story to tell.
+ */
+private const val NO_D3D =
+    "No Direct3D counters this run. DXVK writes them only while a program is drawing " +
+        "through D3D 8/9/10/11, so a session that ran nothing graphical has none."
+
 private const val NO_TRACE =
     "No telemetry was recorded for this session. Runs from before metrics existed have " +
         "none, and neither does a session that failed before it started running."
@@ -653,6 +834,21 @@ private val SampleState: SessionMetricsState by lazy {
             batteryPercent = 80 - index / 4,
             batteryMillivolts = 4_209,
             batteryMilliamps = -(600 + cpu * 8),
+            // The shape this feature exists to show: an intro at one draw call a
+            // frame with the GPU idle, then gameplay at thousands with it pinned.
+            d3dFps = if (index < 4) 10f else 28f + cpu / 10f,
+            d3dDrawCallsPerFrame = if (index < 4) 1f else 340f + cpu * 22f,
+            d3dRenderPassesPerFrame = if (index < 4) 1f else 14f + cpu / 8f,
+            d3dSubmissionsPerFrame = if (index < 4) 2f else 3f + cpu / 40f,
+            d3dBarriersPerFrame = if (index < 4) 9f else 46f + cpu / 4f,
+            d3dDispatchesPerFrame = if (index < 4) 0f else 2f,
+            d3dGpuSyncsPerFrame = 0f,
+            d3dPipelines = 1 + index * 37,
+            d3dPipelineLibraries = 481 + index * 4,
+            d3dPipelinesCompute = if (index < 4) 0 else 3,
+            d3dPipeTasksPending = if (index in 4..7) 12 - index else 0,
+            d3dMemAllocatedMb = 1_083 + index * 40,
+            d3dMemUsedMb = 850 + index * 36,
         )
     }
     SessionMetricsState(
@@ -686,6 +882,7 @@ private val SampleState: SessionMetricsState by lazy {
                 "/sys/class/devfreq is denied to the shell as well as to apps.",
             ),
             MetricSource("temperature", "/sys/class/thermal/thermal_zone*, matched by type", true),
+            MetricSource("d3d", "the session's VESSEL_GFX_STATS snapshot", true),
             MetricSource("battery", "BatteryManager and ACTION_BATTERY_CHANGED", true),
             MetricSource("power", "CURRENT_NOW × voltage, total draw", true),
             MetricSource(
