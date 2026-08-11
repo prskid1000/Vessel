@@ -339,20 +339,20 @@ fun InputEditor(
     var picking by remember { mutableStateOf<Picking?>(null) }
 
     /**
-     * Which groups are folded away.
+     * Everything starts folded.
      *
-     * The pad group starts closed: on a hand-built layout it is twenty-four rows
-     * between the controls you placed and the settings, and it is the read-only
-     * half — nothing in it can be deleted, only bound.
+     * **The screen opens as the map, the selected control, and four headings.**
+     * That is the working surface — tap a control, change what it sends — and
+     * everything else is a list you go to on purpose. Unfolded, the same screen
+     * is a map followed by forty rows of scrolling before the settings.
+     *
+     * Not remembered across visits, deliberately: a fold is a thing you did a
+     * moment ago to see past a section, not a preference worth a document. It
+     * opens on its own when a press lands on a control whose row is folded away.
      */
-    var collapsed by remember { mutableStateOf(setOf(ControlGroup.Pad)) }
-
-    // Open, both of them. Folding is offered because the screen is long, not
-    // because these are rarely wanted — and "Show the overlay" had just been
-    // fixed after being unreachable, so hiding it again by default would be a
-    // poor joke.
-    var settingsFolded by remember { mutableStateOf(false) }
-    var profileFolded by remember { mutableStateOf(false) }
+    var collapsed by remember { mutableStateOf(setOf(ControlGroup.Glass, ControlGroup.Pad)) }
+    var settingsFolded by remember { mutableStateOf(true) }
+    var profileFolded by remember { mutableStateOf(true) }
 
     val entries = remember(profile, collapsed) { controlEntries(profile, collapsed) }
 
