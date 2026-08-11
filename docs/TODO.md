@@ -339,7 +339,7 @@ audit's; they are pointers, not independently re-verified.
   answer would buy: present costs 0.5 ms on the DRI3 path while Metro renders a
   frame every 80–125 ms, so 0.15 ms of present is under 0.2% of a frame.
 
-- [ ] **Drop the per-present `GetGeometry` round trip.** One request and one
+- [x] **Drop the per-present `GetGeometry` round trip.** One request and one
   reply per frame (`wsi_common_x11.c:1854` + `:1917`), on the present thread,
   ordered behind the 3.6 MB PutImage on the same connection, and used for
   nothing but detecting a resize (`:1919-1925`). Selecting `StructureNotify` and
@@ -357,6 +357,29 @@ audit's; they are pointers, not independently re-verified.
   which keeps the round trip but takes it off the critical path. Still `[ ]` for
   the same reason as the item above: unmeasured. Leave the `Trace` suggestion
   standing — it is now the way to find out whether this was worth doing.
+
+  **Closed 2026-08-11 without the `Trace`, because there is nothing on the
+  shipping path to trace.** Every `xcb_get_geometry` in
+  `native/mesa/src/vulkan/wsi/wsi_common_x11.c` was read and attributed:
+
+  | Site | When it runs |
+  |---|---|
+  | `:471`, `:787`, `:1115`, `:3139` | surface capability and creation queries — once |
+  | `:1854` + `:1917` | `x11_present_to_x11_sw` — **per present, software path only** |
+  | `:2926` | `wsi_x11_swapchain_query_dri3_modifiers_changed`, reached only from the `SUBOPTIMAL_COPY` arm of `x11_swapchain_result` (`:1724`) — an Xwayland case, and guarded by `!wsi_device->sw` besides |
+
+  So the per-present round trip this entry is named after **exists only in
+  `x11_present_to_x11_sw`**. On DRI3 resize is reported through
+  `PresentConfigureNotify`, and no geometry is asked for at all. The item
+  therefore cannot pay anything in the configuration the device runs: `0003`
+  pipelines the only per-frame instance, on the only path that has one, and that
+  path is the fallback.
+
+  Which also settles the `Trace`: it would have been taken against `--wsi sw`,
+  measured the same harness whose run-to-run spread already swallowed the whole
+  of `0003` in the entry above, and reported the same nothing. Both halves of
+  this pair are written, both are `sw`-only, and both are unmeasurable for the
+  same reason — not two open items but one closed one.
 
 - [ ] **Back the window drawable with a `GPUImage` on the software path.**
   Today `Texture.updateFromDrawable` re-uploads the **whole window every frame**
