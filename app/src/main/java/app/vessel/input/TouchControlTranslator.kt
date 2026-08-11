@@ -78,6 +78,39 @@ class TouchControlTranslator(
     /** True while a look pad is off centre — exactly when [tick] can produce anything. */
     val looking: Boolean get() = sticks.looking
 
+    /**
+     * The overlay as a gamepad, for the guest's HID pad rather than for keys.
+     *
+     * **Why this exists at all.** Everything else this class produces is
+     * [GuestInput] — keystrokes and pointer motion — which is the right answer
+     * for a guest with no gamepad and the wrong one for a game that reads
+     * XInput and nothing else. A control in the virtual-controller layout
+     * already knows the pad control it *is* ([TouchControl.pad],
+     * [TouchControl.padStick]); this hands that identity out unchanged so the
+     * session can put it on the wire, instead of the overlay being a keyboard
+     * wearing a controller's clothes.
+     *
+     * A snapshot rather than an event: the deflections below are the same
+     * fields [apply] already maintains, so there is one place a stick's position
+     * is known and no second copy to drift. Empty when the layout has no pad
+     * identities at all, which is every layout a user built by hand.
+     */
+    fun padSnapshot(): TouchPadSnapshot = TouchPadSnapshot(
+        leftX = stickX,
+        leftY = stickY,
+        rightX = lookX,
+        rightY = lookY,
+        hatX = hatX,
+        hatY = hatY,
+        // Held by *identity*, not by action: two controls bound to the same key
+        // are one key and two different pad buttons, and `holding` counts the
+        // former. A finger on a control with no pad identity contributes
+        // nothing, which is what makes a hand-built layout inert here.
+        pressed = fingers.values
+            .mapNotNull { id -> layout.byId(id)?.pad }
+            .toSet(),
+    )
+
     /** Whether any finger is on the overlay at all. */
     val busy: Boolean get() = fingers.isNotEmpty()
 

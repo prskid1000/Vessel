@@ -47,6 +47,7 @@ import app.vessel.input.PointerRouter
 import app.vessel.input.Touch
 import app.vessel.input.TouchControl
 import app.vessel.input.TouchControlTranslator
+import app.vessel.input.TouchPadSnapshot
 import app.vessel.input.TouchEdit
 import app.vessel.input.TouchLayout
 import app.vessel.input.TouchPhase
@@ -1479,6 +1480,7 @@ private class SessionSurfaceView(
         override fun run() {
             sink.accept(gamepad.tick(now()))
             sink.accept(overlay.tick(now()))
+            publishPad()
             if (isLooking()) handler.postDelayed(this, LOOK_INTERVAL_MS)
         }
     }
@@ -1649,6 +1651,14 @@ private class SessionSurfaceView(
                 invalidate()
             }
         }
+
+        // **The glass is a gamepad too.** Everything above turns the overlay into
+        // keystrokes, which is the right answer for a guest with no pad and no
+        // answer at all for a game that reads XInput. The same touch is also a
+        // pad control -- the layout says which -- so it goes on the wire as one.
+        // Cheap when there is nothing to say: `submit` drops a state identical to
+        // the last, and an overlay with no pad identities is idle by definition.
+        publishPad()
     }
 
     /**
@@ -1716,6 +1726,7 @@ private class SessionSurfaceView(
         pressedControls.clear()
         editDrag = null
         sink.accept(overlay.reset())
+            publishPad()
     }
 
     /**
@@ -1908,21 +1919,83 @@ private class SessionSurfaceView(
 
     /** Everything the pad is holding right now, as one HID report. */
     private fun publishPad() {
-        padBridge.submit(0, padState)
+        padBridge.submit(0, padState.mergedWith(overlay.padSnapshot()))
+    }
+
+    /**
+     * The physical pad and the on-screen one, as a single controller.
+     *
+     * **Merged rather than chosen between.** They are one slot to the guest
+     * because they are one controller to the player: a thumb on a glass button
+     * while the other hand nudges a real stick is an ordinary thing to do, and
+     * either input winning outright would cancel the other mid-press. So
+     * buttons and hat directions are unioned, and each axis takes whichever
+     * source is further from centre — a stick at rest contributes nothing and
+     * cannot drag a deflected one back.
+     *
+     * Costs nothing when there is no overlay: [TouchPadSnapshot.idle] is the
+     * common case and returns the physical state untouched.
+     */
+    private fun PadBridge.State.mergedWith(overlay: TouchPadSnapshot): PadBridge.State {
+        if (overlay.idle) return this
+
+        var buttons = this.buttons
+        var hat = this.hat
+        var lt = this.lt
+        var rt = this.rt
+        for (control in overlay.pressed) when (control) {
+            GamepadControl.L2 -> lt = PadBridge.AXIS_MAX
+            GamepadControl.R2 -> rt = PadBridge.AXIS_MAX
+            GamepadControl.DPAD_UP -> hat = hat or PadBridge.HAT_UP
+            GamepadControl.DPAD_DOWN -> hat = hat or PadBridge.HAT_DOWN
+            GamepadControl.DPAD_LEFT -> hat = hat or PadBridge.HAT_LEFT
+            GamepadControl.DPAD_RIGHT -> hat = hat or PadBridge.HAT_RIGHT
+            else -> padBitOf(control)?.let { buttons = buttons or (1 shl it) }
+        }
+
+        // A d-pad drawn as one cross reports a direction, not four buttons, and
+        // arrives here as a deflection rather than in `pressed`.
+        if (overlay.hatX < -HAT_EDGE) hat = hat or PadBridge.HAT_LEFT
+        if (overlay.hatX > HAT_EDGE) hat = hat or PadBridge.HAT_RIGHT
+        if (overlay.hatY < -HAT_EDGE) hat = hat or PadBridge.HAT_UP
+        if (overlay.hatY > HAT_EDGE) hat = hat or PadBridge.HAT_DOWN
+
+        return copy(
+            lx = furtherFromCentre(lx, padAxis(overlay.leftX)),
+            ly = furtherFromCentre(ly, padAxis(overlay.leftY)),
+            rx = furtherFromCentre(rx, padAxis(overlay.rightX)),
+            ry = furtherFromCentre(ry, padAxis(overlay.rightY)),
+            lt = lt,
+            rt = rt,
+            buttons = buttons,
+            hat = hat,
+        )
+    }
+
+    private fun furtherFromCentre(a: Int, b: Int): Int = if (abs(b) > abs(a)) b else a
+
+    /**
+     * The HID button index a pad control is, or null when it is not one.
+     *
+     * Shared with the overlay merge, so a glass A and a physical A cannot end up
+     * on different bits -- which would be invisible until a game bound one.
+     */
+    private fun padBitOf(control: GamepadControl): Int? = when (control) {
+        GamepadControl.A -> PadBridge.BTN_A
+        GamepadControl.B -> PadBridge.BTN_B
+        GamepadControl.X -> PadBridge.BTN_X
+        GamepadControl.Y -> PadBridge.BTN_Y
+        GamepadControl.L1 -> PadBridge.BTN_L1
+        GamepadControl.R1 -> PadBridge.BTN_R1
+        GamepadControl.SELECT -> PadBridge.BTN_SELECT
+        GamepadControl.START -> PadBridge.BTN_START
+        GamepadControl.THUMB_L -> PadBridge.BTN_THUMB_L
+        GamepadControl.THUMB_R -> PadBridge.BTN_THUMB_R
+        else -> null
     }
 
     private fun padButton(control: GamepadControl, pressed: Boolean) {
         val bit = when (control) {
-            GamepadControl.A -> PadBridge.BTN_A
-            GamepadControl.B -> PadBridge.BTN_B
-            GamepadControl.X -> PadBridge.BTN_X
-            GamepadControl.Y -> PadBridge.BTN_Y
-            GamepadControl.L1 -> PadBridge.BTN_L1
-            GamepadControl.R1 -> PadBridge.BTN_R1
-            GamepadControl.SELECT -> PadBridge.BTN_SELECT
-            GamepadControl.START -> PadBridge.BTN_START
-            GamepadControl.THUMB_L -> PadBridge.BTN_THUMB_L
-            GamepadControl.THUMB_R -> PadBridge.BTN_THUMB_R
             // The triggers are axes on a HID gamepad, not buttons. A pad that
             // reports them as keys instead -- and many Bluetooth ones do -- gets
             // them turned back into a full deflection here.
@@ -1938,7 +2011,7 @@ private class SessionSurfaceView(
             GamepadControl.DPAD_DOWN -> return padHat(PadBridge.HAT_DOWN, pressed)
             GamepadControl.DPAD_LEFT -> return padHat(PadBridge.HAT_LEFT, pressed)
             GamepadControl.DPAD_RIGHT -> return padHat(PadBridge.HAT_RIGHT, pressed)
-            else -> return
+            else -> padBitOf(control) ?: return
         }
         val mask = 1 shl bit
         padState = padState.copy(
