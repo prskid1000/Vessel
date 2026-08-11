@@ -444,6 +444,14 @@ fun SessionDesktop(
     val laying = inputOpen && input.editing
     LaunchedEffect(inputOpen) { if (!inputOpen) inputActions.onEditing(false) }
 
+    // Placing controls over a live session takes the whole screen, because the
+    // rail and the panel together are 820 dp of a 927 dp window and the controls
+    // being placed are underneath all of it. See `TouchArrange`.
+    var arranging by remember { mutableStateOf(false) }
+    val panelActions = remember(inputActions) {
+        inputActions.copy(onArrange = { arranging = true })
+    }
+
     /** The window whose actions are showing, or null. Held here, not in the bar. */
     var windowMenu by remember { mutableStateOf<GuestWindow?>(null) }
 
@@ -548,7 +556,7 @@ fun SessionDesktop(
             ) {
                 InputPanel(
                     state = input,
-                    actions = inputActions,
+                    actions = panelActions,
                     tab = inputTab,
                     onTab = { inputTab = it },
                     onClose = { inputOpen = false },
@@ -764,6 +772,16 @@ fun SessionDesktop(
                 onStop()
             },
             onDismiss = { confirmingStop = false },
+        )
+    }
+
+    if (arranging) {
+        TouchArrangeDialog(
+            layout = input.profile.overlay,
+            selected = input.selected,
+            onSelect = inputActions.onSelect,
+            onLayout = { inputActions.onProfile(input.profile.copy(touch = it)) },
+            onDone = { arranging = false },
         )
     }
 }

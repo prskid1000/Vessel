@@ -134,6 +134,8 @@ data class InputEditorActions(
     val onExportText: (InputProfile) -> String? = { null },
     val onTouchVisible: (Boolean) -> Unit = {},
     val onEditing: (Boolean) -> Unit = {},
+    /** Hand the whole screen over to placing controls. See [TouchArrange]. */
+    val onArrange: () -> Unit = {},
     val onSelect: (String?) -> Unit = {},
     val onDismissNotice: () -> Unit = {},
 )
@@ -389,8 +391,13 @@ private fun TouchPreviewCard(
             layout = state.profile.overlay,
             aspect = long.value / short.value.coerceAtLeast(1f),
             selected = state.selected,
-            onSelect = actions.onSelect,
-            onLayout = onLayout,
+            onArrange = actions.onArrange,
+        )
+        VButton(
+            "Arrange the overlay",
+            actions.onArrange,
+            style = VButtonStyle.Secondary,
+            modifier = Modifier.fillMaxWidth(),
         )
     }
 }
@@ -398,17 +405,17 @@ private fun TouchPreviewCard(
 /**
  * The overlay, at the shape it will have, with every control where it will be.
  *
- * Draggable, because on the container sheet there is no session to drag the real
- * thing on — and a layout editor that can only be reached by starting a game is
- * the trap the whole cold entry point exists to avoid.
+ * **A picture, and only a picture.** It used to be draggable, and dragging a
+ * 15 dp button around a 232 dp thumbnail is not placing a control — it is
+ * guessing where one will land, at a seventh of the scale it will land at. Its
+ * one gesture now is a tap, which hands the whole screen over to [TouchArrange].
  */
 @Composable
 private fun TouchOverlayPreview(
     layout: TouchLayout,
     aspect: Float,
     selected: String?,
-    onSelect: (String?) -> Unit,
-    onLayout: (TouchLayout) -> Unit,
+    onArrange: () -> Unit,
 ) {
     var size by remember { mutableStateOf(0f to 0f) }
     val density = LocalDensity.current
@@ -420,11 +427,7 @@ private fun TouchOverlayPreview(
             .background(Vessel.colors.neutral900)
             .border(Vessel.metrics.hairline, Vessel.colors.border, Vessel.metrics.shapeMd)
             .onSizeChanged { size = it.width.toFloat() to it.height.toFloat() }
-            .pointerInput(Unit) {
-                // A press on bare canvas deselects, which is the only way back to
-                // "nothing is selected" once something is.
-                detectTapGestures { onSelect(null) }
-            },
+            .clickable(onClickLabel = "Arrange the overlay", onClick = onArrange),
     ) {
         val (w, h) = size
         if (w <= 0f || h <= 0f) return@Box
@@ -457,22 +460,10 @@ private fun TouchOverlayPreview(
                                 )
                         },
                     )
-                    .pointerInput(control.id, w, h) {
-                        detectDragGestures(
-                            onDragStart = { onSelect(control.id) },
-                        ) { change, _ ->
-                            change.consume()
-                            // The drag is reported inside the control's own box,
-                            // so its position has to be put back into the canvas
-                            // before it means anything.
-                            val current = layout.byId(control.id) ?: return@detectDragGestures
-                            val r = current.radiusPx(w, h)
-                            val x = current.centreX(w) - r + change.position.x
-                            val y = current.centreY(h) - r + change.position.y
-                            onLayout(layout.with(TouchEdit.moved(current, x, y, w, h)))
-                        }
-                    }
-                    .clickable(onClickLabel = control.designation) { onSelect(control.id) },
+                    // No gesture of its own: every touch inside the card belongs
+                    // to the card, which opens the arranger. A control that
+                    // swallowed the tap would be a control you cannot get past.
+                    ,
                 contentAlignment = Alignment.Center,
             ) {
                 if (control.kind == TouchKind.DPAD) {

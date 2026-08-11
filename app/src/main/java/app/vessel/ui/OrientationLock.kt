@@ -5,6 +5,10 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 
 /**
@@ -44,6 +48,38 @@ import androidx.compose.ui.platform.LocalContext
  * A [DisposableEffect] rather than a `LaunchedEffect` so leaving the app entirely
  * hands the orientation back too.
  */
+/**
+ * An orientation a surface *inside* a destination needs, overriding the route's.
+ *
+ * **It is a slot the one owner reads, not a second writer.** The rule above —
+ * exactly one composable touches `requestedOrientation` — is what stops the
+ * `NavHost` ordering race, and a full-screen editor that set its own would be
+ * precisely the second writer that rule forbids. So it writes a value here
+ * instead, and [VesselApp] keeps being the only caller of [LockOrientation].
+ *
+ * It exists for one thing: arranging the touch overlay. The overlay is laid out
+ * against a landscape screen because that is the shape it will have in a
+ * session, and the editor for it is reachable from the container sheet, which is
+ * portrait. Rotating is the only way to arrange a landscape thing at full size.
+ */
+val LocalOrientationOverride: ProvidableCompositionLocal<MutableState<Int?>> =
+    staticCompositionLocalOf { mutableStateOf(null) }
+
+/**
+ * Hold [orientation] for as long as this composable is in the tree.
+ *
+ * The counterpart to [LocalOrientationOverride]: a surface asks, the owner
+ * writes, and leaving puts the route's own orientation back.
+ */
+@Composable
+fun HoldOrientation(orientation: Int) {
+    val slot = LocalOrientationOverride.current
+    DisposableEffect(slot, orientation) {
+        slot.value = orientation
+        onDispose { slot.value = null }
+    }
+}
+
 @Composable
 fun LockOrientation(orientation: Int) {
     val activity = LocalContext.current.findActivity() ?: return

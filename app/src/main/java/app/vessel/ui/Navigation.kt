@@ -3,6 +3,7 @@ package app.vessel.ui
 import android.net.Uri
 import android.view.WindowManager
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -159,9 +160,15 @@ fun VesselApp(
     val state by session.state.collectAsStateWithLifecycle()
 
     // One owner for the whole app's orientation, driven by the route. See
-    // `LockOrientation` — the per-destination form races on the way out.
+    // `LockOrientation` — the per-destination form races on the way out. A
+    // surface inside a destination that needs its own — today only the overlay
+    // arranger, which must be landscape even when opened from a portrait sheet —
+    // fills the slot rather than writing `requestedOrientation` itself.
     val backStackEntry by navController.currentBackStackEntryAsState()
-    LockOrientation(orientationFor(backStackEntry?.destination?.route))
+    val orientationOverride = remember { mutableStateOf<Int?>(null) }
+    LockOrientation(
+        orientationOverride.value ?: orientationFor(backStackEntry?.destination?.route),
+    )
 
     // The panel's own size, which is what `display.resolution: native` means.
     // `maximumWindowMetrics` rather than `Resources.displayMetrics`: the latter
@@ -191,176 +198,178 @@ fun VesselApp(
     val setupState by setup.state.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { setup.start() }
 
-    NavHost(
-        navController = navController,
-        startDestination = Routes.HOME,
-        modifier = modifier,
-    ) {
-        composable(Routes.HOME) { entry ->
-            // A file the browser handed back, if the user went and chose one.
-            val picked by entry.savedStateHandle
-                .getStateFlow<String?>(Routes.PICKED_EXECUTABLE, null)
-                .collectAsStateWithLifecycle()
+    CompositionLocalProvider(LocalOrientationOverride provides orientationOverride) {
+        NavHost(
+            navController = navController,
+            startDestination = Routes.HOME,
+            modifier = modifier,
+        ) {
+            composable(Routes.HOME) { entry ->
+                // A file the browser handed back, if the user went and chose one.
+                val picked by entry.savedStateHandle
+                    .getStateFlow<String?>(Routes.PICKED_EXECUTABLE, null)
+                    .collectAsStateWithLifecycle()
 
-            HomeScreen(
-                onOpenFiles = { navController.navigate(Routes.files(it)) },
-                onPickFile = { navController.navigate(Routes.files(it, pick = true)) },
-                onOpenLogs = { navController.navigate(Routes.sessionLogs(it)) },
-                // Launch is not a navigation. The checklist appears over this
-                // list, and the desktop pushes itself once there is one.
-                onLaunch = { session.launch(it, native) },
-                // `native` matters here and not on the desktop: a tile tapped on
-                // home may be the thing that *starts* the container, and the
-                // panel size is what `display.resolution: native` becomes.
-                onLaunchApp = { session.launchApp(it, native) },
-                onOpenLicences = { navController.navigate(Routes.LICENCES) },
-                pickedExecutable = picked,
-                onPickConsumed = {
-                    entry.savedStateHandle[Routes.PICKED_EXECUTABLE] = null
-                },
-            )
-        }
+                HomeScreen(
+                    onOpenFiles = { navController.navigate(Routes.files(it)) },
+                    onPickFile = { navController.navigate(Routes.files(it, pick = true)) },
+                    onOpenLogs = { navController.navigate(Routes.sessionLogs(it)) },
+                    // Launch is not a navigation. The checklist appears over this
+                    // list, and the desktop pushes itself once there is one.
+                    onLaunch = { session.launch(it, native) },
+                    // `native` matters here and not on the desktop: a tile tapped on
+                    // home may be the thing that *starts* the container, and the
+                    // panel size is what `display.resolution: native` becomes.
+                    onLaunchApp = { session.launchApp(it, native) },
+                    onOpenLicences = { navController.navigate(Routes.LICENCES) },
+                    pickedExecutable = picked,
+                    onPickConsumed = {
+                        entry.savedStateHandle[Routes.PICKED_EXECUTABLE] = null
+                    },
+                )
+            }
 
-        composable(
-            Routes.FILES,
-            arguments = listOf(
-                navArgument(Routes.ARG_PICK) {
-                    type = NavType.BoolType
-                    defaultValue = false
-                },
-            ),
-        ) { entry ->
-            FilesScreen(
-                picking = entry.arguments?.getBoolean(Routes.ARG_PICK) == true,
-                onBack = { navController.popBackStack() },
-                onPicked = { guestPath ->
-                    // Left on the *previous* entry — home's — because that is the
-                    // screen still holding the sheet that asked for it.
-                    navController.previousBackStackEntry
-                        ?.savedStateHandle?.set(Routes.PICKED_EXECUTABLE, guestPath)
-                    navController.popBackStack()
-                },
-            )
-        }
-
-        // Both log routes take the container in the path, which is what keeps the
-        // viewer from ever being reachable without one.
-        composable(Routes.SESSION_LOGS) { entry ->
-            val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
-            SessionLogsScreen(
-                onBack = { navController.popBackStack() },
-                onOpenSession = { startedAt ->
-                    navController.navigate(Routes.sessionLog(containerId, startedAt))
-                },
-            )
-        }
-        composable(Routes.SESSION_LOG) {
-            SessionLogScreen(onBack = { navController.popBackStack() })
-        }
-
-        composable(Routes.LICENCES) {
-            LicencesScreen(
-                onBack = { navController.popBackStack() },
-                onOpen = { navController.navigate(Routes.licence(it)) },
-            )
-        }
-        composable(Routes.LICENCE) { entry ->
-            LicenceTextScreen(
-                title = entry.arguments?.getString(Routes.ARG_LICENCE_TITLE).orEmpty(),
-                onBack = { navController.popBackStack() },
-            )
-        }
-
-        // The desktop. A route rather than an overlay over the NavHost, because
-        // the rail's Session log button pushes a destination and an overlay would
-        // be drawn on top of the log it just opened — the back stack is exactly
-        // the thing that makes desktop → log → back → desktop work.
-        composable(Routes.SESSION) {
-            val surface by session.surface.collectAsStateWithLifecycle()
-            val pointerMode by session.pointerMode.collectAsStateWithLifecycle()
-            val windows by session.windows.collectAsStateWithLifecycle(emptyList())
-            val viewport by session.viewport.collectAsStateWithLifecycle(GuestViewport())
-            val shortcuts by session.shortcuts.collectAsStateWithLifecycle(emptyList())
-            val terminals by session.terminalProfiles.collectAsStateWithLifecycle(emptyList())
-            // Collected here rather than inside the taskbar: the readout ticks
-            // twice a second, and a collector inside the bar would recompose the
-            // bar's whole subtree — every window button and its icon — on every
-            // sample. Hoisting it means the taskbar takes a value and only the
-            // readout's own draw is invalidated.
-            val frameRate by session.frameRate.collectAsStateWithLifecycle()
-            val inputProfile by session.inputProfile.collectAsStateWithLifecycle()
-            // The pad's held set changes at a stick's report rate. Collected here
-            // for the same reason `frameRate` is: the panel takes a value, so only
-            // the rows that light are invalidated rather than the desktop.
-            val heldControls by session.heldControls.collectAsStateWithLifecycle()
-            val inputProfiles by session.inputProfileList
-                .collectAsStateWithLifecycle(emptyList())
-            val activeInputProfileId by session.activeInputProfileId
-                .collectAsStateWithLifecycle(null)
-            val touchVisible by session.touchControlsVisible.collectAsStateWithLifecycle()
-            val touchEditing by session.touchEditing.collectAsStateWithLifecycle()
-            val selectedTouchControl by session.selectedTouchControl
-                .collectAsStateWithLifecycle()
-            val inputNotice by session.inputNotice.collectAsStateWithLifecycle()
-            SessionDesktop(
-                state = state,
-                surface = surface,
-                pointerMode = pointerMode,
-                input = InputEditorState(
-                    profile = inputProfile,
-                    profiles = inputProfiles,
-                    activeProfileId = activeInputProfileId,
-                    // A container naming a profile that has been deleted resolves
-                    // to the default and is not rewritten, so the two disagree —
-                    // which is exactly the case worth saying out loud.
-                    missingProfile = activeInputProfileId != null &&
-                        inputProfiles.none { it.id == activeInputProfileId },
-                    containerName = state.containerName,
-                    guest = state.geometry,
-                    live = true,
-                    held = heldControls,
-                    touchVisible = touchVisible,
-                    editing = touchEditing,
-                    selected = selectedTouchControl,
-                    notice = inputNotice,
+            composable(
+                Routes.FILES,
+                arguments = listOf(
+                    navArgument(Routes.ARG_PICK) {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    },
                 ),
-                inputActions = InputEditorActions(
-                    onProfile = session::setInputProfile,
-                    onPickProfile = session::pickInputProfile,
-                    onRename = { session.setInputProfile(inputProfile.copy(name = it)) },
-                    onNewProfile = session::newInputProfile,
-                    onDuplicate = session::duplicateInputProfile,
-                    onDelete = session::deleteInputProfile,
-                    onImportText = session::importInputProfile,
-                    onExportText = { session.exportInputProfile(it) },
-                    onTouchVisible = session::setTouchControlsVisible,
-                    onEditing = session::setTouchEditing,
-                    onSelect = session::selectTouchControl,
-                    onDismissNotice = session::dismissInputNotice,
-                ),
-                windows = windows,
-                frameRate = frameRate,
-                shortcuts = shortcuts,
-                shellUnavailableReason = session.shellUnavailableReason,
-                metrics = session.metrics,
-                onOpenLogs = { navController.navigate(state.logRoute()) },
-                onOpenFiles = {
-                    state.containerId?.let { navController.navigate(Routes.files(it)) }
-                },
-                onStop = session::stop,
-                onTogglePause = session::togglePause,
-                onTogglePointerMode = session::togglePointerMode,
-                onShowKeyboard = session::showKeyboard,
-                onLaunchApp = session::launchApp,
-                onFocusWindow = session::focusWindow,
-                onMinimizeWindow = session::minimizeWindow,
-                onCloseWindow = session::closeWindow,
-                onKillWindow = session::killWindow,
-                onMoveResizeWindow = session::moveResizeWindow,
-                viewport = viewport,
-                terminals = terminals,
-                onTerminal = session::openTerminal,
-            )
+            ) { entry ->
+                FilesScreen(
+                    picking = entry.arguments?.getBoolean(Routes.ARG_PICK) == true,
+                    onBack = { navController.popBackStack() },
+                    onPicked = { guestPath ->
+                        // Left on the *previous* entry — home's — because that is the
+                        // screen still holding the sheet that asked for it.
+                        navController.previousBackStackEntry
+                            ?.savedStateHandle?.set(Routes.PICKED_EXECUTABLE, guestPath)
+                        navController.popBackStack()
+                    },
+                )
+            }
+
+            // Both log routes take the container in the path, which is what keeps the
+            // viewer from ever being reachable without one.
+            composable(Routes.SESSION_LOGS) { entry ->
+                val containerId = entry.arguments?.getString(Routes.ARG_CONTAINER_ID).orEmpty()
+                SessionLogsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenSession = { startedAt ->
+                        navController.navigate(Routes.sessionLog(containerId, startedAt))
+                    },
+                )
+            }
+            composable(Routes.SESSION_LOG) {
+                SessionLogScreen(onBack = { navController.popBackStack() })
+            }
+
+            composable(Routes.LICENCES) {
+                LicencesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpen = { navController.navigate(Routes.licence(it)) },
+                )
+            }
+            composable(Routes.LICENCE) { entry ->
+                LicenceTextScreen(
+                    title = entry.arguments?.getString(Routes.ARG_LICENCE_TITLE).orEmpty(),
+                    onBack = { navController.popBackStack() },
+                )
+            }
+
+            // The desktop. A route rather than an overlay over the NavHost, because
+            // the rail's Session log button pushes a destination and an overlay would
+            // be drawn on top of the log it just opened — the back stack is exactly
+            // the thing that makes desktop → log → back → desktop work.
+            composable(Routes.SESSION) {
+                val surface by session.surface.collectAsStateWithLifecycle()
+                val pointerMode by session.pointerMode.collectAsStateWithLifecycle()
+                val windows by session.windows.collectAsStateWithLifecycle(emptyList())
+                val viewport by session.viewport.collectAsStateWithLifecycle(GuestViewport())
+                val shortcuts by session.shortcuts.collectAsStateWithLifecycle(emptyList())
+                val terminals by session.terminalProfiles.collectAsStateWithLifecycle(emptyList())
+                // Collected here rather than inside the taskbar: the readout ticks
+                // twice a second, and a collector inside the bar would recompose the
+                // bar's whole subtree — every window button and its icon — on every
+                // sample. Hoisting it means the taskbar takes a value and only the
+                // readout's own draw is invalidated.
+                val frameRate by session.frameRate.collectAsStateWithLifecycle()
+                val inputProfile by session.inputProfile.collectAsStateWithLifecycle()
+                // The pad's held set changes at a stick's report rate. Collected here
+                // for the same reason `frameRate` is: the panel takes a value, so only
+                // the rows that light are invalidated rather than the desktop.
+                val heldControls by session.heldControls.collectAsStateWithLifecycle()
+                val inputProfiles by session.inputProfileList
+                    .collectAsStateWithLifecycle(emptyList())
+                val activeInputProfileId by session.activeInputProfileId
+                    .collectAsStateWithLifecycle(null)
+                val touchVisible by session.touchControlsVisible.collectAsStateWithLifecycle()
+                val touchEditing by session.touchEditing.collectAsStateWithLifecycle()
+                val selectedTouchControl by session.selectedTouchControl
+                    .collectAsStateWithLifecycle()
+                val inputNotice by session.inputNotice.collectAsStateWithLifecycle()
+                SessionDesktop(
+                    state = state,
+                    surface = surface,
+                    pointerMode = pointerMode,
+                    input = InputEditorState(
+                        profile = inputProfile,
+                        profiles = inputProfiles,
+                        activeProfileId = activeInputProfileId,
+                        // A container naming a profile that has been deleted resolves
+                        // to the default and is not rewritten, so the two disagree —
+                        // which is exactly the case worth saying out loud.
+                        missingProfile = activeInputProfileId != null &&
+                            inputProfiles.none { it.id == activeInputProfileId },
+                        containerName = state.containerName,
+                        guest = state.geometry,
+                        live = true,
+                        held = heldControls,
+                        touchVisible = touchVisible,
+                        editing = touchEditing,
+                        selected = selectedTouchControl,
+                        notice = inputNotice,
+                    ),
+                    inputActions = InputEditorActions(
+                        onProfile = session::setInputProfile,
+                        onPickProfile = session::pickInputProfile,
+                        onRename = { session.setInputProfile(inputProfile.copy(name = it)) },
+                        onNewProfile = session::newInputProfile,
+                        onDuplicate = session::duplicateInputProfile,
+                        onDelete = session::deleteInputProfile,
+                        onImportText = session::importInputProfile,
+                        onExportText = { session.exportInputProfile(it) },
+                        onTouchVisible = session::setTouchControlsVisible,
+                        onEditing = session::setTouchEditing,
+                        onSelect = session::selectTouchControl,
+                        onDismissNotice = session::dismissInputNotice,
+                    ),
+                    windows = windows,
+                    frameRate = frameRate,
+                    shortcuts = shortcuts,
+                    shellUnavailableReason = session.shellUnavailableReason,
+                    metrics = session.metrics,
+                    onOpenLogs = { navController.navigate(state.logRoute()) },
+                    onOpenFiles = {
+                        state.containerId?.let { navController.navigate(Routes.files(it)) }
+                    },
+                    onStop = session::stop,
+                    onTogglePause = session::togglePause,
+                    onTogglePointerMode = session::togglePointerMode,
+                    onShowKeyboard = session::showKeyboard,
+                    onLaunchApp = session::launchApp,
+                    onFocusWindow = session::focusWindow,
+                    onMinimizeWindow = session::minimizeWindow,
+                    onCloseWindow = session::closeWindow,
+                    onKillWindow = session::killWindow,
+                    onMoveResizeWindow = session::moveResizeWindow,
+                    viewport = viewport,
+                    terminals = terminals,
+                    onTerminal = session::openTerminal,
+                )
+            }
         }
     }
 

@@ -99,6 +99,11 @@ fun ContainerSheet(
         ActivityResultContracts.StartActivityForResult(),
     ) { viewModel.refreshAfterPermission() }
 
+    // Placing controls takes the whole screen, and turns it landscape on the way.
+    // The sheet is portrait and 421 dp wide; the thing being arranged is a
+    // landscape overlay. See `TouchArrange`.
+    var arranging by remember { mutableStateOf(false) }
+
     ContainerSheetContent(
         state = state,
         onDismiss = onDismiss,
@@ -121,6 +126,7 @@ fun ContainerSheet(
             onExportText = { viewModel.exportInputProfile(it) },
             onSelect = { viewModel.selectTouchControl(it) },
             onDismissNotice = viewModel::dismissInputNotice,
+            onArrange = { arranging = true },
         ),
         onDeleteLogs = viewModel::deleteLogs,
         onCopyDiagnostics = viewModel::copyDiagnosticsTo,
@@ -133,6 +139,16 @@ fun ContainerSheet(
             )
         },
     )
+
+    if (arranging) {
+        TouchArrangeDialog(
+            layout = state.input.profile.overlay,
+            selected = state.input.selectedTouchControl,
+            onSelect = { viewModel.selectTouchControl(it) },
+            onLayout = { viewModel.saveInputProfile(state.input.profile.copy(touch = it)) },
+            onDone = { arranging = false },
+        )
+    }
 }
 
 private const val NEW_KEY = "new-container"
