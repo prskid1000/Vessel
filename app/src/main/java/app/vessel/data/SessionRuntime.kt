@@ -265,6 +265,15 @@ class SessionRuntime @Inject constructor(
     private var guestOutput: GuestOutputPipe? = null
 
     /**
+     * The start-of-session code-cache compile, running beside the desktop.
+     *
+     * Held so teardown can cancel it before starting its own: the two would
+     * otherwise merge the same reference codemaps from two processes. See the
+     * call site in [runDesktop] for why it is not awaited there.
+     */
+    private var codeCacheJob: Job? = null
+
+    /**
      * Whether the user asked for this.
      *
      * A session the user stopped ends [SessionExit.OK]. Without the flag it would
@@ -843,9 +852,17 @@ class SessionRuntime @Inject constructor(
         // result is worth the most: last session's codemaps become this
         // session's cache, before the guest that would load it exists. The cost
         // is paid only when there is something to compile — the first thing
-        // `generateCodeCache` does is count `codemap/new` and return — so a
+        // [generateCodeCache] does is count `codemap/new` and return — so a
         // session that ended cleanly has already emptied it and this is free.
-        generateCodeCache(running, log)
+        //
+        // **Launched, not awaited, and that is not a detail.** The first build
+        // of this awaited it here, and a compiler that crashes on a stale cache
+        // then holds the desktop for the whole of [CODE_CACHE_TIMEOUT_MS]: the
+        // session log read "the FEX code cache did not finish in 120 s and was
+        // killed" and the container looked like it would not start at all. A
+        // best-effort cache is never worth a launch, so it now runs beside the
+        // desktop and teardown collects it.
+        codeCacheJob = scope.launch { generateCodeCache(running, log) }
 
         // Opened before the first guest process and read for the whole session,
         // because the guest talks for far longer than any one child of ours
@@ -1410,6 +1427,15 @@ class SessionRuntime @Inject constructor(
 
         // Between the guest dying and the wake lock going, which is the only
         // window in which the CPU is both idle and still ours.
+        //
+        // The start-of-session catch-up may still be going; it is compiling the
+        // *previous* run's codemaps and this call wants to compile this run's,
+        // so two of them at once would have the compiler merging the same
+        // reference set from two processes. Cancelled rather than joined: the
+        // session is already over, the user is waiting, and whatever the
+        // catch-up does not finish is still in `codemap/new` for the next start.
+        codeCacheJob?.cancelAndJoin()
+        codeCacheJob = null
         if (current != null) generateCodeCache(current, log)
 
         runCatching { display.stop() }
