@@ -1,6 +1,7 @@
 package app.vessel.core
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 /**
  * What a running session costs, and the arithmetic that recovers it.
@@ -89,6 +90,57 @@ data class MetricSample(
     val gpuPercent: Int? = null,
     /** Adreno clock. Unavailable on this device — `gpuclk` is denied to apps. */
     val gpuClockMhz: Int? = null,
+
+    // — graphics: what the D3D layer itself is doing —
+    /**
+     * DXVK's own counters, from the snapshot `patches/dxvk/0001` writes.
+     *
+     * **The only fields here that describe the guest's work rather than the
+     * phone's response to it**, and that is why they are worth carrying. Every
+     * other number in this record answers "how hard is the device working"; a
+     * draw-call count answers "at what", and the two together are what separate
+     * a scene that is genuinely heavy from one that is slow for a reason
+     * graphics has nothing to do with.
+     *
+     * The distinction is not hypothetical. Metro's intro reads one draw call and
+     * one render pass a frame with the GPU at 2% — a fullscreen video blit,
+     * bottlenecked on a single-threaded CPU decode under FEX — and no amount of
+     * GPU load, clock or thermal data says so. Gameplay in the same title reads
+     * thousands of draws with the GPU pinned. Same fps, opposite diagnosis.
+     *
+     * Null whenever no Direct3D program is running: a title that never loads
+     * DXVK writes no snapshot, and a snapshot older than a few seconds is
+     * treated as no reading rather than as the last thing that happened.
+     *
+     * Floats, and stored as such, for the reason [fps] is: rounding at the
+     * sample turns a steady 2.4 draws a frame into an alternating 2 and 3 and
+     * puts a sawtooth in a graph of something that was not changing. The panel
+     * rounds when it draws, which is the right place for it.
+     */
+    val d3dFps: Float? = null,
+    val d3dDrawCallsPerFrame: Float? = null,
+    val d3dDispatchesPerFrame: Float? = null,
+    val d3dRenderPassesPerFrame: Float? = null,
+    val d3dBarriersPerFrame: Float? = null,
+    val d3dSubmissionsPerFrame: Float? = null,
+    val d3dGpuSyncsPerFrame: Float? = null,
+    /**
+     * How many pipelines exist, which is a population and not a rate.
+     *
+     * Absolute rather than per frame, and the producer treats it that way too: a
+     * pipeline count that only ever went up by three in the last second would
+     * hide that there are nine hundred. It climbs monotonically and flattens
+     * when compilation stops, which is the shape worth seeing — a title that is
+     * still compiling at minute ten is a title that will stutter at minute ten.
+     */
+    val d3dPipelines: Int? = null,
+    val d3dPipelineLibraries: Int? = null,
+    val d3dPipelinesCompute: Int? = null,
+    /** Pipeline compiles queued and not yet finished. Zero when the backlog clears. */
+    val d3dPipeTasksPending: Int? = null,
+    /** Video memory, as DXVK's allocator accounts for it rather than as the kernel does. */
+    val d3dMemAllocatedMb: Int? = null,
+    val d3dMemUsedMb: Int? = null,
 
     // — memory —
     /** Device RAM in use, from `ActivityManager.MemoryInfo`. */
@@ -313,6 +365,110 @@ data class FrameStats(
 }
 
 /**
+ * What the D3D counters did over a whole run, accumulated as the run goes.
+ *
+ * **Not derived from [MetricHistory], and that is the whole reason it exists.**
+ * The history is a bounded ring twenty minutes long, so a summary taken from it
+ * would describe the last twenty minutes of an hour-long session and label it
+ * the run. This holds four extents and four peaks — a fixed handful of numbers —
+ * and never grows, so it can cover a session of any length for the cost of one
+ * comparison per counter per tick.
+ *
+ * The output goes in the session log rather than on a graph, which is why it is
+ * a sentence and not a type. A trace answers "what happened at t+412s"; the log
+ * answers "what did this run look like", and that is the question somebody
+ * reading a bug report a week later is actually asking.
+ */
+class GfxRunSummary {
+    private val draws = Extent()
+    private val passes = Extent()
+    private val submissions = Extent()
+    private val frames = Extent()
+    private var pipelinesPeak = 0
+    private var librariesPeak = 0
+    private var computePeak = 0
+    private var memUsedPeakMb = 0
+
+    /** Ticks that carried a D3D reading. Ticks that did not are not counted against it. */
+    var samples: Int = 0
+        private set
+
+    fun add(sample: MetricSample) {
+        var any = false
+        sample.d3dDrawCallsPerFrame?.let { draws.add(it); any = true }
+        sample.d3dRenderPassesPerFrame?.let { passes.add(it); any = true }
+        sample.d3dSubmissionsPerFrame?.let { submissions.add(it); any = true }
+        sample.d3dFps?.let { frames.add(it); any = true }
+        sample.d3dPipelines?.let { if (it > pipelinesPeak) pipelinesPeak = it }
+        sample.d3dPipelineLibraries?.let { if (it > librariesPeak) librariesPeak = it }
+        sample.d3dPipelinesCompute?.let { if (it > computePeak) computePeak = it }
+        sample.d3dMemUsedMb?.let { if (it > memUsedPeakMb) memUsedPeakMb = it }
+        if (any) samples++
+    }
+
+    /**
+     * One line, or null when no Direct3D program ever drew.
+     *
+     * Null rather than a line saying nothing happened: a session that runs a
+     * setup program or a shell has no graphics story, and printing "d3d: no
+     * samples" once a minute for the length of it is the noise this summary
+     * exists instead of.
+     */
+    fun line(): String? {
+        if (samples == 0) return null
+        return buildString {
+            append("d3d over ").append(samples).append(" sample(s)")
+            draws.append(this, "draws/frame")
+            passes.append(this, "passes/frame")
+            submissions.append(this, "submits/frame")
+            frames.append(this, "presented fps")
+            if (pipelinesPeak > 0 || librariesPeak > 0 || computePeak > 0) {
+                append(" · pipelines ").append(pipelinesPeak)
+                if (librariesPeak > 0) append(" +").append(librariesPeak).append(" libraries")
+                if (computePeak > 0) append(" +").append(computePeak).append(" compute")
+            }
+            if (memUsedPeakMb > 0) append(" · vidmem peak ").append(memUsedPeakMb).append(" MB")
+        }
+    }
+
+    /**
+     * The smallest thing that can answer min/mean/max without keeping the values.
+     *
+     * A running sum rather than a list, so the memory this costs does not depend
+     * on how long the session was — which is the property that let this replace
+     * the twenty-minute window in the first place.
+     */
+    private class Extent {
+        private var min = Float.MAX_VALUE
+        private var max = -Float.MAX_VALUE
+        private var total = 0.0
+        private var count = 0
+
+        fun add(value: Float) {
+            if (value < min) min = value
+            if (value > max) max = value
+            total += value
+            count++
+        }
+
+        /** ` · label 1.0/842.3/3480.0` — min, mean, max, in that order. */
+        fun append(out: StringBuilder, label: String) {
+            if (count == 0) return
+            out.append(" · ").append(label).append(' ')
+                .append(oneDecimal(min)).append('/')
+                .append(oneDecimal((total / count).toFloat())).append('/')
+                .append(oneDecimal(max))
+        }
+    }
+}
+
+/** `1.0`, `842.3` — a fixed decimal, with no locale to make it a comma. */
+fun oneDecimal(value: Float): String {
+    val tenths = (value * 10f).toLong()
+    return "${tenths / 10}.${(if (tenths < 0) -tenths else tenths) % 10}"
+}
+
+/**
  * CPU time in, a percentage out.
  *
  * Stateful because a jiffy counter is cumulative: the answer is always a
@@ -441,6 +597,92 @@ fun parseProcPidStatmResidentPages(line: String): Long? {
     val resident = fields[1].toLongOrNull() ?: return null
     return if (resident < 0L) null else resident
 }
+
+/**
+ * One snapshot of DXVK's counters, exactly as `patches/dxvk/0001` writes them.
+ *
+ * A separate type from [MetricSample] on purpose. This is a wire format owned by
+ * a C++ file in a patch against a vendored tree, and the sample is a storage
+ * format owned by this app; collapsing them would mean a rename on either side
+ * silently losing a column on the other. The field names here are the producer's
+ * and must not be changed to match ours.
+ *
+ * Every field is nullable with a null default, which is what lets a snapshot
+ * written by an older build of the patch lose one key rather than fail to parse
+ * whole. The alternative — zeros — would put a fabricated reading on a graph,
+ * which is the one thing this feature exists to stop.
+ */
+@Serializable
+data class GfxStats(
+    /** How long the counters below were accumulated over, per the producer's clock. */
+    val intervalMs: Long? = null,
+    val presents: Long? = null,
+    val fps: Float? = null,
+    val drawCallsPerFrame: Float? = null,
+    val dispatchesPerFrame: Float? = null,
+    val renderPassesPerFrame: Float? = null,
+    val barriersPerFrame: Float? = null,
+    val submissionsPerFrame: Float? = null,
+    val gpuSyncsPerFrame: Float? = null,
+    val pipelinesGraphics: Int? = null,
+    val pipelineLibraries: Int? = null,
+    val pipelinesCompute: Int? = null,
+    val pipeTasksDone: Long? = null,
+    val pipeTasksTotal: Long? = null,
+    val memAllocatedMb: Int? = null,
+    val memUsedMb: Int? = null,
+) {
+    /** Compiles queued and not finished, or null when the producer said neither. */
+    val pipeTasksPending: Int?
+        get() {
+            val total = pipeTasksTotal ?: return null
+            val done = pipeTasksDone ?: return null
+            return (total - done).coerceAtLeast(0L).toInt()
+        }
+
+    /**
+     * Whether this snapshot describes a window that means anything.
+     *
+     * **The first snapshot of a run does not, and this is the check that drops
+     * it.** The producer keeps its last write time in a static initialised to
+     * zero, so on the very first present the interval it reports is the whole of
+     * `steady_clock` since boot and the frame rate it derives is that many
+     * frames in one nominal second. The per-frame figures in that first line are
+     * still meaningful — they are the device's lifetime totals over its lifetime
+     * presents — but the two time-derived ones are not, and a reader cannot tell
+     * which fields to trust from the line alone. So the whole line is dropped;
+     * it is replaced a second later.
+     *
+     * The upper bound is what catches it, and it is deliberately loose. A guest
+     * that presents once and then stops for two minutes really does produce a
+     * two-minute interval, and averaging over it is honest. Ten minutes is past
+     * anything a running program does and short of any uptime a phone that is
+     * playing a game has.
+     */
+    val plausible: Boolean
+        get() {
+            val interval = intervalMs ?: return false
+            return interval in 1L..MAX_GFX_INTERVAL_MS
+        }
+}
+
+/**
+ * A snapshot, or null when there is nothing usable to read.
+ *
+ * Null covers every way this can go wrong and the caller treats them alike: the
+ * file has never been written, the read caught it between the producer's
+ * truncate and its write, or the line is from the first present and is not a
+ * window. All three mean "no reading this tick", which is a gap on the graph
+ * rather than a zero — the same contract every other source in
+ * [app.vessel.data.MetricSampler] has.
+ */
+fun parseGfxStats(text: String, json: Json): GfxStats? =
+    runCatching { json.decodeFromString(GfxStats.serializer(), text.trim()) }
+        .getOrNull()
+        ?.takeIf { it.plausible }
+
+/** Past this the interval is the producer's uninitialised clock, not a window. */
+private const val MAX_GFX_INTERVAL_MS = 600_000L
 
 /** A `cpufreq` file's kHz reading as whole MHz, or null when it did not parse. */
 fun parseCpuFreqKhz(text: String): Int? {

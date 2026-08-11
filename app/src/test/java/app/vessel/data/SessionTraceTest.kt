@@ -4,8 +4,10 @@ import app.vessel.core.MetricSample
 import app.vessel.core.MetricSource
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -122,6 +124,78 @@ class SessionTraceTest {
             ),
             forTrace,
         )?.samples?.first()?.cpuPercent)
+    }
+
+    /**
+     * A version 1 trace has no `d3d*` keys at all, and every one of them has to
+     * come back as null rather than as a zero — which is the difference between
+     * "this run predates the graphics counters" and "this run drew nothing".
+     */
+    @Test
+    fun `a trace from before the graphics counters still reads, with nulls`() {
+        val trace = parseTrace(
+            sequenceOf(
+                """{"schemaVersion":1,"containerId":"c1","startedAt":1,"cores":8}""",
+                """{"elapsedMs":0,"cpuPercent":40,"gpuPercent":30}""",
+            ),
+            json,
+        )
+        assertEquals(1, trace?.header?.schemaVersion)
+        assertEquals(40, trace?.samples?.first()?.cpuPercent)
+        assertNull(trace?.samples?.first()?.d3dDrawCallsPerFrame)
+        assertNull(trace?.samples?.first()?.d3dMemUsedMb)
+        assertNull(trace?.samples?.first()?.d3dPipelines)
+    }
+
+    @Test
+    fun `the graphics counters survive a round trip as the fractions they are`() {
+        val sample = sample(0).copy(
+            d3dFps = 29.97f,
+            d3dDrawCallsPerFrame = 1f,
+            d3dRenderPassesPerFrame = 1f,
+            d3dSubmissionsPerFrame = 2.4f,
+            d3dBarriersPerFrame = 9f,
+            d3dPipelines = 1,
+            d3dPipelineLibraries = 481,
+            d3dPipeTasksPending = 3,
+            d3dMemAllocatedMb = 1_083,
+            d3dMemUsedMb = 850,
+        )
+        val trace = parseTrace(encode(header, listOf(sample)).asSequence(), json)
+        assertEquals(sample, trace?.samples?.first())
+        // Not rounded on the way through: 2.4 submissions a frame stored as an
+        // integer alternates 2 and 3 and puts a sawtooth in a flat line.
+        assertEquals(2.4f, trace?.samples?.first()?.d3dSubmissionsPerFrame)
+    }
+
+    /**
+     * `encodeDefaults = false` for samples, and the reason is size.
+     *
+     * Four columns this device can never fill, plus thirteen graphics columns a
+     * session with no Direct3D program never fills, written on every line for
+     * the length of every run. Omitting them is free on read — the default *is*
+     * the null the key would have carried — and it is what stops the trace
+     * growing faster than the thing that prunes it.
+     */
+    @Test
+    fun `a sample leaves out the fields it has nothing to say about`() {
+        val shared = Json { ignoreUnknownKeys = true; prettyPrint = true; encodeDefaults = true }
+        val compact = Json(from = shared) { prettyPrint = false; encodeDefaults = false }
+        val line = compact.encodeToString(MetricSample.serializer(), sample(0))
+        assertFalse("d3dDrawCallsPerFrame" in line)
+        assertFalse("gpuClockMhz" in line)
+        assertFalse("cpuPowerMilliwatts" in line)
+        // `elapsedMs` has no default and must survive being zero, or the first
+        // sample of every run loses its x coordinate.
+        assertTrue("elapsedMs" in line)
+        // And it still reads back to the same record.
+        assertEquals(
+            sample(0),
+            parseTrace(
+                sequenceOf(compact.encodeToString(SessionTraceHeader.serializer(), header), line),
+                compact,
+            )?.samples?.first(),
+        )
     }
 
     @Test

@@ -1,5 +1,6 @@
 package app.vessel.core
 
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -340,6 +341,139 @@ class ThermalTest {
         // half the CPU thermal picture along with the trip points.
         assertEquals(ThermalRole.CPU, thermalRoleOf("cpullc-0-0"))
         assertEquals(ThermalRole.CPU, thermalRoleOf("cpullc-1-1"))
+    }
+}
+
+/**
+ * The D3D counter snapshot, which is a wire format owned by a patch.
+ *
+ * Every string here is one the shipped `patches/dxvk/0001` can actually produce,
+ * including the two that are not readings: the first line of a run, whose
+ * interval is the producer's uninitialised clock, and a line caught halfway
+ * through being rewritten.
+ */
+class GfxStatsTest {
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    /** Metro's intro, verbatim from the shape the producer writes. */
+    private val intro =
+        """{"intervalMs":1001,"presents":30,"fps":29.97,"drawCallsPerFrame":1.0,""" +
+            """"dispatchesPerFrame":0.0,"renderPassesPerFrame":1.0,"barriersPerFrame":9.0,""" +
+            """"submissionsPerFrame":2.0,"gpuSyncsPerFrame":0.0,"pipelinesGraphics":1,""" +
+            """"pipelineLibraries":481,"pipelinesCompute":0,"pipeTasksDone":0,""" +
+            """"pipeTasksTotal":0,"memAllocatedMb":1083,"memUsedMb":850}"""
+
+    @Test
+    fun `a snapshot reads back as the numbers the producer wrote`() {
+        val stats = parseGfxStats(intro, json)!!
+        assertEquals(29.97f, stats.fps!!, 0.001f)
+        assertEquals(1f, stats.drawCallsPerFrame!!, 0.001f)
+        assertEquals(1f, stats.renderPassesPerFrame!!, 0.001f)
+        assertEquals(481, stats.pipelineLibraries)
+        assertEquals(850, stats.memUsedMb)
+        // Pending is derived, and zero of zero is a cleared queue rather than a
+        // missing reading.
+        assertEquals(0, stats.pipeTasksPending)
+    }
+
+    @Test
+    fun `the first snapshot of a run is dropped, because its window is the boot clock`() {
+        // The producer keeps its last write time in a static initialised to
+        // zero, so the very first present reports the whole of `steady_clock`
+        // as its interval and derives a frame rate from it.
+        val first = intro.replace("\"intervalMs\":1001", "\"intervalMs\":95213774")
+        assertNull(parseGfxStats(first, json))
+    }
+
+    @Test
+    fun `a long quiet stretch is still a reading`() {
+        // A guest that presents once every two minutes really did average its
+        // counters over two minutes, and that is honest rather than broken.
+        val slow = intro.replace("\"intervalMs\":1001", "\"intervalMs\":120000")
+        assertEquals(1f, parseGfxStats(slow, json)!!.drawCallsPerFrame!!, 0.001f)
+    }
+
+    @Test
+    fun `a line caught mid-rewrite is no reading rather than a wrong one`() {
+        // The producer truncates and rewrites, so a read can land on a partial
+        // file. Never an exception, and never a half-parsed record.
+        assertNull(parseGfxStats(intro.substring(0, 60), json))
+        assertNull(parseGfxStats("", json))
+        assertNull(parseGfxStats("{}", json))
+    }
+
+    @Test
+    fun `a key this build has never heard of does not lose the line`() {
+        val extended = intro.dropLast(1) + ""","aCounterAddedLater":17}"""
+        assertEquals(850, parseGfxStats(extended, json)!!.memUsedMb)
+    }
+
+    @Test
+    fun `a key this build expects and does not get is null, not zero`() {
+        val partial = """{"intervalMs":1000,"presents":60,"drawCallsPerFrame":12.5}"""
+        val stats = parseGfxStats(partial, json)!!
+        assertEquals(12.5f, stats.drawCallsPerFrame!!, 0.001f)
+        assertNull(stats.memUsedMb)
+        // Pending needs both halves; one of them is not enough to subtract.
+        assertNull(stats.pipeTasksPending)
+    }
+}
+
+/**
+ * The one-line summary the session log gets, which has to survive a run of any
+ * length without holding the run.
+ */
+class GfxRunSummaryTest {
+
+    private fun sample(draws: Float?, fps: Float? = null, pipelines: Int? = null) =
+        MetricSample(
+            elapsedMs = 0L,
+            d3dDrawCallsPerFrame = draws,
+            d3dFps = fps,
+            d3dPipelines = pipelines,
+        )
+
+    @Test
+    fun `a run with no Direct3D program says nothing at all`() {
+        val summary = GfxRunSummary()
+        repeat(600) { summary.add(sample(draws = null)) }
+        assertNull(summary.line())
+        assertEquals(0, summary.samples)
+    }
+
+    @Test
+    fun `the line carries min mean and max of the whole run`() {
+        val summary = GfxRunSummary()
+        summary.add(sample(draws = 1f, fps = 10f, pipelines = 4))
+        summary.add(sample(draws = 3f, fps = 30f, pipelines = 40))
+        summary.add(sample(draws = 5f, fps = 50f, pipelines = 12))
+        val line = summary.line()!!
+        assertTrue(line, "d3d over 3 sample(s)" in line)
+        assertTrue(line, "draws/frame 1.0/3.0/5.0" in line)
+        assertTrue(line, "presented fps 10.0/30.0/50.0" in line)
+        // A population, so the peak and not a mean — and the peak survives a
+        // later sample reporting fewer.
+        assertTrue(line, "pipelines 40" in line)
+    }
+
+    @Test
+    fun `ticks with no reading do not count against the ones that had one`() {
+        val summary = GfxRunSummary()
+        summary.add(sample(draws = null))
+        summary.add(sample(draws = 4f))
+        summary.add(sample(draws = null))
+        assertEquals(1, summary.samples)
+        assertTrue(summary.line()!!, "draws/frame 4.0/4.0/4.0" in summary.line()!!)
+    }
+
+    @Test
+    fun `one decimal has no locale in it`() {
+        // A comma here would make the log line unparseable in half the world,
+        // which is why this is arithmetic rather than String.format.
+        assertEquals("1.0", oneDecimal(1f))
+        assertEquals("842.3", oneDecimal(842.34f))
+        assertEquals("0.0", oneDecimal(0f))
     }
 }
 

@@ -401,6 +401,25 @@ class SessionRuntime @Inject constructor(
         _state.update { it.copy(paused = false) }
     }
 
+    /**
+     * One line into the running session's log, from something outside the
+     * launch path.
+     *
+     * **The direction matters.** [SessionMetricsRecorder] already depends on
+     * this class — it watches [state] to know when a session starts — so it can
+     * call in here, whereas a version where this class asked the recorder for a
+     * summary would be a dependency cycle Hilt would refuse to build. That is
+     * why the sampler pushes its report rather than teardown pulling one.
+     *
+     * Silently does nothing when no session is open, which is the honest
+     * behaviour for a caller that is by definition not synchronised with the
+     * launch: a line arriving after the log has closed is a line about a session
+     * that has already been written up.
+     */
+    fun note(level: LogLevel, text: String) {
+        plan?.log?.line(LogSource.VESSEL, level, text)
+    }
+
     /** Forget a finished session, so the screen can be left without it lingering. */
     fun clear() {
         if (_state.value.active) return

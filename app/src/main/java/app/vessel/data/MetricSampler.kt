@@ -9,16 +9,19 @@ import android.os.Process
 import android.system.Os
 import android.system.OsConstants
 import app.vessel.core.CpuLoad
+import app.vessel.core.GfxStats
 import app.vessel.core.MetricSample
 import app.vessel.core.MetricSource
 import app.vessel.core.ThermalRole
 import app.vessel.core.parseCpuFreqKhz
+import app.vessel.core.parseGfxStats
 import app.vessel.core.parseKgslGpuBusy
 import app.vessel.core.parseProcPidStatCpuTicks
 import app.vessel.core.parseProcPidStatmResidentPages
 import app.vessel.core.parseThermalMilliCelsius
 import app.vessel.core.thermalRoleOf
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.serialization.json.Json
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -54,6 +57,14 @@ import javax.inject.Singleton
 @Singleton
 class MetricSampler @Inject constructor(
     @ApplicationContext private val context: Context,
+    /**
+     * The app's shared configuration, for the one source here that is a document
+     * rather than a number. `ignoreUnknownKeys` is what it is here for: the
+     * snapshot is written by a patch against a vendored DXVK, and a counter
+     * added there before this class knows about it must not make the whole line
+     * unreadable.
+     */
+    private val json: Json,
 ) {
     private val activityManager: ActivityManager? =
         context.getSystemService(ActivityManager::class.java)
@@ -124,11 +135,23 @@ class MetricSampler @Inject constructor(
      *   server's renderer. Giving this class a display dependency to fetch it
      *   would make the one part of the metrics story that has no Android in it
      *   depend on the part that is nothing but Android.
+     * @param gfxStats the D3D layer's counter snapshot, or null when the caller
+     *   has no session to point at. **The file is read here and only the path is
+     *   passed in**, which is the opposite of [fps] and for a different reason.
+     *   There is no dependency problem: it is a plain file, and reading files is
+     *   exactly what the rest of this class does — pushing the parse out to the
+     *   recorder would put half of one source's logic in a class that has no
+     *   other business knowing what a `/proc` node looks like. But *which* file
+     *   is a property of the session, and this class knows nothing about
+     *   sessions and should not start: it has a `Context` and no container id,
+     *   and giving it one would make a sampler that cannot be constructed
+     *   without a container. So the caller names the file and this reads it.
      */
     fun sample(
         elapsedMs: Long,
         atMillis: Long = System.currentTimeMillis(),
         fps: Float? = null,
+        gfxStats: File? = null,
     ): MetricSample {
         if (tick % RESCAN_TICKS == 0) pids = ourPids()
         tick++
@@ -158,6 +181,7 @@ class MetricSampler @Inject constructor(
         val present = clocks.filterNotNull()
         val memory = deviceMemory()
         refreshBattery(atMillis)
+        val d3d = readGfxStats(gfxStats, atMillis)
 
         return MetricSample(
             elapsedMs = elapsedMs,
@@ -184,6 +208,19 @@ class MetricSampler @Inject constructor(
             batteryMillivolts = batteryMillivolts.takeIf { it > 0 },
             batteryMilliamps = currentMicroAmps()?.div(1000),
             fps = fps,
+            d3dFps = d3d?.fps,
+            d3dDrawCallsPerFrame = d3d?.drawCallsPerFrame,
+            d3dDispatchesPerFrame = d3d?.dispatchesPerFrame,
+            d3dRenderPassesPerFrame = d3d?.renderPassesPerFrame,
+            d3dBarriersPerFrame = d3d?.barriersPerFrame,
+            d3dSubmissionsPerFrame = d3d?.submissionsPerFrame,
+            d3dGpuSyncsPerFrame = d3d?.gpuSyncsPerFrame,
+            d3dPipelines = d3d?.pipelinesGraphics,
+            d3dPipelineLibraries = d3d?.pipelineLibraries,
+            d3dPipelinesCompute = d3d?.pipelinesCompute,
+            d3dPipeTasksPending = d3d?.pipeTasksPending,
+            d3dMemAllocatedMb = d3d?.memAllocatedMb,
+            d3dMemUsedMb = d3d?.memUsedMb,
         )
     }
 
@@ -213,6 +250,65 @@ class MetricSampler @Inject constructor(
     }
 
     private fun gpuPercent(): Int? = readFile(KGSL_GPUBUSY)?.let(::parseKgslGpuBusy)?.percent
+
+    /**
+     * The D3D layer's latest snapshot, or null when there is not a current one.
+     *
+     * **Freshness is the whole of the logic here, and it answers three cases
+     * with one rule.** The producer rewrites this file at most once a second and
+     * only while a Direct3D program is presenting, so a file whose last write is
+     * older than [GFX_STALE_MS] means one of: no D3D program has run yet, the
+     * one that was running has exited or stopped drawing, or this is a snapshot
+     * left behind by an earlier session. All three are "no reading", which is a
+     * gap on the graph — and drawing the last thing that happened instead would
+     * put a flat line under a program that is no longer running at all, which is
+     * the most convincing kind of wrong number.
+     *
+     * Three seconds and not one: the producer writes on a present, so a title
+     * running at 20 fps with a hitch can legitimately be two seconds late, and a
+     * threshold at the sample interval would flicker the series off and on for a
+     * program that was drawing perfectly well.
+     *
+     * `lastModified` before the read, and both are cheap: a `stat` costs nothing
+     * next to opening and parsing two hundred bytes, and the common case for a
+     * program that uses no Direct3D is a file that is not there at all.
+     */
+    private fun readGfxStats(file: File?, atMillis: Long): GfxStats? {
+        val target = file ?: return null
+        val written = runCatching { target.lastModified() }.getOrDefault(0L)
+        if (written <= 0L || atMillis - written > GFX_STALE_MS) return null
+        // Bounded like every other read here, and for a related reason: this one
+        // is written by a process outside this app, so its length is not ours to
+        // assume even though we ship the code that writes it.
+        val text = readFile(target.path) ?: return null
+        return parseGfxStats(text, json)
+    }
+
+    /**
+     * Whether the D3D counters are arriving, and why not when they are not.
+     *
+     * Not part of [sources], and the difference is real: everything in that list
+     * is a fact about the device that is settled at construction and cannot
+     * change during a run. This one is a fact about the *program*, and it flips
+     * the moment a title creates its first D3D device — so it is asked for
+     * rather than cached, and the recorder re-asks it as the session goes.
+     */
+    fun graphicsSource(file: File?, atMillis: Long = System.currentTimeMillis()): MetricSource {
+        val reading = readGfxStats(file, atMillis)
+        return MetricSource(
+            label = "d3d",
+            origin = file?.path ?: "the session's VESSEL_GFX_STATS snapshot",
+            available = reading != null,
+            reason = if (reading != null) {
+                ""
+            } else {
+                "no Direct3D counters: DXVK writes them only while a program is drawing " +
+                    "through D3D 8/9/10/11, so a session that runs nothing graphical — or " +
+                    "one whose game has exited — leaves these columns empty. This is not a " +
+                    "source that failed."
+            },
+        )
+    }
 
     /**
      * The current clock of every core, indexed by cpu number.
@@ -454,6 +550,16 @@ class MetricSampler @Inject constructor(
 
         /** Longer than any of these files ever prints, and short enough to be free. */
         const val MAX_READ_BYTES = 2048
+
+        /**
+         * How old the D3D snapshot may be and still be a reading.
+         *
+         * Three sample intervals. The producer writes on a present, so a title
+         * at 20 fps with a hitch is legitimately late, and a threshold at one
+         * interval would flicker the series off and on under a program that was
+         * drawing perfectly well.
+         */
+        const val GFX_STALE_MS = 3_000L
 
         const val BYTES_PER_MB = 1024L * 1024L
 

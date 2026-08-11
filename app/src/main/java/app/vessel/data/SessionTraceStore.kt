@@ -44,8 +44,19 @@ data class SessionTrace(
     val isEmpty: Boolean get() = samples.isEmpty()
 }
 
-/** Bumped when the trace's shape changes in a way a reader has to know about. */
-const val SESSION_TRACE_SCHEMA: Int = 1
+/**
+ * Bumped when the trace's shape changes in a way a reader has to know about.
+ *
+ * **2** adds the `d3d*` columns — DXVK's own per-frame counters, pipeline
+ * populations and video memory — and stops writing fields that hold their
+ * default. Both directions still read: a version 1 trace has no `d3d*` keys and
+ * every one of them defaults to null, and a version 2 trace read by a build that
+ * predates them is covered by `ignoreUnknownKeys`. Nothing here has ever been
+ * renamed or removed, which is the change that would actually need a reader to
+ * branch on this number; it is a statement of what a file contains rather than a
+ * gate, and no code compares it.
+ */
+const val SESSION_TRACE_SCHEMA: Int = 2
 
 /**
  * Reads and writes the per-session telemetry sidecar.
@@ -92,6 +103,33 @@ class SessionTraceStore @Inject constructor(
      */
     private val json = Json(from = shared) { prettyPrint = false }
 
+    /**
+     * The same configuration again, with fields that hold their default left out.
+     *
+     * **Used for samples only, and it is a size decision rather than a taste
+     * one.** The shared instance sets `encodeDefaults = true`, so every sample
+     * was carrying `"gpuClockMhz":null`, `"ramClockMhz":null`,
+     * `"cpuPowerMilliwatts":null` and `"gpuPowerMilliwatts":null` — four columns
+     * this device can never fill — in every line, for the whole of every run.
+     * Adding thirteen `d3d*` fields on top of that would have grown a
+     * twelve-hour trace by tens of megabytes to say "no Direct3D program ran"
+     * forty-three thousand times.
+     *
+     * Omitting them costs nothing on read: every field of [MetricSample] except
+     * `elapsedMs` has a default, and the default *is* the null the key would
+     * have carried. A session that runs no D3D program now writes a **smaller**
+     * trace than before this feature existed, and one that does writes the
+     * counters and not the absences.
+     *
+     * The header keeps [json] and its defaults. It is one line per file, so
+     * nothing is saved by shortening it, and `schemaVersion` equal to its
+     * default is exactly the case where a header must still state it.
+     */
+    private val compact = Json(from = shared) {
+        prettyPrint = false
+        encodeDefaults = false
+    }
+
     private val root: File get() = File(context.filesDir, LOGS_DIRECTORY)
 
     /**
@@ -108,7 +146,7 @@ class SessionTraceStore @Inject constructor(
         writer.write(json.encodeToString(SessionTraceHeader.serializer(), header))
         writer.newLine()
         writer.flush()
-        SessionTraceWriter(writer, json)
+        SessionTraceWriter(writer, compact)
     }.getOrNull()
 
     /**
