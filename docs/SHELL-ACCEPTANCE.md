@@ -214,17 +214,54 @@ Phases 3–5 of `docs/plans/input-mapping.md`, against the design comp
 
    - **A `winebus` backend fed by the app** — a Wine patch adding a bus that
      takes HID reports over a socket, the way `patches/wine/0005` takes shared
-     memory over `WINE_SYSVSHM_SOCKET`, with `enable_winebus_drv=yes` forcing it
-     on the way line 258 already forces `wineoss`. This is the *correct* answer:
-     one device description reaches `hidclass` and `winexinput`, and XInput,
-     DirectInput, winmm and raw HID all light up at once, with rumble available
-     back down the same pipe. It costs a Wine patch, a full rebuild and a new
-     `.wcp`.
+     memory over `WINE_SYSVSHM_SOCKET`. This is the *correct* answer: one device
+     description reaches `hidclass` and `winexinput`, and XInput, DirectInput,
+     winmm and raw HID all light up at once, with rumble available back down the
+     same pipe.
    - **Our own `xinput1_3.dll` and friends**, talking UDP to the app over
      loopback, which is what Winlator does with `winhandler.exe`. Cheaper and
      narrower: it covers XInput only, needs one PE per guest architecture, and
      leaves DirectInput and winmm exactly as dead as they are now — which for a
      title that predates XInput is the whole problem again.
 
-   Neither is started. `tools/input/padwin.c` is the probe either would be
-   measured with; run it before and after.
+   **Measured 2026-08-11: re-enabling SDL is not the third option, and it never
+   was.** The obvious reading of those configure flags is that somebody turned
+   the backends off to save a dependency and turning them back on would produce
+   a device. It would not, because none of the three backends can see anything
+   from inside an app sandbox:
+
+   ```
+   $ adb shell ls -l /dev/input/
+   crw-rw---- 1 root input 13, 64 event0        …and eleven more
+   $ adb shell run-as app.vessel ls -l /dev/input/
+   ls: /dev/input/: Permission denied
+   ```
+
+   `/dev/input` is `root:input` 0660 and `untrusted_app` is in neither. SDL's
+   evdev backend, `bus_udev.c` and libusb all open those nodes; a Wine rebuilt
+   `--with-sdl` would enumerate exactly as many pads as it does today. The flags
+   are not an omission, they are the only correct setting for this platform.
+   Android's `InputDevice` API is the *only* thing on the device that can see a
+   pad, and it is in the app — so whichever design is chosen, the app is the
+   source and something has to carry the state across.
+
+   **Two further facts, both cheaper than they look.** `winebus.sys` and its unix
+   half `winebus.so` are already built and installed — verified on the device at
+   `files/components/Wine/1114/lib/wine/{aarch64,i386}-windows/winebus.sys` and
+   `aarch64-unix/winebus.so`, alongside `hidclass.sys`, `winexinput.sys` and all
+   five XInput DLLs. Nothing needs enabling; a backend needs adding. And a patch
+   alone does **not** invalidate `CONF_ID` (`build/wine.sh:283-289` deliberately
+   keeps patches out of the configure stamp), so a bus backend that touches no
+   `CONFIGURE_ARGS` rebuilds incrementally against the tree already in the
+   `vessel-work` volume, rather than costing the hour-plus reconfigure the entry
+   above assumed. `enable_winebus_drv=yes` is not needed and does not appear in
+   this repo; line 258 forces `wineoss`, not winebus.
+
+   **So: the socket-fed `winebus` backend, and the shim is the fallback.** The
+   argument that decided it is not cost, since the two are now closer in cost
+   than they read: it is that a shim answers `XInputGetState` and nothing else,
+   and the title this was reported against is not guaranteed to use XInput. One
+   HID device answers every API a Windows game can ask.
+
+   Not started. `tools/input/padwin.c` is the probe it would be measured with;
+   run it before and after.
