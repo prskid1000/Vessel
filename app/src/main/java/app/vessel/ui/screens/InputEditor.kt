@@ -393,12 +393,6 @@ private fun TouchPreviewCard(
             selected = state.selected,
             onArrange = actions.onArrange,
         )
-        VButton(
-            "Arrange the overlay",
-            actions.onArrange,
-            style = VButtonStyle.Secondary,
-            modifier = Modifier.fillMaxWidth(),
-        )
     }
 }
 
@@ -496,8 +490,28 @@ private fun TouchOverlayPreview(
                 }
             }
         }
+        // **The affordance sits on the picture rather than beside it.** A button
+        // under the card would be a second thing to explain and a second thing to
+        // aim at, when the card is already the target. Translucent, and over the
+        // middle where the default layout keeps nothing, so it names the gesture
+        // without hiding the arrangement it is offering to change.
+        Text(
+            "ARRANGE THE OVERLAY",
+            style = Vessel.type.overline,
+            color = Vessel.colors.textPrimary.copy(alpha = ARRANGE_HINT_INK),
+            maxLines = 1,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .clip(Vessel.metrics.shapeTag)
+                .background(Vessel.colors.neutral900.copy(alpha = ARRANGE_HINT_GROUND))
+                .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s3),
+        )
     }
 }
+
+/** Legible over an overlay, and never mistaken for one of its controls. */
+private const val ARRANGE_HINT_INK = 0.75f
+private const val ARRANGE_HINT_GROUND = 0.55f
 
 /**
  * The plus a d-pad is, in the preview.
