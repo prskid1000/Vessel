@@ -100,27 +100,23 @@ internal fun PadSettings(
     live: Boolean,
     learn: Boolean,
     onLearn: (Boolean) -> Unit,
-    lit: Set<GamepadControl>,
-    onPin: (GamepadControl) -> Unit,
     onProfile: (InputProfile) -> Unit,
 ) {
-    // **Cold, the diagram cannot light up, and it says so.** A picture of a pad
-    // that never responds otherwise reads as broken — which is the same reason it
-    // is drawn faintly rather than at full strength.
-    if (!live) {
-        InputNote(
-            "No session is running, so the diagram cannot light up. Every control still " +
-                "binds, and a press on the diagram still finds its row.",
-        )
-    }
-
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // **These say "your controller", because there is no longer a picture of
+        // one to press.** A schematic pad used to sit here and answer both
+        // sentences; it was a second drawing of the controller the map at the top
+        // already draws, in the wrong positions, and reading one screen as two
+        // controllers is what the redesign set out to end. What replaces it is
+        // better than the diagram was: the real pad in your hands finds the row,
+        // and the map finds the ones on the glass.
         Text(
-            if (learn) "Press a control to bind it" else "Press a control to find its row",
+            if (learn) "Press a control on your pad to bind it"
+            else "Press a control on your pad to find its row",
             style = Vessel.type.overline,
             color = Vessel.colors.textMuted,
             modifier = Modifier.weight(1f),
@@ -129,11 +125,11 @@ internal fun PadSettings(
         Text("Learn", style = Vessel.type.bodySmall, color = Vessel.colors.textLabel)
     }
 
-    // **Drawn again, after a refactor quietly dropped it.** The sentence above
-    // promises that a press on the diagram finds its row, and for a while there
-    // was no diagram on the screen at all — a promise about a picture nobody
-    // could see. It is also the only way to reach a row without a pad plugged in.
-    PadDiagram(lit = lit, dim = !live, onPin = onPin)
+    // Cold, nothing can answer a press, and it says so rather than leaving the
+    // sentence above looking broken.
+    if (!live) {
+        InputNote("No session is running, so a press cannot find its row. Every control still binds.")
+    }
 
     Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
         Stick.entries.forEach { stick ->
@@ -213,231 +209,8 @@ private fun StickRoleField(stick: Stick, profile: InputProfile, onProfile: (Inpu
  */
 private val ROLES = listOf(StickRole.Pad, StickRole.Keys, StickRole.Look, StickRole.None)
 
-/**
- * A picture of a pad, lit where a control is down.
- *
- * **Absolute placement against a fixed box, on purpose.** It is a diagram of a
- * physical object, not a layout: the shoulders are above the face buttons because
- * they are, and a flow that reordered them at some width would stop being a
- * picture of anything. It draws no pad that is not there either — nothing here
- * says a controller is connected, only which of its controls is currently held.
- */
-@Composable
-private fun PadDiagram(lit: Set<GamepadControl>, dim: Boolean, onPin: (GamepadControl) -> Unit) {
-    // **Scaled to the panel, not pinned to 210 dp.** Every pin inside is placed
-    // at an absolute offset in a fixed box, which is the right way to describe a
-    // controller's shape and the wrong way to fill a column: on a 421 dp sheet
-    // the whole pad sat in the left half with the face buttons bunched around
-    // the middle. Scaling the box keeps one set of coordinates -- the shape is
-    // still described once -- and Compose carries the transform into hit testing,
-    // so a pin stays tappable where it is drawn.
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val scale = (maxWidth / PAD_DIAGRAM_WIDTH).coerceIn(1f, PAD_DIAGRAM_MAX_SCALE)
-        Box(
-            Modifier
-                .align(Alignment.Center)
-                .size(PAD_DIAGRAM_WIDTH * scale, PAD_DIAGRAM_HEIGHT * scale),
-        ) {
-    Box(
-        Modifier
-            .size(PAD_DIAGRAM_WIDTH, PAD_DIAGRAM_HEIGHT)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                transformOrigin = TransformOrigin(0f, 0f)
-            }
-            .alpha(if (dim) COLD_DIAGRAM_ALPHA else 1f),
-    ) {
-        PadDpad(lit, onPin)
-        PAD_PINS.forEach { pin ->
-            val on = pin.control in lit
-            Box(
-                Modifier
-                    .offset(pin.x, pin.y)
-                    .size(pin.width, pin.height)
-                    .clip(pin.shape())
-                    .background(if (on) Vessel.colors.accentPressed else Color.Transparent)
-                    .border(Vessel.metrics.hairline, if (on) Vessel.colors.accent else Vessel.colors.border, pin.shape())
-                    // Tappable as well as lit: a pad you have not plugged in yet
-                    // still needs a way to reach a row, and with Learn on this is
-                    // the same gesture as pressing the control itself.
-                    .clickable(onClickLabel = pin.control.rowLabel()) { onPin(pin.control) }
-                    .padding(1.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (pin.label.isNotEmpty()) {
-                    Text(
-                        pin.label,
-                        style = Vessel.type.monoSmall,
-                        color = if (on) Vessel.colors.accent100 else Vessel.colors.textMuted,
-                        maxLines = 1,
-                        softWrap = false,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            }
-        }
-    }
-        }
-    }
-}
-
-/**
- * The d-pad, as one cross that four directions share.
- *
- * **It was four detached 18 dp rectangles and it did not work.** Reported as
- * "clicking on these does nothing", and the geometry says why: the four arms
- * enclosed a 22x24 dp hole at the exact centre that belonged to no pin at all, so
- * the natural place to put a thumb was the one place with no handler behind it.
- * The arms themselves were 18 dp against a 44 dp house minimum, `clickable` adds
- * no slop of its own, and the whole diagram sits inside a scroll that claims any
- * tap with a few pixels of travel — so even the aimed hits were being eaten.
- *
- * The fix is the shape the rest of the product already uses. One square, one
- * cross drawn inside it at [TouchOverlayPainter.ARM] — the same proportion the
- * overlay and the layout preview draw — and the direction taken from *where in
- * the square* the tap landed, the way a real d-pad rocker resolves it. There is
- * no dead centre because there are no gaps, and the target is the whole 64 dp
- * cluster rather than four islands inside it.
- */
-@Composable
-private fun PadDpad(lit: Set<GamepadControl>, onPin: (GamepadControl) -> Unit) {
-    val ring = Vessel.colors.border
-    val ringLit = Vessel.colors.accent
-    val fillLit = Vessel.colors.accentPressed
-    val hairline = Vessel.metrics.hairline
-    val down = DPAD_DIRECTIONS.filter { it.control in lit }
-    Box(
-        Modifier
-            .offset(DPAD_X, DPAD_Y)
-            .size(DPAD_SIZE)
-            .pointerInput(Unit) {
-                detectTapGestures { at ->
-                    // Dominant axis from the centre, which is what the four
-                    // quadrants of a rocker mean. A tap dead in the middle is
-                    // vertical by the tie-break, and no thumb ever notices.
-                    val dx = at.x - size.width / 2f
-                    val dy = at.y - size.height / 2f
-                    onPin(
-                        if (abs(dx) > abs(dy)) {
-                            if (dx < 0f) GamepadControl.DPAD_LEFT else GamepadControl.DPAD_RIGHT
-                        } else {
-                            if (dy < 0f) GamepadControl.DPAD_UP else GamepadControl.DPAD_DOWN
-                        },
-                    )
-                }
-            },
-    ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val r = size.minDimension / 2f
-            val cx = size.width / 2f
-            val cy = size.height / 2f
-            val a = r * TouchOverlayPainter.ARM
-            val cross = Path().apply {
-                moveTo(cx - a, cy - r); lineTo(cx + a, cy - r); lineTo(cx + a, cy - a)
-                lineTo(cx + r, cy - a); lineTo(cx + r, cy + a); lineTo(cx + a, cy + a)
-                lineTo(cx + a, cy + r); lineTo(cx - a, cy + r); lineTo(cx - a, cy + a)
-                lineTo(cx - r, cy + a); lineTo(cx - r, cy - a); lineTo(cx - a, cy - a)
-                close()
-            }
-            // Only the arm that is down lights, so a diagram of a pad with north
-            // held reads as north held rather than as "the d-pad exists".
-            down.forEach { arm ->
-                drawRect(
-                    color = fillLit,
-                    topLeft = Offset(cx + arm.left * r + arm.leftArm * a, cy + arm.top * r + arm.topArm * a),
-                    size = Size(
-                        (arm.right - arm.left) * r + (arm.rightArm - arm.leftArm) * a,
-                        (arm.bottom - arm.top) * r + (arm.bottomArm - arm.topArm) * a,
-                    ),
-                )
-            }
-            drawPath(cross, if (down.isEmpty()) ring else ringLit, style = Stroke(width = hairline.toPx()))
-        }
-    }
-}
-
-/**
- * One arm of the cross, as multiples of the radius and of the waist.
- *
- * Both, because an arm's rectangle is bounded by the radius on its outer edge and
- * by the waist on its inner one, and writing it as `r` and `a` terms keeps the
- * four in step with `ARM` instead of pinning numbers that would rot the moment
- * the proportion moves again.
- */
-private data class DpadArm(
-    val control: GamepadControl,
-    val left: Float,
-    val top: Float,
-    val right: Float,
-    val bottom: Float,
-    val leftArm: Float = 0f,
-    val topArm: Float = 0f,
-    val rightArm: Float = 0f,
-    val bottomArm: Float = 0f,
-)
-
-private val DPAD_DIRECTIONS = listOf(
-    DpadArm(GamepadControl.DPAD_UP, 0f, -1f, 0f, 0f, leftArm = -1f, rightArm = 1f, bottomArm = -1f),
-    DpadArm(GamepadControl.DPAD_DOWN, 0f, 0f, 0f, 1f, leftArm = -1f, topArm = 1f, rightArm = 1f),
-    DpadArm(GamepadControl.DPAD_LEFT, -1f, 0f, 0f, 0f, topArm = -1f, rightArm = -1f, bottomArm = 1f),
-    DpadArm(GamepadControl.DPAD_RIGHT, 0f, 0f, 1f, 0f, leftArm = 1f, topArm = -1f, bottomArm = 1f),
-)
-
-/** The box the four old arms spanned, kept so the rest of the diagram does not move. */
-private val DPAD_X = 2.dp
-private val DPAD_Y = 52.dp
-private val DPAD_SIZE = 64.dp
-
-/** The design's 45%: a pad that cannot light up must not look like one that will not. */
-private const val COLD_DIAGRAM_ALPHA = 0.45f
-
-/**
- * Past this the pad stops reading as a diagram and starts reading as furniture.
- *
- * 2.2 was the first attempt -- the width of a 421 dp sheet -- and it looked
- * crude: the proportions were drawn at 210 dp and enlarging them by that much
- * makes the d-pad enormous and the gaps between clusters read as mistakes. The
- * original complaint was that the pad sat in the left half of the column, and
- * centring is most of that answer; a modest scale is the rest.
- */
-private const val PAD_DIAGRAM_MAX_SCALE = 1.45f
-
-private data class PadPin(
-    val control: GamepadControl,
-    val x: Dp,
-    val y: Dp,
-    val width: Dp,
-    val height: Dp,
-    val round: Boolean = false,
-    val label: String = "",
-) {
-    @Composable
-    fun shape() = if (round) Vessel.metrics.shapePill else Vessel.metrics.shapeSm
-}
-
-/** The design's own geometry, in a 210 x 156 dp box. */
-private val PAD_PINS = listOf(
-    PadPin(GamepadControl.L1, 6.dp, 0.dp, 40.dp, 13.dp, label = "L1"),
-    PadPin(GamepadControl.L2, 6.dp, 17.dp, 40.dp, 13.dp, label = "L2"),
-    PadPin(GamepadControl.R1, 164.dp, 0.dp, 40.dp, 13.dp, label = "R1"),
-    PadPin(GamepadControl.R2, 164.dp, 17.dp, 40.dp, 13.dp, label = "R2"),
-    // The four d-pad directions are not here: they are one cross, drawn and hit
-    // as a unit by `PadDpad`, for the reasons in its header.
-    PadPin(GamepadControl.THUMB_L, 14.dp, 116.dp, 36.dp, 36.dp, round = true, label = "L"),
-    PadPin(GamepadControl.THUMB_R, 104.dp, 116.dp, 36.dp, 36.dp, round = true, label = "R"),
-    PadPin(GamepadControl.Y, 160.dp, 50.dp, 22.dp, 22.dp, round = true, label = "Y"),
-    PadPin(GamepadControl.X, 138.dp, 72.dp, 22.dp, 22.dp, round = true, label = "X"),
-    PadPin(GamepadControl.B, 182.dp, 72.dp, 22.dp, 22.dp, round = true, label = "B"),
-    PadPin(GamepadControl.A, 160.dp, 94.dp, 22.dp, 22.dp, round = true, label = "A"),
-    PadPin(GamepadControl.SELECT, 70.dp, 60.dp, 30.dp, 13.dp, label = "SEL"),
-    PadPin(GamepadControl.START, 108.dp, 60.dp, 30.dp, 13.dp, label = "STA"),
-)
-
 /** The clear cross and the picker's back arrow, both inside a 44 dp row. */
 internal val CLEAR_TARGET = 28.dp
-private val PAD_DIAGRAM_WIDTH = 210.dp
-private val PAD_DIAGRAM_HEIGHT = 156.dp
 
 /**
  * A track, a fill and a square thumb.

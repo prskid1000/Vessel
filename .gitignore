@@ -12,6 +12,10 @@ build/
 !/build/*.py
 !/build/targets/
 
+# Transcripts of a build, written next to the tree by hand or by an agent. They
+# are worth keeping for the length of one debugging session and never longer.
+/*.log
+
 # Android / Gradle
 .gradle/
 .kotlin/

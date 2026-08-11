@@ -169,14 +169,16 @@ data class InputEditorActions(
  * answers to the same question. The list selects; the header names what is
  * selected and acts on it — new, duplicate, import, export, delete.
  *
- * **It wraps rather than clips, and that is the whole of the layout.** Five icon
- * actions at [app.vessel.ui.theme.VMetrics.iconButton] plus their gaps are 212 dp;
- * with a 40 dp leading control and a name that has to stay readable, they do not
- * fit beside the title on the 387 dp the container sheet has inside its gutters.
- * A previous attempt put them in a fixed-width `Row` and the last two — import and
+ * **It wraps rather than clips, and that is the whole of the layout.** A previous
+ * attempt put the actions in a fixed-width `Row` and the last two — import and
  * export — were simply not on screen. Below [HEADER_INLINE_WIDTH] they take a line
  * of their own, and the `FlowRow` means that even a width nobody anticipated wraps
  * instead of losing a button.
+ *
+ * At [HEADER_ACTION_SIZE] the five and their gaps are 172 dp, which leaves 159 dp
+ * for the name on the 387 dp the container sheet has inside its gutters — so both
+ * surfaces are one line, and the wrap below is the safety net rather than the
+ * normal case it was at 40 dp.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -250,8 +252,13 @@ fun InputEditorHeader(
  */
 @Composable
 private fun ProfileActions(state: InputEditorState, actions: InputEditorActions) {
-    VIconAction(VIcons.Plus, "New profile", actions.onNewProfile)
-    VIconAction(VIcons.Copy, "Duplicate this profile", { actions.onDuplicate(state.profile) })
+    VIconAction(VIcons.Plus, "New profile", actions.onNewProfile, size = HEADER_ACTION_SIZE)
+    VIconAction(
+        VIcons.Copy,
+        "Duplicate this profile",
+        { actions.onDuplicate(state.profile) },
+        size = HEADER_ACTION_SIZE,
+    )
     ProfileTransferButtons(state, actions, compact = true)
     // The built-in default is never deletable, and the control is absent rather
     // than disabled: a dead button asks to be pressed once.
@@ -261,9 +268,21 @@ private fun ProfileActions(state: InputEditorState, actions: InputEditorActions)
             "Delete this profile",
             { actions.onDelete(state.profile) },
             style = VButtonStyle.Danger,
+            size = HEADER_ACTION_SIZE,
         )
     }
 }
+
+/**
+ * Smaller than [app.vessel.ui.theme.VMetrics.iconButton], so the five fit beside
+ * the title instead of taking a second line.
+ *
+ * **It is below the 44 dp touch target, knowingly.** These are five infrequent
+ * profile actions on a screen whose every other control is full width; the header
+ * reading as one line is worth more here than four dp of slop on a button pressed
+ * once a week. Nothing else in the app shrinks this far, and nothing else should.
+ */
+private val HEADER_ACTION_SIZE = 32.dp
 
 private fun InputEditorState.subtitle(): String {
     val name = containerName.ifBlank { "This container" }
@@ -274,11 +293,12 @@ private fun InputEditorState.subtitle(): String {
 /**
  * Below this the five actions take a line of their own.
  *
- * 420 dp, from the arithmetic in [InputEditorHeader]: the session panel is 560 dp
- * less 22 dp of card padding, so 538 dp keeps them inline; the container sheet is
- * 421 dp less 34 dp of gutters, so 387 dp wraps them.
+ * 340 dp, from the arithmetic in [InputEditorHeader]: 172 dp of actions, a 40 dp
+ * leading control and two 8 dp gaps come to 228, and a name narrower than the
+ * ~110 dp left at 340 is not worth keeping on one line. Both real surfaces — the
+ * session panel at 538 dp and the container sheet at 387 — clear it.
  */
-private val HEADER_INLINE_WIDTH = 420.dp
+private val HEADER_INLINE_WIDTH = 340.dp
 
 // — the screen -------------------------------------------------------------------
 
@@ -306,15 +326,18 @@ fun InputEditor(
     /** The row and slot whose key is being chosen, or null while the list is showing. */
     var picking by remember { mutableStateOf<Picking?>(null) }
 
-    /** A control tapped on the diagram, which the list scrolls to. */
-    var pinned by remember { mutableStateOf<GamepadControl?>(null) }
-
     val entries = remember(profile) { controlEntries(profile) }
 
-    // A physical press wins over a tap, always: the whole point of the indicator
-    // is to answer "which row is the button under my thumb", and a stale tap
-    // highlight sitting next to a live one would answer it wrongly.
-    val highlighted = if (state.held.isNotEmpty()) state.held else setOfNotNull(pinned)
+    /**
+     * What is down on the real pad, and nothing else.
+     *
+     * There used to be a second source — a control tapped on a schematic diagram
+     * in the settings — and the two had to be ranked against each other. The
+     * diagram is gone (the map at the top is the picture of this controller, in
+     * the positions it actually has), so the question of which highlight wins no
+     * longer arises.
+     */
+    val highlighted = state.held
 
     // Learn, driven by the pad itself. `GamepadControl` already names every
     // physical control, so this is free — and it is the best answer to "which of
@@ -325,30 +348,21 @@ fun InputEditor(
         picking = entries.pickingFor(control)
     }
 
-    // **"A press on the diagram still finds its row" has to be true.** The
+    // **"Press a control on your pad to find its row" has to be true.** The
     // settings say that in as many words, and a tint on a row nobody can see is
     // indistinguishable from doing nothing — which is exactly how it was
     // reported. The index is read off the entry list rather than recomputed by a
     // parallel walk, so the scroll cannot drift from what was emitted.
+    //
+    // Not while learning: there the press opens a picker, which replaces the
+    // list, so a scroll would be answering a question behind it.
     val listState = rememberLazyListState()
-    LaunchedEffect(pinned, entries) {
-        val control = pinned ?: return@LaunchedEffect
+    LaunchedEffect(highlighted, entries, learn) {
+        if (learn) return@LaunchedEffect
+        val control = highlighted.firstOrNull() ?: return@LaunchedEffect
+        actions.onSelect(entries.rowFor(control)?.key)
         val index = entries.indexOfFirst { it is ControlEntry.Row && control in it.speaksFor }
         if (index >= 0) listState.animateScrollToItem(index + LEADING_ITEMS)
-    }
-
-    // A tap that opens the picker is not also a tap that scrolls: the picker
-    // replaces the list, so the highlight would be waiting behind it for a
-    // question that has already been answered.
-    val pin: (GamepadControl) -> Unit = { control ->
-        val row = entries.rowFor(control)
-        if (learn) {
-            picking = entries.pickingFor(control)
-            pinned = null
-        } else {
-            pinned = control
-            actions.onSelect(row?.key)
-        }
     }
 
     val selected = entries.rowByKey(state.selected)
@@ -412,8 +426,6 @@ fun InputEditor(
                     actions = actions,
                     learn = learn,
                     onLearn = { learn = it },
-                    lit = highlighted,
-                    onPin = pin,
                     modifier = Modifier.padding(top = Vessel.metrics.s22),
                 )
             }
@@ -575,28 +587,13 @@ private fun TouchOverlayPreview(
                 }
             }
         }
-        // **The affordance sits on the picture rather than beside it.** A button
-        // under the card would be a second thing to explain and a second thing to
-        // aim at, when the card is already the target. Translucent, and over the
-        // middle where the default layout keeps nothing, so it names the gesture
-        // without hiding the arrangement it is offering to change.
-        Text(
-            "ARRANGE THE OVERLAY",
-            style = Vessel.type.overline,
-            color = Vessel.colors.textPrimary.copy(alpha = ARRANGE_HINT_INK),
-            maxLines = 1,
-            modifier = Modifier
-                .align(Alignment.Center)
-                .clip(Vessel.metrics.shapeTag)
-                .background(Vessel.colors.neutral900.copy(alpha = ARRANGE_HINT_GROUND))
-                .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s3),
-        )
+        // **No label floats on the picture.** It used to read ARRANGE THE OVERLAY
+        // over the middle, from when the card itself was the only way in. There is
+        // a button under the card now saying the same five words, and a caption
+        // stamped across the arrangement you are trying to read is worse than no
+        // caption at all. The card's own gesture is a tap to select a control.
     }
 }
-
-/** Legible over an overlay, and never mistaken for one of its controls. */
-private const val ARRANGE_HINT_INK = 0.75f
-private const val ARRANGE_HINT_GROUND = 0.55f
 
 /**
  * The plus a d-pad is, in the preview.
@@ -1433,8 +1430,6 @@ private fun InputSettings(
     actions: InputEditorActions,
     learn: Boolean,
     onLearn: (Boolean) -> Unit,
-    lit: Set<GamepadControl>,
-    onPin: (GamepadControl) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val profile = state.profile
@@ -1489,8 +1484,6 @@ private fun InputSettings(
             live = state.live,
             learn = learn,
             onLearn = onLearn,
-            lit = lit,
-            onPin = onPin,
             onProfile = actions.onProfile,
         )
 
@@ -1700,8 +1693,8 @@ private fun ProfileTransferButtons(
     }
 
     if (compact) {
-        VIconAction(VIcons.Import, "Import a profile", onImport)
-        VIconAction(VIcons.Export, "Export this profile", onExport)
+        VIconAction(VIcons.Import, "Import a profile", onImport, size = HEADER_ACTION_SIZE)
+        VIconAction(VIcons.Export, "Export this profile", onExport, size = HEADER_ACTION_SIZE)
         return
     }
 
