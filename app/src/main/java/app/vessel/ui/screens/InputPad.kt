@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -45,6 +46,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.KeyEventType
@@ -394,9 +397,28 @@ private val ROLES = listOf(StickRole.Pad, StickRole.Keys, StickRole.Look, StickR
  */
 @Composable
 private fun PadDiagram(lit: Set<GamepadControl>, dim: Boolean, onPin: (GamepadControl) -> Unit) {
+    // **Scaled to the panel, not pinned to 210 dp.** Every pin inside is placed
+    // at an absolute offset in a fixed box, which is the right way to describe a
+    // controller's shape and the wrong way to fill a column: on a 421 dp sheet
+    // the whole pad sat in the left half with the face buttons bunched around
+    // the middle. Scaling the box keeps one set of coordinates -- the shape is
+    // still described once -- and Compose carries the transform into hit testing,
+    // so a pin stays tappable where it is drawn.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val scale = (maxWidth / PAD_DIAGRAM_WIDTH).coerceIn(1f, PAD_DIAGRAM_MAX_SCALE)
+        Box(
+            Modifier
+                .align(Alignment.Center)
+                .size(PAD_DIAGRAM_WIDTH * scale, PAD_DIAGRAM_HEIGHT * scale),
+        ) {
     Box(
         Modifier
             .size(PAD_DIAGRAM_WIDTH, PAD_DIAGRAM_HEIGHT)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                transformOrigin = TransformOrigin(0f, 0f)
+            }
             .alpha(if (dim) COLD_DIAGRAM_ALPHA else 1f),
     ) {
         PadDpad(lit, onPin)
@@ -427,6 +449,8 @@ private fun PadDiagram(lit: Set<GamepadControl>, dim: Boolean, onPin: (GamepadCo
                     )
                 }
             }
+        }
+    }
         }
     }
 }
@@ -540,6 +564,9 @@ private val DPAD_SIZE = 64.dp
 
 /** The design's 45%: a pad that cannot light up must not look like one that will not. */
 private const val COLD_DIAGRAM_ALPHA = 0.45f
+
+/** Past this the pad stops reading as a diagram and starts reading as furniture. */
+private const val PAD_DIAGRAM_MAX_SCALE = 2.2f
 
 private data class PadPin(
     val control: GamepadControl,

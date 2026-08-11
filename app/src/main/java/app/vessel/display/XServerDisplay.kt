@@ -1645,16 +1645,16 @@ private class SessionSurfaceView(
             is OverlayTouch.Down -> {
                 val control = touch.control ?: return
                 pressedControls[touch.pointerId] = control.id
-                sink.accept(overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h))
+                emit(overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h))
                 invalidate()
             }
 
             is OverlayTouch.Move ->
-                sink.accept(overlay.onMove(touch.pointerId, touch.x, touch.y, w, h))
+                emit(overlay.onMove(touch.pointerId, touch.x, touch.y, w, h))
 
             is OverlayTouch.Up -> {
                 pressedControls.remove(touch.pointerId)
-                sink.accept(overlay.onUp(touch.pointerId))
+                emit(overlay.onUp(touch.pointerId))
                 invalidate()
             }
         }
@@ -1925,6 +1925,26 @@ private class SessionSurfaceView(
     }
 
     /** Everything the pad is holding right now, as one HID report. */
+    /**
+     * The overlay's keystrokes, dropped while the guest has a real gamepad.
+     *
+     * The same rule the physical pad already follows a few lines up, and for the
+     * same reason: a game that reads XInput *and* the keyboard would take the
+     * glass stick twice and walk twice as far. The translator still runs — its
+     * look timer has to keep an honest idea of deflection either way — and only
+     * its output is discarded.
+     *
+     * The consequence is worth stating plainly, because it is the whole risk of
+     * this change: when the bridge is attached and delivering nothing, a control
+     * that used to send `W` now sends nothing at all. That is the correct
+     * behaviour and a bad experience, and the two are only reconciled by the
+     * bridge actually working.
+     */
+    private fun emit(events: List<GuestInput>) {
+        if (padBridge.attached) return
+        sink.accept(events)
+    }
+
     private fun publishPad() {
         padBridge.submit(0, padState.mergedWith(overlay.padSnapshot()))
     }

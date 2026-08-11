@@ -1,9 +1,9 @@
 diff --git a/dlls/winebus.sys/bus_vessel.c b/dlls/winebus.sys/bus_vessel.c
 new file mode 100644
-index 00000000000..a535d2aa92c
+index 00000000000..570ffdcf0cd
 --- /dev/null
 +++ b/dlls/winebus.sys/bus_vessel.c
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,579 @@
 +/*
 + * A winebus backend fed by the Android app over a unix socket.
 + *
@@ -304,7 +304,25 @@ index 00000000000..a535d2aa92c
 +    struct unix_device *iface;
 +
 +    if (index >= VESSEL_PAD_MAX) return;
-+    if (!(iface = vessel_devices[index])) return;
++    if (!(iface = vessel_devices[index]))
++    {
++        /* ERR, not TRACE, and counted rather than left to the log level: the
++         * session runs WINEDEBUG=-all,err+all and a TRACE here is invisible on
++         * the only device this has to work on. Ten is enough to show a pattern
++         * and few enough not to drown a game's log. */
++        static unsigned int missing;
++        if (missing++ < 10) ERR("vessel: state for pad %u but no device\n", index);
++        return;
++    }
++
++    {
++        static unsigned int seen;
++        if (seen++ < 10)
++            ERR("vessel: state pad %u axes %d %d %d %d buttons %#x\n", index,
++                (int)*(const INT16 *)(frame + 6), (int)*(const INT16 *)(frame + 8),
++                (int)*(const INT16 *)(frame + 10), (int)*(const INT16 *)(frame + 12),
++                (unsigned)*(const UINT16 *)(frame + 2));
++    }
 +
 +    vessel_devices[index] = NULL;
 +    bus_event_queue_device_removed(&vessel_event_queue, iface);
@@ -365,6 +383,10 @@ index 00000000000..a535d2aa92c
 +    }
 +
 +    state = &iface->hid_device_state;
++    {
++        static unsigned int queued;
++        if (queued++ < 10) ERR("vessel: queued a report of %u bytes\n", state->report_len);
++    }
 +    bus_event_queue_input_report(&vessel_event_queue, iface, state->report_buf, state->report_len);
 +}
 +
@@ -538,6 +560,10 @@ index 00000000000..a535d2aa92c
 +
 +            if (vessel_partial_len < VESSEL_FRAME_SIZE) break;
 +            vessel_partial_len = 0;
++            {
++                static unsigned int frames;
++                if (frames++ < 10) ERR("vessel: frame type %#x\n", vessel_partial[0]);
++            }
 +            vessel_handle_frame(vessel_partial);
 +        }
 +    }
@@ -557,103 +583,3 @@ index 00000000000..a535d2aa92c
 +        WARN("vessel: could not wake the pad bus: %s\n", strerror(errno));
 +    return STATUS_SUCCESS;
 +}
-diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
-index c2823e13f8d..cfaaeb3b286 100644
---- a/dlls/winebus.sys/Makefile.in
-+++ b/dlls/winebus.sys/Makefile.in
-@@ -9,6 +9,7 @@ EXTRADLLFLAGS = -Wl,--subsystem,native
- SOURCES = \
- 	bus_iohid.c \
- 	bus_sdl.c \
-+	bus_vessel.c \
- 	bus_udev.c \
- 	hid.c \
- 	main.c \
-diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
-index a6227be9908..b3c2f74501f 100644
---- a/dlls/winebus.sys/main.c
-+++ b/dlls/winebus.sys/main.c
-@@ -1263,6 +1263,24 @@ static NTSTATUS iohid_driver_init(void)
-     return bus_main_thread_start(&bus);
- }
- 
-+/*
-+ * The bus the Android app feeds, over a unix socket. See bus_vessel.c: on this
-+ * platform it is the only backend that can produce a device at all, because an
-+ * app is not allowed to open /dev/input, which leaves SDL, udev and libusb all
-+ * blind here however they are configured.
-+ */
-+static NTSTATUS vessel_driver_init(void)
-+{
-+    struct bus_main_params bus =
-+    {
-+        .name = L"VESSEL",
-+        .init_args = &options,
-+        .init_code = vessel_init,
-+        .wait_code = vessel_wait,
-+    };
-+    return bus_main_thread_start(&bus);
-+}
-+
- static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
- {
-     IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation(irp);
-@@ -1282,6 +1300,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
-         if (!sdl_driver_init()) options.disable_input = TRUE;
-         udev_driver_init();
-         iohid_driver_init();
-+        vessel_driver_init();
- 
-         irp->IoStatus.Status = STATUS_SUCCESS;
-         break;
-@@ -1292,6 +1311,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
-         winebus_call(sdl_stop, NULL);
-         winebus_call(udev_stop, NULL);
-         winebus_call(iohid_stop, NULL);
-+        winebus_call(vessel_stop, NULL);
- 
-         WaitForMultipleObjects(bus_count, bus_thread, TRUE, INFINITE);
-         while (bus_count--) CloseHandle(bus_thread[bus_count]);
-diff --git a/dlls/winebus.sys/unix_private.h b/dlls/winebus.sys/unix_private.h
-index c39c8787247..b3d09ceacbf 100644
---- a/dlls/winebus.sys/unix_private.h
-+++ b/dlls/winebus.sys/unix_private.h
-@@ -234,6 +234,10 @@ extern NTSTATUS iohid_bus_init(void *);
- extern NTSTATUS iohid_bus_wait(void *);
- extern NTSTATUS iohid_bus_stop(void *);
- 
-+extern NTSTATUS vessel_bus_init(void *);
-+extern NTSTATUS vessel_bus_wait(void *);
-+extern NTSTATUS vessel_bus_stop(void *);
-+
- extern void bus_event_cleanup(struct bus_event *event);
- extern void bus_event_queue_destroy(struct list *queue);
- extern BOOL bus_event_queue_device_removed(struct list *queue, struct unix_device *device);
-diff --git a/dlls/winebus.sys/unixlib.c b/dlls/winebus.sys/unixlib.c
-index e3cabbc8c34..306c7247f39 100644
---- a/dlls/winebus.sys/unixlib.c
-+++ b/dlls/winebus.sys/unixlib.c
-@@ -310,6 +310,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
-     iohid_bus_init,
-     iohid_bus_wait,
-     iohid_bus_stop,
-+    vessel_bus_init,
-+    vessel_bus_wait,
-+    vessel_bus_stop,
-     mouse_device_create,
-     keyboard_device_create,
-     unix_device_remove,
-diff --git a/dlls/winebus.sys/unixlib.h b/dlls/winebus.sys/unixlib.h
-index d2b17f4c6d3..85f4a2de900 100644
---- a/dlls/winebus.sys/unixlib.h
-+++ b/dlls/winebus.sys/unixlib.h
-@@ -145,6 +145,9 @@ enum unix_funcs
-     iohid_init,
-     iohid_wait,
-     iohid_stop,
-+    vessel_init,
-+    vessel_wait,
-+    vessel_stop,
-     mouse_create,
-     keyboard_create,
-     device_remove,
