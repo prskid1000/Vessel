@@ -1,0 +1,18 @@
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index af3bb7723..6b782e0f8 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -847,6 +847,13 @@ int main(int argc, char** argv) {
+   LogMan::Throw::InstallHandler(AssertHandler);
+   LogMan::Msg::InstallHandler(MsgHandler);
+ #else
++  // Logging::Init() reads SILENTLOG through FEX_CONFIG_OPT, which reaches
++  // FEXCore::Config::GetConv and dereferences the file-static MetaLayer. That
++  // pointer is null until Initialize() assigns it, and the only caller of
++  // Initialize() here is FEX::Config::LoadConfig -- which GenerateCache does
++  // not reach until after this line and ProcessAll never calls at all. Without
++  // this the tool faults on its first statement for every subcommand.
++  FEXCore::Config::Initialize();
+   FEX::Windows::Logging::Init();
+ #endif
+ 
