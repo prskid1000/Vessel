@@ -526,6 +526,16 @@ val LOGGABLES: List<Loggable> = listOf(
         oneSessionFrom = WineChannelLevel.WARNINGS,
     ),
     wineChannel("vulkan", "How Wine found and opened the graphics driver."),
+    wineChannel(
+        channel = "oss",
+        secondary = "The audio driver: what the guest wrote and what the device took.",
+        // The channel `patches/wine/0008`'s AAudio driver logs under, kept from
+        // the OSS driver it replaced. Its trace tier prints one line per top-up —
+        // ten a second, naming the queue depth — which is what tells a stalled
+        // *timer* apart from a guest that is not producing frames, and is exactly
+        // the question crackling audio asks. Bounded by the period rather than by
+        // the workload, so it needs no one-session cap.
+    ),
     wineChannel("file", "Every file the program opens, and every one it fails to open."),
     wineChannel("reg", "Every registry key the program reads or writes."),
     wineChannel(

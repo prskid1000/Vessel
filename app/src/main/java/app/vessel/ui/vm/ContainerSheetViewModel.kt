@@ -471,14 +471,28 @@ class ContainerSheetViewModel @Inject constructor(
      * dangerous value and its one-launch arm are set in the same copy, and a
      * per-field setter here would be a second place able to break that.
      *
-     * Held in the draft like every other edit: nothing reaches the container
-     * document until Save, which is what makes the sheet's Save mean the same
-     * thing for every control on it.
+     * **Written now, not at Save, and that is a deliberate exception.** It was
+     * held in the draft like every other field, and the result was a switch that
+     * did nothing: you turn on a channel to answer a question, close the sheet to
+     * go and reproduce the thing, and the setting goes with it. Reported as
+     * "I turned it on, why is it not on" — twice, against `oss`, and it would
+     * have happened to every flag on the panel equally.
+     *
+     * The precedent is beside this: [deleteLogs] and `copyDiagnosticsTo` are
+     * already immediate, on the grounds that they are *acts of observation*
+     * rather than settings to be committed. Arming a log is the same kind of
+     * thing. Cancelling the sheet no longer reverts it, which is the price and
+     * is the lesser surprise.
+     *
+     * A container being created has no record to write to, so there it stays in
+     * the draft — Save creates the container and carries it in the same write.
      */
     fun setDiagnostics(diagnostics: ContainerDiagnostics) {
         val current = draft ?: return
         draft = current.copy(diagnostics = diagnostics)
         refreshDiagnostics()
+        if (_state.value.creating) return
+        viewModelScope.launch { containers.save(draft ?: return@launch) }
     }
 
     /**

@@ -131,7 +131,10 @@ fun DiagnosticsPanel(
             modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
         )
         Text(
-            "Rows you add are written after the ones above, and a later term wins.",
+            "Rows you add are written after the ones above, and a later term wins. " +
+                "Changes here are kept as you make them — there is no Save for this " +
+                "panel — but the environment is composed when a session starts, so a " +
+                "container that is already running keeps what it launched with.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),
