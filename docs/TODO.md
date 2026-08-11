@@ -381,7 +381,17 @@ audit's; they are pointers, not independently re-verified.
   this pair are written, both are `sw`-only, and both are unmeasurable for the
   same reason — not two open items but one closed one.
 
-- [ ] **Back the window drawable with a `GPUImage` on the software path.**
+- [x] **Back the window drawable with a `GPUImage` on the software path.**
+  *Closed 2026-08-11: there is nothing to back.* `Texture.updateFromDrawable`
+  was instrumented (`452c7a7`, vendored item 26) to time its `glTexSubImage2D`
+  behind `log.tag.VesselUpload`. With the tag enabled and the log buffer live,
+  **several full Metro sessions produced zero lines** — the upload never runs,
+  because `PresentExtension.selectInput` and `DRI3Extension` have already made
+  every presenting window's content a `GPUImage` whose `updateFromDrawable` is a
+  no-op. The projection below was arithmetic about a path the shipping config
+  does not take. The instrumentation stays: it costs nothing when the tag is
+  off, and it is how the answer changes if a client ever stops using Present.
+
   Today `Texture.updateFromDrawable` re-uploads the **whole window every frame**
   (`Texture.java:147`) — the damage rectangle is computed and then discarded into
   a boolean (`Drawable.java:194-199`). When a drawable's texture is a `GPUImage`,
