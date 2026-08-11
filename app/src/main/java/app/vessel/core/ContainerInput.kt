@@ -21,13 +21,21 @@ import kotlinx.serialization.Serializable
  *   being deleted out from under a container is ordinary, not corruption, and
  *   the sheet says so in words rather than silently forgetting.
  * @property touchVisible whether the on-screen overlay is drawn for this
- *   container. Off by default, so a container played with a real pad comes up
- *   clean and an untouched container writes nothing new at all.
+ *   container.
+ *
+ *   **On by default, which is a reversal.** The plan argued for off, so that a
+ *   container played with a real pad came up clean. That is the wrong default
+ *   for the device this runs on: almost nobody has a pad paired, and a phone
+ *   that comes up to a Windows desktop with no on-screen controls and no visible
+ *   sign that any exist reads as a feature that was never built — which is
+ *   exactly how it was reported. The design comp agrees; its overlay is on.
+ *   Turning it off is one switch in the Input panel's Touch tab, and the switch
+ *   is the thing the earlier default made unfindable.
  */
 @Serializable
 data class ContainerInput(
     val profileId: String? = null,
-    val touchVisible: Boolean = false,
+    val touchVisible: Boolean = true,
 ) {
     /** True when the user has chosen nothing, which is what a fresh container is. */
     val isDefault: Boolean get() = this == DEFAULT

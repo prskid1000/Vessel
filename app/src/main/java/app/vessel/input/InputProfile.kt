@@ -52,10 +52,22 @@ data class InputProfile(
          */
         const val DEFAULT_ID: String = "default"
 
+        /**
+         * The built-in table, and an overlay that is not empty.
+         *
+         * **A fresh container gets working touch controls for the same reason it
+         * gets working pad bindings.** An empty canvas is not a starting point,
+         * it is a puzzle: a phone with no controller would come up to a desktop
+         * it can only drive through a trackpad cursor, and nothing on screen
+         * would suggest that the six controls it wants are one stock layout
+         * away. [TouchLayouts.Wasd] is code rather than a stored document, so an
+         * untouched container still writes nothing at all.
+         */
         val Default: InputProfile = InputProfile(
             id = DEFAULT_ID,
             name = GamepadProfile.Default.name,
             pad = GamepadProfile.Default,
+            touch = TouchLayouts.Wasd,
         )
     }
 }
