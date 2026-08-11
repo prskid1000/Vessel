@@ -12,10 +12,10 @@ index c2823e13f8d..c23cfdf05b7 100644
  	unixlib.c \
 diff --git a/dlls/winebus.sys/bus_vessel.c b/dlls/winebus.sys/bus_vessel.c
 new file mode 100644
-index 00000000000..711b04240c7
+index 00000000000..7fa55639ca9
 --- /dev/null
 +++ b/dlls/winebus.sys/bus_vessel.c
-@@ -0,0 +1,577 @@
+@@ -0,0 +1,566 @@
 +/*
 + * A winebus backend fed by the Android app over a unix socket.
 + *
@@ -336,12 +336,10 @@ index 00000000000..711b04240c7
 +    if (index >= VESSEL_PAD_MAX) return;
 +    if (!(iface = vessel_devices[index]))
 +    {
-+        /* ERR, not TRACE, and counted rather than left to the log level: the
-+         * session runs WINEDEBUG=-all,err+all and a TRACE here is invisible on
-+         * the only device this has to work on. Ten is enough to show a pattern
-+         * and few enough not to drown a game's log. */
++        /* Legitimate for the frame or two between the app dropping a pad and
++         * the guest hearing about it, so counted rather than said every time. */
 +        static unsigned int missing;
-+        if (missing++ < 10) ERR("vessel: state for pad %u but no device\n", index);
++        if (missing++ < 10) WARN("vessel: state for pad %u but no device\n", index);
 +        return;
 +    }
 +
@@ -350,12 +348,8 @@ index 00000000000..711b04240c7
 +    memcpy(axis, frame + 6, sizeof(axis));
 +    memcpy(trigger, frame + 14, sizeof(trigger));
 +
-+    {
-+        static unsigned int seen;
-+        if (seen++ < 10)
-+            ERR("vessel: state pad %u axes %d %d %d %d buttons %#x\n", index,
-+                axis[0], axis[1], axis[2], axis[3], buttons);
-+    }
++    TRACE("vessel: pad %u axes %d %d %d %d buttons %#x\n", index,
++          axis[0], axis[1], axis[2], axis[3], buttons);
 +
 +    /* Buttons are HID usages 1..16, so bit n is usage n+1 -- which is A, B, X,
 +     * Y, LB, RB, Back, Start, LThumb, RThumb, Guide, in the order xinput1_3
@@ -393,10 +387,6 @@ index 00000000000..711b04240c7
 +    }
 +
 +    state = &iface->hid_device_state;
-+    {
-+        static unsigned int queued;
-+        if (queued++ < 10) ERR("vessel: queued a report of %u bytes\n", state->report_len);
-+    }
 +    bus_event_queue_input_report(&vessel_event_queue, iface, state->report_buf, state->report_len);
 +}
 +
@@ -508,6 +498,9 @@ index 00000000000..711b04240c7
 +    vessel_stop_write = pipefd[1];
 +    vessel_partial_len = 0;
 +
++    /* The one line kept at a level a session log shows. Everything else about
++     * this bus is only worth reading once you know it connected at all, and
++     * this is the line that says the app and the guest found each other. */
 +    ERR("vessel: pad bus connected to %s\n", path);
 +    return STATUS_SUCCESS;
 +}
@@ -570,10 +563,6 @@ index 00000000000..711b04240c7
 +
 +            if (vessel_partial_len < VESSEL_FRAME_SIZE) break;
 +            vessel_partial_len = 0;
-+            {
-+                static unsigned int frames;
-+                if (frames++ < 10) ERR("vessel: frame type %#x\n", vessel_partial[0]);
-+            }
 +            vessel_handle_frame(vessel_partial);
 +        }
 +    }

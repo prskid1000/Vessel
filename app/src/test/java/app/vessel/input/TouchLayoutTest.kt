@@ -134,12 +134,19 @@ class TouchLayoutTest {
     fun `every stock layout is already sane and uniquely shaped`() {
         TouchLayouts.stock.forEach { stock ->
             assertEquals(stock.name, stock.layout, stock.layout.sane())
-            listOf("Stick", "Look pad", "D-pad", "Left stick", "Right stick").forEach {
+            // A side, not a designation: a stick and a look pad are the same
+            // shape now, so counting names would count them as one thing. What
+            // must be unique is which of the guest's two sticks a control drives.
+            Stick.entries.forEach { side ->
                 assertTrue(
-                    "${stock.name} has at most one $it",
-                    stock.layout.controls.count { c -> c.designation == it } <= 1,
+                    "${stock.name} has at most one control driving the $side stick",
+                    stock.layout.stickCandidates(side).size <= 1,
                 )
             }
+            assertTrue(
+                "${stock.name} has at most one d-pad",
+                stock.layout.controls.count { it.kind == TouchKind.DPAD } <= 1,
+            )
         }
     }
 

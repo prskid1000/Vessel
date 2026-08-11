@@ -281,22 +281,13 @@ class TouchControlTranslator(
         /**
          * Which control drives each of the two stick slots.
          *
-         * A control that *is* the pad's left or right stick says so and takes
-         * that slot. Anything else falls back on its role, which is what makes a
-         * hand-built layout — one stick and one look pad, neither claiming a
-         * side — behave the way it always did: the stick walks, the pad looks.
+         * The rule itself lives on [TouchLayout], because the editor needs the
+         * same answer to know whether a side is free, and two copies of it would
+         * drift the first time either was touched.
          */
-        fun leftStickOf(layout: TouchLayout): TouchControl? =
-            layout.controls.firstOrNull { it.padStick == Stick.LEFT }
-                ?: layout.controls.firstOrNull {
-                    it.kind == TouchKind.STICK && it.padStick == null && it.role != StickRole.Look
-                }
+        fun leftStickOf(layout: TouchLayout): TouchControl? = layout.stickFor(Stick.LEFT)
 
-        fun rightStickOf(layout: TouchLayout): TouchControl? =
-            layout.controls.firstOrNull { it.padStick == Stick.RIGHT }
-                ?: layout.controls.firstOrNull {
-                    it.kind == TouchKind.STICK && it.padStick == null && it.role == StickRole.Look
-                }
+        fun rightStickOf(layout: TouchLayout): TouchControl? = layout.stickFor(Stick.RIGHT)
 
         /**
          * The overlay's sticks and d-pad, as a [GamepadProfile].

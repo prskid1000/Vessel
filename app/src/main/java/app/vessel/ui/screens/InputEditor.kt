@@ -1378,7 +1378,7 @@ private fun TouchAddRow(state: InputEditorState, actions: InputEditorActions) {
             )
         }
         KINDS.forEach { kind ->
-            val taken = kind.unique && layout.has(kind.title)
+            val taken = kind.taken(layout)
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1389,7 +1389,16 @@ private fun TouchAddRow(state: InputEditorState, actions: InputEditorActions) {
                         Vessel.metrics.shapeMd,
                     )
                     .clickable(enabled = !taken, onClickLabel = kind.title) {
-                        val control = TouchEdit.placed(profile.touch, kind.kind, kind.role)
+                        val control = TouchEdit.placed(
+                            layout = profile.touch,
+                            kind = kind.kind,
+                            role = kind.role,
+                            padStick = if (kind.kind == TouchKind.STICK) {
+                                profile.touch.freeStick()
+                            } else {
+                                null
+                            },
+                        )
                         actions.onProfile(profile.copy(touch = profile.touch.with(control)))
                         actions.onSelect(control.id)
                         adding = false
@@ -1418,20 +1427,52 @@ private fun TouchAddRow(state: InputEditorState, actions: InputEditorActions) {
     }
 }
 
+/**
+ * One shape the overlay can be given, and how many of it a controller has.
+ *
+ * [taken] rather than a `unique` flag, because the three answers are genuinely
+ * different: a controller has any number of buttons, exactly two sticks, and
+ * exactly one d-pad. The last is not an oversight — a HID report carries a single
+ * hat, so a second d-pad would have nowhere to go and no way to be told from the
+ * first, where two sticks have their own axes and are two distinct things.
+ */
 private data class AddableKind(
     val title: String,
     val note: String,
     val kind: TouchKind,
-    val role: StickRole = StickRole.Keys,
-    val unique: Boolean = false,
+    val role: StickRole = StickRole.Pad,
+    val taken: (TouchLayout) -> Boolean = { false },
 )
 
+/**
+ * Three shapes, not four.
+ *
+ * "Look pad" used to be the fourth, and it was a stick with its role preset to
+ * Look — the same ring, listed twice, distinguished by a setting the selected
+ * control now shows as a field. Add a stick and set it to Look; that is what the
+ * role picker is for.
+ */
 private val KINDS = listOf(
-    AddableKind("Button", "one key or click", TouchKind.BUTTON),
-    AddableKind("Stick", "four keys", TouchKind.STICK, StickRole.Keys, unique = true),
-    AddableKind("D-pad", "four keys", TouchKind.DPAD, unique = true),
-    AddableKind("Look pad", "relative mouse", TouchKind.STICK, StickRole.Look, unique = true),
+    AddableKind("Button", "one key, click or pad button", TouchKind.BUTTON),
+    AddableKind(
+        "Stick",
+        "an axis, four keys, or the mouse",
+        TouchKind.STICK,
+        taken = { layout -> Stick.entries.all { side -> layout.stickTaken(side) } },
+    ),
+    AddableKind(
+        "D-pad",
+        "four directions, two at once",
+        TouchKind.DPAD,
+        taken = { layout -> layout.controls.any { it.kind == TouchKind.DPAD } },
+    ),
 )
+
+/** Whether one of the guest's two sticks already has something on the glass. */
+private fun TouchLayout.stickTaken(side: Stick): Boolean = stickFor(side) != null
+
+/** The side a new stick should claim: the free one, left first. */
+private fun TouchLayout.freeStick(): Stick? = Stick.entries.firstOrNull { !stickTaken(it) }
 
 // — the settings -----------------------------------------------------------------
 

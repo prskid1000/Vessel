@@ -112,7 +112,16 @@ object TouchEdit {
         layout: TouchLayout,
         kind: TouchKind,
         role: StickRole = StickRole.Keys,
-        name: String = TouchControls.designationOf(kind, role),
+        /**
+         * Which of the guest's two sticks this one is, when it is one.
+         *
+         * A stick placed without a side is a stick the translator has to guess
+         * about — it falls back to "the one that is not Look is the left" — and
+         * guessing is what made a stick and a look pad look like two different
+         * shapes. The editor passes the free side, so the answer is stored.
+         */
+        padStick: Stick? = null,
+        name: String = TouchControls.designationOf(kind, role, padStick),
     ): TouchControl {
         val size = TouchControls.defaultSize(kind)
         var cx = 0.5f
@@ -129,6 +138,7 @@ object TouchEdit {
             cy = cy,
             size = size,
             role = role,
+            padStick = padStick,
             label = name,
         )
     }

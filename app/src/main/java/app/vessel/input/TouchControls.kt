@@ -297,6 +297,31 @@ data class TouchLayout(val controls: List<TouchControl> = emptyList()) {
      * button has no such limit, and neither does the editor.
      */
     fun has(designation: String): Boolean = controls.any { it.designation == designation }
+
+    /**
+     * Every control that would drive one of the guest's two sticks.
+     *
+     * **One definition of the rule, used by the translator and by the editor.**
+     * A control that *is* the pad's left or right stick says so and takes that
+     * slot; anything else falls back on its role, which is what makes a
+     * hand-built layout — one stick and one look pad, neither claiming a side —
+     * behave the way it always did: the stick walks, the pad looks.
+     *
+     * A list rather than the single answer because the editor has to know when a
+     * side is contested: two unsided non-Look sticks are both candidates for the
+     * left, only one can have it, and a layout that does that is malformed.
+     */
+    fun stickCandidates(side: Stick): List<TouchControl> {
+        val claimed = controls.filter { it.padStick == side }
+        if (claimed.isNotEmpty()) return claimed
+        return controls.filter {
+            it.kind == TouchKind.STICK && it.padStick == null &&
+                (it.role == StickRole.Look) == (side == Stick.RIGHT)
+        }
+    }
+
+    /** The one control driving a side, or null when nothing does. */
+    fun stickFor(side: Stick): TouchControl? = stickCandidates(side).firstOrNull()
 }
 
 /** The two or three characters a pad prints on the button itself. */
@@ -365,11 +390,14 @@ object TouchControls {
     ): String = when (kind) {
         TouchKind.BUTTON -> "Button"
         TouchKind.DPAD -> "D-pad"
-        TouchKind.STICK -> when {
-            padStick == Stick.LEFT -> "Left stick"
-            padStick == Stick.RIGHT -> "Right stick"
-            role == StickRole.Look -> "Look pad"
-            else -> "Stick"
+        // **No "Look pad".** A look pad is a stick whose role is Look, and the
+        // role is a field on the control — naming the same ring two things
+        // depending on one of its own settings made the editor look like it had
+        // four shapes when it has three.
+        TouchKind.STICK -> when (padStick) {
+            Stick.LEFT -> "Left stick"
+            Stick.RIGHT -> "Right stick"
+            null -> "Stick"
         }
     }
 }
