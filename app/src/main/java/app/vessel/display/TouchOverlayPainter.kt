@@ -135,9 +135,8 @@ internal class TouchOverlayPainter(private val density: Float) {
     /**
      * The twelve corners of a plus, inscribed in the control's square.
      *
-     * [ARM] is the half-width of each arm as a fraction of the radius. 0.42 is
-     * the proportion a real d-pad has: much thinner and the arms stop being
-     * thumb-width, much fatter and it reads as a square again.
+     * [ARM] is the half-width of each arm as a fraction of the radius, and so it
+     * is what decides how long the arms read — see the constant.
      */
     private fun crossPath(cx: Float, cy: Float, r: Float) {
         val a = r * ARM
@@ -166,22 +165,44 @@ internal class TouchOverlayPainter(private val density: Float) {
         canvas.drawCircle(hx, hy, hr, fill)
     }
 
-    /**
-     * A label sized to fit inside the control it names.
-     *
-     * `W A S D` in a small stick and `Space` in a large button want different
-     * numbers, and a fixed size makes one of them overflow. The cap keeps a
-     * 20%-of-the-screen look pad from setting its label in a display face.
-     */
-    private fun labelSize(radius: Float, label: String): Float {
-        val byWidth = (radius * 2f * LABEL_FIT) / label.length.coerceAtLeast(1)
-        return byWidth.coerceIn(MIN_LABEL_DP * density, MAX_LABEL_DP * density)
-    }
+    private fun labelSize(radius: Float, label: String): Float = labelSize(radius, label, density)
 
     private fun withAlpha(rgb: Int, alpha: Float): Int =
         Color.argb((alpha.coerceIn(0f, 1f) * 255).toInt(), Color.red(rgb), Color.green(rgb), Color.blue(rgb))
 
-    private companion object {
+    internal companion object {
+        /**
+         * A label sized to fit inside the control it names.
+         *
+         * `W A S D` in a small stick and `Space` in a large button want different
+         * numbers, and a fixed size makes one of them overflow. The cap keeps a
+         * 20%-of-the-screen look pad from setting its label in a display face.
+         *
+         * It is on the companion, and internal, because the layout panel's
+         * preview has to size its labels by the same rule. A preview that sets
+         * `SELECT` in a fixed face clips it to `SE` at panel scale while the
+         * overlay itself shows the whole word, and then the preview is lying
+         * about the thing it exists to show.
+         *
+         * [floorDp] is why that is not simply the same call. The floor exists so
+         * that a small button over a session never sets its name at four pixels;
+         * it is a *legibility* rule and it belongs to the overlay. A preview
+         * control is a seventh of overlay size, so the floor is more than twice
+         * the width the glyphs have, and holding it is exactly what turned
+         * `SELECT` into `SE` and `R2` into `R`. The preview passes zero: a
+         * miniature that is too small to read is honest, and one that shows the
+         * wrong word is not.
+         */
+        fun labelSize(
+            radius: Float,
+            label: String,
+            density: Float,
+            floorDp: Float = MIN_LABEL_DP,
+        ): Float {
+            val byWidth = (radius * 2f * LABEL_FIT) / label.length.coerceAtLeast(1)
+            return byWidth.coerceIn(floorDp * density, MAX_LABEL_DP * density)
+        }
+
         /** `--color-surface-2` — the ground every card in the product sits on. */
         const val SURFACE = 0xFF232532.toInt()
 
@@ -219,9 +240,18 @@ internal class TouchOverlayPainter(private val density: Float) {
          * The arms reach the full radius either way, so this is what sets how
          * *long* they look: an arm's visible stub is `r - a`, and thinning the
          * waist is the only way to lengthen it without growing the control.
-         * 0.42 was the proportion of a real d-pad and read as stubby at overlay
-         * size; 0.30 takes each arm from 0.58r to 0.70r.
+         * What the eye actually reads is the stub against its own width,
+         * `(r - a) : 2a` — 0.42 gave 0.7:1 and looked like a fat plus, 0.30 gave
+         * 1.2:1 and was still read as too short. 0.24 is 1.6:1, which keeps the
+         * cross reading as a cross while leaving the arms something a thumb can
+         * land on; below about 0.17 they go spindly and the shape reads as
+         * decoration rather than as a control.
+         *
+         * Longer arms and thicker arms pull against each other at a fixed radius,
+         * so the d-pad was made larger instead — see `TouchLayouts.Gamepad`. On
+         * this panel that is a 73 px arm reaching 115 px, against 44 px reaching
+         * 87 px before: both longer and thicker, which a waist alone cannot do.
          */
-        const val ARM = 0.30f
+        const val ARM = 0.24f
     }
 }

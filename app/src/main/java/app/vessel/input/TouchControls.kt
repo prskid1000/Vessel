@@ -313,7 +313,7 @@ object TouchControls {
     fun defaultSize(kind: TouchKind): Float = when (kind) {
         TouchKind.BUTTON -> 0.07f
         TouchKind.STICK -> 0.12f
-        TouchKind.DPAD -> 0.11f
+        TouchKind.DPAD -> 0.13f
     }
 }
 
@@ -444,12 +444,18 @@ object TouchLayouts {
             stick("stick-l", Stick.LEFT, 0.150f, 0.72f, 0.120f),
             stick("stick-r", Stick.RIGHT, 0.850f, 0.72f, 0.120f),
 
+            // **The same radius as a stick, which is what a real pad has.** It
+            // was 0.085 and read as a small thing to aim four directions with:
+            // the arms were 44 px of glass on this panel and a thumb covers more
+            // than that. At 0.120 it matches `stick-l` exactly, which is both the
+            // proportion the hardware has and the one the eye expects from the
+            // pair sitting one above the other.
             TouchControl(
                 id = "dpad",
                 kind = TouchKind.DPAD,
                 cx = 0.115f,
                 cy = 0.40f,
-                size = 0.085f,
+                size = 0.120f,
                 pad = GamepadControl.DPAD_UP,
             ),
 

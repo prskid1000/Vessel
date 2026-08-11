@@ -46,9 +46,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import app.vessel.core.DisplayGeometry
 import app.vessel.data.InputProfileTransfer
+import app.vessel.display.TouchOverlayPainter
 import app.vessel.input.GamepadAction
 import app.vessel.input.GamepadControl
 import app.vessel.input.InputProfile
@@ -180,10 +182,23 @@ fun InputEditorHeader(
             // string on it that means nothing to anybody.
             val names = (listOf(InputProfile.Default, state.profile) + state.profiles)
                 .associate { it.id to it.name }
+            // **The pointer can outlive the thing it points at, so the field
+            // follows the profile in use rather than the pointer.** A container
+            // naming a deleted profile resolves to the built-in default and is
+            // deliberately *not* rewritten — `InputProfileRepository.resolve` and
+            // `SessionRuntime` both leave the stale id alone, so that plugging a
+            // sideloaded profile back in restores the container. The cost is that
+            // `activeProfileId` names nothing on those frames, and the old code
+            // fell back to printing the id: a UUID, in the one field whose only
+            // job is to say which arrangement is in use. `state.profile` is the
+            // arrangement actually in use, and it always has a name.
+            val selected = (state.activeProfileId ?: InputProfile.DEFAULT_ID)
+                .takeIf { it in ids }
+                ?: state.profile.id
             VDropdownField(
                 options = ids,
-                labelFor = { names[it] ?: it },
-                selected = state.activeProfileId ?: InputProfile.DEFAULT_ID,
+                labelFor = { names[it] ?: InputProfile.Default.name },
+                selected = selected,
                 onSelect = { actions.onPickProfile(it.takeIf { id -> id != InputProfile.DEFAULT_ID }) },
             )
         }
@@ -466,9 +481,23 @@ private fun TouchOverlayPreview(
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
+                    // **Sized by the overlay's own rule, not by a type token.**
+                    // The painter shrinks a label until it fits the control, so
+                    // `SELECT` is legible on a small button over a session. A
+                    // fixed style here is roughly a seventh of that scale and
+                    // clipped the same word to `SE`, which made the preview a
+                    // picture of a control that does not exist. The floor goes
+                    // with it, for the reason in `labelSize`.
                     Text(
                         control.face,
-                        style = Vessel.type.overline,
+                        style = Vessel.type.overline.copy(
+                            fontSize = with(density) {
+                                TouchOverlayPainter
+                                    .labelSize(radius, control.face, density.density, floorDp = 0f)
+                                    .toSp()
+                            },
+                            lineHeight = TextUnit.Unspecified,
+                        ),
                         color = Vessel.colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Clip,
@@ -496,7 +525,7 @@ private fun DpadCross(selected: Boolean, modifier: Modifier = Modifier) {
         val r = size.minDimension / 2f
         val cx = size.width / 2f
         val cy = size.height / 2f
-        val a = r * DPAD_ARM
+        val a = r * TouchOverlayPainter.ARM
         val path = Path().apply {
             moveTo(cx - a, cy - r)
             lineTo(cx + a, cy - r)
@@ -516,10 +545,6 @@ private fun DpadCross(selected: Boolean, modifier: Modifier = Modifier) {
         drawPath(path, ring, style = Stroke(width = width.toPx()))
     }
 }
-
-/** The same proportion `TouchOverlayPainter.ARM` uses. */
-/** Must match `TouchOverlayPainter.ARM` — the preview is a promise about the overlay. */
-private const val DPAD_ARM = 0.30f
 
 /** Play or lay out, whether it is drawn at all, and how solid. */
 @Composable
@@ -611,19 +636,42 @@ private fun TouchControlList(
     val layout = state.profile.overlay
     val short = sessionShortEdgeDp()
     Column(modifier.fillMaxWidth()) {
-        Text(
-            if (layout.isEmpty) {
-                "NOTHING ON THE OVERLAY"
-            } else {
-                "${layout.controls.size} CONTROLS ON THE OVERLAY"
-            },
-            style = Vessel.type.overline,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.padding(
+        Row(
+            Modifier.fillMaxWidth().padding(
                 top = Vessel.metrics.s11,
                 bottom = Vessel.metrics.s3,
             ),
-        )
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (layout.isEmpty) {
+                    "NOTHING ON THE OVERLAY"
+                } else {
+                    "${layout.controls.size} CONTROLS ON THE OVERLAY"
+                },
+                style = Vessel.type.overline,
+                color = Vessel.colors.textMuted,
+                modifier = Modifier.weight(1f),
+            )
+            // **The way back from a layout you have dragged into a mess.**
+            // Placing controls is a destructive, fiddly, one-finger operation
+            // with no undo, and without this the only route back to the shipped
+            // arrangement is deleting every control to reach the stock offer
+            // below. It reads `Reset layout` rather than `Reset positions`
+            // because it restores sizes and membership too, and a button that
+            // does more than its label says is worse than a longer label.
+            // The *stored* layout, not the resolved one: resolution fills a
+            // pad-linked control's action in from the binding table, so the
+            // resolved form never equals the stock constant and the button would
+            // be offered on a layout nobody has touched.
+            if (!layout.isEmpty && state.profile.touch != TouchLayouts.Gamepad) {
+                VButton(
+                    "Reset layout",
+                    { actions.onProfile(state.profile.copy(touch = TouchLayouts.Gamepad)) },
+                    style = VButtonStyle.Ghost,
+                )
+            }
+        }
         if (layout.isEmpty) {
             StockLayoutOffer(state, actions)
             return@Column
