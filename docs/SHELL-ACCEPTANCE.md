@@ -140,6 +140,9 @@ Phases 3–5 of `docs/plans/input-mapping.md`, against the design comp
 | 4c.12 | Profiles lists, creates, renames, duplicates, deletes and picks | `[x]` | Watched: three profiles listed with counts, the active one ringed, delete removed one, the radio moved the container |
 | 4c.13 | Import refuses a file from another schema, with a sentence | `[ ]` | `InputProfileImportTest` pins the refusal; the SAF round trip is not watched |
 | 4c.14 | Export writes a file the user picked a place for | `[ ]` | Not watched |
+| 4c.15 | The built-in default is a **whole controller**, and every control on it is a pad control | `[ ]` | `TouchLayoutTest` pins the layout, the links and the resolution. **Not yet watched on the device** — the screenshots above were taken against the WASD default it replaced |
+| 4c.16 | Rebinding `A` in the Pad tab moves the glass `A` button too | `[ ]` | `InputProfile.overlay` resolves it; pinned in a test, not watched |
+| 4c.17 | The built-in default cannot be renamed or deleted, and Duplicate is the way out | `[ ]` | The name field is disabled and says so; Delete is disabled on that row. Not watched |
 
 ## 5. Session lifecycle
 

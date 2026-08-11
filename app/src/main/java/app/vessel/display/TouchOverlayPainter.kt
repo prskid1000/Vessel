@@ -112,7 +112,7 @@ internal class TouchOverlayPainter(private val density: Float) {
         // a thumb can find its four directions without reading anything.
         if (control.kind == TouchKind.DPAD) drawCross(canvas, cx, cy, r)
 
-        val label = control.bindingLabel
+        val label = control.face
         if (label.isNotEmpty()) {
             text.color = withAlpha(INK, (alpha + LABEL_BOOST).coerceAtMost(1f))
             text.textSize = labelSize(r, label)

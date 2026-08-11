@@ -171,6 +171,25 @@ data class TouchControl(
     val title: String get() = pad?.padLabel() ?: designation
 
     /**
+     * The mark drawn *on* the control.
+     *
+     * A pad control wears its own name — `A`, `L2`, `SEL` — and not the key it
+     * happens to send. That is what a controller looks like, and it is also the
+     * only thing that fits: `Left Ctrl` in a 42 dp circle is `Lef`, and four
+     * buttons all reading `Lef` is a pad nobody can aim at. What each one sends
+     * is in the list beside the preview, where there is room for it.
+     *
+     * A control the user placed has no such name, so it wears its binding, which
+     * is the only thing it has.
+     */
+    val face: String
+        get() = when {
+            padStick != null -> if (padStick == Stick.LEFT) "L" else "R"
+            pad != null -> pad.padGlyph()
+            else -> bindingLabel
+        }
+
+    /**
      * What this control sends, as one chip: `W A S D`, `Mouse look`, `Space`.
      *
      * Derived rather than read from [label] so a rebinding cannot leave the chip
@@ -238,6 +257,19 @@ data class TouchLayout(val controls: List<TouchControl> = emptyList()) {
      * button has no such limit, and neither does the editor.
      */
     fun has(designation: String): Boolean = controls.any { it.designation == designation }
+}
+
+/** The two or three characters a pad prints on the button itself. */
+fun GamepadControl.padGlyph(): String = when (this) {
+    GamepadControl.SELECT -> "SEL"
+    GamepadControl.START -> "STA"
+    GamepadControl.THUMB_L -> "L3"
+    GamepadControl.THUMB_R -> "R3"
+    GamepadControl.DPAD_UP, GamepadControl.DPAD_DOWN,
+    GamepadControl.DPAD_LEFT, GamepadControl.DPAD_RIGHT,
+    -> ""
+
+    else -> name
 }
 
 /** A pad control's name, as the overlay's list and the binding rows both say it. */

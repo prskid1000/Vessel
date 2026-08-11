@@ -447,7 +447,7 @@ private fun TouchOverlayPreview(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    control.bindingLabel,
+                    control.face,
                     style = Vessel.type.overline,
                     color = Vessel.colors.textPrimary,
                     maxLines = 1,
