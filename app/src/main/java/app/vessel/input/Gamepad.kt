@@ -54,6 +54,24 @@ sealed interface StickRole {
     /** Four half-axis controls, thresholded at the deadzone with hysteresis. */
     data object Keys : StickRole
 
+    /**
+     * An axis on the gamepad the guest sees, and nothing else.
+     *
+     * **The role a stick has when there is a gamepad to be.** The other three
+     * are all answers to "there is no pad in the guest, so what should this
+     * pretend to be" — and until `patches/wine/0016` gave the guest a real HID
+     * device that was the only question worth asking. A stick set to this emits
+     * no keys and no pointer motion at all: its deflection reaches the guest as
+     * a stick, through `PadBridge`, which is a path this class knows nothing
+     * about and should not.
+     *
+     * That is why it produces nothing here rather than something smaller. A
+     * stick that sent an axis *and* a keystroke would move a game reading both
+     * twice as far, which is the same doubling the bridge's mute exists to
+     * prevent for a physical pad.
+     */
+    data object Pad : StickRole
+
     /** Nothing at all. Anything the stick was holding is released. */
     data object None : StickRole
 
@@ -62,11 +80,13 @@ sealed interface StickRole {
         fun byName(name: String): StickRole? = when (name) {
             "Look" -> Look
             "Keys" -> Keys
+            "Pad" -> Pad
             "None" -> None
             else -> null
         }
 
         fun nameOf(role: StickRole): String = when (role) {
+            Pad -> "Pad"
             Look -> "Look"
             Keys -> "Keys"
             None -> "None"
@@ -84,12 +104,16 @@ sealed interface GamepadAction {
 /**
  * A binding table, and the reason there is no XInput here.
  *
- * A Windows game that reads XInput wants an `XINPUT_GAMEPAD` struct, which means
- * a DLL inside the guest talking to something outside it — Winlator's
- * `WinHandler`, which is not vendored (see `XServerDisplay`). Without it the
- * only channel into the guest is the X server, and the X server carries keys and
- * a pointer. So a gamepad is a keyboard and mouse here, and the honest place to
- * say so is the type name.
+ * **This used to say there was no XInput, and that is no longer true.**
+ * `patches/wine/0016` gives the guest a real HID gamepad fed over a socket, so
+ * a control can now simply *be* itself: `A` arrives as `A`, a stick arrives as
+ * an axis, and no binding is involved. That is what [StickRole.Pad] and
+ * [Gamepad] below are for.
+ *
+ * This table remains, because a great many Windows games read only the keyboard
+ * — and for those, a pad that sends `W` is the difference between playable and
+ * not. So a binding is now a deliberate choice for a game that needs one,
+ * rather than the only channel that exists.
  *
  * The default is the layout most Windows games are playable with unmodified:
  * left stick walks, right stick looks, and the face buttons land on the keys a
@@ -280,6 +304,8 @@ class GamepadTranslator(
                     out += direction(stick.up, y, positive = false)
                 }
 
+                // Its deflection goes to the guest's own gamepad instead; see the role.
+                StickRole.Pad -> out += releaseHalfAxes(stick)
                 StickRole.None -> out += releaseHalfAxes(stick)
             }
         }

@@ -376,7 +376,12 @@ private fun StickRoleField(stick: Stick, profile: InputProfile, onProfile: (Inpu
     }
 }
 
-private val ROLES = listOf(StickRole.Keys, StickRole.Look, StickRole.None)
+/**
+ * `Pad` first, because it is now the right answer for most games and the others
+ * are what you choose when a game cannot read a gamepad. It reads "Pad" rather
+ * than "Gamepad" only because four options share one row.
+ */
+private val ROLES = listOf(StickRole.Pad, StickRole.Keys, StickRole.Look, StickRole.None)
 
 /**
  * A picture of a pad, lit where a control is down.

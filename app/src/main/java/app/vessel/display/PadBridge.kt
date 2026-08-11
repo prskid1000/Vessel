@@ -195,6 +195,19 @@ internal class PadBridge(private val baseName: String) {
             if (!present[index]) return
             if (sent[index] == state) return
             sent[index] = state
+            // Off unless `setprop log.tag.VesselPad DEBUG`, and only on a state
+            // that actually changed -- so a held stick logs once, not per frame.
+            // Here because the two ends are Kotlin and C, and "the app never
+            // wrote" and "the guest never applied" look identical from outside.
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(
+                    TAG,
+                    "pad $index -> lx=${state.lx} ly=${state.ly} rx=${state.rx} ry=${state.ry}" +
+                        " lt=${state.lt} rt=${state.rt}" +
+                        " buttons=${"%04x".format(state.buttons)} hat=${state.hat}" +
+                        " client=${client != null}",
+                )
+            }
             write(frame(MSG_STATE, index, state))
         }
     }
