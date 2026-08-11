@@ -1,10 +1,12 @@
 package app.vessel.ui.screens
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
@@ -38,7 +42,11 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -49,6 +57,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import app.vessel.display.TouchOverlayPainter
 import app.vessel.input.GamepadAction
 import app.vessel.input.GamepadConfig
 import app.vessel.input.GamepadControl
@@ -66,6 +75,7 @@ import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VToggle
 import app.vessel.ui.theme.Vessel
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -120,6 +130,33 @@ internal fun PadTab(
         picking = null
     }
 
+    // **"A press on the diagram still finds its row" has to be true.** The tab
+    // says that in as many words, and until now it only tinted the row — which
+    // for the d-pad, the triggers and everything below them is a row nobody can
+    // see. Tinting something off-screen is indistinguishable from doing nothing,
+    // and "clicking on these does nothing" is exactly how it was reported.
+    //
+    // One item earlier than the row itself, so its group heading comes with it
+    // and the highlight lands in context rather than flush against the top edge.
+    val listState = rememberLazyListState()
+    val leadingItems = if (wide) 0 else 1
+    LaunchedEffect(pinned, profile) {
+        val row = pinned?.let { bindingRowIndex(profile, it) } ?: return@LaunchedEffect
+        listState.animateScrollToItem((row + leadingItems - 1).coerceAtLeast(0))
+    }
+
+    // A tap that opens the picker is not also a tap that pins a row: the picker
+    // replaces the list, so the highlight would be waiting behind it for a
+    // question that has already been answered.
+    val pin: (GamepadControl) -> Unit = {
+        if (learn) {
+            picking = it
+            pinned = null
+        } else {
+            pinned = it
+        }
+    }
+
     if (wide) {
         Row(modifier.fillMaxWidth().fillMaxHeight()) {
             PadSettingsColumn(
@@ -128,7 +165,7 @@ internal fun PadTab(
                 learn = learn,
                 onLearn = { learn = it },
                 lit = highlighted,
-                onPin = { if (learn) picking = it else pinned = it },
+                onPin = pin,
                 onProfile = onProfile,
             )
             Box(
@@ -139,7 +176,11 @@ internal fun PadTab(
             )
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 if (control == null) {
-                    LazyColumn(Modifier.fillMaxHeight(), contentPadding = LIST_PADDING) {
+                    LazyColumn(
+                        Modifier.fillMaxHeight(),
+                        state = listState,
+                        contentPadding = LIST_PADDING,
+                    ) {
                         bindingListItems(profile, highlighted, { picking = it }, onProfile)
                     }
                 } else {
@@ -166,14 +207,18 @@ internal fun PadTab(
         return
     }
 
-    LazyColumn(modifier.fillMaxWidth().fillMaxHeight(), contentPadding = LIST_PADDING) {
+    LazyColumn(
+        modifier.fillMaxWidth().fillMaxHeight(),
+        state = listState,
+        contentPadding = LIST_PADDING,
+    ) {
         padSettingsItems(
             profile = profile,
             live = live,
             learn = learn,
             onLearn = { learn = it },
             lit = highlighted,
-            onPin = { if (learn) picking = it else pinned = it },
+            onPin = pin,
             onProfile = onProfile,
         )
         bindingListItems(profile, highlighted, { picking = it }, onProfile)
@@ -349,6 +394,7 @@ private fun PadDiagram(lit: Set<GamepadControl>, dim: Boolean, onPin: (GamepadCo
             .size(PAD_DIAGRAM_WIDTH, PAD_DIAGRAM_HEIGHT)
             .alpha(if (dim) COLD_DIAGRAM_ALPHA else 1f),
     ) {
+        PadDpad(lit, onPin)
         PAD_PINS.forEach { pin ->
             val on = pin.control in lit
             Box(
@@ -380,6 +426,113 @@ private fun PadDiagram(lit: Set<GamepadControl>, dim: Boolean, onPin: (GamepadCo
     }
 }
 
+/**
+ * The d-pad, as one cross that four directions share.
+ *
+ * **It was four detached 18 dp rectangles and it did not work.** Reported as
+ * "clicking on these does nothing", and the geometry says why: the four arms
+ * enclosed a 22x24 dp hole at the exact centre that belonged to no pin at all, so
+ * the natural place to put a thumb was the one place with no handler behind it.
+ * The arms themselves were 18 dp against a 44 dp house minimum, `clickable` adds
+ * no slop of its own, and the whole diagram sits inside a scroll that claims any
+ * tap with a few pixels of travel — so even the aimed hits were being eaten.
+ *
+ * The fix is the shape the rest of the product already uses. One square, one
+ * cross drawn inside it at [TouchOverlayPainter.ARM] — the same proportion the
+ * overlay and the layout preview draw — and the direction taken from *where in
+ * the square* the tap landed, the way a real d-pad rocker resolves it. There is
+ * no dead centre because there are no gaps, and the target is the whole 64 dp
+ * cluster rather than four islands inside it.
+ */
+@Composable
+private fun PadDpad(lit: Set<GamepadControl>, onPin: (GamepadControl) -> Unit) {
+    val ring = Vessel.colors.border
+    val ringLit = Vessel.colors.accent
+    val fillLit = Vessel.colors.accentPressed
+    val hairline = Vessel.metrics.hairline
+    val down = DPAD_DIRECTIONS.filter { it.control in lit }
+    Box(
+        Modifier
+            .offset(DPAD_X, DPAD_Y)
+            .size(DPAD_SIZE)
+            .pointerInput(Unit) {
+                detectTapGestures { at ->
+                    // Dominant axis from the centre, which is what the four
+                    // quadrants of a rocker mean. A tap dead in the middle is
+                    // vertical by the tie-break, and no thumb ever notices.
+                    val dx = at.x - size.width / 2f
+                    val dy = at.y - size.height / 2f
+                    onPin(
+                        if (abs(dx) > abs(dy)) {
+                            if (dx < 0f) GamepadControl.DPAD_LEFT else GamepadControl.DPAD_RIGHT
+                        } else {
+                            if (dy < 0f) GamepadControl.DPAD_UP else GamepadControl.DPAD_DOWN
+                        },
+                    )
+                }
+            },
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val r = size.minDimension / 2f
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            val a = r * TouchOverlayPainter.ARM
+            val cross = Path().apply {
+                moveTo(cx - a, cy - r); lineTo(cx + a, cy - r); lineTo(cx + a, cy - a)
+                lineTo(cx + r, cy - a); lineTo(cx + r, cy + a); lineTo(cx + a, cy + a)
+                lineTo(cx + a, cy + r); lineTo(cx - a, cy + r); lineTo(cx - a, cy + a)
+                lineTo(cx - r, cy + a); lineTo(cx - r, cy - a); lineTo(cx - a, cy - a)
+                close()
+            }
+            // Only the arm that is down lights, so a diagram of a pad with north
+            // held reads as north held rather than as "the d-pad exists".
+            down.forEach { arm ->
+                drawRect(
+                    color = fillLit,
+                    topLeft = Offset(cx + arm.left * r + arm.leftArm * a, cy + arm.top * r + arm.topArm * a),
+                    size = Size(
+                        (arm.right - arm.left) * r + (arm.rightArm - arm.leftArm) * a,
+                        (arm.bottom - arm.top) * r + (arm.bottomArm - arm.topArm) * a,
+                    ),
+                )
+            }
+            drawPath(cross, if (down.isEmpty()) ring else ringLit, style = Stroke(width = hairline.toPx()))
+        }
+    }
+}
+
+/**
+ * One arm of the cross, as multiples of the radius and of the waist.
+ *
+ * Both, because an arm's rectangle is bounded by the radius on its outer edge and
+ * by the waist on its inner one, and writing it as `r` and `a` terms keeps the
+ * four in step with `ARM` instead of pinning numbers that would rot the moment
+ * the proportion moves again.
+ */
+private data class DpadArm(
+    val control: GamepadControl,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+    val leftArm: Float = 0f,
+    val topArm: Float = 0f,
+    val rightArm: Float = 0f,
+    val bottomArm: Float = 0f,
+)
+
+private val DPAD_DIRECTIONS = listOf(
+    DpadArm(GamepadControl.DPAD_UP, 0f, -1f, 0f, 0f, leftArm = -1f, rightArm = 1f, bottomArm = -1f),
+    DpadArm(GamepadControl.DPAD_DOWN, 0f, 0f, 0f, 1f, leftArm = -1f, topArm = 1f, rightArm = 1f),
+    DpadArm(GamepadControl.DPAD_LEFT, -1f, 0f, 0f, 0f, topArm = -1f, rightArm = -1f, bottomArm = 1f),
+    DpadArm(GamepadControl.DPAD_RIGHT, 0f, 0f, 1f, 0f, leftArm = 1f, topArm = -1f, bottomArm = 1f),
+)
+
+/** The box the four old arms spanned, kept so the rest of the diagram does not move. */
+private val DPAD_X = 2.dp
+private val DPAD_Y = 52.dp
+private val DPAD_SIZE = 64.dp
+
 /** The design's 45%: a pad that cannot light up must not look like one that will not. */
 private const val COLD_DIAGRAM_ALPHA = 0.45f
 
@@ -402,10 +555,8 @@ private val PAD_PINS = listOf(
     PadPin(GamepadControl.L2, 6.dp, 17.dp, 40.dp, 13.dp, label = "L2"),
     PadPin(GamepadControl.R1, 164.dp, 0.dp, 40.dp, 13.dp, label = "R1"),
     PadPin(GamepadControl.R2, 164.dp, 17.dp, 40.dp, 13.dp, label = "R2"),
-    PadPin(GamepadControl.DPAD_UP, 26.dp, 52.dp, 18.dp, 20.dp),
-    PadPin(GamepadControl.DPAD_DOWN, 26.dp, 96.dp, 18.dp, 20.dp),
-    PadPin(GamepadControl.DPAD_LEFT, 4.dp, 74.dp, 20.dp, 18.dp),
-    PadPin(GamepadControl.DPAD_RIGHT, 46.dp, 74.dp, 20.dp, 18.dp),
+    // The four d-pad directions are not here: they are one cross, drawn and hit
+    // as a unit by `PadDpad`, for the reasons in its header.
     PadPin(GamepadControl.THUMB_L, 14.dp, 116.dp, 36.dp, 36.dp, round = true, label = "L"),
     PadPin(GamepadControl.THUMB_R, 104.dp, 116.dp, 36.dp, 36.dp, round = true, label = "R"),
     PadPin(GamepadControl.Y, 160.dp, 50.dp, 22.dp, 22.dp, round = true, label = "Y"),
@@ -627,6 +778,32 @@ private fun LazyListScope.bindingListItems(
             }
         }
     }
+}
+
+/**
+ * Where a control's row sits in the binding list, or null if it has none.
+ *
+ * **It walks the list the same way [bindingListItems] emits it, and the two have
+ * to move together.** A `LazyColumn` scrolls by index and nothing else; the index
+ * is only knowable by repeating the walk, because whether a stick contributes one
+ * note or four rows depends on the profile's role for it. Written immediately
+ * above the emitter so that a change to one is in front of the eye that changes
+ * the other.
+ */
+private fun bindingRowIndex(profile: InputProfile, control: GamepadControl): Int? {
+    var index = 1 // `bound-count`, which the list opens with.
+    BINDING_GROUPS.forEach { group ->
+        index++ // the group's own heading
+        val role = group.stick?.let { profile.pad.roleOf(it) }
+        if (role != null && role != StickRole.Keys) {
+            index++ // the note that stands in for the four rows
+        } else {
+            val at = group.controls.indexOf(control)
+            if (at >= 0) return index + at
+            index += group.controls.size
+        }
+    }
+    return null
 }
 
 /** An icon and a sentence — the shape every explanatory line in this editor takes. */
