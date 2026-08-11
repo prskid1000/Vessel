@@ -90,16 +90,19 @@ Legend: `[x]` watched working · `[!]` watched failing · `[ ]` not yet run ·
 
 ## 4b. Input mapping
 
-Everything below was written without a device — see `docs/plans/input-mapping.md`.
-Unit tests cover the model, the catalogue and the store; **none of these rows is
-testable off the device**, and none of them is ticked.
+Most of this was written without a device — see `docs/plans/input-mapping.md`.
+The rows now ticked were watched on the phone; **the pad rows were driven by
+`adb shell input gamepad`, not by a real controller** — no pad was paired to the
+device at the time, and a row driven synthetically says `[~]` rather than `[x]`
+however convincing it looked.
 
 | # | Action | State | Notes |
 |---|---|---|---|
-| 4b.1 | The rail holds **five** tools in one row at 421 dp landscape, without scrolling | `[ ]` | The rail went 212 → 260 dp for this. Plan §9.2 is the open question; the arithmetic says five 44 dp targets and four 3 dp gaps need 232 dp inside the card, which 260 gives. Measured on nothing |
-| 4b.2 | Input opens a panel beside the rail; the guest stays visible to its right | `[ ]` | 260 + 560 = 820 dp of a 927 dp window |
-| 4b.3 | Pressing a control on a Bluetooth pad lights its row | `[ ]` | The live-press indicator, and the whole argument for `heldControls` on the seam. Depends on 4.11 |
-| 4b.4 | With **Learn** on, a press opens that control's picker | `[ ]` | Depends on 4b.3 |
+| 4b.1 | The rail holds **five** tools in one row at 421 dp landscape, without scrolling | `[x]` | Watched. Touch / Keys / Input / Files / Log in one row, Pause and Stop below it, nothing clipped and no scrollbar. The rail went 212 → 260 dp for this; plan §9.2 is answered |
+| 4b.2 | Input opens a panel beside the rail; the guest stays visible to its right | `[x]` | Watched. 260 + 560 = 820 dp of a 927 dp window, and the last hundred is guest |
+| 4b.3 | Pressing a control on a Bluetooth pad lights its row | `[~]` | `input gamepad keyevent --duration 1200 96` reaches `GamepadTranslator` and resolves to `A`. **No Bluetooth pad was paired**, so the row stays partial: what is proven is the path from Android's input pipeline inward, not that a real pad enters that pipeline the same way |
+| 4b.4 | With **Learn** on, a press opens that control's picker | `[~]` | Watched with the same synthetic press: the picker for `A`, "now: Space", opened. A *zero-duration* injection does not work and that is the injection's fault — `heldControls` goes empty again within the same frame, so nothing observes it |
+| 4b.4a | A pad event reaches the guest while the **shell** has focus | `[x]` | The bug behind "the controller does nothing". Measured: with the panel's *Filter keys* field focused, `MainActivity.dispatchKeyEvent` logs `view hadFocus=false` — the compositor view was not going to be given the event at all. It now gets pad events first, whatever holds focus |
 | 4b.5 | Rebinding a control takes effect **without relaunching** | `[ ]` | The reason the editor is in-session at all |
 | 4b.6 | Rebinding a control that is **held** does not leave the guest holding a key | `[ ]` | `setInputProfile` releases before it changes. The failure mode is a character that walks into a wall forever |
 | 4b.7 | Setting the right stick to **Keys** makes its four rows appear and bind | `[ ]` | |
@@ -114,7 +117,29 @@ testable off the device**, and none of them is ticked.
 | 4b.16 | A container pointed at a profile starts on it | `[ ]` | `SessionRuntime.prepare` resolves it and logs the name |
 | 4b.17 | Deleting a profile a container names: the container starts on the default and **says so** | `[ ]` | And the container document is **not** rewritten. `adb shell run-as` the two JSON files to check |
 | 4b.18 | The **first edit** on a container using the built-in default silently adopts a copy, and another container on the default is unaffected | `[ ]` | |
-| 4b.19 | The gamepad glyph in the rail and the container sheet reads as a gamepad at 18 dp | `[ ]` | Drawn in `VIcons` rather than transcribed from Phosphor — the project vendors no Phosphor asset for `game-controller`. Never rendered |
+| 4b.19 | The gamepad glyph in the rail and the container sheet reads as a gamepad at 18 dp | `[x]` | Watched in both places. It reads as a pad |
+
+## 4c. The touch overlay, and the three tabs
+
+Phases 3–5 of `docs/plans/input-mapping.md`, against the design comp
+`Vessel Input Mapping.dc.html`. Everything ticked here was watched on the phone.
+
+| # | Action | State | Notes |
+|---|---|---|---|
+| 4c.1 | The Input screen has **Pad / Touch / Profiles**, from both entries | `[x]` | Watched cold from the container sheet at 421 dp, and in session at 560 dp. One `InputEditor`; the width decides one column or two |
+| 4c.2 | The container sheet's Input row shows the profile as a chip | `[x]` | `Input · Pad bindings and the touch overlay. 20 controls mapped, 6 on the overlay.` with a `Keyboard and mouse` chip |
+| 4c.3 | The header carries back, title, `<container> · <resolution>` and a profile picker | `[x]` | Watched. The picker briefly rendered a UUID before the profile list arrived; fixed by seeding the name map with the profile being edited |
+| 4c.4 | Touch draws a preview at the session's aspect with every control in place | `[x]` | Watched, six controls. **The preview is the shape of the screen, not of the guest desktop** — see the note below |
+| 4c.5 | `N CONTROLS ON THE OVERLAY`, each with kind, metrics and a binding chip | `[x]` | `Stick · 11% · 66% · 102 dp · W A S D` |
+| 4c.6 | An empty overlay offers the stock layouts instead of an empty canvas | `[x]` | Watched; `WASD and look` adopted and persisted to `input-profiles.json` |
+| 4c.7 | **The overlay is drawn over a running guest** | `[x]` | Watched. Stick, look pad, Space, E, Left Shift, Esc, over the desktop at 35% |
+| 4c.8 | Show / hide has a control the user can find | `[x]` | Rail → Input → Touch → *Show the overlay*. Watched turning it on mid-session |
+| 4c.9 | A control on the overlay sends its key to the guest | `[ ]` | Needs a guest program that shows keys; the desktop is still black (5.1) |
+| 4c.10 | Holding an on-screen button and tapping elsewhere is still a **left** click | `[ ]` | `PointerRouterTest` pins it off the device. Not watched |
+| 4c.11 | Edit mode: drag moves, the corner resizes, the guest receives nothing | `[ ]` | Not watched |
+| 4c.12 | Profiles lists, creates, renames, duplicates, deletes and picks | `[x]` | Watched: three profiles listed with counts, the active one ringed, delete removed one, the radio moved the container |
+| 4c.13 | Import refuses a file from another schema, with a sentence | `[ ]` | `InputProfileImportTest` pins the refusal; the SAF round trip is not watched |
+| 4c.14 | Export writes a file the user picked a place for | `[ ]` | Not watched |
 
 ## 5. Session lifecycle
 
@@ -152,3 +177,51 @@ testable off the device**, and none of them is ticked.
 4. **No 3D at all** — Turnip is built `-Dplatforms=android` and has no X11 WSI,
    so every D3D probe dies at `vkCreateInstance`. Gates the whole graphics
    matrix in `TODO.md` §3.
+
+5. **A gamepad is not a gamepad inside the guest, and now there is a number for
+   it.** Reported as "I connected a controller and the game does not pick it up".
+   Measured with `tools/input/run-guest-pad.sh`, which runs a PE probe in the
+   live container and asks all three APIs a Windows game can ask:
+
+   ```
+   VESSEL-GUESTPAD xinput dll=xinput1_4.dll load=ok caps=yes state=yes
+   VESSEL-GUESTPAD xinput dll=xinput1_4.dll slot=0 caps=rc1167
+   …the same for 1_3, 9_1_0, 1_2, 1_1, on all four slots…
+   VESSEL-GUESTPAD dinput enum hr=0x00000000 devices=0
+   VESSEL-GUESTPAD winmm slots=16
+   VESSEL-GUESTPAD summary xinput=0 dinput=0 winmm=0
+   ```
+
+   `1167` is `ERROR_DEVICE_NOT_CONNECTED`. So **every XInput DLL is present and
+   working and there is no device behind any of them**, DirectInput enumerates no
+   game controller, and winmm has none attached. This is not a fault; it is
+   `docs/plans/input-mapping.md` §1 exactly as written, now measured rather than
+   asserted.
+
+   What the pad *does* reach is the X server, as keys and a pointer — 4b.3 and
+   4b.4 above. A game that reads the keyboard therefore plays; a game that calls
+   `XInputGetState` sees nothing, and no amount of remapping changes that.
+
+   **What would fix it, in the order the evidence points.** Wine's own
+   `xinput1_1..1_4`, `xinputuap`, `dinput`, `dinput8`, `hid`, `hidclass`,
+   `winexinput` and `winebus` all ship inside `dist/wine-*.wcp` already. The
+   missing piece is a *device*: `build/wine.sh:263` configures
+   `--without-sdl --without-udev --without-usb`, so `winebus.sys` has no backend
+   and enumerates nothing. Two shapes are available.
+
+   - **A `winebus` backend fed by the app** — a Wine patch adding a bus that
+     takes HID reports over a socket, the way `patches/wine/0005` takes shared
+     memory over `WINE_SYSVSHM_SOCKET`, with `enable_winebus_drv=yes` forcing it
+     on the way line 258 already forces `wineoss`. This is the *correct* answer:
+     one device description reaches `hidclass` and `winexinput`, and XInput,
+     DirectInput, winmm and raw HID all light up at once, with rumble available
+     back down the same pipe. It costs a Wine patch, a full rebuild and a new
+     `.wcp`.
+   - **Our own `xinput1_3.dll` and friends**, talking UDP to the app over
+     loopback, which is what Winlator does with `winhandler.exe`. Cheaper and
+     narrower: it covers XInput only, needs one PE per guest architecture, and
+     leaves DirectInput and winmm exactly as dead as they are now — which for a
+     title that predates XInput is the whole problem again.
+
+   Neither is started. `tools/input/padwin.c` is the probe either would be
+   measured with; run it before and after.
