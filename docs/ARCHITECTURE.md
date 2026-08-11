@@ -480,6 +480,53 @@ Every one of these steps has a timeout. The failure this whole section exists to
 end was a step that hung rather than one that errored, and a step that hangs is
 a step that has failed slowly.
 
+## Input and audio leave the process the same way: through the app
+
+Two seams that look unrelated share a cause. This is an `untrusted_app`, and the
+two obvious Linux answers — open a device node, open a sound device — are both
+closed to it. In each case the app already holds an Android API that can do the
+job, so the guest is given a socket to the app rather than a device to open.
+
+**Audio: `wineoss.drv` on AAudio.** `patches/wine/0008` replaces the unix half of
+Wine's OSS driver with AAudio, the NDK's only low-latency output. `mmdevapi`
+probes `oss` by default, so no registry key or override selects it — a guest that
+opens WASAPI, DirectSound or winmm lands here without knowing.
+
+The trap worth remembering: **AudioFlinger's start threshold is the buffer size.**
+A track whose queue never reaches it never starts, `framesRead` never moves, and
+the driver's ring appears to stall with no error anywhere. Sizing the shared
+buffer to `min(client, device)` is what makes a guest with a large period audible.
+
+Vessel applies **no attenuation of its own**. The guest outputs at full scale and
+Android's volume keys own the rest; two gain stages in series make a slider that
+does not mean anything.
+
+**Gamepads: the app is the bus.** `/dev/input` is `root:input` 0660 and this
+process is in neither group, so SDL, udev and libusb can never enumerate a
+controller — the missing piece is not a driver but a *permission*, and no Wine
+backend can earn it. Android's `InputDevice` API can see the pad, and it lives in
+the app.
+
+`patches/wine/0016` therefore adds a `winebus` backend whose device nodes are
+frames on a unix socket, in the same shape as `patches/wine/0005`'s MIT-SHM
+channel: a path in an environment variable, absent when the app opened none, in
+which case the backend reports itself unimplemented and winebus behaves exactly
+as before. Frames are a fixed 20 bytes both ways, so a short read is a torn frame
+rather than a desynchronised stream.
+
+What the guest gets is a **real HID device**, not an XInput shim: vid 045e, pid
+028e — the wired Xbox 360 pad — which `winexinput.sys` attaches to, DirectInput
+and winmm enumerate, and which carries force feedback back down the same socket
+onto the controller's own motors via `InputDevice.getVibrator`. A glass overlay
+and a physical pad are merged into one report before it goes on the wire, because
+they are one controller to the player: buttons union, and each axis takes
+whichever source is further from centre.
+
+**Assembling a HID report is not delivering it.** `hid_device_sync_report` only
+swaps the report against the previous one and answers whether it changed; every
+backend follows it with `bus_event_queue_input_report`. Without that call a pad
+enumerates perfectly, answers all three APIs, and reads dead centre forever.
+
 ## Roadmap
 
 | Phase | Deliverable | Status |
@@ -630,6 +677,10 @@ its side. Not written yet.
 
 ### Still missing
 
+*The "host is not wired up" bullet that stood here until 2026-08-11 described
+the day the backend was vendored. `XServerDisplay` has been the real binding for
+`SessionDisplayServer` since; sessions run, draw and take input through it.*
+
 - **The AHardwareBuffer/DAC present layer for DXVK is out of scope here and not
   done.** The X server side exists — DRI3 hands out the buffer fd and Present
   routes the flip — but nothing yet drives a real swapchain from DXVK's
@@ -639,12 +690,6 @@ its side. Not written yet.
   with a no-op implementation. Relative mouse mode and window activation from
   the X side into Win32 are therefore inert. The integration point is
   `XServer.setWinHandler()`.
-- **The host is not wired up.** This task vendored the backend only. The seam
-  exists on the session side — `app.vessel.core.SessionDisplayServer`, currently
-  bound to `SessionDisplayServer.Absent` — and closing it means one adapter that
-  creates the `XServer`, stands up `XConnectorEpoll` on the two sockets and hosts
-  `XServerView`. The call sequence is in
-  `app/src/main/java/com/winlator/README.md`.
 - **No XFixes.** winex11 uses it for cursor images and region ops when present;
   without it the pointer is the server's own cursor. Fine for now, wrong for
   applications that set custom cursors.

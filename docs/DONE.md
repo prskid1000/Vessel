@@ -4,6 +4,72 @@ Closed items moved out of `docs/TODO.md`, with the evidence that closed them.
 The rule they were held to is that file's rule: nothing was ticked until it had
 been watched working on the device.
 
+## Input and audio
+
+- [x] **Guest audio plays, and Vessel never turns it down.** `patches/wine/0008`
+  rewrites `wineoss.drv`'s unix half onto AAudio — the NDK's only low-latency
+  output — and `mmdevapi` probes `oss` by default, so nothing else had to change
+  to make a Windows program audible.
+
+  *Evidence:* heard on the device, 2026-08-11, and the trace explains what the
+  ear reported. AudioFlinger's **start threshold is the buffer size**, so a track
+  whose queue never reaches it never starts: `wineoss.drv` was handing Metro's
+  whole 1440-frame buffer to a device wanting 1736, and the driver logged
+  `advanced by 0, held: 1440` for 2072 consecutive passes. Sizing the shared
+  buffer to `min(client, device)` fixed it.
+
+  **Wine outputs at full scale and Android owns the volume.** Two attenuations
+  in series is a slider that does not mean anything.
+
+- [x] **A gamepad reaches the guest as a gamepad, not as keystrokes.**
+  `patches/wine/0016` adds a `winebus` backend fed by the app over a unix socket.
+  The guest gets a real HID device — vid 045e, pid 028e, the wired Xbox 360 pad
+  every title has been tested against for fifteen years — which XInput,
+  DirectInput and winmm all enumerate, and which carries rumble back down the
+  same socket to the controller's own motors.
+
+  **Why a socket and not a device node.** `/dev/input` is `root:input` 0660 and
+  `untrusted_app` is in neither group, so SDL, udev and libusb can never see a
+  controller from this process. Android's `InputDevice` API can, and it lives in
+  the app — so the app is the bus and `bus_vessel.c` is its client half.
+
+  *Evidence, 2026-08-11, from a session log with a Bluetooth pad connected:*
+
+  ```
+  vessel: pad bus connected to @vessel-pad-0-1
+  vessel: frame type 0x1
+  vessel: state pad 0 axes 128 128 -3469 -1413 buttons 0
+  vessel: queued a report of 17 bytes
+  ```
+
+  **It had been shipping as dead code for four test rounds.** The patch carried
+  only the new `bus_vessel.c` and none of the five edits that hook it into
+  `Makefile.in`, `unixlib.h`, `unixlib.c`, `unix_private.h` and `main.c` —
+  because `git diff` on a tree whose only change is an *untracked* file produces
+  exactly that, and a `git checkout -- .` cleanup had dropped the rest. The file
+  compiled into nothing and the linker said nothing. Two habits come out of it:
+  regenerate a patch with `git add -N` so the new file joins the tracked edits,
+  and confirm a Wine patch landed by running `strings` over the packaged `.so`
+  rather than reading a build's exit code — `build/wine.sh` prints
+  `error: ANDROID_NDK_HOME is not set` and exits 0 when run outside Docker.
+
+- [x] **The input screen is one list of controls.** It had been showing one
+  controller under two mental models — a free-form overlay you could add to, and
+  a fixed table of twenty-four rows you could only bind — and merging the tabs
+  moved the seam into the middle of a scroll instead of removing it. Every row is
+  a control now: on the glass, on the pad, or both.
+
+  `GamepadAction.Pad` is what made that honest — a control can send a *control*
+  rather than a keystroke, which only became possible once the guest had a pad to
+  send one to. The default profile is therefore a controller, with the keyboard
+  layout it used to be kept whole and offered by name.
+
+  Two rules that were special cases became ordinary. The default profile is a
+  normal editable record whose id means only "delete refuses it", where it used
+  to be a constant the store would not write — so the first edit forked a copy,
+  and a slider drag forked eight. And edits are a draft that Save writes, rather
+  than forty document writes during a drag.
+
 ## 1. Blocking a working product
 
 - [x] **Nothing had ever rendered a triangle. It has now, in both bitnesses.**

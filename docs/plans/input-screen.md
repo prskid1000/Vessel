@@ -1,5 +1,21 @@
 # The input screen, redesigned
 
+**Implemented 2026-08-11. Kept as the record of why, not as a plan.** Everything
+below was built; `docs/DESIGN.md` carries the shape that resulted, and three
+things went further than this document asked:
+
+- `GamepadAction.Pad` — a control can send a *control*, not just a key — which
+  made "one vocabulary" real rather than only visual, and made the default
+  profile a controller.
+- The default profile became an ordinary editable record, because the constant it
+  had been was what forked a copy on every edit.
+- Edits became a draft that Save writes, instead of reaching disk per keystroke.
+
+The closing line below — *do the bridge first, or this will be tuned against a
+controller that cannot be tested* — was right, and the bridge landed first.
+
+---
+
 Written 2026-08-11, after the tabs came out and the result was confusing.
 
 ## What is wrong, precisely

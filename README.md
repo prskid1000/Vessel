@@ -72,8 +72,8 @@ docker run --rm -v "$PWD:/src" -v vessel-work:/work vessel-build ./build/wine.sh
 
 ## Status
 
-**Windows programs run in windows on the phone, take input, and draw through
-Direct3D. A commercial game renders in a real container.**
+**Windows programs run in windows on the phone, draw through Direct3D, play
+sound, and take a real gamepad. A commercial game renders in a real container.**
 
 Verified on the device on 2026-08-09, from the app's own launcher rather than a
 shell: `notepad.exe` added from the file browser, tapped on its tile with nothing
@@ -140,6 +140,9 @@ executable needs SELinux `execmod`, which apps are not granted and parts of the
 policy `dontaudit` — so it fails with `EACCES` and no log line at all.
 
 ### What is actually left
+
+Nothing in this section is a blocker any more. It is the record of the last three
+things that were, kept because the diagnoses are reusable.
 
 **Not Direct3D. That is done, and this section said otherwise for a week.**
 It used to read that KGSL cannot export a dma-buf for a buffer Turnip allocated,

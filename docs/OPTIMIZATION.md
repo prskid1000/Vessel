@@ -152,7 +152,11 @@ MIT-SHM path. That is real hot code.
 
 - **Cost:** one hour of rebuild. Ties the package to Oryon, which this project
   does deliberately everywhere else.
-- **Status:** not applied, pending a benchmark that can see a win this size.
+- **Status: applied.** `build/wine.sh:275` sets
+  `CFLAGS="-O2 ${VESSEL_CPU_FLAGS:-} …"`, and the flag appears on 259 compile
+  lines of a full build. **Its value is still unmeasured** — it was adopted on
+  the argument above rather than on a number, and no benchmark here can yet see
+  a win this size.
 
 ---
 

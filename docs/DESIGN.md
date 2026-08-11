@@ -555,6 +555,54 @@ otherwise leaves the screen with the session still running — it does not stop 
 container, and it is not forwarded as `Esc`, because a gesture that cannot be
 escaped from is how the first build trapped the user on a running desktop.
 
+## Input mapping — one list, and one picture of the controller
+
+The screen that took the most attempts, and the one whose lesson generalises.
+
+**The failure was structural, not cosmetic.** It showed *one controller under two
+mental models*: a free-form overlay half where controls had positions and could
+be added and removed, and a fixed table of twenty-four rows that could only be
+bound. Nothing said the glass d-pad **was** the row called `D-pad up`. Eleven
+changes each fixed something real and none of them fixed that, because merging
+two halves into one scroll puts the seam in the middle of the page instead of
+behind a tab. Two smaller faults fell out of the same seam: `Add a control` asked
+for no name, so a control was anonymous until bound; and the two halves used two
+vocabularies for one object — *Button, Stick, Look pad* against *A, L2, D-pad up*.
+
+**The shape now: one list of controls. Every row is a control. A row can be on
+the glass, on the pad, or both.** That was already true of the data — a
+`TouchControl` carries `pad`/`padStick` and borrows the pad table's binding — and
+the screen was the last place pretending otherwise. Top to bottom: the map, the
+selected control, every control, settings, profile.
+
+Consequences worth stating, because each replaced a special case with a rule:
+
+- **The map is the only picture of the controller.** A schematic pad in the
+  settings drew it a second time, in positions it does not have. What replaced it
+  is better than it was: a press on the real pad finds and scrolls to its row, and
+  the map finds the ones on the glass.
+- **Three shapes, not four.** A look pad is a stick whose role is `Look`, and the
+  role is a field on the control. Two sticks may be placed because a controller
+  has two; one d-pad, because a HID report carries a single hat and a second would
+  have nowhere to go.
+- **The default profile is an ordinary record.** It used to be a constant the
+  store refused to write, so the first edit forked a copy — a slider drag forked
+  eight. Its id now means one thing: delete refuses it.
+- **Edits are a draft; Save writes them.** In a session the draft reaches the
+  guest immediately, which is the whole argument for editing bindings while a
+  game runs. The button reads *Save* when there is something to write and *Saved*
+  when there is not.
+- **Everything folds, and everything starts folded** — the two control groups,
+  the settings and the profile — using `VDisclosure`'s header so it folds the way
+  Diagnostics already did. The screen opens as the map, the selected control and
+  four headings.
+
+**The general lesson.** When a screen has been changed a dozen times and is still
+confusing, the confusion is usually structural and will not yield to a
+thirteenth. Write down what the screen is *saying* — here, "these are two
+different kinds of thing" — check it against the model, and if the model
+disagrees, the screen is the thing that is wrong.
+
 ## The shell — taskbar and launcher
 
 The product's missing centre: without it Vessel can run a Windows *desktop* but

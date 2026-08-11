@@ -358,8 +358,10 @@ renderer no longer refuses: it writes an offer covering all six published
 components, every one naming a real upstream repository, ref and commit, with
 the superseded Wine 10.13 and Turnip HAL builds and the unpublished Git package
 filtered out. The *Modifications to upstream* section enumerates
-`patches/mesa/` (6) and `patches/wine/` (14) from the filesystem, so every path
-in it resolves by construction.
+`patches/mesa/` (6) and `patches/wine/` (15) from the filesystem, so every path
+in it resolves by construction — the counts here track the directories rather
+than being asserted, which is why adding `patches/wine/0016` needed no code
+change to stay covered.
 
 *What has still not happened, and it is the difference between the obligation
 being dischargeable and discharged:* a component build has not run on `main`

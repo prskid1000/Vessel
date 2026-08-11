@@ -13,15 +13,20 @@ as won't-do, with the reason.
 
 ---
 
-## 1. Blocking a working product
+## 1. Blocking a working product — nothing is
 
-What stands between here and one sentence: *a Windows program drew on the screen
-through DXVK*. As of 2026-08-09 **half of that sentence is true** — a Windows
-program draws through D3D11 and the pixels read back correct — and what is left
-is putting those pixels in a window.
+The sentence this section existed for was *a Windows program drew on the screen
+through DXVK*. It has been true since 2026-08-09, and since 2026-08-11 the
+product it gates is one you can sit down with: a game renders, plays sound, and
+takes a Bluetooth controller.
 
-- [ ] **No D3D program has drawn into a window, and the cause is now known and
-  is not what any previous note said.**
+Kept as a record rather than a queue. The entries below are closed; what is
+still open lives in the sections after it.
+
+- [x] **Done. A D3D program draws into a window, and a game runs.** Metro 2033
+  Redux renders through DXVK on Turnip inside a container, windowed, GPU-bound at
+  97-98%. What follows is the record of how the last blocker fell, kept because
+  the diagnosis is reusable and the wrong turns were expensive.
 
   **Turnip was built as an Android Vulkan HAL.** Its only dynamic symbol is
   `HMI`, so only Android's `libvulkan.so` can load it — and that loader does not
@@ -48,6 +53,42 @@ is putting those pixels in a window.
   **~2.4 ms a frame, about 14% of a 60 Hz budget**, end to end including the
   Java X server. That is the present baseline this project never had.
   *Done when:* a windowed D3D11 program draws through the ICD inside a session.
+
+## Input and audio — closed 2026-08-11
+
+- [x] **Guest audio plays.** Wine's `wineoss.drv` was rewritten to speak AAudio
+  (`patches/wine/0008`), the NDK's only low-latency output; `mmdevapi` probes
+  `oss` by default, so nothing else had to change. The fix that made it audible
+  was sizing the shared buffer to `min(client, device)`: AudioFlinger's start
+  threshold *is* the buffer size, so a track queued below it never starts. Vessel
+  never attenuates — the guest outputs at full scale and Android's volume keys
+  own the rest.
+
+- [x] **A gamepad reaches the guest as a gamepad.** `/dev/input` is `root:input`
+  0660 and `untrusted_app` is in neither group, so SDL, udev and libusb can never
+  enumerate a controller in this process. `patches/wine/0016` adds a `winebus`
+  backend fed by the app over a unix socket — the app *is* the bus — and the
+  guest gets a real HID device that XInput, DirectInput and winmm all read as a
+  wired Xbox 360 pad, rumble included. Verified on device with a Bluetooth
+  controller driving a Windows program.
+
+  **The bug that hid for four test rounds is the lesson.** The patch contained
+  only the new `bus_vessel.c` and none of the five edits wiring it into
+  `Makefile.in`, `unixlib.h/c`, `unix_private.h` and `main.c`: `git diff` on a
+  tree whose only change is an *untracked* file produces exactly that, so a
+  `git checkout -- .` cleanup dropped the wiring silently and the linker dropped
+  the file without a word. Regenerate a patch with `git add -N`, and check
+  `strings` on the packaged `.so` — not the build's exit code, which is 0 when
+  `build/wine.sh` prints `ANDROID_NDK_HOME is not set` and stops.
+
+- [x] **The input screen is one list.** It had grown two mental models of one
+  controller — a free-form overlay half and a fixed 24-row pad table — and
+  merging the tabs only moved the seam into the middle of a scroll. Every row is
+  a control now, on the glass or on the pad or both; `GamepadAction.Pad` lets a
+  control send a *control* rather than a keystroke, so the default profile is a
+  controller and the old keyboard layout is kept by name as `KeyboardAndMouse`.
+  The default profile is an ordinary editable record whose id only means "cannot
+  be deleted", and edits are a draft that Save writes.
 
 ## The graphics bugs Metro exposed
 
@@ -708,11 +749,19 @@ audit's; they are pointers, not independently re-verified.
   be trustworthy. Either the number moves to the right knob or the knob loses its
   justification — both are better than today.
 
-- [ ] **`-mcpu=oryon-1` for Wine's unix side** (`docs/OPTIMIZATION.md:138-156`).
-  Still undone and still right in principle, but **rank it last for games**: on
-  the DXVK present path the unix side is only win32u's thin Vulkan thunk, and the
-  heavy native code is Turnip, which already gets the flag. It matters for
-  `winex11.drv.so`'s MIT-SHM blitter — the GDI path, not a game.
+- [x] **`-mcpu=oryon-1` reaches Wine's unix side, and this entry was wrong twice.**
+  It said "still undone" long after `build/wine.sh:275` began passing
+  `${VESSEL_CPU_FLAGS}` in `CFLAGS`; the build log carries the flag on 259
+  compile lines, `winex11.drv`'s unix half among them. The header of
+  `build/wine.sh:40-46` already records why `CROSSCFLAGS` does *not* get it —
+  one string builds arm64ec, aarch64 and i386 PE code, and you cannot say
+  `-mcpu=oryon-1` to an i386 compiler.
+
+  **Unmeasured, and ranked last for games**: on the DXVK present path the unix
+  side is only win32u's thin Vulkan thunk, and the heavy native code is Turnip,
+  which already gets the flag. It matters for `winex11.drv.so`'s MIT-SHM
+  blitter — the GDI path, not a game. Applied is not the same as worth it; what
+  is closed here is the claim that it was not applied.
 
 - [x] **DRI3 present works, and it is 3.4× cheaper than the software path.**
   *Measured 2026-08-10 with `tools/gfx/run-x11present.sh`, no Wine and no FEX in
@@ -1479,10 +1528,10 @@ Still open:
   unmeasurable until item 1.3, which now has a named cause and a named next
   step. `tools/device-bench.sh` was not run: with no D3D device there is nothing
   for it to time that `docs/OPTIMIZATION.md` does not already have.
-- [ ] **`-mcpu=oryon-1` for Wine's unix side.** Valid there even though it is
-  not for `CROSSCFLAGS`: `CFLAGS` reaches only the arm64 host build. Would tune
-  `ntdll.so`, `win32u.so` and `winex11.drv.so`. An hour's rebuild for a win the
-  current harness can barely see, so it waits for a benchmark that can.
+- [x] **`-mcpu=oryon-1` for Wine's unix side — applied, unmeasured.**
+  `build/wine.sh:275` puts `VESSEL_CPU_FLAGS` in `CFLAGS`, which reaches only
+  the arm64 host build, so `ntdll.so`, `win32u.so` and `winex11.drv.so` are
+  tuned. Whether it is worth anything is still unknown; see §Cheap wins.
 
 ## 6. Before the repository goes public
 
