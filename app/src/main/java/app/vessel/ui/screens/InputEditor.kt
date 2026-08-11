@@ -518,7 +518,8 @@ private fun DpadCross(selected: Boolean, modifier: Modifier = Modifier) {
 }
 
 /** The same proportion `TouchOverlayPainter.ARM` uses. */
-private const val DPAD_ARM = 0.42f
+/** Must match `TouchOverlayPainter.ARM` — the preview is a promise about the overlay. */
+private const val DPAD_ARM = 0.30f
 
 /** Play or lay out, whether it is drawn at all, and how solid. */
 @Composable

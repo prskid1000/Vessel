@@ -213,7 +213,15 @@ internal class TouchOverlayPainter(private val density: Float) {
         /** How much of a control's width a label may take. */
         const val LABEL_FIT = 1.1f
 
-        /** A d-pad arm's half-width, as a fraction of its radius. */
-        const val ARM = 0.42f
+        /**
+         * A d-pad arm's half-width, as a fraction of its radius.
+         *
+         * The arms reach the full radius either way, so this is what sets how
+         * *long* they look: an arm's visible stub is `r - a`, and thinning the
+         * waist is the only way to lengthen it without growing the control.
+         * 0.42 was the proportion of a real d-pad and read as stubby at overlay
+         * size; 0.30 takes each arm from 0.58r to 0.70r.
+         */
+        const val ARM = 0.30f
     }
 }

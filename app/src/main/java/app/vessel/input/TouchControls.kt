@@ -437,8 +437,12 @@ object TouchLayouts {
             // its cluster above it, its stick-click inboard. That symmetry is
             // also the fastest thing to learn — whatever is true of one hand is
             // true of the other.
-            stick("stick-l", Stick.LEFT, 0.090f, 0.72f, 0.120f),
-            stick("stick-r", Stick.RIGHT, 0.910f, 0.72f, 0.120f),
+            // Inboard of the corners rather than in them. A stick's radius is a
+            // fraction of the *short* side, so on a wide desktop 0.09 put half
+            // the circle under the screen's own edge — and a thumb resting on a
+            // bezel is not resting on a stick.
+            stick("stick-l", Stick.LEFT, 0.150f, 0.72f, 0.120f),
+            stick("stick-r", Stick.RIGHT, 0.850f, 0.72f, 0.120f),
 
             TouchControl(
                 id = "dpad",
