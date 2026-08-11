@@ -38,6 +38,13 @@ data class InputProfile(
             stick == null || pad.roleOf(stick) == StickRole.Keys
         }
 
+    /**
+     * Whether this is the profile a container falls back to.
+     *
+     * True of an *edited* default too: the id is what carries the meaning, and
+     * the only meaning left is that it cannot be deleted. Renaming it, rebinding
+     * it and rearranging its overlay are all ordinary edits.
+     */
     val isBuiltInDefault: Boolean get() = id == DEFAULT_ID
 
     /**
@@ -91,7 +98,7 @@ data class InputProfile(
 
     companion object {
         /**
-         * The id of the profile that is never written to disk.
+         * The id of the profile a container falls back to.
          *
          * A container with no `profileId`, and a container whose `profileId`
          * names a profile that has since been deleted, both resolve here — and
@@ -120,10 +127,12 @@ data class InputProfile(
          * stock layouts any profile can adopt. What it lost is its status as the
          * thing a container starts with.
          *
-         * It is a constant and is never written to disk, which is what keeps an
-         * untouched container's stored bytes identical to what they were before
-         * this feature existed — and what makes "there is always a profile" true
-         * without a migration: nothing in the document ever named it.
+         * **This is the seed, not a constant the product defends.** It is what
+         * [DEFAULT_ID] resolves to until something writes a profile under that
+         * id, after which the written one is the default and this is only what
+         * `Reset all` restores. Editing it is an ordinary edit; the single thing
+         * its id still means is that `InputProfileRepository.delete` refuses it,
+         * which is what makes "there is always a profile" true.
          */
         val Default: InputProfile = InputProfile(
             id = DEFAULT_ID,

@@ -122,7 +122,7 @@ import kotlin.math.roundToInt
  */
 data class InputEditorState(
     val profile: InputProfile,
-    /** Every stored profile. The built-in default is not in here; it is never stored. */
+    /** Every profile, the default first — see `InputProfileRepository.profiles`. */
     val profiles: List<InputProfile> = emptyList(),
     /** What the container points at. Null is the built-in default. */
     val activeProfileId: String? = null,
@@ -1705,33 +1705,55 @@ private fun ProfilesSection(
             )
         }
 
-        // Rename is the current profile's name field rather than a button on every
-        // row: renaming is the one profile action that is a *value*, and a field is
-        // what this product uses for a value everywhere else.
+        // **Typed, then saved, rather than saved per keystroke.** The field used
+        // to write the profile document on every character — twelve writes to
+        // name something "My controller" — and the name is the one profile value
+        // a half-finished state of is meaningless. The button is beside the field
+        // because that is what it applies to; everything else on this screen still
+        // takes effect as you change it, which is what you want for a binding you
+        // are testing and not for a word you are in the middle of typing.
+        var typed by remember(state.profile.id, state.profile.name) {
+            mutableStateOf(state.profile.name)
+        }
         VLabeledField(
             label = "Name",
             help = if (state.profile.isBuiltInDefault) {
-                "The built-in controller cannot be renamed or deleted — it is what a " +
-                    "container falls back to, so there is always one. Duplicate it and " +
-                    "the copy is yours to name, change and remove."
+                "The default cannot be deleted — it is what a container falls back to, so " +
+                    "there is always one. Everything else about it, this name included, is " +
+                    "yours to change."
             } else {
                 null
             },
         ) {
-            VTextField(
-                state.profile.name,
-                actions.onRename,
-                // Read-only rather than absent: the name is the thing being
-                // explained, and a field that vanished would leave the sentence
-                // under it talking about nothing.
-                enabled = !state.profile.isBuiltInDefault,
-                placeholder = "My controller",
-            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f)) {
+                    VTextField(
+                        typed,
+                        { typed = it },
+                        placeholder = "My controller",
+                    )
+                }
+                VButton(
+                    "Save",
+                    { actions.onRename(typed.trim()) },
+                    style = VButtonStyle.Secondary,
+                    // A name that is blank, or already the one it has, has nothing
+                    // to save — and a disabled button says which without a dialog.
+                    enabled = typed.isNotBlank() && typed.trim() != state.profile.name,
+                )
+            }
         }
 
         VRule(verticalMargin = Vessel.metrics.s3)
 
-        (listOf(InputProfile.Default) + state.profiles).forEach { profile ->
+        // Not `listOf(Default) + profiles` any more: the repository already puts
+        // the default first, and prepending the seed beside an edited one showed
+        // the same profile twice under two names.
+        state.profiles.forEach { profile ->
             ProfileRow(
                 profile = profile,
                 active = (state.activeProfileId ?: InputProfile.DEFAULT_ID) == profile.id,
@@ -1740,9 +1762,9 @@ private fun ProfilesSection(
         }
 
         InputNote(
-            "A profile belongs to no container until one selects it. The built-in default " +
-                "is what a container gets when it has never been given one, and it is never " +
-                "written to disk.",
+            "A profile belongs to no container until one selects it. The default is what a " +
+                "container gets when it has never been given one — it can be renamed and " +
+                "changed like any other, and only deleting it is refused.",
         )
     }
 }

@@ -231,14 +231,24 @@ class InputProfileStoreTest {
     }
 
     @Test
-    fun `the built-in default is never written to the document`() = runBlocking {
-        // The repository refuses it. Asserted here rather than in a repository
-        // test because it needs no DataStore: a `default` row would be a profile
-        // every container silently starts resolving to instead of the constant.
-        val stored = StoredInputProfile.of(InputProfile.Default)
-        assertEquals(InputProfile.DEFAULT_ID, stored.id)
+    fun `the default is written under its own id like any other profile`() {
+        // **This used to assert the opposite.** The default was a constant the
+        // repository refused to save, so editing it forked a copy; now it is an
+        // ordinary record whose id is the only thing special about it, and an
+        // edit to it has to survive the disc under that id rather than under a
+        // fresh one.
+        val edited = InputProfile.Default.copy(name = "Mine")
+        val back = StoredInputProfile.of(edited).toProfile()
+        assertEquals(InputProfile.DEFAULT_ID, back.id)
+        assertEquals("Mine", back.name)
+        assertTrue("an edited default is still the default", back.isBuiltInDefault)
+    }
+
+    @Test
+    fun `a document that has never been written names no default`() {
+        // The seed is what resolves until something writes over it, so an empty
+        // document is still a legal state and is not the same as a missing one.
         assertNull(
-            "nothing should have written the default",
             InputProfileDocument().profiles.firstOrNull { it.id == InputProfile.DEFAULT_ID },
         )
     }

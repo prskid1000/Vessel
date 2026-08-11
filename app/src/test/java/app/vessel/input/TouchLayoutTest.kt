@@ -256,14 +256,17 @@ class TouchLayoutTest {
     /**
      * There is always a profile.
      *
-     * The built-in one is a constant rather than a record, so no delete can reach
-     * it and nothing in the stored document ever names it — which is also why
-     * there is no migration to write when its contents change.
+     * The default is an ordinary record now — editable, renameable, saved under
+     * its own id — and the single thing its id still means is that
+     * `InputProfileRepository.delete` refuses it. `InputProfile.Default` is the
+     * seed used until something writes over it.
      */
     @Test
-    fun `the built-in default cannot be a stored record`() {
+    fun `the default is the seed and is marked undeletable`() {
         assertTrue(InputProfile.Default.isBuiltInDefault)
         assertEquals("Virtual controller", InputProfile.Default.name)
+        // Renaming it does not stop it being the one that cannot be deleted.
+        assertTrue(InputProfile.Default.copy(name = "Mine").isBuiltInDefault)
     }
 
     /** Keyboard and mouse survives as a stock layout; it is just not the default. */

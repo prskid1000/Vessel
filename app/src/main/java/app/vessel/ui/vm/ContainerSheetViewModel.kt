@@ -273,10 +273,10 @@ class ContainerSheetViewModel @Inject constructor(
     /**
      * Point this container at a profile, or at nothing.
      *
-     * **Nothing is stored as null rather than as the default profile's id.** The
-     * built-in default is never written to disk, so a container that has chosen
-     * it has chosen nothing — which is what keeps an untouched container's bytes
-     * identical to what they were before this feature existed.
+     * **Nothing is stored as null rather than as the default profile's id.** A
+     * container that has chosen the default has chosen nothing in particular, and
+     * a null resolves to whatever the default currently is — so a container never
+     * has to be rewritten when the default is edited or renamed.
      */
     fun setInputProfile(id: String?) {
         val current = draft ?: return
@@ -314,50 +314,19 @@ class ContainerSheetViewModel @Inject constructor(
      * that another container is also using. The same rule Delete and *Copy
      * diagnostics to* already follow.
      *
-     * **The first edit on the built-in default adopts a copy.** The default is a
-     * constant and is never written to disk, which is what keeps an untouched
-     * container's bytes unchanged — so editing it makes a real profile, points
-     * *this* container at it, and leaves every other container on the default
-     * exactly as it was.
+     * **The default is edited in place, like anything else.** It used to be a
+     * constant that could not be saved, so the first edit forked a copy under a
+     * new name — which meant a slider drag left a profile nobody asked for. It is
+     * an ordinary record now; see `InputProfileRepository`. The consequence worth
+     * knowing is that editing the default changes it for **every** container that
+     * has not chosen something else, which is what a shared default means.
      */
     fun saveInputProfile(next: InputProfile) {
-        val current = draft ?: return
-
-        // **The adoption happens here, not inside the coroutine.** It used to run
-        // after `launch`, so a drag on any slider — which calls this once per
-        // frame — started a dozen coroutines that each read the draft before any
-        // of them had written it, each decided the profile was still the
-        // built-in default, and each minted a fresh UUID. One drag produced eight
-        // profiles. Deciding synchronously means the second call sees what the
-        // first did, because both run on the same thread before either suspends.
-        // **Adopting a copy is for an edit, and a no-op is not an edit.** Reset
-        // all on the built-in default produces the built-in default, byte for
-        // byte, and forking a profile for it left a "Virtual controller (2)" in
-        // the list that differed from the original in nothing at all.
-        if (next.isBuiltInDefault && next == InputProfile.Default) return
-
-        var profile = next
-        if (profile.isBuiltInDefault) {
-            val adopted = current.input.profileId
-            profile = profile.copy(
-                id = adopted ?: UUID.randomUUID().toString(),
-                // A second edit that still arrives holding the built-in default —
-                // the editor had not been recomposed yet — writes to the copy
-                // already adopted, under the name it was given.
-                name = adopted
-                    ?.let { id -> _state.value.input.profiles.firstOrNull { it.id == id }?.name }
-                    ?: inputProfiles.nextName(
-                        profile.name,
-                        _state.value.input.profiles.map { it.name },
-                    ),
-            )
-            if (adopted == null) {
-                draft = current.copy(input = current.input.copy(profileId = profile.id))
-            }
-        }
-
+        // One rule for every profile, the default included. The fork that used to
+        // live here — mint a UUID, rename, repoint the container — is gone with
+        // the constant it existed for; see `InputProfileRepository`.
         viewModelScope.launch {
-            inputProfiles.save(profile)
+            inputProfiles.save(next)
             refreshInput()
         }
     }
@@ -425,10 +394,14 @@ class ContainerSheetViewModel @Inject constructor(
     private fun refreshInput() {
         val current = draft ?: return
         viewModelScope.launch {
+            // `profiles` carries the default first, edited or seeded, so both
+            // "which one is this container on" and "what is in the list" come
+            // from one place and cannot disagree about the default's name.
             val stored = inputProfiles.profiles.first()
+            val default = stored.first { it.isBuiltInDefault }
             val wanted = current.input.profileId
             val found = stored.firstOrNull { it.id == wanted }
-            val resolved = found ?: InputProfile.Default
+            val resolved = found ?: default
             val geometry = (current.params[DisplayParams.RESOLUTION] as? ParamValue.Text)
                 ?.value
                 ?.takeIf { text -> text.contains('x', ignoreCase = true) }

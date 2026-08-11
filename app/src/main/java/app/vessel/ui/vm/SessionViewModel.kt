@@ -223,63 +223,19 @@ class SessionViewModel @Inject constructor(
      * so a draft would defeat the feature. The push releases every held control
      * first — see [SessionDisplayServer.setInputProfile].
      *
-     * **Editing the built-in default adopts it.** The default is a constant and is
-     * never written to disk, which is what keeps an untouched container's bytes
-     * unchanged; so the first edit copies it into a real profile, points this
-     * container at the copy and continues. The name is unchanged, so nothing about
-     * it appears to move — and every *other* container still on the default is
-     * left exactly as it was, which is the behaviour a shared default has to have.
+     * **The default is edited in place.** No fork, no rename, no repointing of
+     * the container — it is a record like any other and is saved under its own
+     * id. Editing it therefore changes it for every container that has not chosen
+     * something else, which is what a shared default means and was already true
+     * of every other shared profile.
      */
-    /**
-     * The copy this session adopted the first time the built-in default was edited.
-     *
-     * **Held here, and decided synchronously.** The adoption used to happen inside
-     * the coroutine below, so a slider drag — one call per frame — started a dozen
-     * coroutines that each read "still the built-in default" before any of them had
-     * recorded otherwise, and each minted a UUID. One drag left eight profiles in
-     * the list. Two plain fields set before the first suspension point are enough:
-     * every call after the first sees them.
-     */
-    private var adoptedId: String? = null
-    private var adoptedName: String? = null
-
     fun setInputProfile(next: InputProfile) {
-        // Adopting a copy is for an edit; a reset of the built-in default back to
-        // the built-in default is not one. See the sheet's copy of this rule.
-        if (next.isBuiltInDefault && next == InputProfile.Default) return
-
-        var profile = next
-        val adopting = profile.isBuiltInDefault && adoptedId == null
-        if (profile.isBuiltInDefault) {
-            val id = adoptedId ?: UUID.randomUUID().toString().also { adoptedId = it }
-            profile = profile.copy(id = id, name = adoptedName ?: profile.name)
-        }
-
+        // Saved under its own id, whatever that id is. The default is a profile
+        // like any other now — see `InputProfileRepository` — so there is no
+        // adopt-a-copy dance and no container document to repoint.
         viewModelScope.launch {
-            var saving = profile
-            if (adopting) {
-                // Only the one call that did the adopting names it, so the unique
-                // name is computed once however fast the edits arrive.
-                val name = inputProfiles.nextName(
-                    next.name,
-                    inputProfiles.profiles.first().map { it.name },
-                )
-                adoptedName = name
-                saving = saving.copy(name = name)
-                state.value.containerId?.let { id ->
-                    containers.get(id)?.let { container ->
-                        containers.save(
-                            container.copy(
-                                input = container.input.copy(profileId = saving.id),
-                            ),
-                        )
-                    }
-                }
-            } else if (next.isBuiltInDefault) {
-                saving = saving.copy(name = adoptedName ?: saving.name)
-            }
-            inputProfiles.save(saving)
-            display.setInputProfile(saving)
+            inputProfiles.save(next)
+            display.setInputProfile(next)
         }
     }
 
@@ -352,10 +308,6 @@ class SessionViewModel @Inject constructor(
      * the in-session editor exists to break.
      */
     fun pickInputProfile(id: String?) {
-        // Choosing a profile ends the adoption: an edit after switching back to
-        // the built-in default is a new fork, not a write to the last one.
-        adoptedId = null
-        adoptedName = null
         viewModelScope.launch {
             state.value.containerId?.let { containerId ->
                 containers.get(containerId)?.let {
