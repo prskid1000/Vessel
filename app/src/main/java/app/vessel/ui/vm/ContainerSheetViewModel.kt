@@ -285,6 +285,25 @@ class ContainerSheetViewModel @Inject constructor(
     }
 
     /**
+     * Whether the overlay is drawn, from the cold editor.
+     *
+     * **Into the draft, unlike the profile edits below it.** This one is a field
+     * of *this container* rather than of a shared profile, so it follows the same
+     * rule as every other setting on this sheet and lands on Save. The session
+     * has its own path — `SessionViewModel.setTouchControlsVisible` — because
+     * there the change has to reach a running display as well as the disc.
+     *
+     * It existed as a toggle with no handler at all until this: the sheet built
+     * its actions without one, `InputEditorActions` defaults it to `{}`, and so
+     * the control rendered with the stored value and silently refused to move.
+     */
+    fun setTouchVisible(visible: Boolean) {
+        val current = draft ?: return
+        draft = current.copy(input = current.input.copy(touchVisible = visible))
+        refreshInput()
+    }
+
+    /**
      * Store an edit made in the cold editor.
      *
      * **Immediate, and not held in the draft like every other field on this
@@ -303,18 +322,35 @@ class ContainerSheetViewModel @Inject constructor(
      */
     fun saveInputProfile(next: InputProfile) {
         val current = draft ?: return
-        viewModelScope.launch {
-            var profile = next
-            if (profile.isBuiltInDefault) {
-                profile = profile.copy(
-                    id = UUID.randomUUID().toString(),
-                    name = inputProfiles.nextName(
+
+        // **The adoption happens here, not inside the coroutine.** It used to run
+        // after `launch`, so a drag on any slider — which calls this once per
+        // frame — started a dozen coroutines that each read the draft before any
+        // of them had written it, each decided the profile was still the
+        // built-in default, and each minted a fresh UUID. One drag produced eight
+        // profiles. Deciding synchronously means the second call sees what the
+        // first did, because both run on the same thread before either suspends.
+        var profile = next
+        if (profile.isBuiltInDefault) {
+            val adopted = current.input.profileId
+            profile = profile.copy(
+                id = adopted ?: UUID.randomUUID().toString(),
+                // A second edit that still arrives holding the built-in default —
+                // the editor had not been recomposed yet — writes to the copy
+                // already adopted, under the name it was given.
+                name = adopted
+                    ?.let { id -> _state.value.input.profiles.firstOrNull { it.id == id }?.name }
+                    ?: inputProfiles.nextName(
                         profile.name,
-                        inputProfiles.profiles.first().map { it.name },
+                        _state.value.input.profiles.map { it.name },
                     ),
-                )
+            )
+            if (adopted == null) {
                 draft = current.copy(input = current.input.copy(profileId = profile.id))
             }
+        }
+
+        viewModelScope.launch {
             inputProfiles.save(profile)
             refreshInput()
         }

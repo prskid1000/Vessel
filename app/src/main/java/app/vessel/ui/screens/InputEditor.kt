@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -141,7 +143,17 @@ data class InputEditorState(
     val notice: String? = null,
 )
 
-/** What the editor can do. One lambda per verb, so nothing here knows about a store. */
+/**
+ * What the editor can do. One lambda per verb, so nothing here knows about a store.
+ *
+ * **Every default is a silent no-op, so an unwired verb is a dead control.** The
+ * defaults exist for previews and for [SessionScreen], which fills `onArrange` in
+ * itself with `copy`. The cost is that a call site which simply forgets one gets
+ * no warning: `onTouchVisible` was missing from the container sheet for exactly
+ * that reason, and "Show the overlay" rendered with the stored value and refused
+ * to move. When adding a verb here, wire it at **both** real call sites —
+ * `ContainerSheet` and `Navigation` — not only the one you are working in.
+ */
 data class InputEditorActions(
     val onProfile: (InputProfile) -> Unit = {},
     val onPickProfile: (String?) -> Unit = {},
@@ -326,7 +338,23 @@ fun InputEditor(
     /** The row and slot whose key is being chosen, or null while the list is showing. */
     var picking by remember { mutableStateOf<Picking?>(null) }
 
-    val entries = remember(profile) { controlEntries(profile) }
+    /**
+     * Which groups are folded away.
+     *
+     * The pad group starts closed: on a hand-built layout it is twenty-four rows
+     * between the controls you placed and the settings, and it is the read-only
+     * half — nothing in it can be deleted, only bound.
+     */
+    var collapsed by remember { mutableStateOf(setOf(ControlGroup.Pad)) }
+
+    // Open, both of them. Folding is offered because the screen is long, not
+    // because these are rarely wanted — and "Show the overlay" had just been
+    // fixed after being unreachable, so hiding it again by default would be a
+    // poor joke.
+    var settingsFolded by remember { mutableStateOf(false) }
+    var profileFolded by remember { mutableStateOf(false) }
+
+    val entries = remember(profile, collapsed) { controlEntries(profile, collapsed) }
 
     /**
      * What is down on the real pad, and nothing else.
@@ -362,7 +390,17 @@ fun InputEditor(
         val control = highlighted.firstOrNull() ?: return@LaunchedEffect
         actions.onSelect(entries.rowFor(control)?.key)
         val index = entries.indexOfFirst { it is ControlEntry.Row && control in it.speaksFor }
-        if (index >= 0) listState.animateScrollToItem(index + LEADING_ITEMS)
+        if (index >= 0) {
+            listState.animateScrollToItem(index + LEADING_ITEMS)
+            return@LaunchedEffect
+        }
+        // Not in the list because its group is folded. Open the group rather than
+        // doing nothing: "press a control to find its row" cannot be conditional
+        // on having already opened the half it is in.
+        val hidden = controlEntries(profile).indexOfFirst {
+            it is ControlEntry.Row && control in it.speaksFor
+        }
+        if (hidden >= 0) collapsed = emptySet()
     }
 
     val selected = entries.rowByKey(state.selected)
@@ -419,6 +457,9 @@ fun InputEditor(
                 actions = actions,
                 lit = highlighted,
                 shortEdge = shortEdge,
+                onToggle = { group ->
+                    collapsed = if (group in collapsed) collapsed - group else collapsed + group
+                },
             )
             item(key = "settings") {
                 InputSettings(
@@ -426,11 +467,19 @@ fun InputEditor(
                     actions = actions,
                     learn = learn,
                     onLearn = { learn = it },
+                    collapsed = settingsFolded,
+                    onToggle = { settingsFolded = !settingsFolded },
                     modifier = Modifier.padding(top = Vessel.metrics.s22),
                 )
             }
             item(key = "profiles") {
-                ProfilesSection(state, actions, Modifier.padding(top = Vessel.metrics.s22))
+                ProfilesSection(
+                    state = state,
+                    actions = actions,
+                    collapsed = profileFolded,
+                    onToggle = { profileFolded = !profileFolded },
+                    modifier = Modifier.padding(top = Vessel.metrics.s22),
+                )
             }
         }
     }
@@ -651,6 +700,9 @@ private sealed interface ControlEntry {
         override val key: String,
         val title: String,
         val reset: Reset? = null,
+        /** The group this heading opens and closes, or null for a bare title. */
+        val group: ControlGroup? = null,
+        val collapsed: Boolean = false,
     ) : ControlEntry
 
     /** A control: on the glass, on the pad, or both. */
@@ -702,6 +754,16 @@ private sealed interface ControlEntry {
 private enum class Reset { Layout, All }
 
 /**
+ * The two halves of the control list, each of which folds away.
+ *
+ * The list is every control a profile has — twenty-four plus whatever was placed
+ * — and on a phone that is a lot of scrolling to reach the settings under it. The
+ * glass group is the one being worked on, so it opens; [Pad] is the read-only
+ * remainder and starts closed.
+ */
+private enum class ControlGroup { Glass, Pad }
+
+/**
  * One binding a row owns.
  *
  * [pad] is what makes the glass and the pad one table: a slot naming a pad control
@@ -727,7 +789,11 @@ private const val SLOT_SENDS = "Sends"
  * glass; on a hand-built layout it leaves all twenty-four, because none of them
  * is.
  */
-private fun controlEntries(profile: InputProfile): List<ControlEntry> {
+private fun controlEntries(
+    profile: InputProfile,
+    /** Groups whose rows are folded away. The headings are always emitted. */
+    collapsed: Set<ControlGroup> = emptySet(),
+): List<ControlEntry> {
     val layout = profile.overlay
     val covered = layout.controls.flatMap { it.padControls }.toSet()
     val rest = PAD_READING_ORDER.filterNot { it in covered }
@@ -752,16 +818,26 @@ private fun controlEntries(profile: InputProfile): List<ControlEntry> {
         // form never equals the stock constant and the way back would be offered
         // on an arrangement nobody has touched.
         reset = Reset.Layout.takeIf { !layout.isEmpty && profile.touch != TouchLayouts.Gamepad },
+        group = ControlGroup.Glass,
+        collapsed = ControlGroup.Glass in collapsed,
     )
-    if (layout.isEmpty) {
-        out += ControlEntry.Stock
-    } else {
-        layout.controls.forEach { out += glassRow(it) }
+    if (ControlGroup.Glass !in collapsed) {
+        if (layout.isEmpty) {
+            out += ControlEntry.Stock
+        } else {
+            layout.controls.forEach { out += glassRow(it) }
+        }
+        out += ControlEntry.Add
     }
-    out += ControlEntry.Add
 
     if (rest.isNotEmpty()) {
-        out += ControlEntry.Heading("h-pad", "ON THE PAD ONLY · ${rest.size}")
+        out += ControlEntry.Heading(
+            key = "h-pad",
+            title = "ON THE PAD ONLY · ${rest.size}",
+            group = ControlGroup.Pad,
+            collapsed = ControlGroup.Pad in collapsed,
+        )
+        if (ControlGroup.Pad in collapsed) return out
         val noted = mutableSetOf<Stick>()
         rest.forEach { control ->
             val stick = Stick.entries.firstOrNull { control in it.halfAxes }
@@ -867,11 +943,12 @@ private fun LazyListScope.controlItems(
     actions: InputEditorActions,
     lit: Set<GamepadControl>,
     shortEdge: Dp,
+    onToggle: (ControlGroup) -> Unit,
 ) {
     val profile = state.profile
     items(entries.size, key = { entries[it].key }) { index ->
         when (val entry = entries[index]) {
-            is ControlEntry.Heading -> ControlHeading(entry, profile, actions)
+            is ControlEntry.Heading -> ControlHeading(entry, profile, actions, onToggle)
 
             is ControlEntry.Row -> ControlRowView(
                 row = entry,
@@ -891,16 +968,77 @@ private fun LazyListScope.controlItems(
     }
 }
 
+/**
+ * The caret every folding header shows, pointing down when open.
+ *
+ * One definition for the three headers that fold — the two control groups, the
+ * settings and the profile — because a caret that rotated one way in one place
+ * and the other way elsewhere is the kind of thing nobody reports and everybody
+ * notices.
+ */
+@Composable
+private fun FoldCaret(collapsed: Boolean) {
+    Icon(
+        VIcons.CaretDown,
+        contentDescription = null,
+        tint = Vessel.colors.textMuted,
+        modifier = Modifier
+            .size(Vessel.metrics.iconSm)
+            .rotate(if (collapsed) -90f else 0f)
+            .padding(end = Vessel.metrics.s3),
+    )
+}
+
+/**
+ * A section title that folds its body away.
+ *
+ * The whole row is the target rather than the caret: a 14 dp glyph is not
+ * something to aim at with a thumb, and the row is already the full width.
+ */
+@Composable
+private fun FoldingHeader(
+    title: String,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clickable(onClickLabel = if (collapsed) "Show" else "Hide", onClick = onToggle),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FoldCaret(collapsed)
+        Text(title, style = Vessel.type.overline, color = Vessel.colors.textMuted)
+    }
+}
+
 @Composable
 private fun ControlHeading(
     heading: ControlEntry.Heading,
     profile: InputProfile,
     actions: InputEditorActions,
+    onToggle: (ControlGroup) -> Unit,
 ) {
+    // **The whole heading is the target, not the chevron.** A 12 dp glyph is not
+    // something to aim at with a thumb, and the row is already the full width.
+    val group = heading.group
     Row(
-        Modifier.fillMaxWidth().padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s3),
+        Modifier
+            .fillMaxWidth()
+            .then(
+                if (group == null) {
+                    Modifier
+                } else {
+                    Modifier.clickable(
+                        onClickLabel = if (heading.collapsed) "Show" else "Hide",
+                    ) { onToggle(group) }
+                },
+            )
+            .padding(top = Vessel.metrics.s11, bottom = Vessel.metrics.s3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (group != null) FoldCaret(heading.collapsed)
         Text(
             heading.title,
             style = Vessel.type.overline,
@@ -1492,15 +1630,14 @@ private fun InputSettings(
     actions: InputEditorActions,
     learn: Boolean,
     onLearn: (Boolean) -> Unit,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val profile = state.profile
     Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
-        Text(
-            "SETTINGS",
-            style = Vessel.type.overline,
-            color = Vessel.colors.textMuted,
-        )
+        FoldingHeader("SETTINGS", collapsed, onToggle)
+        if (collapsed) return@Column
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
@@ -1570,6 +1707,8 @@ private fun InputSettings(
 private fun ProfilesSection(
     state: InputEditorState,
     actions: InputEditorActions,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // No scroll of its own: it is one item inside the screen's single list, and a
@@ -1578,7 +1717,8 @@ private fun ProfilesSection(
         modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
     ) {
-        Text("PROFILE", style = Vessel.type.overline, color = Vessel.colors.textMuted)
+        FoldingHeader("PROFILE", collapsed, onToggle)
+        if (collapsed) return@Column
 
         if (state.missingProfile) {
             VCaution(

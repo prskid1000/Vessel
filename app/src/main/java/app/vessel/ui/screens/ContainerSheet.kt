@@ -127,6 +127,7 @@ fun ContainerSheet(
             onSelect = { viewModel.selectTouchControl(it) },
             onDismissNotice = viewModel::dismissInputNotice,
             onArrange = { arranging = true },
+            onTouchVisible = viewModel::setTouchVisible,
         ),
         onDeleteLogs = viewModel::deleteLogs,
         onCopyDiagnostics = viewModel::copyDiagnosticsTo,
