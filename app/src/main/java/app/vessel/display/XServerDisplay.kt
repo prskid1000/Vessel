@@ -1384,9 +1384,12 @@ private class SessionSurfaceView(
             // The overlay carries the same release-before-change rule, and needs
             // it more: a control can be moved out from under the finger that is
             // holding it, which the pad can never do.
-            sink.accept(overlay.setLayout(value.touch))
+            // `overlay`, not `touch`: a control that *is* the pad's A button
+            // borrows its binding from the pad table, and the resolved layout is
+            // the only one that knows what it sends.
+            sink.accept(overlay.setLayout(value.overlay))
             overlay.config = value.config
-            touchLayout = value.touch
+            touchLayout = value.overlay
             pressedControls.clear()
             syncLookTimer()
             invalidate()

@@ -37,6 +37,16 @@ class TouchControlTranslator(
      */
     private val sticks = GamepadTranslator(padProfileOf(layout), config)
 
+    /**
+     * Which control drives each of the two stick slots.
+     *
+     * By identity rather than by role, because a full-controller overlay can have
+     * both sticks sending keys — and then "the one that is not Look" names two
+     * controls and the right stick would silently drive the left.
+     */
+    private var leftStickId: String? = leftStickOf(layout)?.id
+    private var rightStickId: String? = rightStickOf(layout)?.id
+
     /** Which control each finger currently on the overlay landed on. */
     private val fingers = mutableMapOf<Int, String>()
 
@@ -83,6 +93,8 @@ class TouchControlTranslator(
     fun setLayout(next: TouchLayout): List<GuestInput> {
         val released = reset()
         layout = next
+        leftStickId = leftStickOf(next)?.id
+        rightStickId = rightStickOf(next)?.id
         sticks.profile = padProfileOf(next)
         return released
     }
@@ -196,6 +208,7 @@ class TouchControlTranslator(
         return apply(control, dx, dy)
     }
 
+    /** The thumb left: the stick springs back, and whatever it held is let go. */
     private fun centre(control: TouchControl): List<GuestInput> = apply(control, 0f, 0f)
 
     private fun apply(control: TouchControl, dx: Float, dy: Float): List<GuestInput> =
@@ -206,7 +219,7 @@ class TouchControlTranslator(
                 sticks.onHat(hatX, hatY)
             }
 
-            control.role == StickRole.Look -> {
+            control.id == rightStickId -> {
                 lookX = dx
                 lookY = dy
                 sticks.onSticks(stickX, stickY, lookX, lookY)
@@ -221,28 +234,50 @@ class TouchControlTranslator(
 
     private companion object {
         /**
-         * The overlay's sticks, d-pad and look pad, as a [GamepadProfile].
+         * Which control drives each of the two stick slots.
          *
-         * The left stick is the overlay's stick and the right is its look pad,
-         * always — a look pad has no half-axes to bind and a stick has no
-         * velocity, so the two can never want the same slot. A layout missing
-         * either leaves that stick at [StickRole.None], which is silent.
+         * A control that *is* the pad's left or right stick says so and takes
+         * that slot. Anything else falls back on its role, which is what makes a
+         * hand-built layout — one stick and one look pad, neither claiming a
+         * side — behave the way it always did: the stick walks, the pad looks.
+         */
+        fun leftStickOf(layout: TouchLayout): TouchControl? =
+            layout.controls.firstOrNull { it.padStick == Stick.LEFT }
+                ?: layout.controls.firstOrNull {
+                    it.kind == TouchKind.STICK && it.padStick == null && it.role != StickRole.Look
+                }
+
+        fun rightStickOf(layout: TouchLayout): TouchControl? =
+            layout.controls.firstOrNull { it.padStick == Stick.RIGHT }
+                ?: layout.controls.firstOrNull {
+                    it.kind == TouchKind.STICK && it.padStick == null && it.role == StickRole.Look
+                }
+
+        /**
+         * The overlay's sticks and d-pad, as a [GamepadProfile].
+         *
+         * Each slot takes the role its own control carries rather than a fixed
+         * one, because a full-controller overlay can have a right stick sending
+         * keys just as a pad can. A slot with no control is [StickRole.None],
+         * which is silent.
          */
         fun padProfileOf(layout: TouchLayout): GamepadProfile {
-            val stick = layout.controls.firstOrNull {
-                it.kind == TouchKind.STICK && it.role != StickRole.Look
-            }
-            val look = layout.controls.firstOrNull {
-                it.kind == TouchKind.STICK && it.role == StickRole.Look
-            }
+            val left = leftStickOf(layout)
+            val right = rightStickOf(layout)
             val dpad = layout.controls.firstOrNull { it.kind == TouchKind.DPAD }
 
             val bindings = buildMap {
-                stick?.let {
+                left?.let {
                     put(GamepadControl.STICK_L_UP, it.up)
                     put(GamepadControl.STICK_L_DOWN, it.down)
                     put(GamepadControl.STICK_L_LEFT, it.left)
                     put(GamepadControl.STICK_L_RIGHT, it.right)
+                }
+                right?.let {
+                    put(GamepadControl.STICK_R_UP, it.up)
+                    put(GamepadControl.STICK_R_DOWN, it.down)
+                    put(GamepadControl.STICK_R_LEFT, it.left)
+                    put(GamepadControl.STICK_R_RIGHT, it.right)
                 }
                 dpad?.let {
                     put(GamepadControl.DPAD_UP, it.up)
@@ -256,8 +291,8 @@ class TouchControlTranslator(
                 name = "overlay",
                 bindings = bindings,
                 sticks = mapOf(
-                    Stick.LEFT to if (stick == null) StickRole.None else StickRole.Keys,
-                    Stick.RIGHT to if (look == null) StickRole.None else StickRole.Look,
+                    Stick.LEFT to (left?.role ?: StickRole.None),
+                    Stick.RIGHT to (right?.role ?: StickRole.None),
                 ),
             )
         }

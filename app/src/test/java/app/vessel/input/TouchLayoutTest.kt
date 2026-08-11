@@ -1,5 +1,6 @@
 package app.vessel.input
 
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -133,20 +134,134 @@ class TouchLayoutTest {
     fun `every stock layout is already sane and uniquely shaped`() {
         TouchLayouts.stock.forEach { stock ->
             assertEquals(stock.name, stock.layout, stock.layout.sane())
-            listOf("Stick", "Look pad", "D-pad").forEach { designation ->
+            listOf("Stick", "Look pad", "D-pad", "Left stick", "Right stick").forEach {
                 assertTrue(
-                    "${stock.name} has at most one $designation",
-                    stock.layout.controls.count { it.designation == designation } <= 1,
+                    "${stock.name} has at most one $it",
+                    stock.layout.controls.count { c -> c.designation == it } <= 1,
                 )
             }
         }
     }
 
+    /** Nothing on a stock layout may sit off the screen it is laid out against. */
     @Test
-    fun `the built-in default draws something`() {
-        assertFalse(InputProfile.Default.touch.isEmpty)
-        assertTrue(InputProfile.Default.touch.has("Stick"))
-        assertTrue(InputProfile.Default.touch.has("Look pad"))
+    fun `every stock control is wholly on a landscape screen`() {
+        TouchLayouts.stock.forEach { stock ->
+            stock.layout.controls.forEach { control ->
+                val clamped = control.clampedIn(2780f, 1264f)
+                assertEquals("${stock.name}/${control.id} cx", control.cx, clamped.cx, 0.0001f)
+                assertEquals("${stock.name}/${control.id} cy", control.cy, clamped.cy, 0.0001f)
+            }
+        }
+    }
+
+    /** Two controls of a full pad must not sit on top of each other. */
+    @Test
+    fun `the controller layout does not overlap itself`() {
+        val w = 2780f
+        val h = 1264f
+        val controls = TouchLayouts.Gamepad.controls
+        controls.forEachIndexed { i, a ->
+            controls.drop(i + 1).forEach { b ->
+                val dx = a.centreX(w) - b.centreX(w)
+                val dy = a.centreY(h) - b.centreY(h)
+                val apart = kotlin.math.hypot(dx, dy)
+                val touching = a.radiusPx(w, h) + b.radiusPx(w, h)
+                assertTrue("${a.id} and ${b.id} overlap", apart >= touching)
+            }
+        }
+    }
+
+    /**
+     * The built-in default is a whole controller, and every control on it is a
+     * pad control rather than a key.
+     *
+     * That is the property the feature rests on: the Pad tab and the overlay are
+     * one table seen twice. A control on this layout holding its own binding
+     * would be one that stopped following a rebinding, silently.
+     */
+    @Test
+    fun `the built-in default is a whole controller, linked to the pad table`() {
+        val stored = InputProfile.Default.touch
+        assertFalse(stored.isEmpty)
+        assertTrue("both sticks", stored.controls.count { it.padStick != null } == 2)
+        assertTrue("a d-pad", stored.controls.any { it.kind == TouchKind.DPAD })
+        assertTrue(
+            "every control is a pad control",
+            stored.controls.all { it.pad != null || it.padStick != null },
+        )
+        // Nothing on it carries a binding of its own; they are all borrowed.
+        assertTrue(
+            "no control holds its own action",
+            stored.controls.all { it.action == GamepadAction.None },
+        )
+    }
+
+    /** Twelve buttons and two sticks is a controller; fewer is a subset of one. */
+    @Test
+    fun `every pad control a person would look for is on the default`() {
+        val linked = InputProfile.Default.touch.controls.mapNotNull { it.pad }.toSet()
+        listOf(
+            GamepadControl.A, GamepadControl.B, GamepadControl.X, GamepadControl.Y,
+            GamepadControl.L1, GamepadControl.R1, GamepadControl.L2, GamepadControl.R2,
+            GamepadControl.SELECT, GamepadControl.START,
+            GamepadControl.THUMB_L, GamepadControl.THUMB_R,
+        ).forEach { assertTrue("$it is on the overlay", it in linked) }
+    }
+
+    /**
+     * Resolution is what turns the link into behaviour: the glass A button sends
+     * whatever the pad table binds A to, and follows it when that changes.
+     */
+    @Test
+    fun `a pad-linked control borrows the pad table's binding`() {
+        val a = InputProfile.Default.overlay.controls.first { it.pad == GamepadControl.A }
+        assertEquals(GamepadProfile.Default.bindings[GamepadControl.A], a.action)
+
+        val rebound = InputProfile.Default.let {
+            it.copy(
+                pad = it.pad.copy(
+                    bindings = it.pad.bindings + (GamepadControl.A to GamepadAction.Key(X11.F1)),
+                ),
+            )
+        }
+        val moved = rebound.overlay.controls.first { it.pad == GamepadControl.A }
+        assertEquals(GamepadAction.Key(X11.F1), moved.action)
+    }
+
+    /** A stick takes its role from the pad table too, so Look is not said twice. */
+    @Test
+    fun `a linked stick takes the pad table's role and half-axes`() {
+        val overlay = InputProfile.Default.overlay
+        val left = overlay.controls.first { it.padStick == Stick.LEFT }
+        val right = overlay.controls.first { it.padStick == Stick.RIGHT }
+        assertEquals(StickRole.Keys, left.role)
+        assertEquals(StickRole.Look, right.role)
+        assertEquals(GamepadProfile.Default.bindings[GamepadControl.STICK_L_UP], left.up)
+        // And the designations stay unique, which is what the editor's
+        // one-of-each rule is checked against.
+        assertEquals("Left stick", left.designation)
+        assertEquals("Right stick", right.designation)
+    }
+
+    /**
+     * There is always a profile.
+     *
+     * The built-in one is a constant rather than a record, so no delete can reach
+     * it and nothing in the stored document ever names it — which is also why
+     * there is no migration to write when its contents change.
+     */
+    @Test
+    fun `the built-in default cannot be a stored record`() {
+        assertTrue(InputProfile.Default.isBuiltInDefault)
+        assertEquals("Virtual controller", InputProfile.Default.name)
+    }
+
+    /** Keyboard and mouse survives as a stock layout; it is just not the default. */
+    @Test
+    fun `the keyboard and mouse layout is still offered`() {
+        assertTrue(TouchLayouts.stock.any { it.layout == TouchLayouts.Wasd })
+        assertTrue(TouchLayouts.stock.first().layout == TouchLayouts.Gamepad)
     }
 
     @Test

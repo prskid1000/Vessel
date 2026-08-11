@@ -40,6 +40,55 @@ data class InputProfile(
 
     val isBuiltInDefault: Boolean get() = id == DEFAULT_ID
 
+    /**
+     * The overlay as it will actually behave: every pad-linked control resolved
+     * against the pad table.
+     *
+     * **This is what makes the touch overlay and a controller one feature rather
+     * than two.** A control carrying [TouchControl.pad] or
+     * [TouchControl.padStick] stores no binding of its own; it borrows the pad
+     * table's, which means rebinding `A` in the Pad tab moves the glass button
+     * too, and a stick set to Look on the pad is a look pad on the glass without
+     * anything having to say so twice.
+     *
+     * Everything that draws, hit-tests or translates the overlay reads this;
+     * [touch] is only what is *stored*, and the link survives in it so a later
+     * rebinding still reaches the control.
+     */
+    val overlay: TouchLayout
+        get() {
+            if (touch.controls.none { it.pad != null || it.padStick != null }) return touch
+            return TouchLayout(touch.controls.map { resolve(it) })
+        }
+
+    private fun resolve(control: TouchControl): TouchControl {
+        val stick = control.padStick
+        if (stick != null) {
+            return control.copy(
+                role = pad.roleOf(stick),
+                up = bound(stick.up),
+                down = bound(stick.down),
+                left = bound(stick.left),
+                right = bound(stick.right),
+            )
+        }
+        val linked = control.pad ?: return control
+        // A d-pad names one of its four directions and takes all four, because a
+        // cross is one control with four bindings and the model has one field.
+        if (control.kind == TouchKind.DPAD) {
+            return control.copy(
+                up = bound(GamepadControl.DPAD_UP),
+                down = bound(GamepadControl.DPAD_DOWN),
+                left = bound(GamepadControl.DPAD_LEFT),
+                right = bound(GamepadControl.DPAD_RIGHT),
+            )
+        }
+        return control.copy(action = bound(linked))
+    }
+
+    private fun bound(control: GamepadControl): GamepadAction =
+        pad.bindings[control] ?: GamepadAction.None
+
     companion object {
         /**
          * The id of the profile that is never written to disk.
@@ -53,21 +102,34 @@ data class InputProfile(
         const val DEFAULT_ID: String = "default"
 
         /**
-         * The built-in table, and an overlay that is not empty.
+         * **A whole controller, drawn on the glass — and it cannot be deleted or
+         * renamed.**
          *
-         * **A fresh container gets working touch controls for the same reason it
-         * gets working pad bindings.** An empty canvas is not a starting point,
-         * it is a puzzle: a phone with no controller would come up to a desktop
-         * it can only drive through a trackpad cursor, and nothing on screen
-         * would suggest that the six controls it wants are one stock layout
-         * away. [TouchLayouts.Wasd] is code rather than a stored document, so an
-         * untouched container still writes nothing at all.
+         * The default used to be a keyboard-and-mouse layout, and that was the
+         * wrong shipped answer for this device. Almost nobody here has a pad
+         * paired, so the thing a fresh container most needs is *a pad*: both
+         * sticks, the d-pad, four face buttons, four shoulders and triggers, the
+         * two system buttons and the two stick clicks, laid out where thumbs
+         * actually go. See [TouchLayouts.Gamepad].
+         *
+         * Every control on it is a pad control rather than a key — see
+         * [InputProfile.overlay] — so the overlay and a physical controller are
+         * one table seen twice, and the Pad tab governs both.
+         *
+         * Keyboard and mouse is not gone: it is [TouchLayouts.Wasd], one of the
+         * stock layouts any profile can adopt. What it lost is its status as the
+         * thing a container starts with.
+         *
+         * It is a constant and is never written to disk, which is what keeps an
+         * untouched container's stored bytes identical to what they were before
+         * this feature existed — and what makes "there is always a profile" true
+         * without a migration: nothing in the document ever named it.
          */
         val Default: InputProfile = InputProfile(
             id = DEFAULT_ID,
-            name = GamepadProfile.Default.name,
+            name = "Virtual controller",
             pad = GamepadProfile.Default,
-            touch = TouchLayouts.Wasd,
+            touch = TouchLayouts.Gamepad,
         )
     }
 }

@@ -55,6 +55,23 @@ data class TouchControl(
     val down: GamepadAction = GamepadAction.None,
     val left: GamepadAction = GamepadAction.None,
     val right: GamepadAction = GamepadAction.None,
+    /**
+     * The pad control this **is**, when it is one.
+     *
+     * A control carrying this does not hold its own binding: what it sends is
+     * whatever the profile's pad table binds that control to, resolved by
+     * [InputProfile.overlay]. That is what makes an on-screen A button and a
+     * physical A button one thing rather than two tables to keep in step — bind
+     * `A` in the Pad tab and the glass button follows, and the day a real
+     * controller reaches the guest as a controller, both arrive together.
+     *
+     * Null for a control the user placed and bound themselves, which is every
+     * control in a layout built by hand.
+     */
+    val pad: GamepadControl? = null,
+
+    /** The whole stick this **is**, for the two analogue sticks. See [pad]. */
+    val padStick: Stick? = null,
 ) {
     /**
      * The same control with every number inside the range the editor offers.
@@ -136,8 +153,22 @@ data class TouchControl(
         get() = when (kind) {
             TouchKind.BUTTON -> "Button"
             TouchKind.DPAD -> "D-pad"
-            TouchKind.STICK -> if (role == StickRole.Look) "Look pad" else "Stick"
+            TouchKind.STICK -> when {
+                padStick == Stick.LEFT -> "Left stick"
+                padStick == Stick.RIGHT -> "Right stick"
+                role == StickRole.Look -> "Look pad"
+                else -> "Stick"
+            }
         }
+
+    /**
+     * What the control is called in a list.
+     *
+     * A control that *is* a pad control is named after it — `A`, `L2 trigger`,
+     * `Left stick click` — because "Button" twelve times over is a list that says
+     * nothing. One the user placed keeps its shape as its name.
+     */
+    val title: String get() = pad?.padLabel() ?: designation
 
     /**
      * What this control sends, as one chip: `W A S D`, `Mouse look`, `Space`.
@@ -207,6 +238,21 @@ data class TouchLayout(val controls: List<TouchControl> = emptyList()) {
      * button has no such limit, and neither does the editor.
      */
     fun has(designation: String): Boolean = controls.any { it.designation == designation }
+}
+
+/** A pad control's name, as the overlay's list and the binding rows both say it. */
+fun GamepadControl.padLabel(): String = when (this) {
+    GamepadControl.L2 -> "L2 trigger"
+    GamepadControl.R2 -> "R2 trigger"
+    GamepadControl.THUMB_L -> "Left stick click"
+    GamepadControl.THUMB_R -> "Right stick click"
+    GamepadControl.SELECT -> "Select"
+    GamepadControl.START -> "Start"
+    GamepadControl.DPAD_UP -> "D-pad up"
+    GamepadControl.DPAD_DOWN -> "D-pad down"
+    GamepadControl.DPAD_LEFT -> "D-pad left"
+    GamepadControl.DPAD_RIGHT -> "D-pad right"
+    else -> name
 }
 
 /** The numbers the overlay is allowed to take, and what a fresh control gets. */
@@ -318,13 +364,102 @@ object TouchLayouts {
         ),
     )
 
+    /**
+     * A whole controller, on the glass.
+     *
+     * **This is the built-in default, and every control on it *is* a pad control
+     * rather than a key.** Nothing here holds its own binding: each one carries a
+     * [TouchControl.pad] or [TouchControl.padStick], and what it sends is
+     * whatever the profile's pad table says that control sends. So the Pad tab
+     * and the overlay are one table seen twice — rebind `A` and the glass button
+     * follows — and a phone with no controller and a phone with one are playing
+     * the same game in the same way.
+     *
+     * **The arrangement is the Pad tab's own diagram, stretched to the screen.**
+     * The design comp specifies no full-pad overlay, only that diagram, and a
+     * picture of a controller that disagreed with the controller two taps away
+     * would be worse than either. So: sticks low and outboard where thumbs rest,
+     * the d-pad under the left thumb, the face diamond under the right,
+     * shoulders and triggers along the top edge where index fingers reach, and
+     * the two system buttons in the middle of the top, out of the way of both.
+     *
+     * The stick clicks are the one concession. A thumb cannot press a stick it is
+     * steering with, so `L3` and `R3` are separate small buttons inboard of each
+     * stick rather than a press on the stick itself.
+     */
+    val Gamepad: TouchLayout = TouchLayout(
+        listOf(
+            // The two thumbs, low and outboard, where they rest when the phone is
+            // held. Everything else is placed around them.
+            stick("stick-l", Stick.LEFT, 0.085f, 0.72f, 0.115f),
+            stick("stick-r", Stick.RIGHT, 0.915f, 0.72f, 0.115f),
+
+            TouchControl(
+                id = "dpad",
+                kind = TouchKind.DPAD,
+                cx = 0.245f,
+                cy = 0.42f,
+                size = 0.075f,
+                pad = GamepadControl.DPAD_UP,
+            ),
+
+            // The face diamond, in the arrangement the Pad tab draws it.
+            padButton("btn-y", GamepadControl.Y, 0.845f, 0.29f, 0.05f),
+            padButton("btn-x", GamepadControl.X, 0.790f, 0.40f, 0.05f),
+            padButton("btn-b", GamepadControl.B, 0.900f, 0.40f, 0.05f),
+            padButton("btn-a", GamepadControl.A, 0.845f, 0.51f, 0.05f),
+
+            // Along the top edge, which is where an index finger reaches on a
+            // phone held in two hands.
+            padButton("btn-l1", GamepadControl.L1, 0.060f, 0.08f, 0.048f),
+            padButton("btn-l2", GamepadControl.L2, 0.145f, 0.08f, 0.048f),
+            padButton("btn-r2", GamepadControl.R2, 0.855f, 0.08f, 0.048f),
+            padButton("btn-r1", GamepadControl.R1, 0.940f, 0.08f, 0.048f),
+
+            padButton("btn-select", GamepadControl.SELECT, 0.460f, 0.08f, 0.040f),
+            padButton("btn-start", GamepadControl.START, 0.540f, 0.08f, 0.040f),
+
+            // **The one place this is not a picture of a pad.** A thumb cannot
+            // press a stick it is steering with, so the stick clicks are their
+            // own small buttons inboard of each stick rather than a press on the
+            // stick itself.
+            padButton("btn-l3", GamepadControl.THUMB_L, 0.235f, 0.72f, 0.040f),
+            padButton("btn-r3", GamepadControl.THUMB_R, 0.765f, 0.72f, 0.040f),
+        ),
+    )
+
     /** Nothing on screen, for a container played with a real pad. */
     val None: TouchLayout = TouchLayout()
 
     val stock: List<Stock> = listOf(
+        Stock("A whole controller", "Both sticks, the d-pad, and every button.", Gamepad),
         Stock("WASD and look", "A stick, a look pad and four buttons.", Wasd),
         Stock("Arrows and Enter", "A d-pad, Enter and Esc — for an installer.", Installer),
         Stock("Nothing", "An empty overlay. Add controls yourself.", None),
+    )
+
+    private fun stick(id: String, which: Stick, cx: Float, cy: Float, size: Float) = TouchControl(
+        id = id,
+        kind = TouchKind.STICK,
+        cx = cx,
+        cy = cy,
+        size = size,
+        padStick = which,
+    )
+
+    private fun padButton(
+        id: String,
+        control: GamepadControl,
+        cx: Float,
+        cy: Float,
+        size: Float,
+    ) = TouchControl(
+        id = id,
+        kind = TouchKind.BUTTON,
+        cx = cx,
+        cy = cy,
+        size = size,
+        pad = control,
     )
 
     private fun button(id: String, cx: Float, cy: Float, size: Float, action: GamepadAction) =

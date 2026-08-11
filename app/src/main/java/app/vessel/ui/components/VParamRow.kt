@@ -716,17 +716,31 @@ fun VTextField(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     placeholder: String? = null,
+    /**
+     * A value that is shown and may not be changed.
+     *
+     * Dimmed rather than recoloured, and a *field* rather than a bare line of
+     * text, because the one place this is used — the built-in profile's name —
+     * has a sentence under it explaining why the name cannot move. A field that
+     * turned into a label would leave that sentence talking about nothing.
+     */
+    enabled: Boolean = true,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val shape = Vessel.metrics.shapeMd
+    val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
 
     Box(
         modifier
             .fillMaxWidth()
             .defaultMinSize(minHeight = fieldHeight)
             .background(Vessel.colors.surface, shape)
-            .vRing(if (focused) Vessel.colors.accent else Vessel.colors.divider, shape)
+            .vRing(
+                (if (focused && enabled) Vessel.colors.accent else Vessel.colors.divider)
+                    .let { it.copy(alpha = it.alpha * alpha) },
+                shape,
+            )
             .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s6),
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -736,8 +750,13 @@ fun VTextField(
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
+            enabled = enabled,
             singleLine = true,
-            textStyle = Vessel.type.body.copy(color = Vessel.colors.textPrimary),
+            textStyle = Vessel.type.body.copy(
+                color = Vessel.colors.textPrimary.copy(
+                    alpha = Vessel.colors.textPrimary.alpha * alpha,
+                ),
+            ),
             cursorBrush = SolidColor(Vessel.colors.accent),
             interactionSource = interaction,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),

@@ -116,6 +116,17 @@ data class StoredTouchControl(
     val down: StoredAction = StoredAction.None,
     val left: StoredAction = StoredAction.None,
     val right: StoredAction = StoredAction.None,
+    /**
+     * The pad control this control *is*, by name, or empty.
+     *
+     * Stored rather than resolved so the link survives a round trip: a control
+     * whose action was flattened on the way to disk would stop following the pad
+     * table the moment it was read back, and the whole point of the built-in
+     * layout is that it never stops following it. An unknown name degrades to no
+     * link, which leaves the control's own stored action in charge.
+     */
+    val pad: String = "",
+    val padStick: String = "",
 ) {
     /** Null for a kind this build has never heard of — dropped, not guessed at. */
     fun toControl(): TouchControl? {
@@ -134,6 +145,8 @@ data class StoredTouchControl(
             down = down.toAction(),
             left = left.toAction(),
             right = right.toAction(),
+            pad = GamepadControl.entries.firstOrNull { it.name == pad },
+            padStick = Stick.entries.firstOrNull { it.name == padStick },
         ).sane()
     }
 
@@ -153,6 +166,8 @@ data class StoredTouchControl(
                 down = StoredAction.of(down),
                 left = StoredAction.of(left),
                 right = StoredAction.of(right),
+                pad = pad?.name.orEmpty(),
+                padStick = padStick?.name.orEmpty(),
             )
         }
     }

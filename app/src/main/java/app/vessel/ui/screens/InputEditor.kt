@@ -280,7 +280,10 @@ private val TAB_HEIGHT = 28.dp
 
 @Composable
 private fun TouchTab(state: InputEditorState, actions: InputEditorActions, wide: Boolean) {
-    val layout = state.profile.touch
+    // Resolved, because a pad-linked control's binding lives in the pad table
+    // and only the resolved layout knows what it sends. Edits still write the
+    // stored form, which keeps the link.
+    val layout = state.profile.overlay
     val onLayout: (TouchLayout) -> Unit = { actions.onProfile(state.profile.copy(touch = it)) }
 
     if (wide) {
@@ -365,7 +368,7 @@ private fun TouchPreviewCard(
                 " does not move it.",
         )
         TouchOverlayPreview(
-            layout = state.profile.touch,
+            layout = state.profile.overlay,
             aspect = long.value / short.value.coerceAtLeast(1f),
             selected = state.selected,
             onSelect = actions.onSelect,
@@ -542,7 +545,7 @@ private fun TouchControlList(
     actions: InputEditorActions,
     modifier: Modifier = Modifier,
 ) {
-    val layout = state.profile.touch
+    val layout = state.profile.overlay
     val short = sessionShortEdgeDp()
     Column(modifier.fillMaxWidth()) {
         Text(
@@ -656,7 +659,7 @@ private fun TouchControlRow(
                 ),
         )
         Column(Modifier.weight(1f)) {
-            Text(control.designation, style = Vessel.type.body, maxLines = 1)
+            Text(control.title, style = Vessel.type.body, maxLines = 1)
             Text(
                 control.metrics(shortEdge),
                 style = Vessel.type.monoSmall,
@@ -696,7 +699,7 @@ private fun TouchSelectionEditor(
     actions: InputEditorActions,
     onLayout: (TouchLayout) -> Unit,
 ) {
-    val layout = state.profile.touch
+    val layout = state.profile.overlay
     val control = layout.byId(state.selected)
     var picking by remember { mutableStateOf<String?>(null) }
 
@@ -717,11 +720,26 @@ private fun TouchSelectionEditor(
     val slot = picking
     if (slot != null) {
         KeyPicker(
-            title = "${control.designation} · $slot",
+            title = "${control.title} · $slot",
             current = control.actionFor(slot),
             onClose = { picking = null },
             onChoose = { action ->
-                onLayout(layout.with(control.withAction(slot, action)))
+                // **A pad-linked control rebinds the pad table, not itself.** The
+                // glass A button and the physical A button are the same control
+                // seen twice; editing one to disagree with the other would undo
+                // the whole reason the link exists.
+                val linked = control.padFor(slot)
+                if (linked != null) {
+                    actions.onProfile(
+                        state.profile.copy(
+                            pad = state.profile.pad.copy(
+                                bindings = state.profile.pad.bindings + (linked to action),
+                            ),
+                        ),
+                    )
+                } else {
+                    onLayout(layout.with(control.withAction(slot, action)))
+                }
                 picking = null
             },
             modifier = Modifier.fillMaxWidth().height(KEY_PICKER_HEIGHT),
@@ -731,7 +749,7 @@ private fun TouchSelectionEditor(
 
     Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
         VRule(verticalMargin = Vessel.metrics.s3)
-        Text(control.designation, style = Vessel.type.cardTitle)
+        Text(control.title, style = Vessel.type.cardTitle)
 
         control.slots().forEach { name ->
             VLabeledField(label = if (name == SLOT_SENDS) "Sends" else name) {
@@ -786,6 +804,35 @@ private fun TouchControl.slots(): List<String> = when {
     kind == TouchKind.BUTTON -> listOf(SLOT_SENDS)
     kind == TouchKind.STICK && role == StickRole.Look -> emptyList()
     else -> listOf("Up", "Down", "Left", "Right")
+}
+
+/**
+ * Which pad control a slot on this control writes to, or null when the control
+ * holds its own binding.
+ *
+ * A d-pad names one direction and owns all four, so the slot decides which; a
+ * stick's four half-axes work the same way. A plain pad button has one slot and
+ * one control.
+ */
+private fun TouchControl.padFor(slot: String): GamepadControl? {
+    padStick?.let { stick ->
+        return when (slot) {
+            "Up" -> stick.up
+            "Down" -> stick.down
+            "Left" -> stick.left
+            "Right" -> stick.right
+            else -> null
+        }
+    }
+    val linked = pad ?: return null
+    if (kind != TouchKind.DPAD) return linked
+    return when (slot) {
+        "Up" -> GamepadControl.DPAD_UP
+        "Down" -> GamepadControl.DPAD_DOWN
+        "Left" -> GamepadControl.DPAD_LEFT
+        "Right" -> GamepadControl.DPAD_RIGHT
+        else -> null
+    }
 }
 
 private fun TouchControl.actionFor(slot: String): GamepadAction = when (slot) {
@@ -935,8 +982,9 @@ private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
         VLabeledField(
             label = "Name",
             help = if (state.profile.isBuiltInDefault) {
-                "The built-in default cannot be renamed. Editing anything on it makes a " +
-                    "copy first, and the copy can be."
+                "The built-in controller cannot be renamed or deleted — it is what a " +
+                    "container falls back to, so there is always one. Duplicate it and " +
+                    "the copy is yours to name, change and remove."
             } else {
                 null
             },
@@ -944,7 +992,11 @@ private fun ProfilesTab(state: InputEditorState, actions: InputEditorActions) {
             VTextField(
                 state.profile.name,
                 actions.onRename,
-                placeholder = "Keyboard and mouse",
+                // Read-only rather than absent: the name is the thing being
+                // explained, and a field that vanished would leave the sentence
+                // under it talking about nothing.
+                enabled = !state.profile.isBuiltInDefault,
+                placeholder = "My controller",
             )
         }
 
