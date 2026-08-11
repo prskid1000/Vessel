@@ -481,6 +481,15 @@ data class FexPackage(
      * writing codemaps nothing compiles is the pure cost this used to be.
      */
     val offlineCompiler: File?,
+    /**
+     * Every `FEXOfflineCompiler*.exe` the package ships, 32- and 64-bit.
+     *
+     * Both, because `ProcessAll` re-execs itself per module and rewrites the
+     * trailing name of its own path to pick the sibling matching that module's
+     * bitness — so the 32-bit one has to be reachable from wherever the 64-bit
+     * one was launched, even though nothing ever invokes it directly.
+     */
+    val compilers: List<File> = listOfNotNull(offlineCompiler),
 )
 
 /**
@@ -556,6 +565,15 @@ internal fun fexCacheKey(environment: Map<String, String>, fex: FexPackage?): St
  * makes it land in the right place.
  */
 internal const val FEX_CACHE_DOS_PATH = "C:\\vessel\\fexcache\\"
+
+/**
+ * The DOS directory the cache link and the compiler aliases both live in.
+ *
+ * The compiler has to be *launched* from a DOS path as well as pointed at one:
+ * `ProcessAll` re-execs itself per module through `GetModuleFileNameA`, and a
+ * unix self-path is not something `_spawnv` can start.
+ */
+internal const val FEX_CACHE_DOS_DIR = "C:\\vessel\\"
 
 /**
  * The host side of [FEX_CACHE_DOS_PATH] — the symlink the session maintains.

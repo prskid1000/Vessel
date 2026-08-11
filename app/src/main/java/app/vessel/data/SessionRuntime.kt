@@ -20,6 +20,7 @@ import app.vessel.core.SessionDisplayServer
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
+import app.vessel.core.FEX_CACHE_DOS_DIR
 import app.vessel.core.fexCacheHost
 import app.vessel.core.fexCacheLink
 import app.vessel.core.FexPackage
@@ -724,7 +725,7 @@ class SessionRuntime @Inject constructor(
 
         // The guest is told `C:\vessel\fexcache\`; this is what that resolves to.
         val cacheHost = fexCacheHost(sessionPaths, environment, fex)
-        linkFexCache(layout.prefix, cacheHost, log)
+        linkFexCache(layout.prefix, cacheHost, fex?.compilers.orEmpty(), log)
 
         val resolved = LaunchPlan(
             layout = layout,
@@ -1518,8 +1519,12 @@ class SessionRuntime @Inject constructor(
             "building the FEX code cache from $pending new codemap(s) in ${cache.path}",
         )
         val started = System.currentTimeMillis()
+        // The DOS alias, not `compiler.absolutePath`. `ProcessAll` re-execs
+        // itself through `GetModuleFileNameA`, and from a unix path every child
+        // fails to spawn — see [linkFexCache], which maintains the alias.
+        val dosCompiler = FEX_CACHE_DOS_DIR + compiler.name
         val spec = ProcessSpec(
-            argv = current.tree.programArgv(compiler.absolutePath, listOf("process-all")),
+            argv = current.tree.programArgv(dosCompiler, listOf("process-all")),
             environment = current.environment,
             workingDirectory = current.layout.base,
         )
@@ -1580,7 +1585,12 @@ class SessionRuntime @Inject constructor(
      * and said out loud, because deleting something in a user's prefix to make
      * room for a cache is a worse outcome than not having the cache.
      */
-    private suspend fun linkFexCache(prefix: File, host: File, log: SessionLog) {
+    private suspend fun linkFexCache(
+        prefix: File,
+        host: File,
+        compilers: List<File>,
+        log: SessionLog,
+    ) {
         withContext(Dispatchers.IO) {
             runCatching {
                 host.mkdirs()
@@ -1588,6 +1598,20 @@ class SessionRuntime @Inject constructor(
                 link.parentFile?.mkdirs()
                 val path = link.toPath()
                 val target = host.toPath()
+
+                // **Both compilers, under the same DOS-visible directory.**
+                // `ProcessAll` re-execs itself once per module with
+                // `_spawnv(_P_WAIT, GetModuleFileNameA(), …)`, and a self-path
+                // that is a unix path is not something `_spawnv` can launch —
+                // every child fails and the parent reports
+                // "Cache generation failed" for all of them without saying why.
+                // Both bitnesses, because FEX rewrites the trailing name to
+                // pick the 32- or 64-bit sibling out of its own directory.
+                compilers.forEach { exe ->
+                    val alias = File(link.parentFile, exe.name).toPath()
+                    runCatching { Files.deleteIfExists(alias) }
+                    runCatching { Files.createSymbolicLink(alias, exe.toPath()) }
+                }
 
                 if (Files.isSymbolicLink(path)) {
                     if (Files.readSymbolicLink(path) == target) return@runCatching
@@ -1908,6 +1932,9 @@ class SessionRuntime @Inject constructor(
         return withContext(Dispatchers.IO) {
             runCatching {
                 val compiler = File(directory, FEX_OFFLINE_COMPILER).takeIf { it.isFile }
+                val everyCompiler = directory.listFiles { f: File ->
+                    f.isFile && f.name.startsWith("FEXOfflineCompiler") && f.name.endsWith(".exe")
+                }?.sorted().orEmpty()
                 FexPackage(
                     directory = directory,
                     identity = listOf(
@@ -1916,6 +1943,7 @@ class SessionRuntime @Inject constructor(
                         File(directory, WOW64_FEX).length().toString(),
                     ).joinToString("/"),
                     offlineCompiler = compiler,
+                    compilers = everyCompiler,
                 )
             }.getOrNull()
         }
