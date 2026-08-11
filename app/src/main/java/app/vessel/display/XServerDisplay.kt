@@ -932,7 +932,14 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
      * for before it decides which kind of address to build.
      */
     private val padSocketName: String = PadBridge.socketName(displayNumber(request.display))
-    private val padSocketPath: String = "@$padSocketName"
+    /**
+     * Read from the bridge, not from [padSocketName].
+     *
+     * `start` may bind a different name when a killed session has left the one
+     * we asked for held by this same process; the guest has to be told where the
+     * socket really is, and this is only read after `start` for that reason.
+     */
+    private val padSocketPath: String get() = "@${padBridge.socketName}"
 
     private val padBridge = PadBridge(padSocketName)
 

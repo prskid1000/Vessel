@@ -35,7 +35,25 @@ import java.util.concurrent.atomic.AtomicBoolean
  * a second connection means the first session's `winebus` has not noticed it is
  * dead yet, and serving the stale one would send a live pad to a dead guest.
  */
-internal class PadBridge(private val socketName: String) {
+internal class PadBridge(private val baseName: String) {
+
+    /**
+     * The name actually bound, which is not always the one asked for.
+     *
+     * An abstract socket lives as long as the process that bound it, and a
+     * session that is killed never reaches [stop] to release its own. The next
+     * session in the same process then collides with its predecessor, the bind
+     * fails, [listening] stays false, and the guest is never told where to
+     * dial -- a pad that worked once and never again until the app is
+     * restarted. Measured exactly that way: the first session after an install
+     * enumerated a controller and every session after it saw none.
+     *
+     * So a taken name is not fatal; [start] walks a suffix until one binds, and
+     * whoever puts the path in the environment reads it from here rather than
+     * assuming the name it asked for.
+     */
+    var socketName: String = baseName
+        private set
 
     /** What one pad is, as the wire carries it. */
     data class State(
@@ -112,7 +130,7 @@ internal class PadBridge(private val socketName: String) {
             // stale node to delete after a kill, no directory to create, and no
             // 108-byte path to fit a sandbox path into. `winebus` dials it the
             // same way libxcb already dials the X server on this device.
-            server = LocalServerSocket(socketName)
+            server = bindSomewhere()
         } catch (e: Throwable) {
             Log.w(TAG, "could not open the pad socket @$socketName", e)
             running.set(false)
@@ -124,6 +142,28 @@ internal class PadBridge(private val socketName: String) {
             start()
         }
         return true
+    }
+
+    /**
+     * The first free name in the family, starting with the one asked for.
+     *
+     * Bounded rather than unbounded: a process that has leaked sixteen sockets
+     * has a different problem, and a loop with no end would hide it.
+     */
+    private fun bindSomewhere(): LocalServerSocket {
+        var last: IOException? = null
+        for (attempt in 0 until MAX_NAME_ATTEMPTS) {
+            val name = if (attempt == 0) baseName else "$baseName-$attempt"
+            try {
+                val bound = LocalServerSocket(name)
+                if (attempt > 0) Log.i(TAG, "the pad socket @$baseName was taken; bound @$name")
+                socketName = name
+                return bound
+            } catch (e: IOException) {
+                last = e
+            }
+        }
+        throw last ?: IOException("no pad socket name was free")
     }
 
     fun stop() {
@@ -287,6 +327,9 @@ internal class PadBridge(private val socketName: String) {
          * user's point of view, as a container whose pad does nothing.
          */
         fun socketName(display: Int): String = "vessel-pad-$display"
+
+        /** Enough to outlast a run of killed sessions; see [bindSomewhere]. */
+        private const val MAX_NAME_ATTEMPTS = 16
 
         /** Four, because XInput has four slots and there is no fifth thing to be. */
         const val SLOTS = 4
