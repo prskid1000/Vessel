@@ -671,6 +671,17 @@ private sealed interface ControlEntry {
     ) : ControlEntry {
         /** A pad row cannot be deleted; a control the user placed is only ever theirs. */
         val deletable: Boolean get() = glass != null && speaksFor.isEmpty()
+
+        /**
+         * Which analogue stick this row is part of, if any.
+         *
+         * Two ways in, because a stick reaches the list two ways: as a glass
+         * control that says which side it is, or — when nothing on the glass
+         * claims it — as its four half-axis rows in the pad group. Either way the
+         * role field has a stick to edit, so no stick is unreachable.
+         */
+        fun stick(): Stick? = glass?.padStick
+            ?: Stick.entries.firstOrNull { s -> s.halfAxes.any { it in speaksFor } }
     }
 
     /** The sentence that stands in for a stick's four rows when they cannot fire. */
@@ -1144,6 +1155,16 @@ private fun SelectedControl(
             )
         }
 
+        // **A stick's role belongs to the stick, so it is a field of the stick.**
+        // The two used to sit together in the settings, labelled "Left stick sends"
+        // and "Right stick sends", and choosing between them meant knowing which of
+        // the two things on the map you had just tapped. Here there is one, and it
+        // is the one you are looking at.
+        val stick = row.stick()
+        if (stick != null) {
+            StickRoleField(stick, profile, actions.onProfile)
+        }
+
         row.slots.forEach { slot ->
             VLabeledField(label = slot.name) {
                 VButton(
@@ -1157,13 +1178,13 @@ private fun SelectedControl(
         if (row.slots.isEmpty() && glass != null) {
             InputNote(
                 when (glass.role) {
-                    StickRole.Pad -> "It is a stick the guest reads as a stick, so there is no " +
-                        "key to bind. Change what the stick sends in the settings below."
+                    StickRole.Pad -> "It reaches the guest as a stick, so there is no key to " +
+                        "bind — that is what the four keys above are instead of."
 
                     StickRole.Look -> "A look pad moves the mouse. There is no analogue axis a " +
                         "Windows game can read, so this is the only thing it can be."
 
-                    else -> "It sends nothing. Change what the stick sends in the settings below."
+                    else -> "It sends nothing. Give the stick a role above."
                 },
             )
         }

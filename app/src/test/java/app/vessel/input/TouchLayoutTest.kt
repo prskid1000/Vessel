@@ -235,8 +235,10 @@ class TouchLayoutTest {
         val overlay = InputProfile.Default.overlay
         val left = overlay.controls.first { it.padStick == Stick.LEFT }
         val right = overlay.controls.first { it.padStick == Stick.RIGHT }
-        assertEquals(StickRole.Keys, left.role)
-        assertEquals(StickRole.Look, right.role)
+        // Both are sticks now: the default profile is a controller, and a stick
+        // that reaches the guest as a stick is what `StickRole.Pad` means.
+        assertEquals(StickRole.Pad, left.role)
+        assertEquals(StickRole.Pad, right.role)
         assertEquals(GamepadProfile.Default.bindings[GamepadControl.STICK_L_UP], left.up)
         // And the designations stay unique, which is what the editor's
         // one-of-each rule is checked against.

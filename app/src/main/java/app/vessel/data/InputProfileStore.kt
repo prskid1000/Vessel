@@ -58,11 +58,14 @@ data class StoredAction(
     val keycode: Int = 0,
     val keysym: Int = 0,
     val button: String = "",
+    /** The pad control, by enum name, for [KIND_PAD]. See [StoredShortcut]'s rule. */
+    val pad: String = "",
 ) {
     companion object {
         const val KIND_NONE: String = "none"
         const val KIND_KEY: String = "key"
         const val KIND_BUTTON: String = "button"
+        const val KIND_PAD: String = "pad"
 
         val None = StoredAction()
 
@@ -70,6 +73,7 @@ data class StoredAction(
             GamepadAction.None -> None
             is GamepadAction.Key -> StoredAction(KIND_KEY, action.keycode, action.keysym)
             is GamepadAction.Button -> StoredAction(KIND_BUTTON, button = action.button.name)
+            is GamepadAction.Pad -> StoredAction(KIND_PAD, pad = action.control.name)
         }
     }
 
@@ -94,6 +98,14 @@ data class StoredAction(
         KIND_BUTTON ->
             PointerButton.entries.firstOrNull { it.name == button }
                 ?.let { GamepadAction.Button(it) }
+                ?: GamepadAction.None
+
+        // A control this build does not have is unbound rather than a crash, the
+        // same rule the keycode range above follows: a profile written by a newer
+        // build should lose one binding, not fail to open.
+        KIND_PAD ->
+            GamepadControl.entries.firstOrNull { it.name == pad }
+                ?.let { GamepadAction.Pad(it) }
                 ?: GamepadAction.None
 
         else -> GamepadAction.None

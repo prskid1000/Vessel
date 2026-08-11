@@ -52,6 +52,43 @@ class TouchControlTranslatorTest {
     private fun translator(vararg controls: TouchControl) =
         TouchControlTranslator(TouchLayout(controls.toList()))
 
+    /**
+     * The binding wins over the identity, which is the whole of "I can switch the
+     * mapping if I want": the glass `A` is made to press `B` on the guest's pad.
+     */
+    @Test
+    fun `a control bound to a pad control sends that one, not the one it is`() {
+        val a = TouchControl(
+            id = "a",
+            kind = TouchKind.BUTTON,
+            cx = 0.5f,
+            cy = 0.5f,
+            size = 0.1f,
+            pad = GamepadControl.A,
+            action = GamepadAction.Pad(GamepadControl.B),
+        )
+        val t = translator(a)
+        // Nothing on the X11 seam: a pad binding travels the socket instead.
+        assertEquals(emptyList<GuestInput>(), t.onDown(0, a, 450f, 200f, w, h))
+        assertEquals(setOf(GamepadControl.B), t.padSnapshot().pressed)
+    }
+
+    /** An unbound control that *is* one of the twenty-four still sends itself. */
+    @Test
+    fun `identity is the fallback when nothing is bound`() {
+        val a = TouchControl(
+            id = "a",
+            kind = TouchKind.BUTTON,
+            cx = 0.5f,
+            cy = 0.5f,
+            size = 0.1f,
+            pad = GamepadControl.A,
+        )
+        val t = translator(a)
+        t.onDown(0, a, 450f, 200f, w, h)
+        assertEquals(setOf(GamepadControl.A), t.padSnapshot().pressed)
+    }
+
     @Test
     fun `a button presses on the way down and releases on the way up`() {
         val t = translator(fire)

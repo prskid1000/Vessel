@@ -7,6 +7,15 @@ package app.vessel.input
  * and the numpad — which almost nothing on a phone wants — comes last.
  */
 enum class KeyGroup(val title: String) {
+    /**
+     * The guest's own controller, first because it is now the right answer.
+     *
+     * Everything below this group is a way of *pretending* to be a keyboard or a
+     * mouse, which is what a pad had to do before the guest had a pad of its own.
+     * A game that reads a controller should be given a controller, so the twenty
+     * -four come before the alternatives rather than after them.
+     */
+    GAMEPAD("Controller"),
     MOUSE("Mouse"),
     MODIFIERS("Modifiers"),
 
@@ -66,6 +75,12 @@ object X11KeyCatalog {
     )
 
     val entries: List<KeyChoice> = buildList {
+        // Every control the guest's pad has, offered as itself. In reading order
+        // rather than enum order so the picker looks like a controller: face
+        // buttons, shoulders, the small pair, the sticks pressed, then the four
+        // directions of the d-pad and the eight half-axes of the two sticks.
+        GamepadControl.entries.forEach { add(pad(it)) }
+
         // The seven X11 pointer buttons. Four of them are the wheel, because
         // that is how X11 carries a wheel — there is no scroll axis on the wire.
         add(mouse("Left mouse", PointerButton.LEFT))
@@ -192,6 +207,7 @@ object X11KeyCatalog {
             byButton[action.button]?.label ?: "Button ${action.button.x11Code}"
 
         is GamepadAction.Key -> byKeycode[action.keycode]?.label ?: "Keycode ${action.keycode}"
+        is GamepadAction.Pad -> action.control.displayName()
     }
 
     /** The catalogue entry a binding came from, when there is one. */
@@ -199,7 +215,13 @@ object X11KeyCatalog {
         GamepadAction.None -> null
         is GamepadAction.Button -> byButton[action.button]
         is GamepadAction.Key -> byKeycode[action.keycode]
+        is GamepadAction.Pad -> byPad[action.control]
     }
+
+    private val byPad: Map<GamepadControl, KeyChoice> =
+        entries.mapNotNull { choice ->
+            (choice.action as? GamepadAction.Pad)?.let { it.control to choice }
+        }.toMap()
 
     private val byKeycode: Map<Int, KeyChoice> =
         entries.mapNotNull { choice ->
@@ -216,4 +238,7 @@ object X11KeyCatalog {
 
     private fun mouse(label: String, button: PointerButton) =
         KeyChoice(label, KeyGroup.MOUSE, GamepadAction.Button(button))
+
+    private fun pad(control: GamepadControl) =
+        KeyChoice(control.displayName(), KeyGroup.GAMEPAD, GamepadAction.Pad(control))
 }

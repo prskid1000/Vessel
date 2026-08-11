@@ -257,4 +257,15 @@ class InputProfileStoreTest {
             )
         }
     }
+
+    /** A pad binding survives the disc, and an unknown control degrades to unbound. */
+    @Test
+    fun `a pad action round-trips and an unknown one does not crash`() {
+        val action = GamepadAction.Pad(GamepadControl.THUMB_R)
+        assertEquals(action, StoredAction.of(action).toAction())
+        assertEquals(
+            GamepadAction.None,
+            StoredAction(StoredAction.KIND_PAD, pad = "PADDLE_4").toAction(),
+        )
+    }
 }

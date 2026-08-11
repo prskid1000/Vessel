@@ -54,7 +54,7 @@ class GamepadStickRoleTest {
         assertEquals(
             emptyList<GuestInput>(),
             GamepadTranslator(
-                profile(StickRole.Look, StickRole.None, GamepadProfile.Default.bindings),
+                profile(StickRole.Look, StickRole.None, GamepadProfile.KeyboardAndMouse.bindings),
                 config,
             ).onSticks(lx = 1f, ly = 0f, rx = 0f, ry = 0f),
         )

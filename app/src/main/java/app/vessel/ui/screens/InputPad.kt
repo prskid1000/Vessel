@@ -131,11 +131,10 @@ internal fun PadSettings(
         InputNote("No session is running, so a press cannot find its row. Every control still binds.")
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
-        Stick.entries.forEach { stick ->
-            Box(Modifier.weight(1f)) { StickRoleField(stick, profile, onProfile) }
-        }
-    }
+    // The two stick roles used to sit here, side by side. They are properties of
+    // one stick, not of the screen, so they moved to the selected control — where
+    // a stick's role is one field of the stick you are looking at rather than a
+    // pair you have to match to the right one by name.
 
     InputSlider(
         label = "Deadzone",
@@ -165,7 +164,7 @@ internal fun PadSettings(
 }
 
 @Composable
-private fun StickRoleField(stick: Stick, profile: InputProfile, onProfile: (InputProfile) -> Unit) {
+internal fun StickRoleField(stick: Stick, profile: InputProfile, onProfile: (InputProfile) -> Unit) {
     val role = profile.pad.roleOf(stick)
     val label = if (stick == Stick.LEFT) "Left stick sends" else "Right stick sends"
     Column(verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3)) {

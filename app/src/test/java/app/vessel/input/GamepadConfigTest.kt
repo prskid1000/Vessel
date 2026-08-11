@@ -46,7 +46,7 @@ class GamepadConfigTest {
     @Test
     fun `a wider deadzone still engages and releases in the right order`() {
         val config = GamepadConfig(deadzone = GamepadConfig.MAX_DEADZONE)
-        val g = GamepadTranslator(GamepadProfile.Default, config)
+        val g = GamepadTranslator(GamepadProfile.KeyboardAndMouse, config)
 
         // Just under the deadzone: nothing.
         assertEquals(

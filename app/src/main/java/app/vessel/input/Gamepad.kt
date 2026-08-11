@@ -98,7 +98,56 @@ sealed interface StickRole {
 sealed interface GamepadAction {
     data class Key(val keycode: Int, val keysym: Int = 0) : GamepadAction
     data class Button(val button: PointerButton) : GamepadAction
+
+    /**
+     * A control on the guest's own gamepad.
+     *
+     * **The binding that only became possible once the guest had a pad.** Before
+     * `patches/wine/0016` there was nothing on the other side to name, so every
+     * binding was a keystroke or a mouse button and a glass `A` reached a game as
+     * the space bar. Now `A` can simply be `A` — and, because it is a binding
+     * rather than an identity, the `A` on the glass can be `B` if you would
+     * rather, which is what "I can switch the mapping if I want" asks for.
+     *
+     * It produces no [GuestInput] anywhere. Keys and pointer buttons travel the
+     * X11 seam; this travels the pad socket, and the two are different wires.
+     * Everything that turns actions into [GuestInput] returns nothing for it,
+     * deliberately and not by omission.
+     */
+    data class Pad(val control: GamepadControl) : GamepadAction
+
     data object None : GamepadAction
+}
+
+/** What a control is called on screen, in the one place that decides it. */
+fun GamepadControl.displayName(): String = when (this) {
+    // "A button", not "A": the catalogue promises every label is distinct, and
+    // the letter keys are already called A, B, X and Y. A picker offering two
+    // rows both reading "A" is the one thing this text exists to prevent.
+    GamepadControl.A -> "A button"
+    GamepadControl.B -> "B button"
+    GamepadControl.X -> "X button"
+    GamepadControl.Y -> "Y button"
+    GamepadControl.L1 -> "L1 bumper"
+    GamepadControl.R1 -> "R1 bumper"
+    GamepadControl.L2 -> "L2 trigger"
+    GamepadControl.R2 -> "R2 trigger"
+    GamepadControl.SELECT -> "Select"
+    GamepadControl.START -> "Start"
+    GamepadControl.THUMB_L -> "Left stick press"
+    GamepadControl.THUMB_R -> "Right stick press"
+    GamepadControl.DPAD_UP -> "D-pad up"
+    GamepadControl.DPAD_DOWN -> "D-pad down"
+    GamepadControl.DPAD_LEFT -> "D-pad left"
+    GamepadControl.DPAD_RIGHT -> "D-pad right"
+    GamepadControl.STICK_L_UP -> "Left stick up"
+    GamepadControl.STICK_L_DOWN -> "Left stick down"
+    GamepadControl.STICK_L_LEFT -> "Left stick left"
+    GamepadControl.STICK_L_RIGHT -> "Left stick right"
+    GamepadControl.STICK_R_UP -> "Right stick up"
+    GamepadControl.STICK_R_DOWN -> "Right stick down"
+    GamepadControl.STICK_R_LEFT -> "Right stick left"
+    GamepadControl.STICK_R_RIGHT -> "Right stick right"
 }
 
 /**
@@ -138,7 +187,42 @@ data class GamepadProfile(
     fun roleOf(stick: Stick): StickRole = sticks[stick] ?: StickRole.None
 
     companion object {
+        /**
+         * Every control sends itself, on the guest's own gamepad.
+         *
+         * **This used to be a keyboard, and the change is the whole point of
+         * `patches/wine/0016`.** `A` was the space bar, the left stick was WASD
+         * and the right stick moved the mouse, because there was no controller in
+         * the guest to send anything to. There is one now, so the default is a
+         * controller: `A` is `A`, both sticks are sticks, and a game that reads
+         * XInput gets what it asked for without anyone opening this screen.
+         *
+         * Written as a binding per control rather than as an empty map meaning
+         * "pass through", so the editor has twenty-four rows to show and every
+         * one of them can be pointed somewhere else. That is what makes the
+         * mapping switchable: the identity is a value, not a hardwiring.
+         *
+         * **What this costs when the bridge is not there.** A guest running an
+         * older Wine has no pad, and a profile that sends only pad controls
+         * reaches it with nothing at all. That is the correct behaviour rather
+         * than a silent fallback to keys — a game walking twice as far because it
+         * read both is a worse failure than one that reads neither — and the way
+         * out is [KeyboardAndMouse], one tap away in the profile list.
+         */
         val Default = GamepadProfile(
+            name = "Controller",
+            bindings = GamepadControl.entries.associateWith { GamepadAction.Pad(it) },
+            sticks = mapOf(Stick.LEFT to StickRole.Pad, Stick.RIGHT to StickRole.Pad),
+        )
+
+        /**
+         * The old default, kept whole and offered by name.
+         *
+         * For the many Windows games that read the keyboard and nothing else,
+         * and for a guest whose Wine predates the pad. Left stick walks, right
+         * stick looks, face buttons on the keys a keyboard-and-mouse player uses.
+         */
+        val KeyboardAndMouse = GamepadProfile(
             name = "Keyboard and mouse",
             bindings = mapOf(
                 GamepadControl.STICK_L_UP to GamepadAction.Key(X11.W),
@@ -166,6 +250,7 @@ data class GamepadProfile(
                 GamepadControl.THUMB_L to GamepadAction.Key(X11.SHIFT_L),
                 GamepadControl.THUMB_R to GamepadAction.Key(X11.C),
             ),
+            sticks = mapOf(Stick.LEFT to StickRole.Keys, Stick.RIGHT to StickRole.Look),
         )
     }
 }
@@ -361,6 +446,9 @@ class GamepadTranslator(
         when (val action = profile.bindings[control] ?: GamepadAction.None) {
             is GamepadAction.Key -> listOf(GuestInput.Key(action.keycode, action.keysym, pressed))
             is GamepadAction.Button -> listOf(GuestInput.Button(action.button, pressed))
+            // The guest's own pad, reached over the socket rather than through
+            // this seam. `XServerDisplay` applies it to the HID report.
+            is GamepadAction.Pad -> emptyList()
             GamepadAction.None -> emptyList()
         }
 

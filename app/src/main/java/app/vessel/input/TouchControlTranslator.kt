@@ -102,12 +102,22 @@ class TouchControlTranslator(
         rightY = lookY,
         hatX = hatX,
         hatY = hatY,
-        // Held by *identity*, not by action: two controls bound to the same key
-        // are one key and two different pad buttons, and `holding` counts the
-        // former. A finger on a control with no pad identity contributes
-        // nothing, which is what makes a hand-built layout inert here.
+        // **The binding first, then the identity.** A control bound to
+        // `GamepadAction.Pad` says outright which control it sends, and that has
+        // to win: it is how the glass `A` is made to send `B`. Identity is the
+        // fallback for a control that carries a pad control but no explicit
+        // binding, which is every layout written before the binding existed.
+        //
+        // Note this is deliberately *not* keyed on the action for the other
+        // kinds: two controls bound to the same key are one key and two
+        // different pad buttons. A finger on a control that is neither bound to
+        // a pad control nor is one contributes nothing here, which is what keeps
+        // a hand-built keyboard layout out of the guest's gamepad.
         pressed = fingers.values
-            .mapNotNull { id -> layout.byId(id)?.pad }
+            .mapNotNull { id ->
+                val control = layout.byId(id) ?: return@mapNotNull null
+                (control.action as? GamepadAction.Pad)?.control ?: control.pad
+            }
             .toSet(),
     )
 
@@ -215,6 +225,8 @@ class TouchControlTranslator(
     private fun edges(action: GamepadAction, pressed: Boolean): List<GuestInput> = when (action) {
         is GamepadAction.Key -> listOf(GuestInput.Key(action.keycode, action.keysym, pressed))
         is GamepadAction.Button -> listOf(GuestInput.Button(action.button, pressed))
+        // Travels the pad socket, not the X11 seam: `padSnapshot` carries it.
+        is GamepadAction.Pad -> emptyList()
         GamepadAction.None -> emptyList()
     }
 

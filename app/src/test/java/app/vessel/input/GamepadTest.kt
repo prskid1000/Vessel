@@ -16,10 +16,10 @@ class GamepadTest {
 
     private val config = GamepadConfig()
 
-    private fun pad() = GamepadTranslator(GamepadProfile.Default, config)
+    private fun pad() = GamepadTranslator(GamepadProfile.KeyboardAndMouse, config)
 
     @Test
-    fun `the left stick becomes the keys the default profile binds`() {
+    fun `the left stick becomes the keys the keyboard profile binds`() {
         val g = pad()
         assertEquals(
             listOf(GuestInput.Key(X11.D, 0, pressed = true)),
@@ -184,7 +184,7 @@ class GamepadTest {
 
     @Test
     fun `every default binding names a keycode the server can carry`() {
-        GamepadProfile.Default.bindings.forEach { (control, action) ->
+        GamepadProfile.KeyboardAndMouse.bindings.forEach { (control, action) ->
             if (action is GamepadAction.Key) {
                 assertTrue(
                     "$control binds ${action.keycode}, which is outside the server's range",

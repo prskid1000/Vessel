@@ -32,6 +32,7 @@ import app.vessel.core.TopLevelWindow
 import app.vessel.core.WindowBounds
 import app.vessel.core.displayNumber
 import app.vessel.core.xSocketName
+import app.vessel.input.GamepadAction
 import app.vessel.input.GamepadControl
 import com.winlator.inputcontrols.ExternalController
 import app.vessel.input.GamepadTranslator
@@ -1946,7 +1947,69 @@ private class SessionSurfaceView(
     }
 
     private fun publishPad() {
-        padBridge.submit(0, padState.mergedWith(overlay.padSnapshot()))
+        padBridge.submit(0, padState.remapped().mergedWith(overlay.padSnapshot()))
+    }
+
+    /**
+     * The physical pad's own controls, moved to wherever the profile sends them.
+     *
+     * **Only [GamepadAction.Pad] moves anything.** A control bound to a key is
+     * left exactly where it is: the pad is still the pad, and a key binding is
+     * the *additional* keyboard emulation a game without controller support
+     * needs — dropping the button from the report because someone also wanted it
+     * to type `W` would silently break every profile written before this existed.
+     * So the identity case costs one map lookup and changes nothing, and the
+     * whole function returns early when no binding remaps at all.
+     *
+     * Half-axes are absent on purpose. A stick belongs to its [StickRole], which
+     * already answers what a whole stick does; remapping "the left half of the
+     * right stick" to a button would need a threshold nobody has asked for, and
+     * the four half-axis bindings keep their keyboard meaning.
+     */
+    private fun PadBridge.State.remapped(): PadBridge.State {
+        val bindings = gamepad.profile.bindings
+        if (bindings.values.none { it is GamepadAction.Pad }) return this
+
+        var buttons = this.buttons
+        var hat = this.hat
+        var lt = this.lt
+        var rt = this.rt
+        for ((from, action) in bindings) {
+            val to = (action as? GamepadAction.Pad)?.control ?: continue
+            if (to == from || !holds(from)) continue
+            // Cleared before it is set, so a swap is a swap: A→B and B→A both
+            // firing would otherwise leave whichever ran last holding both.
+            when (from) {
+                GamepadControl.L2 -> lt = 0
+                GamepadControl.R2 -> rt = 0
+                GamepadControl.DPAD_UP -> hat = hat and PadBridge.HAT_UP.inv()
+                GamepadControl.DPAD_DOWN -> hat = hat and PadBridge.HAT_DOWN.inv()
+                GamepadControl.DPAD_LEFT -> hat = hat and PadBridge.HAT_LEFT.inv()
+                GamepadControl.DPAD_RIGHT -> hat = hat and PadBridge.HAT_RIGHT.inv()
+                else -> padBitOf(from)?.let { buttons = buttons and (1 shl it).inv() }
+            }
+            when (to) {
+                GamepadControl.L2 -> lt = PadBridge.AXIS_MAX
+                GamepadControl.R2 -> rt = PadBridge.AXIS_MAX
+                GamepadControl.DPAD_UP -> hat = hat or PadBridge.HAT_UP
+                GamepadControl.DPAD_DOWN -> hat = hat or PadBridge.HAT_DOWN
+                GamepadControl.DPAD_LEFT -> hat = hat or PadBridge.HAT_LEFT
+                GamepadControl.DPAD_RIGHT -> hat = hat or PadBridge.HAT_RIGHT
+                else -> padBitOf(to)?.let { buttons = buttons or (1 shl it) }
+            }
+        }
+        return copy(lt = lt, rt = rt, buttons = buttons, hat = hat)
+    }
+
+    /** Whether this report has the given digital control down. */
+    private fun PadBridge.State.holds(control: GamepadControl): Boolean = when (control) {
+        GamepadControl.L2 -> lt > 0
+        GamepadControl.R2 -> rt > 0
+        GamepadControl.DPAD_UP -> hat and PadBridge.HAT_UP != 0
+        GamepadControl.DPAD_DOWN -> hat and PadBridge.HAT_DOWN != 0
+        GamepadControl.DPAD_LEFT -> hat and PadBridge.HAT_LEFT != 0
+        GamepadControl.DPAD_RIGHT -> hat and PadBridge.HAT_RIGHT != 0
+        else -> padBitOf(control)?.let { buttons and (1 shl it) != 0 } ?: false
     }
 
     /**
