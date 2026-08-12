@@ -1,0 +1,46 @@
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index 0dcf3ee99d3..5e5b7b0042b 100644
+--- a/dlls/kernelbase/kernelbase.spec
++++ b/dlls/kernelbase/kernelbase.spec
+@@ -388,6 +388,7 @@
+ @ stdcall FlsAlloc(ptr)
+ @ stdcall FlsFree(long)
+ @ stdcall FlsGetValue(long)
++@ stdcall FlsGetValue2(long)
+ @ stdcall FlsSetValue(long ptr)
+ @ stdcall FlushConsoleInputBuffer(long)
+ @ stdcall FlushFileBuffers(long)
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index 9a8ce88411f..c17cfcbb76b 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -1296,6 +1296,29 @@ PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue( DWORD index )
+ }
+ 
+ 
++/***********************************************************************
++ *           FlsGetValue2   (kernelbase.@)
++ *
++ * Undocumented, and present in kernelbase.dll since Windows 11. The newer
++ * Visual C++ runtime resolves it by name at startup and uses it in place of
++ * FlsGetValue; a game shipping its own VCRUNTIME140 therefore asks for it on
++ * every platform, including this one.
++ *
++ * The difference from FlsGetValue is the SetLastError() below it, which this
++ * one does not do. That is the whole point of the second entry point: the write
++ * to the TEB is pure cost on a path the CRT takes constantly. Failing the
++ * lookup is what breaks callers, because GetProcAddress hands back NULL and the
++ * caller stores it as a function pointer.
++ */
++PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue2( DWORD index )
++{
++    void *data;
++
++    if (!set_ntstatus( RtlFlsGetValue( index, &data ))) return NULL;
++    return data;
++}
++
++
+ /***********************************************************************
+  *           FlsSetValue   (kernelbase.@)
+  */
