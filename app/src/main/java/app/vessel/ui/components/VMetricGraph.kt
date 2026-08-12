@@ -19,6 +19,10 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -167,16 +171,22 @@ fun VMetricGraph(
         } else {
             emptyList()
         }
-        val yGutter = labels.maxOfOrNull { it.size.width.toFloat() + 6.dp.toPx() } ?: 0f
-        val xGutter = labels.firstOrNull()?.let { it.size.height.toFloat() + 2.dp.toPx() } ?: 0f
-        val plot = Size(size.width - yGutter, size.height - xGutter)
+        // **The same breathing room on all four sides.** The left and bottom get
+        // theirs from the labels; without this the top and right had none, so a
+        // line at 100% was drawn on the border and a run ending at `now` ran off
+        // the edge of the box. The plot is inset uniformly instead, and the
+        // gridlines and the series share it.
+        val inset = if (labelled) 4.dp.toPx() else 0f
+        val yGutter = (labels.maxOfOrNull { it.size.width.toFloat() + 6.dp.toPx() } ?: 0f)
+        val xGutter = (labels.firstOrNull()?.let { it.size.height.toFloat() + 2.dp.toPx() } ?: 0f)
+        val plot = Size(size.width - yGutter - inset, size.height - xGutter - inset)
 
         fractions.forEachIndexed { index, frac ->
-            val y = plot.height - plot.height * frac
+            val y = inset + plot.height - plot.height * frac
             drawLine(
                 color = if (frac == 0.5f) divider else divider.copy(alpha = 0.45f),
                 start = Offset(yGutter, y),
-                end = Offset(size.width, y),
+                end = Offset(yGutter + plot.width, y),
                 strokeWidth = metrics.hairline.toPx(),
             )
             labels.getOrNull(index)?.let { text ->
@@ -187,7 +197,7 @@ fun VMetricGraph(
                         // what makes a column of numbers of different widths read
                         // as a column.
                         yGutter - text.size.width - 4.dp.toPx(),
-                        (y - text.size.height / 2f).coerceIn(0f, plot.height - text.size.height),
+                        (y - text.size.height / 2f).coerceIn(0f, size.height - text.size.height),
                     ),
                 )
             }
@@ -196,11 +206,18 @@ fun VMetricGraph(
         // X is the window the samples cover, oldest on the left. Labelled as
         // "ago" rather than as a clock: the trace is a ring and its left edge is
         // wherever the window starts, not a time of day anyone can act on.
-        if (labelled && spanSeconds > 0) {
-            for ((frac, text) in listOf(0f to "-${spanSeconds}s", 1f to "now")) {
+        if (labelled) {
+            // **Always something on X.** It used to draw only when the caller
+            // knew the window in seconds, so a card that did not pass one showed
+            // a bare axis and no explanation — which reads as a missing feature
+            // rather than as a missing argument. Falling back to the sample count
+            // is still true and still useful: it says how much history the line
+            // covers, which is the question the axis is there to answer.
+            val left = if (spanSeconds > 0) "-${spanSeconds}s" else "${series.first().values.size} samples"
+            for ((frac, text) in listOf(0f to left, 1f to "now")) {
                 val label = measurer.measure(text, axisType.copy(color = axisInk))
                 val x = yGutter + (plot.width - label.size.width) * frac
-                drawText(label, topLeft = Offset(x, plot.height + 1.dp.toPx()))
+                drawText(label, topLeft = Offset(x, inset + plot.height + 1.dp.toPx()))
             }
         }
 
@@ -208,7 +225,7 @@ fun VMetricGraph(
             // Each run of consecutive readings is its own path. Two runs either
             // side of a gap are two separate strokes, which is what makes a
             // missing sample look missing.
-            runsOf(line, yGutter, plot).forEach { run ->
+            runsOf(line, yGutter, inset, plot).forEach { run ->
                 drawRun(run, line.form, ink, metrics.graphStroke.toPx(), metrics.graphDot.toPx())
             }
         }
@@ -283,6 +300,7 @@ private fun DrawScope.drawRun(
 private fun DrawScope.runsOf(
     series: VMetricSeries,
     left: Float = 0f,
+    top: Float = 0f,
     plot: Size = size,
 ): List<List<Offset>> {
     val count = series.values.size
@@ -300,7 +318,7 @@ private fun DrawScope.runsOf(
             return@forEachIndexed
         }
         val fraction = ((value - series.floor) / span).coerceIn(0f, 1f)
-        current += Offset(left + index * step, plot.height - fraction * plot.height)
+        current += Offset(left + index * step, top + plot.height - fraction * plot.height)
     }
     if (current.isNotEmpty()) runs += current
     return runs
@@ -723,6 +741,20 @@ private fun VMetricGraphDialog(
         onDispose { previous?.let { activity?.requestedOrientation = it } }
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        // **The bars are chrome and the chart is the content.** A status bar
+        // with a battery icon over a performance graph is thirty pixels of the
+        // time axis spent on something the graph is not about. Hidden for as
+        // long as the dialog lives and shown again on dispose — the dialog has
+        // its own window, so this cannot leak into the session behind it.
+        val view = LocalView.current
+        DisposableEffect(Unit) {
+            val window = (view.parent as? DialogWindowProvider)?.window
+            val bars = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+            bars?.hide(WindowInsetsCompat.Type.systemBars())
+            bars?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            onDispose { bars?.show(WindowInsetsCompat.Type.systemBars()) }
+        }
         Box(
             Modifier
                 .fillMaxSize()
