@@ -81,7 +81,8 @@ data class ContainerDiagnostics(
     // — edits, all addressed by row index -------------------------------------
 
     /** Append an empty row, which contributes nothing until it is named. */
-    fun withRowAdded(): ContainerDiagnostics = copy(rows = rows + DiagnosticSetting())
+    fun withRowAdded(turnip: Boolean = false): ContainerDiagnostics =
+        copy(rows = rows + DiagnosticSetting(turnip = turnip))
 
     fun withRowRemoved(index: Int): ContainerDiagnostics =
         if (index !in rows.indices) this else copy(rows = rows.filterIndexed { i, _ -> i != index })
@@ -102,7 +103,9 @@ data class ContainerDiagnostics(
                 if (i != index) {
                     row
                 } else {
-                    DiagnosticSetting(name, loggable.addAt)
+                    // The origin is carried, not recomputed: renaming within a
+                    // table must not move the row to the other one.
+                    DiagnosticSetting(name, loggable.addAt, turnip = row.turnip)
                 }
             },
         )
@@ -139,6 +142,18 @@ data class DiagnosticSetting(
     val name: String = "",
     /** A stop from that thing's own ladder. */
     val level: String = "",
+    /**
+     * Which table added this row.
+     *
+     * **A row that has just been added has no name**, so nothing about it says
+     * which list it belongs in — and `loggableFor("")` synthesises a Wine channel,
+     * so a row added from the graphics table appeared under logging. Remembering
+     * the origin is the only thing that can answer for an empty row; once named,
+     * the name agrees with it because each table's picker offers only its own.
+     *
+     * Defaulted, so every container document written before this parses.
+     */
+    val turnip: Boolean = false,
 ) {
     /**
      * Whether this row is loud enough to be spent after one launch.
@@ -876,6 +891,9 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             levelEditable = row.name.isNotEmpty() && row.isAllowed(diagnostics),
             removable = true,
             nameIsInvalid = row.name.isNotEmpty() && !isLoggableName(row.name),
+            // The stored origin wins for an unnamed row, which has no name to
+            // ask; once named the two agree. See `DiagnosticSetting.turnip`.
+            isTurnipFlag = row.turnip || loggable.isTurnipFlag,
         )
     }
 

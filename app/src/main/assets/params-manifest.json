@@ -133,46 +133,48 @@
         },
         {
           "key": "turnip.autotuneFlags",
-          "title": "Tiling override",
-          "help": "'big_gmem' forces tiles for any pass with ten or more draws. Metro averages about twenty draws a pass, so this flips most of them.",
-          "type": "enum",
-          "options": ["", "big_gmem"],
-          "default": "",
-          "env": "TU_AUTOTUNE_FLAGS"
+          "title": "Force tiles for busy passes",
+          "help": "Draws a pass in tiles whenever it has ten or more draws. Metro averages about twenty a pass, so this flips most of them.",
+          "type": "bool",
+          "default": false,
+          "env": "TU_AUTOTUNE_FLAGS",
+          "onValue": "big_gmem"
         },
         {
           "key": "turnip.concurrentBinning",
           "title": "Overlap tile setup",
           "help": "Lets tile setup run alongside drawing. Off by default in the driver because it costs more than it saves on desktop games. Only means anything if the game is actually tiling.",
-          "type": "enum",
-          "options": ["false", "true"],
-          "default": "false",
-          "env": "tu_allow_concurrent_binning"
+          "type": "bool",
+          "default": false,
+          "env": "tu_allow_concurrent_binning",
+          "onValue": "true"
         },
         {
           "key": "turnip.conservativeLrz",
           "title": "Keep depth rejection through blending",
           "help": "Recovers early depth rejection that the driver gives up on after a blended draw. CAUTION: on a game that needs the caution, this renders incorrectly rather than crashing -- check the picture, not just the frame rate.",
-          "type": "enum",
-          "options": ["false", "true"],
-          "default": "false",
-          "env": "disable_conservative_lrz"
+          "type": "bool",
+          "default": false,
+          "env": "disable_conservative_lrz",
+          "onValue": "true"
         },
         {
           "key": "turnip.gpuTrace",
           "title": "Per-pass GPU trace",
           "help": "Writes one record per render pass -- tiles or not, why depth rejection was dropped, and bytes moved -- to the container's tmp folder. Costs frame rate while it runs, so read the shape and not the fps.",
-          "type": "enum",
-          "options": ["", "print_csv", "print", "print_json"],
-          "default": "",
-          "env": "MESA_GPU_TRACES"
+          "_comment": "CSV rather than a choice of three. All of print/print_csv/print_json carry the same fields; only the encoding differs, and picking between them is not a decision anybody has information to make. CSV is the one a spreadsheet and a two-line script both open.",
+          "type": "bool",
+          "default": false,
+          "env": "MESA_GPU_TRACES",
+          "onValue": "print_csv"
         },
         {
           "key": "d3d.dxvkConfig",
           "title": "DXVK options",
-          "help": "Passed straight to DXVK, one 'key = value' per line. Nothing here is proven; 'd3d11.cachedDynamicResources = a' is the one most likely to matter on this phone, where the CPU and GPU share memory.",
+          "help": "Passed straight to DXVK, one 'key = value' per line. Three worth trying, none proven: 'd3d11.cachedDynamicResources = a' (this phone shares memory between CPU and GPU, so the memory type DXVK avoids costs nothing here), 'd3d11.relaxedBarriers = True' and 'd3d11.relaxedGraphicsBarriers = True' (fewer forced breaks between draws).",
           "type": "text",
           "default": "",
+          "placeholder": "d3d11.cachedDynamicResources = a",
           "env": "DXVK_CONFIG"
         }
       ]
@@ -187,7 +189,8 @@
           "title": "Extra DLL overrides",
           "help": "Wine's WINEDLLOVERRIDES. Leave empty unless following specific advice.",
           "type": "text",
-          "default": ""
+          "default": "",
+          "placeholder": "name=native,builtin"
         }
       ],
       "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP — so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations.",

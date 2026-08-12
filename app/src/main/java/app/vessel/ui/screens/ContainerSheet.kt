@@ -562,7 +562,9 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
             ParamType.TEXT -> VTextField(
                 value = (value as? ParamValue.Text)?.value.orEmpty(),
                 onValueChange = { onParam(spec.key, ParamValue.Text(it)) },
-                placeholder = "name=native,builtin",
+                // The param's own example, because a shared one is a lie in
+                // every field but the one it was written for.
+                placeholder = spec.placeholder.orEmpty(),
             )
 
             ParamType.INT -> VStepper(

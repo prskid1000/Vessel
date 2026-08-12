@@ -15,7 +15,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
-import app.vessel.core.ADDABLE_LOGGABLES
+import app.vessel.core.ADDABLE_LOG_LOGGABLES
+import app.vessel.core.ADDABLE_TURNIP_LOGGABLES
 import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.DiagnosticRow
 import app.vessel.core.SessionLogLimits
@@ -138,7 +139,7 @@ fun DiagnosticsPanel(
 
         VButton(
             "Add",
-            { onChange(diagnostics.withRowAdded()) },
+            { onChange(diagnostics.withRowAdded(turnip = false)) },
             style = VButtonStyle.Primary,
             icon = VIcons.Plus,
             modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
@@ -178,7 +179,7 @@ fun DiagnosticsPanel(
 
         VButton(
             "Add",
-            { onChange(diagnostics.withRowAdded()) },
+            { onChange(diagnostics.withRowAdded(turnip = true)) },
             style = VButtonStyle.Primary,
             icon = VIcons.Plus,
             modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
@@ -267,7 +268,12 @@ private fun InventoryRow(
 ) {
     VDiagnosticRow(
         name = row.name,
-        nameOptions = ADDABLE_LOGGABLES.map { it.name },
+        // Only this table's names. Offering all of them would let a graphics
+        // flag be named into the logging table, where it would then be drawn
+        // under a header that describes it wrongly.
+        nameOptions = (
+            if (row.isTurnipFlag) ADDABLE_TURNIP_LOGGABLES else ADDABLE_LOG_LOGGABLES
+        ).map { it.name },
         onName = { propose(diagnostics.withRowNamed(row.index, it), row.index) },
         levels = row.levels,
         levelLabel = { row.levelLabels[it] ?: it },
@@ -502,7 +508,7 @@ private fun DiagnosticsPanelPreview() {
                     // preview is not an excuse to be the first.
                     diagnostics = ContainerDiagnostics()
                         .withRowAdded()
-                        .withRowNamed(0, ADDABLE_LOGGABLES.first { it.caution != null }.name),
+                        .withRowNamed(0, ADDABLE_LOG_LOGGABLES.first { it.caution != null }.name),
                     usageLabel = "14.2 MB",
                     usageFraction = 0.03f,
                     ceilingLabel = "10 sessions · 480 MB at these limits",
