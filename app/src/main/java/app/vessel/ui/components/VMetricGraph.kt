@@ -147,9 +147,6 @@ fun VMetricGraph(
         // appear at the height the panel and the full-screen view use, which are
         // the two places somebody is reading the shape rather than glancing.
         val labelled = size.height > 90f && axisStyle != null && series.isNotEmpty()
-        val yGutter = if (labelled) 30.dp.toPx() else 0f
-        val xGutter = if (labelled) 13.dp.toPx() else 0f
-        val plot = Size(size.width - yGutter, size.height - xGutter)
 
         // **One ceiling for the card, because a card is one unit.** Every series
         // here shares a scale — eight cores in MHz, four sensors in °C, one
@@ -157,7 +154,24 @@ fun VMetricGraph(
         // largest ceiling wins so a series normalised against a smaller one
         // still lands inside the box.
         val ceiling = series.maxOf { it.ceiling }
-        for (frac in floatArrayOf(0f, 0.5f, 1f)) {
+        val fractions = floatArrayOf(0f, 0.5f, 1f)
+
+        // **The gutter is measured, not guessed.** It was a flat 30 dp, and
+        // `3.80 GHz` is wider than that — so the labels were drawn at a negative
+        // x and the leading digit was clipped off the side of the canvas. Every
+        // card has a different unit and therefore a different widest label, so
+        // the only number that can be right is the one taken from the text
+        // itself.
+        val labels = if (labelled) {
+            fractions.map { measurer.measure(axisStyle!!((ceiling * it).toInt()), axisType.copy(color = axisInk)) }
+        } else {
+            emptyList()
+        }
+        val yGutter = labels.maxOfOrNull { it.size.width.toFloat() + 6.dp.toPx() } ?: 0f
+        val xGutter = labels.firstOrNull()?.let { it.size.height.toFloat() + 2.dp.toPx() } ?: 0f
+        val plot = Size(size.width - yGutter, size.height - xGutter)
+
+        fractions.forEachIndexed { index, frac ->
             val y = plot.height - plot.height * frac
             drawLine(
                 color = if (frac == 0.5f) divider else divider.copy(alpha = 0.45f),
@@ -165,12 +179,14 @@ fun VMetricGraph(
                 end = Offset(size.width, y),
                 strokeWidth = metrics.hairline.toPx(),
             )
-            if (labelled) {
-                val text = measurer.measure(axisStyle!!((ceiling * frac).toInt()), axisType.copy(color = axisInk))
+            labels.getOrNull(index)?.let { text ->
                 drawText(
                     text,
                     topLeft = Offset(
-                        yGutter - text.size.width - 3.dp.toPx(),
+                        // Right-aligned against the plot's left edge, which is
+                        // what makes a column of numbers of different widths read
+                        // as a column.
+                        yGutter - text.size.width - 4.dp.toPx(),
                         (y - text.size.height / 2f).coerceIn(0f, plot.height - text.size.height),
                     ),
                 )
