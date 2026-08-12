@@ -138,6 +138,21 @@ class FrameHints private constructor(
     /** The target this session was created with, in nanoseconds. For the log. */
     val targetMillis: Double get() = targetNanos / 1_000_000.0
 
+    /**
+     * One line for the *session* log, which is a file.
+     *
+     * **logcat could not hold this.** The outcome is decided once, at the first
+     * composite, and the device's main ring buffer is 256 KiB — measured at two
+     * minutes forty-three seconds of this phone's traffic. Every attempt to read
+     * whether hints were open found nothing, not because nothing happened but
+     * because it had scrolled off, and "no line at all" reads exactly like dead
+     * code. A diagnostic that cannot be retrieved is not a diagnostic.
+     */
+    val description: String
+        get() = "cpu hints open, target %.1f ms".format(targetMillis) +
+            if (guestAttached) ", guest attach attempted" else ""
+
+
     companion object {
         private const val TAG = "VesselFrameHints"
 

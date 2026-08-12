@@ -30,6 +30,7 @@ import app.vessel.core.FrameRate
 import app.vessel.core.PAD_SOCKET_ENV
 import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDisplayServer
+import app.vessel.data.GuestProcessTree
 import app.vessel.core.TopLevelWindow
 import app.vessel.core.WindowBounds
 import app.vessel.core.displayNumber
@@ -143,10 +144,85 @@ import kotlinx.coroutines.withContext
 @Singleton
 class XServerDisplay @Inject constructor(
     @ApplicationContext private val context: Context,
+    /**
+     * The guest, so that it can be stopped when there is nothing to draw into.
+     *
+     * Injected here rather than reached from the session runtime because *this*
+     * class is the only thing that knows when a surface exists. Both are
+     * `@Singleton` and `GuestProcessTree` depends on nothing but a `Context`, so
+     * there is no cycle. See [pauseGuestSoon].
+     */
+    private val guest: GuestProcessTree,
 ) : SessionDisplayServer {
 
     private val _surface = MutableStateFlow<View?>(null)
     override val surface: StateFlow<View?> = _surface.asStateFlow()
+
+    /** Pids stopped by [pauseGuestSoon], empty when the guest is running. */
+    private var pausedPids: List<Int> = emptyList()
+
+    /** Posted on surface loss, cancelled if a surface comes back. See below. */
+    private var pausePending: Runnable? = null
+
+    private val guestHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * **Stop the guest when nothing will ever show what it draws.**
+     *
+     * Measured, and it is the largest remaining waste in the stack: a session
+     * spent 60 seconds with the compositor reporting `fps 0.0` while DXVK
+     * presented **103 fps at 76% GPU**. Every one of those frames was rendered
+     * at full cost into a surface that no longer existed. The frame cap cannot
+     * help — the guest was inside its budget; there was simply no consumer.
+     *
+     * Nothing gentler works. Wine has no suspend interface, the guest is a tree
+     * of processes rather than one, and the compositor going idle applies no
+     * backpressure to a swapchain writing into shared memory. `SIGSTOP` to the
+     * tree is the mechanism, and `GuestProcessTree` already had it built and
+     * unused.
+     *
+     * **The delay is the whole design.** A surface is destroyed and recreated by
+     * an ordinary rotation, and by any transition that rebuilds the view, so an
+     * immediate stop would signal the entire process tree twice a second while
+     * the user turned the phone. [PAUSE_GRACE_MS] is long enough that no normal
+     * transition reaches it and short enough that a backgrounded game stops
+     * before it has cost anything worth measuring.
+     *
+     * **What this deliberately changes:** a session with no surface no longer
+     * makes progress. A long install continues when you come back rather than
+     * finishing while you are elsewhere. That is the trade, it is the reason the
+     * pause is logged rather than silent, and it is the right way round — the
+     * alternative is 6 W and 76% of the GPU spent on frames that do not exist.
+     */
+    private fun pauseGuestSoon() {
+        if (pausePending != null || pausedPids.isNotEmpty()) return
+        val task = Runnable {
+            pausePending = null
+            // Re-checked at the moment of acting rather than trusted from when it
+            // was scheduled: `stop()` may have run in between, and signalling a
+            // tree that teardown is already killing races `wineserver -k` for no
+            // benefit.
+            if (session == null || _surface.value != null) return@Runnable
+            val stopped = runCatching { guest.pause() }.getOrDefault(emptyList())
+            pausedPids = stopped
+            if (stopped.isNotEmpty()) {
+                Log.i(TAG, "no surface for ${PAUSE_GRACE_MS}ms: stopped ${stopped.size} guest process(es)")
+            }
+        }
+        pausePending = task
+        guestHandler.postDelayed(task, PAUSE_GRACE_MS)
+    }
+
+    /** Undo [pauseGuestSoon], whether it fired or is still pending. */
+    private fun resumeGuest() {
+        pausePending?.let { guestHandler.removeCallbacks(it) }
+        pausePending = null
+        val stopped = pausedPids
+        if (stopped.isEmpty()) return
+        pausedPids = emptyList()
+        runCatching { guest.resume(stopped) }
+        Log.i(TAG, "surface is back: continued ${stopped.size} guest process(es)")
+    }
 
     private val _pointerMode = MutableStateFlow(PointerMode.TRACKPAD)
     override val pointerMode: StateFlow<PointerMode> = _pointerMode.asStateFlow()
@@ -189,6 +265,9 @@ class XServerDisplay @Inject constructor(
 
     private val _desktopUp = MutableStateFlow(false)
     override val desktopUp: StateFlow<Boolean> = _desktopUp.asStateFlow()
+
+    private val _frameHints = MutableStateFlow<String?>(null)
+    override val frameHints: StateFlow<String?> = _frameHints.asStateFlow()
 
     private val _guestViewport = MutableStateFlow(GuestViewport())
     override val guestViewport: StateFlow<GuestViewport> = _guestViewport.asStateFlow()
@@ -383,6 +462,13 @@ class XServerDisplay @Inject constructor(
                 // profile would only land if the user opened the panel.
                 started.view.inputProfile = _inputProfile.value
                 started.view.onHeldControlsChanged = { held -> _heldControls.value = held }
+                // Stop the guest when its output has nowhere to go. See
+                // `pauseGuestSoon` for the measurement that made this necessary
+                // and for why it waits before acting.
+                started.view.onFrameHints = { note -> _frameHints.value = note }
+                started.view.onSurfaceAvailable = { available ->
+                    if (available) resumeGuest() else pauseGuestSoon()
+                }
                 // The overlay's own three, for the same reason: a view built
                 // after the container resolved its settings begins on the
                 // defaults otherwise, and the overlay would only appear once
@@ -412,6 +498,10 @@ class XServerDisplay @Inject constructor(
 
     /** Main thread, lock held. */
     private fun teardown() {
+        // **Before anything else.** A pause scheduled a moment ago would
+        // otherwise fire against a session that is being torn down, and a tree
+        // left stopped is one `wineserver -k` cannot talk to.
+        resumeGuest()
         sampler?.cancel()
         sampler = null
         // Reset rather than freeze. A rate left at its last value would sit on
@@ -422,6 +512,9 @@ class XServerDisplay @Inject constructor(
         // windows of a session that has stopped is worse than an empty one.
         _windows.value = emptyList()
         _desktopUp.value = false
+        // The next session opens its own hint session and reports again; a note
+        // left from the last one would be read as this one's.
+        _frameHints.value = null
         // Nothing is held once there is no view to hold it, and a row left lit
         // after the session ended reads as a stuck button.
         _heldControls.value = emptySet()
@@ -443,6 +536,17 @@ class XServerDisplay @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private companion object {
+        /**
+         * How long a surface may be gone before the guest is stopped.
+         *
+         * Three seconds: longer than any rotation or view rebuild, and short
+         * enough that a backgrounded session has not cost anything worth
+         * measuring. Chosen rather than measured — the failure it guards against
+         * (signalling the whole tree twice a second while the phone is turned)
+         * has no threshold to find, only a margin to keep.
+         */
+        const val PAUSE_GRACE_MS = 3_000L
+
         const val TAG = "VesselDisplay"
 
         /**
@@ -1544,6 +1648,20 @@ private class SessionSurfaceView(
         applyPreferredDisplayMode()
     }
 
+    /**
+     * Forwarded from the paced view, whose holder is the only thing that knows.
+     * `XServerDisplay` uses it to stop the guest when there is nothing to draw
+     * into — see `pauseGuestSoon`.
+     */
+    var onSurfaceAvailable: ((Boolean) -> Unit)?
+        get() = xServerView.onSurfaceAvailable
+        set(value) { xServerView.onSurfaceAvailable = value }
+
+    /** Forwarded from the paced view. See [PacedXServerView.onFrameHints]. */
+    var onFrameHints: ((String) -> Unit)?
+        get() = xServerView.onFrameHints
+        set(value) { xServerView.onFrameHints = value }
+
     /** The panel mode this window asked for, so detach can hand it back. */
     private var restoreDisplayModeId: Int? = null
 
@@ -2462,6 +2580,12 @@ private class PacedXServerView(
     @Volatile
     private var pendingGuestPid = 0
 
+    /** True when there is a surface to present into. Read by `XServerDisplay`. */
+    var onSurfaceAvailable: ((Boolean) -> Unit)? = null
+
+    /** What the hint session did, once, at the first composite. */
+    var onFrameHints: ((String) -> Unit)? = null
+
     private val handler = Handler(Looper.getMainLooper())
 
     @Volatile
@@ -2507,9 +2631,23 @@ private class PacedXServerView(
         // a *higher* multiple, and should. A guest that presents slowly still
         // gets a panel that can carry it when it speeds up.
         holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(h: SurfaceHolder) = applyFrameRate(h)
-            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = applyFrameRate(h)
-            override fun surfaceDestroyed(h: SurfaceHolder) = Unit
+            override fun surfaceCreated(h: SurfaceHolder) {
+                applyFrameRate(h)
+                onSurfaceAvailable?.invoke(true)
+            }
+
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {
+                applyFrameRate(h)
+                onSurfaceAvailable?.invoke(true)
+            }
+
+            // **The one moment the guest is certainly drawing into nothing.**
+            // Not `onDetachedFromWindow` and not the Activity's lifecycle: a
+            // SurfaceView keeps its surface across some transitions and loses it
+            // in others, and only the holder knows which happened.
+            override fun surfaceDestroyed(h: SurfaceHolder) {
+                onSurfaceAvailable?.invoke(false)
+            }
         })
     }
 
@@ -2604,7 +2742,15 @@ private class PacedXServerView(
                 // has to be created from the thread it is about to describe.
                 if (!hintsTried) {
                     hintsTried = true
-                    hints = FrameHints.create(context, fpsLimit)
+                    val opened = FrameHints.create(context, fpsLimit)
+                    hints = opened
+                    // Reported up as well as logged: logcat's main buffer holds
+                    // under three minutes on this device, so the line that says
+                    // whether hints are on had always scrolled away before anyone
+                    // looked. See `FrameHints.description`.
+                    onFrameHints?.invoke(
+                        opened?.description ?: "cpu hints unavailable: the platform declined a session",
+                    )
                 }
                 val session = hints ?: return
                 val pid = pendingGuestPid

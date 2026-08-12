@@ -386,6 +386,18 @@ interface SessionDisplayServer {
     val desktopUp: StateFlow<Boolean>
 
     /**
+     * What the scheduler-hint session did, once it is known. Null until then.
+     *
+     * On this seam because the display server is the only thing that can answer:
+     * the session is opened from the compositor's GL thread, which nothing else
+     * has a reference to. It is a flow rather than a getter because the answer
+     * arrives at the first composited frame, which is well after `start`
+     * returns — and it is published at all because the logcat line it used to be
+     * is evicted within three minutes on this device. See `FrameHints`.
+     */
+    val frameHints: StateFlow<String?>
+
+    /**
      * Raise a window and give it the input focus.
      *
      * A no-op for an id the server does not have. A taskbar button pressed while
@@ -539,6 +551,10 @@ interface SessionDisplayServer {
         // Headless: no desktop will ever appear, so a program launched into this
         // session must not sit waiting for one that cannot come.
         override val desktopUp: StateFlow<Boolean> = MutableStateFlow(true).asStateFlow()
+
+        // Headless: nothing composites, so no hint session is ever opened and
+        // there is nothing to report. Null is that, and is not a failure.
+        override val frameHints: StateFlow<String?> = MutableStateFlow<String?>(null).asStateFlow()
 
         override fun focusWindow(id: Int) = Unit
 

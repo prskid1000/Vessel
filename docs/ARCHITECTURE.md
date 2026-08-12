@@ -183,14 +183,48 @@ fighting if that export ever appears. Mesa picks up any driconf option from a
 same-named environment variable (`util/xmlconfig.c:424`). **Unmeasured:** it
 needs a real x86-64 D3D title, so no probe in `tools/gfx/` can attribute it.
 
-**Neither rendering mode is forced.** The widely repeated "GMEM is broken on
-Adreno 829, force `TU_DEBUG=sysmem`" is wrong: Turnip's GMEM page-fault report is
-scoped to Adreno **830**, and Turnip does not set `disable_gmem` for a829, so
-forcing sysmem gives up tiled rendering the hardware can do. The opposite advice,
-common in Chinese-language guides, is Adreno 710/720 guidance and equally
-unfounded. Where a specific title does corrupt, `TU_AUTOTUNE_ALGO=prefer_sysmem`
-is the better control than `TU_DEBUG=sysmem` — it still permits the fast path in
-high-confidence cases, so it is a nudge rather than a veto.
+**Vessel forces neither rendering mode — and the driver has already chosen one.**
+
+This paragraph used to end at the first clause and was wrong by omission.
+Turnip ships a compiled-in driconf profile keyed on the Vulkan **engine name**,
+and DXVK sets `pEngineName = "DXVK"` (`native/dxvk/src/dxvk/dxvk_instance.cpp`).
+The profile
+(`native/mesa/src/freedreno/vulkan/00-turnip-defaults.conf`) sets:
+
+```
+<option name="tu_autotune_algorithm" value="prefer_sysmem" />
+<!-- "DX games almost always tend to prefer SYSMEM over GMEM,
+     so we just hardcode this for DXVK and VKD3D-Proton." -->
+```
+
+`PREFER_SYSMEM` means *"always use sysmem unless we have strong evidence that
+GMEM is better"* (`tu_autotune.cc`). The conf is compiled into the driver rather
+than read from disk, so it applies here with nothing set. **Every Direct3D title
+on this stack is therefore biased away from tiled rendering**, and the 2 MB of
+GMEM this part has (`freedreno_devices.py`) goes mostly unused. The cost moves
+from tile load/store traffic to full-rate DRAM writes.
+
+That does not make the old advice right. "GMEM is broken on Adreno 829, force
+`TU_DEBUG=sysmem`" is still wrong — Turnip's GMEM page-fault report is scoped to
+Adreno **830**, and Turnip does not set `disable_gmem` for a829. The opposite
+advice, common in Chinese-language guides, is Adreno 710/720 guidance and equally
+unfounded. What changes is the recommendation that used to close this paragraph:
+`TU_AUTOTUNE_ALGO=prefer_sysmem` was offered as a gentler control than
+`TU_DEBUG=sysmem`, and it is **a no-op** — it asks for the state the driver is
+already in.
+
+The interesting direction is the other one. `TU_AUTOTUNE_ALGO` is read at
+`tu_autotune.cc` and takes priority over the driconf, so `bandwidth` (Turnip's
+own default heuristic), `profiled` (measure both, pick) and `prefer_gmem` are all
+reachable, as is `TU_AUTOTUNE_FLAGS=big_gmem` (tiles for any pass with ≥10
+draws). All four are container params under **Graphics experiments**.
+
+> **Unmeasured, in both directions.** Whether sysmem is the right call for a
+> given title at 1280×720 has not been tested here. The drirc comment is a
+> generalisation about DX games on desktop-class Adreno, not a measurement on
+> a829 — and the upstream authors who wrote it had reason to. `TU_DEBUG_FILE` is
+> set per container precisely so this can be A/B'd within one session; across two
+> launches, thermals move the same measurement 15%.
 
 ## Running downloaded native code on Android
 

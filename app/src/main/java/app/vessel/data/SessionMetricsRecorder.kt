@@ -186,6 +186,7 @@ class SessionMetricsRecorder @Inject constructor(
         val writer = withContext(Dispatchers.IO) { traces.open(header) }
         val summary = GfxRunSummary()
         var reported = 0L
+        var hintsReported = false
 
         // Elapsed realtime, not wall clock: a session is routinely long enough
         // for an NTP correction to land inside it, and a graph whose x-axis can
@@ -204,6 +205,15 @@ class SessionMetricsRecorder @Inject constructor(
                     fps = display.frameRate.value.fps.takeIf { it > 0f || display.frameRate.value.history.isNotEmpty() },
                     gfxStats = stats,
                 )
+                // Said once, into the session log, the first time the display
+                // server knows. Not logcat: its main buffer holds under three
+                // minutes here, and this answer is decided at the first frame.
+                if (!hintsReported) {
+                    display.frameHints.value?.let {
+                        hintsReported = true
+                        runtime.note(LogLevel.INFO, it)
+                    }
+                }
                 summary.add(sample)
                 // The device's own story, kept beside the guest's. Separate call
                 // because it survives a session that never drew: an installer has

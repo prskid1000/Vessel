@@ -86,6 +86,9 @@ fun DiagnosticsPanel(
      */
     var baselineExpanded by remember { mutableStateOf(false) }
 
+    /** The graphics table's own baseline, folded for the same reason. */
+    var turnipBaselineExpanded by remember { mutableStateOf(false) }
+
     /**
      * Apply an edit, unless it newly turns on something that costs.
      *
@@ -111,17 +114,27 @@ fun DiagnosticsPanel(
     // reaching the first control that does anything.
     val (added, fixed) = rows.partition { it.removable }
 
+    // **Two tables, because TU_DEBUG is not a logging variable.**
+    //
+    // Half its members change how the frame is drawn — `nolrz` turns off
+    // low-resolution depth, `gmem` and `sysmem` pick a rendering mode — and
+    // listing those under *What to log* said they were logging choices, which is
+    // the one thing they are not. The split is derived from `emit`, so a flag
+    // cannot be drawn in one table and sent through the other.
+    val (turnipFixed, logFixed) = fixed.partition { it.isTurnipFlag }
+    val (turnipAdded, logAdded) = added.partition { it.isTurnipFlag }
+
     Column(modifier.fillMaxWidth()) {
         VSectionHeader("What to log")
         VDisclosure(
             "Always on",
             expanded = baselineExpanded,
             onToggle = { baselineExpanded = !baselineExpanded },
-            summary = "${fixed.size} Vessel always sends",
+            summary = "${logFixed.size} Vessel always sends",
         ) {
-            fixed.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+            logFixed.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
         }
-        added.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+        logAdded.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
 
         VButton(
             "Add",
@@ -135,6 +148,46 @@ fun DiagnosticsPanel(
                 "Changes here are kept as you make them — there is no Save for this " +
                 "panel — but the environment is composed when a session starts, so a " +
                 "container that is already running keeps what it launched with.",
+            style = Vessel.type.bodySmall,
+            color = Vessel.colors.textMuted,
+            modifier = Modifier.padding(top = Vessel.metrics.s6),
+        )
+
+        /*
+         * The graphics-driver table.
+         *
+         * Its own header, its own fixed row (`startup`, which Vessel always
+         * sends and nothing can remove) and its own Add — the same shape as the
+         * logging table above, which is what makes it read as a peer rather than
+         * an appendix.
+         *
+         * Two things are true of these and not of the rows above, and the header
+         * text has to carry both: several change *rendering* rather than output,
+         * and the opposing pairs must not be switched on together.
+         */
+        VSectionHeader("Graphics driver")
+        VDisclosure(
+            "Always on",
+            expanded = turnipBaselineExpanded,
+            onToggle = { turnipBaselineExpanded = !turnipBaselineExpanded },
+            summary = "${turnipFixed.size} Vessel always sends",
+        ) {
+            turnipFixed.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+        }
+        turnipAdded.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+
+        VButton(
+            "Add",
+            { onChange(diagnostics.withRowAdded()) },
+            style = VButtonStyle.Primary,
+            icon = VIcons.Plus,
+            modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
+        )
+        Text(
+            "These are TU_DEBUG flags. The ones that only report need the driver " +
+                "logger on and say so; the rest change how a frame is drawn, which is " +
+                "measured on the frame counter rather than read in a log. Switch on one " +
+                "at a time — the driver resolves a contradictory pair silently.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),

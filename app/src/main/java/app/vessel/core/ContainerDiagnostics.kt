@@ -293,6 +293,18 @@ data class Loggable(
     val isFixed: Boolean get() = fixedLevel != null
 
     /**
+     * Which table this belongs in.
+     *
+     * **Derived from `emit`, never declared**, so a flag cannot end up in one
+     * list and be sent through the other. `TU_DEBUG` is the only variable whose
+     * members are not log channels: half of them change how the frame is drawn.
+     * Listing "turn off low-resolution depth" under *What to log* described it as
+     * a logging choice, which is the one thing it is not.
+     */
+    val isTurnipFlag: Boolean
+        get() = emit is Emit.ListMember && (emit as Emit.ListMember).variable == "TU_DEBUG"
+
+    /**
      * Whether the user may add a row for this.
      *
      * Not the inverse of [isFixed]: the four Wine channels the prefix names are
@@ -678,6 +690,12 @@ fun loggableFor(name: String): Loggable =
 /** The entries the name column offers, which is everything that can compose. */
 val ADDABLE_LOGGABLES: List<Loggable> = LOGGABLES.filter { it.isAddable }
 
+/** The addable log channels — everything except the graphics-driver flags. */
+val ADDABLE_LOG_LOGGABLES: List<Loggable> = ADDABLE_LOGGABLES.filterNot { it.isTurnipFlag }
+
+/** The addable `TU_DEBUG` members, which are their own table. */
+val ADDABLE_TURNIP_LOGGABLES: List<Loggable> = ADDABLE_LOGGABLES.filter { it.isTurnipFlag }
+
 /**
  * Whether [name] is something Wine's parser would read as a channel.
  *
@@ -800,6 +818,8 @@ data class DiagnosticRow(
     val removable: Boolean,
     /** True when the name is typed and Wine would not register it. */
     val nameIsInvalid: Boolean,
+    /** Which table draws this. See [Loggable.isTurnipFlag]. */
+    val isTurnipFlag: Boolean = false,
 )
 
 /**
@@ -831,6 +851,7 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             levelEditable = false,
             removable = false,
             nameIsInvalid = false,
+            isTurnipFlag = loggable.isTurnipFlag,
         )
     }
 
