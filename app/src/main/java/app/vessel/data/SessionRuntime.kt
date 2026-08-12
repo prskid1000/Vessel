@@ -610,7 +610,7 @@ class SessionRuntime @Inject constructor(
         }
 
         try {
-            prepare(containerId, profile, manifest, log) ?: return
+            prepare(containerId, profile, manifest, fpsLimit, log) ?: return
             runDesktop(log, geometry, fpsLimit)
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
@@ -663,6 +663,8 @@ class SessionRuntime @Inject constructor(
         containerId: String,
         profile: ContainerProfile,
         manifest: ParamManifest?,
+        /** The same number `runDesktop` paces the compositor with. See below. */
+        fpsLimit: Int?,
         log: SessionLog,
     ): LaunchPlan? {
         val layout = paths.of(containerId)
@@ -721,6 +723,12 @@ class SessionRuntime @Inject constructor(
             turnip = turnip,
             fex = fex,
             display = DEFAULT_DISPLAY,
+            // The same value `runDesktop` gives the compositor, threaded down
+            // here rather than parsed a second time. It becomes `DXVK_FRAME_RATE`
+            // and `VKD3D_FRAME_RATE`, so the renderer stops producing frames the
+            // compositor was already throwing away — measured at 116 rendered for
+            // every 24 shown, at 84% GPU. See `sessionEnvironment`.
+            fpsLimit = fpsLimit,
         )
 
         if (turnip == null) {

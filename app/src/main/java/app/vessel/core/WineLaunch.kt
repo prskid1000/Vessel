@@ -292,11 +292,18 @@ const val UNLIMITED_FPS: String = "unlimited"
 /**
  * `display.fpsLimit` as a number, or null for unlimited.
  *
- * It becomes no environment variable. The manifest declares no `env` for it on
- * purpose — see `manifestEnvironment` — so it is carried to the frame-pacing side
- * of the display seam instead. Inventing `DXVK_FRAME_RATE` here because the name
- * exists would set a cap the user never chose on the one layer that is not doing
- * the compositing.
+ * The manifest still declares no `env` for it — see `manifestEnvironment` — but
+ * that is now about *ownership*, not about the D3D layer being off limits. One
+ * number reaches three places: the compositor's pacing, `DXVK_FRAME_RATE` and
+ * `VKD3D_FRAME_RATE`, all composed by code rather than by a document.
+ *
+ * **This used to say that capping the D3D layer would be a cap the user never
+ * chose, and that was measured wrong.** Metro at a 24 fps cap, from the session
+ * trace: composited `fps` 24.0 and DXVK's own `d3dFps` **116**, at 84% GPU and
+ * ~760 draw calls a frame. The cap was doing exactly what it said and only what
+ * it said — throttling the blit — while the guest rendered five frames for every
+ * one anybody saw and the GPU paid for all five. A frame limit that leaves the
+ * renderer uncapped is a limit on the display and not on the work.
  */
 fun parseFpsLimit(value: String?): Int? {
     if (value == null || value == UNLIMITED_FPS) return null

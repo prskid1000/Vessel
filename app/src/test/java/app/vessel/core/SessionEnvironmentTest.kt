@@ -126,7 +126,8 @@ class SessionEnvironmentTest {
         driver: TurnipDriver? = null,
         fexPackage: FexPackage? = fex,
         display: String = DEFAULT_DISPLAY,
-    ) = sessionEnvironment(container(params), manifest, paths, driver, fexPackage, display)
+        fpsLimit: Int? = null,
+    ) = sessionEnvironment(container(params), manifest, paths, driver, fexPackage, display, fpsLimit)
 
     // — the logging contract --------------------------------------------------
 
@@ -432,8 +433,110 @@ class SessionEnvironmentTest {
     fun `a param with no env contributes nothing, invented or otherwise`() {
         val environment = env()
         assertFalse(environment.containsKey("display.resolution"))
-        assertFalse(environment.containsKey("DXVK_FRAME_RATE"))
         assertFalse(environment.containsKey("WINE_RESOLUTION"))
+        // `display.fpsLimit` is the exception that proves the rule: it declares
+        // no `env` either, and it still reaches two variables — but only because
+        // `sessionEnvironment` is given the parsed number, which this call is
+        // not. An uncapped container writes neither.
+        assertFalse(environment.containsKey("DXVK_FRAME_RATE"))
+        assertFalse(environment.containsKey("VKD3D_FRAME_RATE"))
+    }
+
+    @Test
+    fun `a manifest param whose value is empty contributes no variable at all`() {
+        // The graphics experiments are off when their variable is *absent* and on
+        // when it is present with any content — `TU_AUTOTUNE_FLAGS` and
+        // `MESA_GPU_TRACES` both parse a flag list. A param must always produce a
+        // value, so the empty string is the manifest's only way to say "leave
+        // this alone", and writing it through would be a container declaring an
+        // experiment nobody chose.
+        val optional = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "g", title = "G",
+                    params = listOf(
+                        ParamSpec(
+                            key = "turnip.autotuneFlags",
+                            title = "Tiling override",
+                            type = ParamType.ENUM,
+                            options = listOf("", "big_gmem"),
+                            default = JsonPrimitive(""),
+                            env = "TU_AUTOTUNE_FLAGS",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertFalse(env(manifest = optional).containsKey("TU_AUTOTUNE_FLAGS"))
+        assertEquals(
+            "big_gmem",
+            env(
+                params = mapOf("turnip.autotuneFlags" to ParamValue.Text("big_gmem")),
+                manifest = optional,
+            )["TU_AUTOTUNE_FLAGS"],
+        )
+    }
+
+    @Test
+    fun `the Turnip instrument paths stay inside the container`() {
+        // Reserved for the reason VESSEL_GFX_STATS is: they name paths this app
+        // creates and reads, and a document that could move them would have the
+        // driver writing outside the container.
+        val environment = env()
+        assertEquals(tmp.absoluteFile, File(environment["TU_DEBUG_FILE"]!!).absoluteFile.parentFile)
+        assertEquals(tmp.absoluteFile, File(environment["MESA_GPU_TRACEFILE"]!!).absoluteFile.parentFile)
+        assertTrue("TU_DEBUG_FILE" in RESERVED_SESSION_ENV)
+        assertTrue("MESA_GPU_TRACEFILE" in RESERVED_SESSION_ENV)
+    }
+
+    @Test
+    fun `a frame rate limit caps the renderer as well as the compositor`() {
+        // The bug this closes, measured on the device: at a 24 fps cap the
+        // composited rate was 24.0 and DXVK's own was 116.5, at 84% GPU and ~760
+        // draw calls a frame. Four frames in five were rendered at full cost and
+        // discarded, because the cap reached the blit and not the renderer.
+        val environment = env(fpsLimit = 24)
+        assertEquals("24", environment["DXVK_FRAME_RATE"])
+        assertEquals("24", environment["VKD3D_FRAME_RATE"])
+    }
+
+    @Test
+    fun `a container cannot set a renderer frame rate that disagrees with the compositor`() {
+        // Both are reserved, so a manifest param declaring either as its `env` is
+        // dropped by the manifest stage — the same guard `VKD3D_LOG_FILE` gets
+        // above, and here for a sharper reason: the failure it prevents is not an
+        // error but a phone running hot at a frame rate the user believes they
+        // capped, with nothing anywhere saying why.
+        val sneaky = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "g", title = "G",
+                    params = listOf(
+                        ParamSpec(
+                            key = "sneaky.dxvkFps",
+                            title = "DXVK frame rate",
+                            type = ParamType.TEXT,
+                            default = JsonPrimitive("240"),
+                            env = "DXVK_FRAME_RATE",
+                        ),
+                        ParamSpec(
+                            key = "sneaky.vkd3dFps",
+                            title = "vkd3d frame rate",
+                            type = ParamType.TEXT,
+                            default = JsonPrimitive("240"),
+                            env = "VKD3D_FRAME_RATE",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val environment = env(manifest = sneaky, fpsLimit = 30)
+        assertEquals("30", environment["DXVK_FRAME_RATE"])
+        assertEquals("30", environment["VKD3D_FRAME_RATE"])
+        assertTrue("DXVK_FRAME_RATE" in RESERVED_SESSION_ENV)
+        assertTrue("VKD3D_FRAME_RATE" in RESERVED_SESSION_ENV)
     }
 
     @Test
@@ -599,6 +702,14 @@ class SessionEnvironmentTest {
                 "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
                 "VKD3D_SHADER_CACHE_PATH" to File(caches, "vkd3d").absolutePath,
                 "TU_DEBUG" to "startup",
+                // The two Turnip instrument paths, always set and inert until a
+                // flag asks for them. `TU_DEBUG_FILE` is the one that matters:
+                // Turnip re-reads it mid-session, which is what makes a tiling
+                // A/B possible against one scene at one temperature instead of
+                // across two launches that this device's thermals make
+                // incomparable.
+                "TU_DEBUG_FILE" to File(tmp, TU_DEBUG_FILE_NAME).absolutePath,
+                "MESA_GPU_TRACEFILE" to File(tmp, GPU_TRACE_FILE_NAME).absolutePath,
                 "MESA_VK_WSI_DEBUG" to "sw",
                 // A Turnip driconf option delivered as an env var, because FEX
                 // asks Turnip for it through `__wine_set_unix_env` and that

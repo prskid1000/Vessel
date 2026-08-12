@@ -432,6 +432,63 @@ class GfxRunSummary {
     }
 
     /**
+     * What the *device* did over the same run: load, clocks and heat.
+     *
+     * **Separate from the D3D line above because it answers a different question
+     * and survives a session with no graphics at all.** The d3d line describes
+     * the guest's work; this one describes the phone's response to it, and a
+     * container running an installer has the second story without the first.
+     *
+     * **Mean CPU clock is the number this was added for.** Every performance
+     * question asked of this project all morning turned on it and it existed
+     * only inside the trace, where reading it means pulling a `.jsonl` off the
+     * device and writing a script. A session at 1713 MHz against a 3321 MHz
+     * ceiling is the difference between "the emulator is slow" and "the platform
+     * never clocked up", and until now the log could not tell them apart.
+     *
+     * Both extents are kept because they say different things: **mean** is what
+     * the run actually ran at, and **peak** is what the device was willing to
+     * give — a wide gap between them is a scheduler that keeps backing off, and
+     * a low peak is a thermal or policy cap.
+     */
+    private val cpuLoad = Extent()
+    private val gpuLoad = Extent()
+    private val cpuClock = Extent()
+    private val cpuClockPeak = Extent()
+    private val gpuTemp = Extent()
+
+    /** Ticks that carried any device reading, which is nearly all of them. */
+    private var deviceSamples: Int = 0
+
+    fun addDevice(sample: MetricSample) {
+        var any = false
+        sample.cpuPercent?.let { cpuLoad.add(it.toFloat()); any = true }
+        sample.gpuPercent?.let { gpuLoad.add(it.toFloat()); any = true }
+        sample.clockMhz?.let { cpuClock.add(it.toFloat()); any = true }
+        sample.clockPeakMhz?.let { cpuClockPeak.add(it.toFloat()); any = true }
+        sample.gpuTempDeciC?.let { gpuTemp.add(it / 10f); any = true }
+        if (any) deviceSamples++
+    }
+
+    /**
+     * One line, or null when nothing about the device could be read.
+     *
+     * Null rather than a row of dashes, for the reason [line] gives: a summary
+     * that prints when it has nothing to say is the noise these exist instead of.
+     */
+    fun deviceLine(): String? {
+        if (deviceSamples == 0) return null
+        return buildString {
+            append("device over ").append(deviceSamples).append(" sample(s)")
+            cpuLoad.append(this, "cpu %")
+            gpuLoad.append(this, "gpu %")
+            cpuClock.append(this, "cpu MHz mean")
+            cpuClockPeak.append(this, "cpu MHz peak core")
+            gpuTemp.append(this, "gpu degC")
+        }
+    }
+
+    /**
      * The smallest thing that can answer min/mean/max without keeping the values.
      *
      * A running sum rather than a list, so the memory this costs does not depend

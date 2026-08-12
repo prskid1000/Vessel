@@ -10,15 +10,52 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!--
+      `appCategory="game"` is a performance setting on this hardware, not a
+      label for the launcher.
+
+      Measured on the device before it was set: `cmd game list-modes app.vessel`
+      answered *"Package app.vessel is not of game type"*, and a Metro session
+      ran its whole length with the cores at 1713-1977 MHz out of a 3321/3801
+      ceiling — under 60% of the clock that was available, at 84% GPU. Nothing
+      told the platform this was a game, so nothing raised anything.
+
+      This phone has a lot listening for that answer: `pm list features` reports
+      `com.motorola.software.game_mode` and `com.motorola.game_moment`, and
+      `service list` has `motorola.hardware.power.IMdpfExt` next to Qualcomm's
+      `vendor.qti.hardware.power.powermodule.IPowerModule`. All of it keys off
+      the app category, and all of it was being asked to treat a game engine as
+      a productivity app.
+
+      It also unlocks the user-facing half — Game Dashboard, and the per-app
+      Performance/Battery choice — which `res/xml/game_mode_config.xml` gives
+      defaults for.
+    -->
     <application
         android:name=".VesselApplication"
         android:allowBackup="false"
+        android:appCategory="game"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:largeHeap="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Vessel">
+
+        <!--
+          What each Game Mode means for a container. Read by GameManager when the
+          user picks a mode in the Game Dashboard.
+
+          Vessel does not scale its own render resolution from these — the guest
+          decides its resolution and `display.resolution` is the user's — so both
+          modes are declared with `allowDownscale="false"` and differ only in
+          what they ask the platform's power path for. Claiming a downscale this
+          app cannot perform would have the system budget for a frame that never
+          gets cheaper.
+        -->
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
 
         <!--
           `configChanges` is why rotating no longer blanks the desktop.

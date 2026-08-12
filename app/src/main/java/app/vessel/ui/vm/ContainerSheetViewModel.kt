@@ -221,12 +221,59 @@ class ContainerSheetViewModel @Inject constructor(
      * Load [containerId], or a fresh draft when it is null or [NEW_CONTAINER].
      *
      * Idempotent, because it is called from a `LaunchedEffect` and composition is
-     * not a promise about how many times something happens.
+     * not a promise about how many times something happens. [consumeFinished]
+     * is what re-arms it, and that is not a detail — see below.
      */
     fun open(containerId: String?) {
         if (opened) return
         opened = true
+        // **Deliberately not `loading = true`.** A reopen after Save re-reads the
+        // container, and blanking the sheet to its loading placeholder first made
+        // it open in two visible steps: a short sheet, then a jump to full height
+        // when the read came back a frame or two later. Reported as the sheet
+        // "jerking twice while opening".
+        //
+        // `loading` starts true, so the first open still shows the placeholder —
+        // there genuinely is nothing to draw then. On a reopen the state on screen
+        // is what was just saved, so leaving it up is not a stale-data risk; it is
+        // the same content the read is about to confirm.
         viewModelScope.launch { load(containerId ?: NEW_CONTAINER) }
+    }
+
+    /**
+     * **The sheet has closed. Be ready to be opened again.**
+     *
+     * `finished` was written as a one-shot on the assumption that the view model
+     * dies with the sheet it closed. It does not: `ContainerSheet` takes it from
+     * `hiltViewModel(key = containerId)`, which scopes it to the *screen*, and the
+     * screen is still there. So the flag stayed `true` and [opened] stayed `true`
+     * for as long as the process lived.
+     *
+     * Reported as **"changed fps to 24, pressed Save, and the container settings
+     * would not open again until I closed and reopened the app"**, which is
+     * exactly those two fields:
+     *
+     *  - `finished` still `true` meant the sheet's own
+     *    `LaunchedEffect(state.finished)` fired on the first composition of the
+     *    *next* open and dismissed it before a frame was drawn. Nothing appeared,
+     *    and nothing had gone wrong in any way a user could see.
+     *  - [opened] still `true` meant [open] would have early-returned anyway, so
+     *    even a sheet that survived would have been showing the previous draft
+     *    rather than what is on disk.
+     *
+     * The second one bites hardest on **New container**, whose key is fixed: after
+     * making one, the next New container would have reused the same view model
+     * and shown the container that had just been created.
+     *
+     * Clearing both here rather than in [save] and [delete] keeps the flag doing
+     * its job. It exists so the *sheet* can act on it once, and only the sheet
+     * knows when it has — a view model that cleared it itself would be racing the
+     * composition that is supposed to read it.
+     */
+    fun consumeFinished() {
+        if (!_state.value.finished) return
+        opened = false
+        _state.update { it.copy(finished = false) }
     }
 
     private suspend fun load(containerId: String) {

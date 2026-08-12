@@ -205,6 +205,10 @@ class SessionMetricsRecorder @Inject constructor(
                     gfxStats = stats,
                 )
                 summary.add(sample)
+                // The device's own story, kept beside the guest's. Separate call
+                // because it survives a session that never drew: an installer has
+                // clocks and heat and no D3D at all.
+                summary.addDevice(sample)
                 val d3d = sample.d3dDrawCallsPerFrame != null
                 _state.update {
                     if (it.startedAt != startedAt) {
@@ -269,6 +273,11 @@ class SessionMetricsRecorder @Inject constructor(
      * elision.
      */
     private fun report(summary: GfxRunSummary) {
+        // Device first, graphics second. The device line is the one that exists
+        // for every session — a run with no D3D still has clocks and heat — so a
+        // reader scanning a log finds the always-present line above the
+        // sometimes-present one rather than hunting for it below.
+        summary.deviceLine()?.let { runtime.note(LogLevel.INFO, it) }
         val line = summary.line() ?: return
         runtime.note(LogLevel.INFO, line)
     }

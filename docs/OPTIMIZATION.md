@@ -222,6 +222,46 @@ different thread count.
   concrete reason not to add the "pin to big cores" setting that every phone
   emulator eventually grows.
 
+### Candidate F — telling the platform this is a game — **applied**
+
+Candidate E asked "how do I get the fast cores?" and answered it with a mask,
+which is the wrong instrument: a mask *removes* runqueues from a session that is
+wineserver plus guest threads plus FEX threads, and that is the whole of the
+19%. The right question is "how do I ask for more clock without taking anything
+away", and Android has three answers. All three were present on this device and
+none was being used.
+
+**What was actually happening.** A Metro session, gameplay, from the session
+trace: cores at **1713–1977 MHz** against a 3321/3801 MHz ceiling, with the GPU
+at 84%. Under 60% of the clock that was sitting there. Nothing had told the
+platform this was a game, so EAS treated a workload that looked like it was
+keeping up exactly as it should.
+
+| | Evidence on the device | Now |
+|---|---|---|
+| `android:appCategory="game"` | `cmd game list-modes app.vessel` → *"Package app.vessel is not of game type"* | **set**, with `res/xml/game_mode_config.xml` |
+| ADPF hint session | `performance_hint: [android.os.IHintManager]`; `debug.sf.enable_adpf_cpu_hint=true` | **`display/FrameHints.kt`** |
+| uclamp | `/proc/sys/kernel/sched_util_clamp_{min,max}`, kernel 6.12-android16 | **not used** — raising `uclamp_min` needs `CAP_SYS_NICE`, which an app does not have |
+
+The category is the one that reaches the guest, and this phone has a lot
+listening for it: `pm list features` reports `com.motorola.software.game_mode`
+and `com.motorola.game_moment`, and `service list` has
+`motorola.hardware.power.IMdpfExt` beside Qualcomm's `IPowerModule`.
+
+`game_mode_config.xml` declares both modes and **refuses both of the platform's
+levers** — `allowGameDownscaling` and `allowGameFpsOverride` are false. Vessel
+cannot honestly downscale (the guest picked its resolution and the expensive
+rendering happens at that resolution inside the guest), and a platform FPS
+override would cap *presentation* a second time, which is precisely the bug §6
+below exists to fix.
+
+- **Unmeasured.** Both changes are argued from the clock figures above rather
+  than from a before/after. The ADPF session covers the compositor's GL thread
+  and *attempts* the guest's — whether the platform accepts a same-uid tid from
+  another process is not something this project has established, so
+  `FrameHints.attachGuest` tries once and writes the answer to logcat. Read that
+  line before quoting anything about what the session covers.
+
 ---
 
 ## 5. What is not worth doing
@@ -230,7 +270,69 @@ different thread count.
   be measured against first. Revisit only if Candidate B lands and helps.
 - **`-O3` for Wine's PE side.** Wine upstream ships `-O2` and its PE code is not
   where the time goes. Miscompile risk without a matching payoff.
-- **Working around Mesa's LTO refusal.** Upstream turned it off on purpose.
+- **Working around Mesa's LTO refusal.** Upstream turned it off on purpose. The
+  reason is on the record and is not about performance: LTO caused *"random
+  impossible-to-debug bugs"* and LTO reports are a standing WONTFIX. There is an
+  `allow-broken-lto` escape hatch; taking it on a shipping graphics driver trades
+  an unmeasured gain for undebuggable corruption.
+- **`sched_setattr` uclamp on the guest's threads.** The kernel has it
+  (`/proc/sys/kernel/sched_util_clamp_min`, 6.12-android16) and it is the soft
+  form of Candidate E that would not have cost 19%. It is unreachable anyway:
+  raising a task's `uclamp_min` above the system default requires `CAP_SYS_NICE`,
+  and an unprivileged app has none. Candidate F is the reachable version.
+
+---
+
+## 6. The frame limit capped the screen and not the renderer — **fixed**
+
+`display.fpsLimit` reached exactly one place: `PacedXServerView.requestRender`,
+which drops a composite that arrives too soon. That is a cap on the **blit** —
+the last and cheapest step in the chain — and the guest was left to render as
+fast as it could.
+
+Measured, Metro at a **24 fps** cap, consecutive seconds of one session trace:
+
+| s | composited `fps` | DXVK `d3dFps` | gpu% | draws/frame | clock |
+|---|---|---|---|---|---|
+| 55 | 24.0 | **143.8** | 84% | 904 | 1977 MHz |
+| 58 | 24.0 | **162.0** | 84% | 687 | 1977 MHz |
+| 60 | 23.8 | **114.8** | 84% | 764 | 1917 MHz |
+| 65 | 24.0 | **116.5** | 84% | 759 | 1972 MHz |
+
+**Twenty-four frames on the screen, a hundred and sixteen rendered.** Four out of
+every five complete frames — geometry, shading, resolve, ~760 draw calls each —
+were computed at full GPU cost and then discarded, because nothing downstream of
+DXVK can un-spend work already submitted. That is the whole of "I capped it to 24
+and the phone is still hot".
+
+The decision not to do this was recorded, in `SessionDisplay.kt` and in two
+tests, and its stated reason was that capping the D3D layer *"would set a cap the
+user never chose on the one layer that is not doing the compositing"*. That is
+right about what the user sees and backwards about what the GPU does.
+
+Both limiters were already in the vendored source and neither was wired:
+
+- `DXVK_FRAME_RATE` — `native/dxvk/src/util/util_fps_limiter.cpp:129`
+- `VKD3D_FRAME_RATE` — `native/vkd3d/libs/vkd3d/swapchain.c:3921`
+
+Each sleeps in Present rather than dropping, so the frames that stop being shown
+stop being *rendered*. `sessionEnvironment` now sets both from the same number
+the compositor paces with, and both are in `RESERVED_SESSION_ENV` so a container
+document cannot set a renderer cap that disagrees with the compositor's.
+
+The compositor's own pacing stays. It is not redundant — it is the only cap that
+applies to an OpenGL or GDI title, which was the true half of the original
+objection, and it costs nothing as the backstop.
+
+> **Unmeasured.** The arithmetic says GPU load should fall roughly with the
+> frames no longer rendered; fixed per-frame costs mean it will not be the full
+> 5×. Re-run the trace at a 24 fps cap and compare `gpuPercent` and `d3dFps`
+> before quoting a number.
+
+**This also makes the FPS readout honest.** The taskbar showed `24` while the
+game ran at 116, so the counter that exists to answer "is this smooth" was
+reporting a number that said nothing about the machine's load. `d3dFps` is in the
+trace and still not in the UI.
 
 ---
 

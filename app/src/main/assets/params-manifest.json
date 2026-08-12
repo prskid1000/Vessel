@@ -104,6 +104,80 @@
       ]
     },
     {
+      "id": "graphics",
+      "title": "Graphics experiments",
+      "help": "Unproven. Each one is a question to measure, not a setting to leave on.",
+      "_comment": [
+        "None of these has a measured effect on this device. They are here because",
+        "the stack is GPU-bound at 94-97% and the levers that could change that",
+        "were unreachable without a build. Every default below is the driver's own",
+        "behaviour, so a container nobody has touched runs exactly as it did.",
+        "",
+        "Read docs/OPTIMIZATION.md before changing one, and change one at a time.",
+        "Absolute frame times do not survive between sessions on this phone -- the",
+        "same measurement moved 15% on thermal state alone -- so a comparison",
+        "across two launches is noise. TU_DEBUG_FILE (set automatically, under the",
+        "container's tmp/) lets a subset of the Turnip flags be switched while the",
+        "game runs, which is the only way to A/B these against the same scene at",
+        "the same temperature."
+      ],
+      "params": [
+        {
+          "key": "turnip.autotuneAlgorithm",
+          "title": "Tiling decision",
+          "help": "Adreno can draw in on-chip tiles or straight to memory. The driver ships a rule that opts Direct3D games out of tiling entirely, so this game is almost certainly not tiling. 'bandwidth' is the driver's own default rule; 'profiled' measures both and picks. Leave on default unless you are testing.",
+          "type": "enum",
+          "options": ["default", "bandwidth", "profiled", "prefer_gmem", "prefer_sysmem"],
+          "default": "default",
+          "env": "TU_AUTOTUNE_ALGO"
+        },
+        {
+          "key": "turnip.autotuneFlags",
+          "title": "Tiling override",
+          "help": "'big_gmem' forces tiles for any pass with ten or more draws. Metro averages about twenty draws a pass, so this flips most of them.",
+          "type": "enum",
+          "options": ["", "big_gmem"],
+          "default": "",
+          "env": "TU_AUTOTUNE_FLAGS"
+        },
+        {
+          "key": "turnip.concurrentBinning",
+          "title": "Overlap tile setup",
+          "help": "Lets tile setup run alongside drawing. Off by default in the driver because it costs more than it saves on desktop games. Only means anything if the game is actually tiling.",
+          "type": "enum",
+          "options": ["false", "true"],
+          "default": "false",
+          "env": "tu_allow_concurrent_binning"
+        },
+        {
+          "key": "turnip.conservativeLrz",
+          "title": "Keep depth rejection through blending",
+          "help": "Recovers early depth rejection that the driver gives up on after a blended draw. CAUTION: on a game that needs the caution, this renders incorrectly rather than crashing -- check the picture, not just the frame rate.",
+          "type": "enum",
+          "options": ["false", "true"],
+          "default": "false",
+          "env": "disable_conservative_lrz"
+        },
+        {
+          "key": "turnip.gpuTrace",
+          "title": "Per-pass GPU trace",
+          "help": "Writes one record per render pass -- tiles or not, why depth rejection was dropped, and bytes moved -- to the container's tmp folder. Costs frame rate while it runs, so read the shape and not the fps.",
+          "type": "enum",
+          "options": ["", "print_csv", "print", "print_json"],
+          "default": "",
+          "env": "MESA_GPU_TRACES"
+        },
+        {
+          "key": "d3d.dxvkConfig",
+          "title": "DXVK options",
+          "help": "Passed straight to DXVK, one 'key = value' per line. Nothing here is proven; 'd3d11.cachedDynamicResources = a' is the one most likely to matter on this phone, where the CPU and GPU share memory.",
+          "type": "text",
+          "default": "",
+          "env": "DXVK_CONFIG"
+        }
+      ]
+    },
+    {
       "id": "compatibility",
       "title": "Compatibility",
       "help": "One escape hatch for a single misbehaving program.",

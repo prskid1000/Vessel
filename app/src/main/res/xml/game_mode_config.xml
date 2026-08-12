@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Which Game Modes Vessel supports, and what it promises in each.
+
+  `supportsBatteryGameMode` and `supportsPerformanceGameMode` are the whole of
+  the declaration: they are what makes the two entries appear in the Game
+  Dashboard, and a mode not declared here is one the user cannot pick.
+
+  `allowGameDownscaling="false"` in both, deliberately. The platform's downscale
+  works by resizing the app's own surface, and Vessel's surface is a compositor
+  for a guest that chose its own resolution — `display.resolution`, which the
+  user set. Letting the system shrink it would fight that setting, and would not
+  save the GPU anything anyway, because the expensive rendering happens inside
+  the guest at the guest's resolution and is only then blitted. The honest lever
+  for that is `display.resolution` itself.
+
+  `allowGameFpsOverride="false"` for the same reason and a sharper one:
+  `display.fpsLimit` now reaches DXVK and vkd3d as well as the compositor, so
+  Vessel's own cap is the one that actually stops frames from being rendered. A
+  platform FPS override applied on top would cap presentation a second time and
+  reintroduce exactly the gap that was just measured and closed — frames
+  rendered at full GPU cost and then dropped.
+
+  What is left is the part worth having: with these declared, Performance mode
+  tells the OEM power path to keep clocks up for this app, which is the thing
+  that was missing when a Metro session ran at 1713 MHz of an available 3321.
+-->
+<game-mode-config
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsBatteryGameMode="true"
+    android:supportsPerformanceGameMode="true"
+    android:allowGameDownscaling="false"
+    android:allowGameFpsOverride="false" />

@@ -89,7 +89,17 @@ fun ContainerSheet(
 
     // Save and Delete both end the sheet. Read once as a flag rather than through
     // a callback out of the view model, so a recomposition cannot dismiss twice.
-    LaunchedEffect(state.finished) { if (state.finished) onDismiss() }
+    //
+    // **Consumed, and that is not tidiness.** The view model outlives this
+    // composable — `hiltViewModel(key = …)` scopes it to the screen — so a flag
+    // left set closes the *next* open before it draws, which read as "container
+    // settings will not open until I restart the app". See
+    // `ContainerSheetViewModel.consumeFinished`.
+    LaunchedEffect(state.finished) {
+        if (!state.finished) return@LaunchedEffect
+        viewModel.consumeFinished()
+        onDismiss()
+    }
 
     val context = LocalContext.current
     // Comes back with no result — all-files access is a settings toggle, not a

@@ -302,6 +302,32 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "VKD3D_SHADER_DEBUG",
     "VKD3D_LOG_FILE",
     "TU_DEBUG",
+    // Composed from `display.fpsLimit` alongside the compositor's own pacing, so
+    // that one setting caps the renderer and the blit together. Reserved because
+    // a container able to write either of these directly could set a renderer cap
+    // that disagrees with the compositor's — and the symptom of that is not an
+    // error but a phone that runs hot at a frame rate the user thought they had
+    // limited, which is precisely the bug this pair was added to fix.
+    "DXVK_FRAME_RATE",
+    "VKD3D_FRAME_RATE",
+    // Two paths, not two settings — which is why they are here and the flags
+    // that make them useful are ordinary manifest params.
+    //
+    // `TU_DEBUG_FILE` names a file Turnip *watches*: a subset of its flags
+    // (`perf`, `sysmem`, `gmem`, `nolrz`, `forcebin`, `log_skip_gmem_ops` —
+    // `tu_util.cc:70`) can be changed **while the game is running**. That is the
+    // only way this project can get a GMEM-versus-sysmem number worth quoting:
+    // `docs/OPTIMIZATION.md` records the same measurement moving 15% between
+    // sessions on thermals alone, so a comparison across two launches is noise.
+    // Within one session, same scene, seconds apart, it is a measurement.
+    //
+    // `MESA_GPU_TRACEFILE` is where the per-render-pass trace lands when
+    // `MESA_GPU_TRACES` asks for one. Both are reserved for the reason
+    // `VESSEL_GFX_STATS` is: they name paths this app creates and reads, and a
+    // container document that could move them could have the driver writing
+    // outside the container.
+    "TU_DEBUG_FILE",
+    "MESA_GPU_TRACEFILE",
     // Owned by the display server, which is the only thing that knows whether a
     // shared-memory socket got bound and where. A manifest param naming it would
     // point winex11 at a socket nothing is listening on, and patch 0005 answers
@@ -681,6 +707,18 @@ const val GFX_STATS_FILE: String = "gfx-stats.json"
 /** [GFX_STATS_FILE] inside a container's scratch directory, for both sides of it. */
 fun gfxStatsFile(tmp: File): File = File(tmp, GFX_STATS_FILE)
 
+/** `TU_DEBUG_FILE` — Turnip re-reads this mid-session. See `RESERVED_SESSION_ENV`. */
+const val TU_DEBUG_FILE_NAME: String = "tu-debug"
+
+/** `MESA_GPU_TRACEFILE` — where a per-render-pass trace lands. */
+const val GPU_TRACE_FILE_NAME: String = "gpu-trace.csv"
+
+/** The live Turnip flag file for a container, for anything that wants to write it. */
+fun turnipDebugFile(tmp: File): File = File(tmp, TU_DEBUG_FILE_NAME)
+
+/** The per-render-pass trace for a container. */
+fun gpuTraceFile(tmp: File): File = File(tmp, GPU_TRACE_FILE_NAME)
+
 /**
  * The environment a session is started with — `docs/LOGGING.md` as code.
  *
@@ -715,6 +753,16 @@ fun sessionEnvironment(
     turnip: TurnipDriver? = null,
     fex: FexPackage? = null,
     display: String = DEFAULT_DISPLAY,
+    /**
+     * `display.fpsLimit`, already parsed. Null caps nothing.
+     *
+     * Passed in rather than read from [profile] here, even though this function
+     * has the manifest and could call `parseFpsLimit` itself, because the session
+     * has already resolved it for the compositor and the two must be the same
+     * number. Two readers of one param is how a container ends up rendering at
+     * one rate and presenting at another.
+     */
+    fpsLimit: Int? = null,
 ): Map<String, String> {
     val environment = LinkedHashMap<String, String>()
 
@@ -1017,6 +1065,45 @@ fun sessionEnvironment(
     // either; device.c turns it on for VK_DRIVER_ID_MESA_TURNIP by itself.
     environment["VKD3D_CONFIG"] = "nodxr"
 
+    // **`display.fpsLimit`, applied to the renderer and not only to the screen.**
+    //
+    // The compositor has always paced itself to this number — `PacedXServerView`
+    // drops a `requestRender` that arrives too soon — and that is a cap on the
+    // blit, which is the last thing in the chain and the cheapest. The guest was
+    // left to render as fast as it could.
+    //
+    // Measured, Metro at a 24 fps cap, one second of the session trace:
+    //
+    //     fps 24.0   d3dFps 116.5   gpu 84%   draws/frame 759
+    //
+    // Twenty-four frames on the screen, a hundred and sixteen rendered. Four out
+    // of every five complete frames — geometry, shading, resolve, ~760 draw calls
+    // each — were computed at full GPU cost and then discarded, because nothing
+    // downstream of DXVK can un-spend work that has already been submitted. That
+    // is the whole of "I capped it to 24 and the phone is still hot".
+    //
+    // So the limit is set on the two D3D layers as well. Both limiters are real
+    // and already in the vendored source: DXVK reads `DXVK_FRAME_RATE` in
+    // `util_fps_limiter.cpp` and vkd3d reads `VKD3D_FRAME_RATE` when it
+    // initialises a swapchain, and each sleeps in Present rather than dropping —
+    // so the frames that stop being drawn stop being *rendered*, which is the
+    // point.
+    //
+    // Unset for an unlimited container rather than written as 0 or -1: DXVK
+    // treats a value it cannot parse as no limit anyway, and an absent variable
+    // is the honest way to say "no cap" to two projects with different opinions
+    // about which sentinel means that.
+    //
+    // The compositor's own pacing stays exactly as it was. It is not redundant —
+    // it is the only cap that applies to an OpenGL or GDI title, which is the
+    // objection that used to argue against setting these at all, and it costs
+    // nothing to keep as the backstop for everything the D3D variables cannot
+    // reach.
+    fpsLimit?.takeIf { it > 0 }?.let { limit ->
+        environment["DXVK_FRAME_RATE"] = limit.toString()
+        environment["VKD3D_FRAME_RATE"] = limit.toString()
+    }
+
     // The shader caches, all three, pointed at the container.
     //
     // Mesa's is the one that matters and the one most easily missed: it disables
@@ -1029,6 +1116,19 @@ fun sessionEnvironment(
     environment["VKD3D_SHADER_CACHE_PATH"] = File(paths.caches, "vkd3d").absolutePath
 
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
+
+    // **The two Turnip paths, always set, because both are inert until asked
+    // for.** An empty `TU_DEBUG_FILE` costs one `stat` per frame boundary at
+    // most, and `MESA_GPU_TRACEFILE` is opened only when `MESA_GPU_TRACES` names
+    // a format. Setting them unconditionally means a measurement never fails
+    // because a second setting was forgotten — which is the failure this project
+    // has already had twice, with the shader caches and with `TU_DEBUG`
+    // needing `MESA_LOG`.
+    //
+    // Under `tmp` rather than `logs`: neither is a session log, both are
+    // instrument output, and `tmp` is already where `VESSEL_GFX_STATS` writes.
+    environment["TU_DEBUG_FILE"] = File(paths.tmp, TU_DEBUG_FILE_NAME).absolutePath
+    environment["MESA_GPU_TRACEFILE"] = File(paths.tmp, GPU_TRACE_FILE_NAME).absolutePath
 
     // **The only present path this driver has. Without it a swapchain is not an
     // error, it is a crash.**
@@ -1230,10 +1330,12 @@ fun sessionEnvironment(
 /**
  * Every manifest param that declares an `env`, resolved against this container.
  *
- * A param with no `env` produces nothing: `display.resolution` and
- * `display.fpsLimit` are consumed by the session surface, and inventing a
- * `DXVK_FRAME_RATE` for the latter because it looks like it should exist is the
- * fabrication the manifest exists to prevent.
+ * A param with no `env` produces nothing. `display.resolution` is consumed by the
+ * session surface. `display.fpsLimit` reaches `DXVK_FRAME_RATE` and
+ * `VKD3D_FRAME_RATE` as well as the compositor, but it gets there through
+ * [sessionEnvironment]'s own code and not through an `env` declaration — the same
+ * shape as [dllOverrides], and for the same reason: one setting composed into
+ * several variables is a thing code does, not a thing a document can express.
  */
 /**
  * `WINEDLLOVERRIDES`: the D3D and WGL set this build ships, then whatever the
@@ -1285,7 +1387,23 @@ internal fun manifestEnvironment(
     for (spec in manifest?.allParams.orEmpty()) {
         val name = spec.env ?: continue
         val value = profile.params[spec.key] ?: spec.defaultValue() ?: continue
-        out[name] = value.asEnvValue()
+        val rendered = value.asEnvValue()
+        // **An empty value means "not set", and that is the only way a manifest
+        // param can express it.**
+        //
+        // Several of the graphics experiments are off when their variable is
+        // absent and *on* when it is present with any content — `TU_AUTOTUNE_FLAGS`
+        // and `MESA_GPU_TRACES` both parse a flag list, and `DXVK_CONFIG` is
+        // matched as a config line. Writing them as empty strings would be a
+        // container declaring an experiment it had not chosen, and the manifest
+        // has no other vocabulary for "leave this alone": every param must
+        // produce a value, so the empty one has to be the absence.
+        //
+        // `wine.dllOverrides` is unaffected — it declares no `env` and is composed
+        // by `dllOverrides` instead — and nothing else in the manifest defaults to
+        // an empty string.
+        if (rendered.isEmpty()) continue
+        out[name] = rendered
     }
     return out
 }

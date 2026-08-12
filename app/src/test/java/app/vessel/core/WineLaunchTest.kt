@@ -230,10 +230,12 @@ class WineLaunchTest {
     }
 
     @Test
-    fun `the frame rate limit becomes no environment variable`() {
-        // It is carried on DisplayRequest instead. Inventing DXVK_FRAME_RATE here
-        // would cap the D3D layer rather than the compositor, and would do
-        // nothing at all for an OpenGL title.
+    fun `the launcher environment carries no frame rate of its own`() {
+        // `display.fpsLimit` does reach `DXVK_FRAME_RATE` and `VKD3D_FRAME_RATE`
+        // now — capping only the compositor left the guest rendering 116 frames
+        // for every 24 shown — but it gets there through `sessionEnvironment`,
+        // which has the number. This layer has never seen it and must not invent
+        // one: a launcher-side default would be a cap the user never chose.
         val environment = wineLauncherEnvironment(tree, scratch)
         assertTrue(environment.keys.none { it.contains("FRAME") || it.contains("FPS") })
     }

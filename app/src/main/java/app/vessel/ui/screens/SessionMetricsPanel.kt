@@ -573,16 +573,49 @@ private fun CoreClockCard(state: SessionMetricsState) {
     }
 
     val latest = history.latest?.coreClocksMhz.orEmpty()
+
+    // **The mean, drawn over the eight and read as the headline.**
+    //
+    // The card had eight lines and no aggregate, so the one question it is most
+    // often asked — "what is this session actually running at" — could only be
+    // answered by eyeballing eight traces at once. That number decided every
+    // performance argument this project had: 1713 MHz against a 3321 MHz ceiling
+    // is the difference between a slow emulator and a platform that never
+    // clocked up, and it was visible only in the rail's compact spark and in the
+    // raw trace.
+    //
+    // Against the *fastest* core's ceiling, not each core's own. A mean across
+    // clusters has no single rated maximum, and normalising it per-core the way
+    // the eight lines are normalised would put it on an axis it does not share
+    // with any of them. Drawn `Area` so it reads as the backdrop the per-core
+    // lines sit on rather than as a ninth core.
+    val meanSeries = fastest
+        ?.takeIf { it > 0 }
+        ?.let { ceiling ->
+            history.seriesOrNull(ceiling, VSeriesTone.Secondary, VSeriesForm.Area, "mean") {
+                it.clockMhz
+            }
+        }
+
     VMetricGraphCard(
         title = "clock · per core",
-        value = null,
-        stats = ceilings.indices.map { core ->
-            VMetricStat(
-                "cpu$core",
-                latest.getOrNull(core)?.let(::formatMegahertz) ?: PARKED,
+        value = history.latest?.clockMhz?.let(::formatMegahertz),
+        stats = buildList {
+            // Mean and peak lead, because they are the summary; the eight
+            // individual cores follow for the "is it using the big cores"
+            // question the card was originally built for.
+            addAll(history.stats { it.clockMhz }.stats(::formatMegahertz))
+            history.latest?.clockPeakMhz?.let { add(VMetricStat("peak core", formatMegahertz(it))) }
+            addAll(
+                ceilings.indices.map { core ->
+                    VMetricStat(
+                        "cpu$core",
+                        latest.getOrNull(core)?.let(::formatMegahertz) ?: PARKED,
+                    )
+                },
             )
         },
-        series = series,
+        series = listOfNotNull(meanSeries) + series,
         unavailable = state.unavailable("clock") ?: if (series.isEmpty()) NO_CORE_CLOCKS else null,
     )
 }

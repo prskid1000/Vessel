@@ -183,9 +183,44 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
     private volatile long compositedFrames = 0;
 
+    /**
+     * VESSEL: notified around each composite, on the GL thread.
+     *
+     * The one seam `app.vessel.display.FrameHints` needs, and the reason it is
+     * here rather than in the view: `GLSurfaceView.setRenderer` may be called
+     * once and `XServerView`'s constructor has already called it, so a Vessel
+     * subclass of the view cannot wrap the renderer from outside.
+     *
+     * Both callbacks bracket the *whole* frame including the effect composer,
+     * because a hint session is being told how long the composite took and an
+     * effect pass is part of that.
+     */
+    public interface FrameListener {
+        void onFrameBegin();
+
+        void onFrameEnd();
+    }
+
+    /**
+     * VESSEL: `volatile` for the same reason `compositedFrames` is — one writer
+     * (whoever built the view), one reader (the GL thread). Null is the normal
+     * state on a device with no performance-hint support.
+     */
+    private volatile FrameListener frameListener;
+
+    /** VESSEL: see {@link FrameListener}. Null clears it. */
+    public void setFrameListener(FrameListener listener) {
+        this.frameListener = listener;
+    }
+
     @Override
     public void onDrawFrame(GL10 gl) {
         compositedFrames++;
+        // VESSEL: read once. The field is volatile and the teardown path clears
+        // it, so a local is what keeps begin and end paired on the same object.
+        final FrameListener listener = frameListener;
+        if (listener != null) listener.onFrameBegin();
+
         if (toggleFullscreen) {
             fullscreen = !fullscreen;
             toggleFullscreen = false;
@@ -196,6 +231,8 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             effectComposer.render();
         }
         else drawFrame();
+
+        if (listener != null) listener.onFrameEnd();
     }
 
     protected void drawFrame() {

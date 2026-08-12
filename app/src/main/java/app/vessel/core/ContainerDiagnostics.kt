@@ -507,10 +507,45 @@ val LOGGABLES: List<Loggable> = listOf(
         levelIsMachine = true,
     ),
 
-    // — Turnip flags, each a member of TU_DEBUG and gated on the driver logger --
-    turnipFlag("perf", "Says why a frame was slow."),
-    turnipFlag("nolrz", "Turns off low-resolution depth, to see whether it is the cause."),
-    turnipFlag("noubwc", "Turns off bandwidth compression, to see whether it is the cause."),
+    // — Turnip flags that only *say* something. Gated on the driver logger, ----
+    //   because without it their output goes to logcat, which Vessel cannot read.
+    turnipLogFlag("perf", "Says why a frame was slow — including why the driver turned off " +
+        "low-resolution depth, and where it stopped rendering in tiles."),
+    turnipLogFlag(
+        "log_skip_gmem_ops",
+        "Counts the tile loads and stores the driver managed to skip.",
+    ),
+
+    // — Turnip flags that change how the frame is drawn. NOT gated. -------------
+    //
+    // **These used to require MESA_LOG and that was wrong.** A flag that turns
+    // off low-resolution depth changes the rendering whether or not anybody can
+    // read a log about it, and the whole point of `nolrz` is the null test: run
+    // it, watch the frame rate, and if nothing moves then low-resolution depth
+    // was doing nothing for this game and a whole line of work can be dropped.
+    // Requiring a logger to perform a measurement that is taken off the frame
+    // counter made the cheapest experiment in the project needlessly expensive.
+    turnipRenderFlag(
+        "nolrz",
+        "Turns off low-resolution depth. If the frame rate does not change, this " +
+            "GPU's biggest saving was already doing nothing here.",
+    ),
+    turnipRenderFlag(
+        "noubwc",
+        "Turns off bandwidth compression. If this costs a lot, compression is " +
+            "carrying the frame and is worth protecting.",
+    ),
+    turnipRenderFlag(
+        "gmem",
+        "Forces drawing in tiles. The driver ships a rule that opts Direct3D games " +
+            "out of tiling; this is how to ask whether that rule is right here.",
+    ),
+    turnipRenderFlag(
+        "sysmem",
+        "Forces drawing straight to memory, never in tiles — the opposite of the row above.",
+    ),
+    turnipRenderFlag("forcebin", "Always splits the screen into tiles, whatever the driver decided."),
+    turnipRenderFlag("nobin", "Never splits the screen into tiles."),
 
     // — Wine channels worth suggesting -----------------------------------------
     wineChannel(
@@ -578,7 +613,14 @@ val LOGGABLES: List<Loggable> = listOf(
     ),
 )
 
-private fun turnipFlag(flag: String, secondary: String) = Loggable(
+/**
+ * A `TU_DEBUG` flag whose only effect is output. Gated on the driver logger.
+ *
+ * TU_DEBUG is a flag list with no severity in it, so each is a switch and not a
+ * ladder — and one of these produces nothing a user can read until Mesa's file
+ * logger is on, because Turnip writes to logcat and Vessel does not read logcat.
+ */
+private fun turnipLogFlag(flag: String, secondary: String) = Loggable(
     name = flag,
     emit = Emit.ListMember("TU_DEBUG", flag),
     levels = ON_OFF,
@@ -586,11 +628,35 @@ private fun turnipFlag(flag: String, secondary: String) = Loggable(
     baseline = Emit.OFF,
     secondary = "TU_DEBUG — $secondary",
     addAt = Emit.ON,
-    // TU_DEBUG is a flag list with no severity in it, so it is a switch and not a
-    // ladder; and every one of them is unreadable until Mesa's file logger is on.
     gate = MESA_LOG_VAR,
     caution = "Unavailable until $MESA_LOG_VAR is set — without it these produce output " +
         "the product cannot read.",
+)
+
+/**
+ * A `TU_DEBUG` flag that changes how the frame is drawn. **Not gated.**
+ *
+ * The distinction is not cosmetic. A log flag is useless without a logger; one
+ * of these is measured on the frame counter, and gating it behind `MESA_LOG`
+ * would make the cheapest experiment available — turn off low-resolution depth,
+ * see whether anything moves — require a second setting it has no need of.
+ *
+ * The caution is a different one for the same reason: these change what is
+ * rendered, and two of them (`gmem`/`sysmem`, `forcebin`/`nobin`) are opposing
+ * pairs that must not be switched on together. Turnip resolves a contradiction
+ * silently rather than complaining, so the result would be a measurement of
+ * nothing in particular.
+ */
+private fun turnipRenderFlag(flag: String, secondary: String) = Loggable(
+    name = flag,
+    emit = Emit.ListMember("TU_DEBUG", flag),
+    levels = ON_OFF,
+    labels = ON_OFF_LABELS,
+    baseline = Emit.OFF,
+    secondary = "TU_DEBUG — $secondary",
+    addAt = Emit.ON,
+    caution = "Changes how frames are drawn, not what is logged. Switch on one at a " +
+        "time: the driver resolves a contradictory pair silently.",
 )
 
 /** The one variable another entry's [Loggable.gate] names. */

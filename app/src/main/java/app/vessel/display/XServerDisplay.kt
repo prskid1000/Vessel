@@ -1,6 +1,8 @@
 package app.vessel.display
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -535,7 +537,19 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
         // moment a program is waiting for — and it must not go false again when
         // the last window closes, because a desktop does not stop existing
         // because nothing is on it. See [SessionDisplayServer.desktopUp].
-        if (root.children.any { it.isVirtualDesktop(root) }) onDesktopUp?.invoke()
+        val desktop = root.children.firstOrNull { it.isVirtualDesktop(root) }
+        if (desktop != null) {
+            onDesktopUp?.invoke()
+            // **The one guest pid this app can name, taken where it is known.**
+            // The desktop window's `_NET_WM_PID` is Wine's `explorer`, which is
+            // the process that owns the session's rendering — so it is the right
+            // one to widen the frame-hint session to, if the platform allows a
+            // same-uid tid from another process at all. `attachGuestToHints`
+            // records it and the next composite tries once; a pid of 0, a
+            // platform that refuses, or an API below 34 all end the same way,
+            // with hints covering the compositor and a line in logcat saying so.
+            view.hintGuestProcess(desktop.processId)
+        }
         val listener = onWindowsChanged ?: return
         val focused = manager.focusedWindow?.id
         val list = root.children.mapNotNull { window ->
@@ -1310,7 +1324,7 @@ private class GuestInputSink(
 private class SessionSurfaceView(
     context: Context,
     private val xServer: XServer,
-    fpsLimit: Int?,
+    private val fpsLimit: Int?,
     /** The guest's gamepad bus. See [PadBridge]; `DisplaySession` owns its socket. */
     private val padBridge: PadBridge,
 ) : FrameLayout(context) {
@@ -1341,6 +1355,12 @@ private class SessionSurfaceView(
     private val xServerView = PacedXServerView(context, xServer, fpsLimit)
 
     val renderer get() = xServerView.renderer
+
+    /** See [PacedXServerView.attachGuestToHints]. Called when the desktop appears. */
+    fun hintGuestProcess(pid: Int) = xServerView.attachGuestToHints(pid)
+
+    /** See [PacedXServerView.closeHints]. Called on teardown. */
+    fun releaseFrameHints() = xServerView.closeHints()
 
     private val sink = GuestInputSink(
         xServer = xServer,
@@ -1521,6 +1541,124 @@ private class SessionSurfaceView(
         // Once now as well as on every change, because a pad that was already
         // connected when the session started fires no callback at all.
         refreshPads()
+        applyPreferredDisplayMode()
+    }
+
+    /** The panel mode this window asked for, so detach can hand it back. */
+    private var restoreDisplayModeId: Int? = null
+
+    /**
+     * **Put the panel on the rate the container renders at, rather than
+     * rendering at a rate the panel will not present.**
+     *
+     * The measurement that forced this. A container capped at 165 with Metro
+     * rendering 160 fps, on a phone whose panel is 165 Hz — and `dumpsys display`
+     * said the app was being given `mode 4, renderFrameRate 60.000004`. Sixty
+     * presented, a hundred and sixty rendered: **two frames in three discarded**,
+     * at full GPU cost, on top of the pacing bug fixed the same morning. This one
+     * is not Vessel's pacing at all — it is the platform choosing a refresh mode,
+     * and `Surface.setFrameRate` is a *hint* it may decline. It declined.
+     *
+     * `preferredDisplayModeId` is the stronger request: a window may name a mode
+     * and the platform honours it while that window is in front. So the container's
+     * limit stops being a number the renderer is trimmed down to and becomes the
+     * number the whole chain agrees on — panel, compositor, DXVK and vkd3d.
+     *
+     * The manifest offers 24/30/60/90/120/165, which is not a coincidence: it is
+     * the list this panel reports. So an exact match normally exists, and a 24 fps
+     * container drops the panel to 24 Hz, which on an LTPO screen is a power saving
+     * of its own beyond the frames not drawn.
+     *
+     * No match, no request. Picking the nearest mode would put the panel somewhere
+     * the user did not choose to serve a cap that is already being applied twice
+     * over, and a *higher* mode than the cap is exactly the waste this is here to
+     * stop. An uncapped container is left alone for the same reason — there is no
+     * rate to match, and the platform's own choice is the best available answer.
+     */
+    private fun applyPreferredDisplayMode() {
+        // **Every exit says why.** The first version of this returned silently at
+        // three different points, and the symptom of all three was identical:
+        // no log, no crash, a panel still at 60 Hz, and no way to tell which
+        // branch had taken it. One cycle of build-install-play to learn nothing
+        // is one too many.
+        val wanted = fpsLimit?.takeIf { it > 0 } ?: return
+        val window = hostWindow()
+        if (window == null) {
+            Log.w("VesselDisplay", "no Activity window behind this view; cannot ask for a panel mode")
+            return
+        }
+        val current = display?.mode
+        if (current == null) {
+            Log.w("VesselDisplay", "the view reports no display; cannot ask for a panel mode")
+            return
+        }
+        val sameSize = display?.supportedModes.orEmpty()
+            // Same resolution, or the request changes what the screen shows as
+            // well as how often — some panels list lower-resolution modes.
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+        val mode = sameSize.firstOrNull { kotlin.math.abs(it.refreshRate - wanted) < REFRESH_MATCH }
+        if (mode == null) {
+            Log.w(
+                "VesselDisplay",
+                "no $wanted Hz mode at ${current.physicalWidth}x${current.physicalHeight}; " +
+                    "panel offers ${sameSize.joinToString { "%.1f".format(it.refreshRate) }}",
+            )
+            return
+        }
+
+        restoreDisplayModeId = window.attributes.preferredDisplayModeId
+        window.attributes = window.attributes.apply { preferredDisplayModeId = mode.modeId }
+        Log.i(
+            "VesselDisplay",
+            "asked the panel for ${mode.refreshRate} Hz (mode ${mode.modeId}) to match the $wanted fps cap",
+        )
+    }
+
+    /** Hand the panel back to the platform. See [applyPreferredDisplayMode]. */
+    private fun releasePreferredDisplayMode() {
+        val previous = restoreDisplayModeId ?: return
+        restoreDisplayModeId = null
+        val window = hostWindow() ?: return
+        runCatching {
+            window.attributes = window.attributes.apply { preferredDisplayModeId = previous }
+        }
+    }
+
+    /**
+     * The Activity window this view is showing in, or null when it is not in one.
+     *
+     * **`context` is the *application* context and always will be.** The display
+     * server is a `@Singleton` injected with `@ApplicationContext` on purpose —
+     * it owns the GL surface across Activity recreation, which is what keeps a
+     * rotation from blanking the desktop — so unwrapping its Context finds no
+     * Activity, ever. The first version of [applyPreferredDisplayMode] did exactly
+     * that and silently did nothing: no crash, no log, just a panel that stayed
+     * at 60 Hz.
+     *
+     * `rootView` is the answer, and only after attach: once this view is in a
+     * window its root is the DecorView, whose Context *is* the Activity. Both are
+     * tried because the first is free and correct anywhere this class is ever
+     * constructed with a real Activity context.
+     */
+    private fun hostWindow(): android.view.Window? {
+        context.findActivity()?.let { return it.window }
+        // Up the parent chain, not to `rootView`. **The root is the one view in
+        // the hierarchy guaranteed not to help**: `PhoneWindow.generateDecor`
+        // builds the DecorView with a `DecorContext`, whose base is the
+        // *application* context by design so that a window cannot leak an
+        // Activity. Unwrapping it therefore lands exactly where unwrapping this
+        // view's own context lands — nowhere — which is what
+        // `no Activity window behind this view` was reporting on the device.
+        //
+        // The Activity is on the views in between: Compose's host view is created
+        // with it. So each ancestor is asked in turn and the first that answers
+        // wins, which finds it well before the walk reaches the DecorView.
+        var view: View? = this
+        while (view != null) {
+            view.context.findActivity()?.let { return it.window }
+            view = view.parent as? View
+        }
+        return null
     }
 
     override fun onDetachedFromWindow() {
@@ -1542,11 +1680,22 @@ private class SessionSurfaceView(
             context.getSystemService(InputManager::class.java)
                 ?.unregisterInputDeviceListener(pads)
         }
+        // A 24 Hz panel is right for a session and wrong for the launcher, so the
+        // request goes back the moment this view leaves the window rather than at
+        // session teardown, which can be a second later.
+        releasePreferredDisplayMode()
         super.onDetachedFromWindow()
     }
 
     /** Release the GL thread. Separate from detach: the view outlives composition. */
-    fun shutdown() = xServerView.onPause()
+    fun shutdown() {
+        // Hints before the pause. `onPause` parks the GL thread, and a listener
+        // still attached to a parked renderer holds a hint session that the
+        // platform is still accounting for — one per session, never closed, for
+        // as long as the app lives.
+        releaseFrameHints()
+        xServerView.onPause()
+    }
 
     /** The rail's keyboard button. There is no hardware keyboard on most phones. */
     fun showSoftKeyboard() {
@@ -2289,6 +2438,30 @@ private class PacedXServerView(
     private val minFrameNanos: Long =
         fpsLimit?.takeIf { it > 0 }?.let { NANOS_PER_SECOND / it } ?: 0L
 
+    /**
+     * The ADPF session, opened on the GL thread's first frame. See [FrameHints].
+     *
+     * Written and read on the GL thread only, which is why it is not volatile and
+     * why [hints] is `@Volatile` instead: the *other* thread that needs it is
+     * whoever calls [attachGuestToHints], and that one only ever reads.
+     */
+    @Volatile
+    private var hints: FrameHints? = null
+
+    /** Set once the first frame has tried to open a session, success or not. */
+    private var hintsTried = false
+
+    /**
+     * A guest pid to widen the hint session to, parked until a session exists.
+     *
+     * The desktop's pid is known long after the first composite — a window has to
+     * be mapped and to have set `_NET_WM_PID` — but it can in principle also
+     * arrive before, if the platform declined a session and the GL thread is
+     * still starting. Parking it costs one int and removes the ordering question.
+     */
+    @Volatile
+    private var pendingGuestPid = 0
+
     private val handler = Handler(Looper.getMainLooper())
 
     @Volatile
@@ -2348,10 +2521,38 @@ private class PacedXServerView(
      * platform go higher when something else on screen needs it.
      */
     private fun applyFrameRate(holder: SurfaceHolder) {
-        val wanted = (fpsLimit?.takeIf { it > 0 } ?: DEFAULT_FRAME_RATE).toFloat()
+        val capped = fpsLimit?.takeIf { it > 0 }
+        val wanted = (capped ?: DEFAULT_FRAME_RATE).toFloat()
+        // **A capped container gets the assertive form of this call.**
+        //
+        // The two-argument overload defaults to `CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS`,
+        // and on this panel a switch away from 60 Hz is not seamless — which is
+        // the whole of why a container asking for 165, on a 165 Hz screen, was
+        // measured being given `mode 4, renderFrameRate 60.000004` while the guest
+        // rendered 127 fps. The platform was not ignoring the request; it was
+        // honouring the seamless-only default and finding nothing seamless to do.
+        //
+        // `CHANGE_FRAME_RATE_ALWAYS` says a visible mode-switch blink at session
+        // start is an acceptable price. It plainly is: it happens once, and the
+        // alternative is every frame after it costing full GPU time to be dropped.
+        //
+        // `_FIXED_SOURCE` rather than `_DEFAULT` for the same reason it is right
+        // for a video player — a capped session produces exactly this rate and
+        // nothing above it, so a panel running at a non-multiple would judder. An
+        // *uncapped* container keeps `_DEFAULT` and the seamless-only strategy,
+        // because there the old comment still holds: the guest's rate is unknown
+        // and may rise, and the platform should stay free to follow it.
         runCatching {
-            holder.surface.setFrameRate(wanted, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
-        }
+            if (capped != null) {
+                holder.surface.setFrameRate(
+                    wanted,
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ALWAYS,
+                )
+            } else {
+                holder.surface.setFrameRate(wanted, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+            }
+        }.onFailure { Log.w("VesselDisplay", "could not ask for $wanted fps", it) }
     }
 
     override fun requestRender() {
@@ -2375,6 +2576,51 @@ private class PacedXServerView(
     /** `super` is not reachable from inside the trailing lambda; this is. */
     private fun renderNow() = super.requestRender()
 
+    /**
+     * Widen the hint session to a guest process, when one is known.
+     *
+     * Called from whatever notices the desktop window and its `_NET_WM_PID` —
+     * not from the GL thread. It records the pid and lets the next composite do
+     * the work, because [FrameHints.attachGuest] has to run where the session's
+     * own thread is registered, and because a `setThreads` from a second thread
+     * mid-frame is a race for no benefit.
+     */
+    fun attachGuestToHints(pid: Int) {
+        if (pid > 0) pendingGuestPid = pid
+    }
+
+    /** Release the session. Idempotent, and safe on a view that never got one. */
+    fun closeHints() {
+        renderer.setFrameListener(null)
+        hints?.close()
+        hints = null
+    }
+
+    init {
+        renderer.setFrameListener(object : GLRenderer.FrameListener {
+            override fun onFrameBegin() {
+                // First frame on this thread: this is the earliest moment the GL
+                // thread's tid exists and is running our code, and the session
+                // has to be created from the thread it is about to describe.
+                if (!hintsTried) {
+                    hintsTried = true
+                    hints = FrameHints.create(context, fpsLimit)
+                }
+                val session = hints ?: return
+                val pid = pendingGuestPid
+                if (pid > 0) {
+                    pendingGuestPid = 0
+                    session.attachGuest(pid)
+                }
+                session.frameBegin()
+            }
+
+            override fun onFrameEnd() {
+                hints?.frameEnd()
+            }
+        })
+    }
+
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000L
         const val NANOS_PER_MILLI = 1_000_000L
@@ -2382,4 +2628,28 @@ private class PacedXServerView(
         /** What to ask the panel for when the container names no limit. */
         const val DEFAULT_FRAME_RATE = 60
     }
+}
+
+/**
+ * How close a panel mode has to be to a cap to count as that cap.
+ *
+ * The modes report `60.000004` and `120.00001`, not 60 and 120, so an equality
+ * test finds nothing. Half a hertz is far tighter than the gap between any two
+ * modes this panel offers (24/30/60/90/120/165) and far looser than the float
+ * error, which is the only thing it needs to be.
+ */
+private const val REFRESH_MATCH = 0.5f
+
+/**
+ * The Activity behind a view's Context, or null.
+ *
+ * A View's Context is usually the Activity, but a themed wrapper or a Compose
+ * `AndroidView` can put one or more `ContextWrapper`s in between — so unwrapping
+ * is the only reliable way to reach the window. Null when there is genuinely no
+ * Activity, which is an ordinary answer for a view in a test or a service.
+ */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
