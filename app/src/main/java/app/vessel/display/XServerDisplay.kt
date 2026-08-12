@@ -62,6 +62,7 @@ import app.vessel.input.toPixel
 import com.winlator.core.Bitmask
 import com.winlator.renderer.GLRenderer
 import com.winlator.renderer.ViewTransformation
+import com.winlator.renderer.material.SGSRMaterial
 import com.winlator.sysvshm.SysVSHMConnectionHandler
 import com.winlator.sysvshm.SysVSHMRequestHandler
 import com.winlator.sysvshm.SysVSharedMemory
@@ -479,6 +480,19 @@ class XServerDisplay @Inject constructor(
                 started.view.onTouchSelection = { id -> _selectedTouchControl.value = id }
                 started.view.onTouchLayoutEdited = { layout -> _touchLayoutEdits.tryEmit(layout) }
                 _surface.value = started.view
+                // Before the first frame, so the material's first compile is
+                // already the container's. `setUpscaler` is safe later too — a
+                // tuning change zeroes the program id — but arriving late would
+                // mean one visible frame drawn with somebody else's constants.
+                started.view.renderer.setUpscaler(
+                    request.upscaler.sgsr,
+                    SGSRMaterial.Tuning(
+                        request.upscaler.edgeDirection,
+                        request.upscaler.edgeThreshold,
+                        request.upscaler.sharpness,
+                        request.upscaler.maxDelta,
+                    ),
+                )
                 startSampling(started.view.renderer, request.fpsLimit, request.geometry.width, request.geometry.height)
                 DisplayOutcome.Started(started.environment)
             } catch (t: Throwable) {

@@ -100,6 +100,67 @@
             "120": "120 fps",
             "165": "165 fps  (panel maximum)"
           }
+        },
+        {
+          "key": "display.upscaler",
+          "title": "Upscaler",
+          "help": "How the guest's picture is stretched to fill the screen when Resolution is below it. Snapdragon Game Super Resolution reconstructs edges; Bilinear just blurs. Neither runs at all when Resolution already matches the screen.",
+          "type": "enum",
+          "options": [
+            "sgsr",
+            "bilinear"
+          ],
+          "default": "sgsr",
+          "optionLabels": {
+            "sgsr": "Snapdragon Game Super Resolution",
+            "bilinear": "Bilinear  (no reconstruction)"
+          }
+        },
+        {
+          "key": "display.sgsrEdgeDirection",
+          "title": "Edge direction",
+          "help": "Reconstructs a diagonal along the direction of its edge instead of evenly around it, which is most of what a 2x upscale does; Qualcomm rates the extra cost as minimal but it is not free.",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "key": "display.sgsrSharpness",
+          "title": "Edge sharpness",
+          "help": "How hard a reconstructed edge is pushed. Qualcomm's default is 2.0 and the result is clamped to the neighbouring pixels either way, so this cannot ring beyond them.",
+          "type": "enum",
+          "options": [
+            "1.0",
+            "1.5",
+            "2.0",
+            "2.5",
+            "3.0"
+          ],
+          "default": "2.0",
+          "optionLabels": {
+            "1.0": "1.0  (soft)",
+            "1.5": "1.5",
+            "2.0": "2.0  (Qualcomm default)",
+            "2.5": "2.5",
+            "3.0": "3.0  (hard)"
+          }
+        },
+        {
+          "key": "display.sgsrEdgeThreshold",
+          "title": "Edge threshold",
+          "help": "How different neighbouring pixels must be before they count as an edge worth reconstructing, in 255ths. Higher is softer and faster because fewer pixels take the expensive path; Qualcomm's default is 8.",
+          "type": "int",
+          "min": 1,
+          "max": 64,
+          "default": 8
+        },
+        {
+          "key": "display.sgsrMaxDelta",
+          "title": "Maximum pixel change",
+          "help": "The most any single pixel may be moved by reconstruction, in 255ths, which is also the size of any shimmer it causes on edges that keep crossing the threshold as the camera moves; Qualcomm's default is 23.",
+          "type": "int",
+          "min": 1,
+          "max": 64,
+          "default": 23
         }
       ]
     },

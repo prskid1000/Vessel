@@ -84,7 +84,7 @@ Unlike the components below, this code ships **inside** the APK.
 | Inter, as a variable font | [`rsms/inter`](https://github.com/rsms/inter) v4.1 | `InterVariable.ttf`, version 4.001 | **OFL-1.1** |
 | JetBrains Mono, as a variable font | [`JetBrains/JetBrainsMono`](https://github.com/JetBrains/JetBrainsMono) v2.304 | `JetBrainsMono[wght].ttf`, version 2.304 | **OFL-1.1** |
 | Phosphor Icons, transcribed as path data | [`phosphor-icons/core`](https://github.com/phosphor-icons/core) 2.1.1 | regular weight only | MIT |
-| Snapdragon Game Super Resolution 1.0, as one fragment shader | [`SnapdragonStudios/snapdragon-gsr`](https://github.com/SnapdragonStudios/snapdragon-gsr) | `sgsr/v1/include/glsl/sgsr1_shader_mobile.frag` | **BSD-3-Clause** |
+| Snapdragon Game Super Resolution 1, as one fragment shader | [`SnapdragonStudios/snapdragon-gsr`](https://github.com/SnapdragonStudios/snapdragon-gsr) | `sgsr/v1/include/glsl/sgsr1_shader_mobile_edge_direction.frag` | **BSD-3-Clause** |
 
 libadrenotools is at `app/src/main/cpp/adrenotools/`, with upstream's layout,
 file names and SPDX headers intact and no modification to any upstream source

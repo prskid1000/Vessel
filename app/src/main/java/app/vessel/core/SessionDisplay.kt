@@ -35,7 +35,48 @@ data class DisplayRequest(
      * `WINE_SYSVSHM_SOCKET` rather than by a name libxcb already knows.
      */
     val socketRoot: File,
+    /** How the guest's picture is stretched when [geometry] is below the screen. */
+    val upscaler: UpscalerRequest = UpscalerRequest(),
 )
+
+/**
+ * The compositor's upscaler, resolved from the container.
+ *
+ * **Only ever consulted when the guest is being magnified.** The renderer decides
+ * that from the measured ratio rather than from this — a container rendering at
+ * the panel's own size takes the plain bilinear blit whatever is set here,
+ * because reconstructing a 1:1 copy is a dozen taps spent to reproduce the input.
+ *
+ * Fractions rather than the 255ths the manifest collects, because that is what
+ * the shader's constants are and converting once at the edge is better than
+ * having two units in flight. [edgeThreshold] and [maxDelta] are both in the
+ * range a colour channel is.
+ *
+ * The defaults here are the shader's own defaults restated, so a caller that
+ * builds a request without an upscaler gets what the material would have used
+ * anyway. They are Qualcomm's published values, except [edgeDirection] — see
+ * `SGSRMaterial.DEFAULT` for why that one is on.
+ */
+data class UpscalerRequest(
+    /** False takes the bilinear path, the only picture Vessel had before SGSR. */
+    val sgsr: Boolean = true,
+    val edgeDirection: Boolean = true,
+    val edgeThreshold: Float = 8f / 255f,
+    val sharpness: Float = 2f,
+    val maxDelta: Float = 23f / 255f,
+) {
+    /** One line for the session log, so a trace says what drew it. */
+    override fun toString(): String =
+        if (!sgsr) {
+            "bilinear"
+        } else {
+            "sgsr" +
+                (if (edgeDirection) " +edgeDirection" else "") +
+                " threshold ${(edgeThreshold * 255f).toInt()}/255" +
+                " sharpness $sharpness" +
+                " maxDelta ${(maxDelta * 255f).toInt()}/255"
+        }
+}
 
 /**
  * The composited frame rate, and enough history to draw its shape.

@@ -53,6 +53,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     // VESSEL: the upscaler, used instead of windowMaterial when a window is
     // being magnified. See useSGSRFor().
     private final SGSRMaterial sgsrMaterial = new SGSRMaterial();
+    // VESSEL: the container's choice. Default true so a session that never calls
+    // setUpscaler behaves as it did before the setting existed.
+    private boolean sgsrEnabled = true;
     public final ViewTransformation viewTransformation = new ViewTransformation();
     private final Drawable rootCursorDrawable;
     private final ArrayList<RenderableWindow> renderableWindows = new ArrayList<>();
@@ -373,6 +376,23 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     }
 
     /**
+     * VESSEL: the container's upscaler choice, applied before the first frame.
+     *
+     * <p>Takes primitives and {@link SGSRMaterial.Tuning} rather than anything
+     * from {@code app.vessel}, because {@code app/src/main/java/com/winlator/README.md}
+     * says the vendored tree never imports Vessel's. The caller composes the
+     * tuning; this only stores it.
+     *
+     * <p>Safe to call after frames have already been drawn: {@link
+     * SGSRMaterial#setTuning} zeroes the program id, so the next {@code use()}
+     * recompiles with the new constants.
+     */
+    public void setUpscaler(boolean enabled, SGSRMaterial.Tuning tuning) {
+        sgsrEnabled = enabled;
+        sgsrMaterial.setTuning(tuning);
+    }
+
+    /**
      * VESSEL: whether this window is being drawn into more pixels than it has.
      *
      * <p><b>The point of the whole feature is that most windows fail this test.</b>
@@ -405,6 +425,7 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
      * back and forth between frames.
      */
     private boolean useSGSRFor(Drawable drawable, float destWidth, float destHeight, boolean transparent) {
+        if (!sgsrEnabled) return false;
         if (transparent) return false;
         if (drawable.width <= 0 || drawable.height <= 0) return false;
         if (!SGSRMaterial.isSupported()) return false;

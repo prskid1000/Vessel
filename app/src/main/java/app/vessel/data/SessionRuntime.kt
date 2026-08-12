@@ -25,6 +25,7 @@ import app.vessel.core.fexCacheHost
 import app.vessel.core.fexCacheLink
 import app.vessel.core.FexPackage
 import app.vessel.core.TurnipDriver
+import app.vessel.core.UpscalerRequest
 import app.vessel.core.WINE_BOOT
 import app.vessel.core.WINE_REGEDIT
 import app.vessel.core.BOOTSTRAP_SESSION_ENV
@@ -564,6 +565,7 @@ class SessionRuntime @Inject constructor(
         val manifest = manifests.load().getOrNull()
         val geometry = parseGeometry(text(profile, manifest, DisplayParams.RESOLUTION), native)
         val fpsLimit = parseFpsLimit(text(profile, manifest, DisplayParams.FPS_LIMIT))
+        val upscaler = upscalerOf(profile, manifest)
 
         _state.value = SessionState(
             containerId = containerId,
@@ -584,6 +586,7 @@ class SessionRuntime @Inject constructor(
                 "driver     ${profile.driver}",
                 "d3d        ${profile.d3dLayer}",
                 "desktop    $geometry @ ${fpsLimit?.let { "$it fps" } ?: "unlimited"}",
+                "upscaler   $upscaler",
             ),
         )
 
@@ -611,7 +614,7 @@ class SessionRuntime @Inject constructor(
 
         try {
             prepare(containerId, profile, manifest, fpsLimit, log) ?: return
-            runDesktop(log, geometry, fpsLimit)
+            runDesktop(log, geometry, fpsLimit, upscaler)
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
             // every step of it suspends, so it needs a context that is not
@@ -815,6 +818,7 @@ class SessionRuntime @Inject constructor(
         log: SessionLog,
         geometry: DisplayGeometry,
         fpsLimit: Int?,
+        upscaler: UpscalerRequest,
     ) {
         val current = plan ?: return
         _state.update { it.copy(phase = SessionPhase.STARTING) }
@@ -824,6 +828,7 @@ class SessionRuntime @Inject constructor(
             geometry = geometry,
             fpsLimit = fpsLimit,
             socketRoot = current.layout.base,
+            upscaler = upscaler,
         )
         // What the server answers with, not what was asked for. `DISPLAY` and
         // `WINE_SYSVSHM_SOCKET` name sockets that either got bound or did not,
@@ -1999,6 +2004,47 @@ class SessionRuntime @Inject constructor(
         (profile.params[key] as? ParamValue.Flag)?.value
             ?: (manifest?.spec(key)?.defaultValue() as? ParamValue.Flag)?.value
             ?: true
+
+    /**
+     * An int param, or null when neither the container nor the manifest answers.
+     *
+     * No fallback of its own, unlike [flag]: the two callers are shader constants
+     * whose right value is Qualcomm's, and [UpscalerRequest]'s own defaults are
+     * already those. Inventing a number here would put a third copy of them in
+     * the codebase and make a disagreement between the three silent.
+     */
+    private fun count(profile: ContainerProfile, manifest: ParamManifest?, key: String): Int? =
+        (profile.params[key] as? ParamValue.Count)?.value
+            ?: (manifest?.spec(key)?.defaultValue() as? ParamValue.Count)?.value
+
+    /**
+     * The container's upscaler settings, in the shader's units.
+     *
+     * The manifest collects the two clamps in 255ths because that is how
+     * Qualcomm's file writes them and how anyone comparing against it will think
+     * of them; the shader wants fractions. Converted here, once, rather than at
+     * either end — [UpscalerRequest] documents which it holds.
+     *
+     * A sharpness that will not parse falls back to the default rather than
+     * throwing. It is an enum in the manifest so the only way to reach this is a
+     * container file edited by hand, and a session that refuses to start over a
+     * sharpening constant would be a much worse answer than one that starts at
+     * 2.0 and says so in the log line above.
+     */
+    private fun upscalerOf(profile: ContainerProfile, manifest: ParamManifest?): UpscalerRequest {
+        val fallback = UpscalerRequest()
+        val choice = text(profile, manifest, DisplayParams.UPSCALER)
+        return UpscalerRequest(
+            sgsr = choice != DisplayParams.UPSCALER_BILINEAR,
+            edgeDirection = flag(profile, manifest, DisplayParams.SGSR_EDGE_DIRECTION),
+            edgeThreshold = count(profile, manifest, DisplayParams.SGSR_EDGE_THRESHOLD)
+                ?.let { it / 255f } ?: fallback.edgeThreshold,
+            sharpness = text(profile, manifest, DisplayParams.SGSR_SHARPNESS)
+                ?.trim()?.toFloatOrNull() ?: fallback.sharpness,
+            maxDelta = count(profile, manifest, DisplayParams.SGSR_MAX_DELTA)
+                ?.let { it / 255f } ?: fallback.maxDelta,
+        )
+    }
 
     // — checklist plumbing -----------------------------------------------------
 

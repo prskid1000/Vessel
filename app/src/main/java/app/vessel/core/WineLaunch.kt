@@ -315,6 +315,25 @@ object DisplayParams {
     const val RESOLUTION: String = "display.resolution"
     const val FPS_LIMIT: String = "display.fpsLimit"
 
+    /**
+     * The upscaler group.
+     *
+     * **All five only ever matter when [RESOLUTION] is below the screen.** The
+     * compositor binds SGSR on the measured magnification and not on a setting
+     * (`GLRenderer.useSGSRFor`), so a container rendering at the panel's own size
+     * ignores every one of these — there is nothing to reconstruct. That is worth
+     * saying here because it makes [RESOLUTION] the setting that decides whether
+     * the rest of this object does anything at all.
+     */
+    const val UPSCALER: String = "display.upscaler"
+    const val SGSR_EDGE_DIRECTION: String = "display.sgsrEdgeDirection"
+    const val SGSR_SHARPNESS: String = "display.sgsrSharpness"
+    const val SGSR_EDGE_THRESHOLD: String = "display.sgsrEdgeThreshold"
+    const val SGSR_MAX_DELTA: String = "display.sgsrMaxDelta"
+
+    /** [UPSCALER]'s two options. */
+    const val UPSCALER_SGSR: String = "sgsr"
+    const val UPSCALER_BILINEAR: String = "bilinear"
 }
 
 /**

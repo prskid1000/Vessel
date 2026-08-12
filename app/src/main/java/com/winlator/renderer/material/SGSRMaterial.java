@@ -5,8 +5,10 @@ import android.util.Log;
 
 import com.winlator.renderer.GLRenderer;
 
+import java.util.Locale;
+
 /**
- * VESSEL: Snapdragon Game Super Resolution 1.0, as the compositor's blit.
+ * VESSEL: Snapdragon Game Super Resolution 1, as the compositor's blit.
  *
  * <p>Not a Winlator file. The whole of this class is Vessel's, and the fragment
  * shader inside it is Qualcomm's — see {@link #SGSR_FRAGMENT_BODY} for the
@@ -40,6 +42,83 @@ import com.winlator.renderer.GLRenderer;
  */
 public class SGSRMaterial extends ShaderMaterial {
     public final Uniforms uniforms = new Uniforms();
+
+    /**
+     * VESSEL: the four numbers upstream ships as {@code #define}s.
+     *
+     * <p>They are compile-time constants in the shader and stay that way — SGSR
+     * branches on {@code UseEdgeDirection} at the level of a function signature
+     * ({@code weightY} takes a {@code vec3} with it and a {@code float} without),
+     * so it cannot be a uniform without writing both paths and picking between
+     * them per fragment. Making the other three uniforms while that one is a
+     * define would be an inconsistency with no benefit: all four change once, at
+     * session start, from a container the user already had to open.
+     *
+     * <p><b>Defaults are upstream's, and deliberately so.</b> Nothing here has
+     * been measured on this device. The one place this departs from the file as
+     * published is {@link #edgeDirection}, which upstream ships commented out and
+     * Vessel turns on — see {@link #DEFAULT}.
+     */
+    public static final class Tuning {
+        /** Qualcomm's {@code UseEdgeDirection}: weight the taps along the edge. */
+        public final boolean edgeDirection;
+        /** {@code EdgeThreshold}, as a fraction — upstream's is {@code 8.0/255.0}. */
+        public final float edgeThreshold;
+        /** {@code EdgeSharpness} — upstream's is {@code 2.0}. */
+        public final float edgeSharpness;
+        /** The {@code deltaY} clamp, as a fraction — upstream's is {@code 23.0/255.0}. */
+        public final float maxDelta;
+
+        public Tuning(boolean edgeDirection, float edgeThreshold, float edgeSharpness, float maxDelta) {
+            this.edgeDirection = edgeDirection;
+            this.edgeThreshold = edgeThreshold;
+            this.edgeSharpness = edgeSharpness;
+            this.maxDelta = maxDelta;
+        }
+
+        public boolean sameAs(Tuning other) {
+            return other != null
+                && other.edgeDirection == edgeDirection
+                && other.edgeThreshold == edgeThreshold
+                && other.edgeSharpness == edgeSharpness
+                && other.maxDelta == maxDelta;
+        }
+    }
+
+    /**
+     * VESSEL: upstream's numbers, with edge direction on.
+     *
+     * <p>Upstream ships {@code // #define UseEdgeDirection} commented out and
+     * describes it as improving visual quality for "a minimal cost increase". It
+     * is on here because Vessel's whole use of SGSR is the magnified case — the
+     * material is not even bound at 1:1 — and edge direction is the part of the
+     * algorithm that decides how a diagonal is reconstructed, which is the case
+     * a 2x upscale spends most of its pixels on. Off is one setting away.
+     *
+     * <p>The other three are untouched. They are a picture decision, and this
+     * project has spent the day distinguishing measured claims from plausible
+     * ones; changing a constant because it sounds better would be the latter.
+     */
+    public static final Tuning DEFAULT = new Tuning(true, 8.0f / 255.0f, 2.0f, 23.0f / 255.0f);
+
+    private Tuning tuning = DEFAULT;
+
+    /**
+     * VESSEL: change the constants, and force the next {@link #use()} to rebuild.
+     *
+     * <p>{@link ShaderMaterial#use()} compiles when {@code programId == 0} or the
+     * EGL context changed. A tuning change is a third reason and the base class
+     * cannot know about it, so this zeroes the id — the same signal a fresh
+     * material gives. The old program is abandoned rather than deleted for the
+     * reason {@code destroy()} documents: the name may belong to a context that
+     * is no longer current, and deleting it would take whatever now owns that
+     * number with it.
+     */
+    public void setTuning(Tuning next) {
+        if (next == null || next.sameAs(tuning)) return;
+        tuning = next;
+        programId = 0;
+    }
 
     public static class Uniforms {
         public final Uniform xform = new Uniform("xform");
@@ -175,26 +254,97 @@ public class SGSRMaterial extends ShaderMaterial {
 
     @Override
     protected String getFragmentShader() {
-        return versionDirective() + "\n" + SGSR_FRAGMENT_BODY;
+        return String.join("\n",
+            versionDirective(),
+            SGSR_LICENCE_HEADER,
+            tuningDefines(),
+            SGSR_FRAGMENT_BODY
+        );
     }
 
     /**
-     * VESSEL: Snapdragon Game Super Resolution 1.0, verbatim but for the four
-     * changes listed below.
+     * VESSEL: {@link Tuning} rendered as the {@code #define} block upstream puts
+     * under its own "USER CONFIGURATION" banner.
+     *
+     * <p>Emitted between the licence header and the body so the body below stays
+     * a transcription with nothing interpolated into it — the whole point of
+     * keeping it one constant is that it can be diffed against the upstream file.
+     */
+    private String tuningDefines() {
+        StringBuilder out = new StringBuilder();
+        out.append("#define OperationMode 1\n");
+        if (tuning.edgeDirection) out.append("#define UseEdgeDirection\n");
+        out.append("#define EdgeThreshold ").append(glslFloat(tuning.edgeThreshold)).append('\n');
+        out.append("#define EdgeSharpness ").append(glslFloat(tuning.edgeSharpness)).append('\n');
+        out.append("#define MaxDelta ").append(glslFloat(tuning.maxDelta));
+        return out.toString();
+    }
+
+    /**
+     * VESSEL: a literal GLSL will read as a float.
+     *
+     * <p>{@code %.8f} and not {@code Float.toString}: the latter produces
+     * {@code 0.03137255} for most values but {@code 2.0} as {@code "2.0"} and a
+     * small one as {@code "1.0E-5"}, and GLSL ES has no {@code E} exponent form
+     * for a constant expression in a {@code #define}. {@link Locale#US} because a
+     * device set to a comma locale would otherwise emit {@code 0,031} and the
+     * shader would fail to compile — which, since {@code compileShaders} throws,
+     * is a black desktop on somebody else's phone.
+     */
+    private static String glslFloat(float value) {
+        return String.format(Locale.US, "%.8f", value);
+    }
+
+    /**
+     * VESSEL: reproduced because BSD-3-Clause clause 1 requires it.
+     *
+     * <p>Kept out of {@link #SGSR_FRAGMENT_BODY} only so the {@code #version}
+     * line can precede it, which GLSL requires of every directive.
+     */
+    private static final String SGSR_LICENCE_HEADER = String.join("\n",
+        "//============================================================================================================",
+        "//",
+        "//",
+        "//                  Copyright (c) 2025, Qualcomm Innovation Center, Inc. All rights reserved.",
+        "//                              SPDX-License-Identifier: BSD-3-Clause",
+        "//",
+        "//============================================================================================================"
+    );
+
+    /**
+     * VESSEL: Snapdragon Game Super Resolution 1, the edge-direction variant,
+     * verbatim but for the four changes listed below.
      *
      * <pre>
      * Upstream  https://github.com/SnapdragonStudios/snapdragon-gsr
-     * File      sgsr/v1/include/glsl/sgsr1_shader_mobile.frag
-     * Licence   BSD-3-Clause — Copyright (c) 2023, Qualcomm Innovation Center, Inc.
+     * File      sgsr/v1/include/glsl/sgsr1_shader_mobile_edge_direction.frag
+     * Licence   BSD-3-Clause — Copyright (c) 2025, Qualcomm Innovation Center, Inc.
      *           Full text ships as res/raw/license_bsd_sgsr.txt and is listed on
      *           the Licences screen. See docs/LICENSING.md.
      * </pre>
      *
-     * <p><b>Not Apache-2.0</b>, which is what this was requested as. The
-     * repository's {@code LICENSE} carries
-     * {@code SPDX-License-Identifier: BSD-3-Clause}, and clause 1 — "redistributions
-     * of source code must retain the above copyright notice" — is why the header
-     * below is reproduced rather than summarised.
+     * <p><b>This replaced {@code sgsr1_shader_mobile.frag}</b>, which is the file
+     * Vessel shipped first and is the older of the two SGSR 1 shaders upstream
+     * publishes. Two things actually differ, and neither is cosmetic:
+     *
+     * <ol>
+     *   <li>The spread the Lanczos weights are fitted against changed from
+     *       {@code std = 2.181818/sum} to {@code sumMean = 1.014185e+01/sum}
+     *       squared. Different curve, not a retuned constant.</li>
+     *   <li>{@code UseEdgeDirection} is new: {@link #edgeDirection} estimates the
+     *       edge's direction from the eight gathered taps and {@code weightY}
+     *       then stretches the kernel along it instead of weighting radially.
+     *       That is the part that decides how a diagonal is reconstructed, which
+     *       is what a 2x upscale spends most of its pixels on.</li>
+     * </ol>
+     *
+     * <p><b>SGSR 2 is not an option here and this is not a matter of effort.</b>
+     * It is a temporal upscaler — a convert pass, an upscale pass and an optional
+     * sharpen pass — and the convert pass consumes per-pixel motion vectors and a
+     * depth buffer from the engine. Vessel's compositor is handed a finished RGB
+     * window over the X protocol. There is no depth, there are no motion vectors,
+     * and nothing on this side of the socket could synthesise either. SGSR 1 is
+     * the newest version whose inputs Vessel actually has.
      *
      * <p><b>What was changed, and why each change was forced:</b>
      *
@@ -204,11 +354,6 @@ public class SGSRMaterial extends ShaderMaterial {
      *       {@code textureGather}, which GLSL ES did not have until 3.10, so the
      *       shader as published does not compile against the version it declares
      *       unless the driver quietly allows it.</li>
-     *   <li>{@code textureGather(ps0, coord, mode)} became
-     *       {@code textureGather(ps0, coord, OperationMode)}. The spec requires
-     *       that component argument to be a constant expression, and
-     *       {@code mode} is a local variable. Same value, and the only reason
-     *       upstream works is constant folding nothing guarantees.</li>
      *   <li>The {@code layout(location=...)} qualifiers on the fragment input and
      *       output are dropped. On a fragment <em>input</em> that qualifier needs
      *       ES 3.1 with separate shader objects; matching by name is what this
@@ -216,30 +361,29 @@ public class SGSRMaterial extends ShaderMaterial {
      *   <li>The {@code UseUniformBlock} branch is removed rather than left
      *       {@code #if}-ed out. It names Vulkan descriptor sets
      *       ({@code layout(set=0, binding=0)}), which is not GLSL ES at all.</li>
+     *   <li>The {@code deltaY} clamp reads {@code MaxDelta} instead of the
+     *       literal {@code 23.0/255.0}. That clamp is the amount a single pixel
+     *       may be moved by the sharpening branch, so it is also the amplitude of
+     *       any flicker the branch produces when a pixel's edge vote sits on the
+     *       threshold and crosses it as the camera moves. Upstream's value is
+     *       still the default; this only makes it reachable.</li>
      * </ol>
      *
-     * <p>{@code OperationMode 1} is upstream's own default: RGBA in, luminance
-     * carried in the green channel, which is the mode for an ordinary colour
-     * window. {@code EdgeThreshold} and {@code EdgeSharpness} are untouched at
-     * upstream's {@code 8.0/255.0} and {@code 2.0} — tuning them is a picture
-     * decision nobody here has measured, and a changed constant would make "this
-     * is SGSR" a weaker claim than it needs to be.
+     * <p>The {@code #define} block upstream carries here is emitted by
+     * {@link #tuningDefines()} instead. {@code OperationMode 1} is upstream's own
+     * default: RGBA in, luminance carried in the green channel, which is the mode
+     * for an ordinary colour window.
+     *
+     * <p>{@code xCenter} and {@code yCenter} are computed and unused, exactly as
+     * published — they exist for the commented-out radial test on the line below
+     * them, which would run SGSR only near the middle of the screen. Left alone:
+     * removing them would make this harder to diff against upstream, and the
+     * region test itself is a visible seam rather than a free saving.
      */
     private static final String SGSR_FRAGMENT_BODY = String.join("\n",
-        "//============================================================================================================",
-        "//",
-        "//",
-        "//                  Copyright (c) 2025, Qualcomm Innovation Center, Inc. All rights reserved.",
-        "//                              SPDX-License-Identifier: BSD-3-Clause",
-        "//",
-        "//============================================================================================================",
         "",
         "precision mediump float;",
         "precision highp int;",
-        "",
-        "#define OperationMode 1",
-        "#define EdgeThreshold 8.0/255.0",
-        "#define EdgeSharpness 2.0",
         "",
         "uniform highp vec4 ViewportInfo[1];",
         "uniform mediump sampler2D ps0;",
@@ -254,21 +398,46 @@ public class SGSRMaterial extends ShaderMaterial {
         "\twA *= wA;",
         "\treturn wB*wA;",
         "}",
-        "vec2 weightY(float dx, float dy,float c, float std)",
+        "",
+        "#if defined(UseEdgeDirection)",
+        "vec2 weightY(float dx, float dy, float c, vec3 data)",
+        "#else",
+        "vec2 weightY(float dx, float dy, float c, float data)",
+        "#endif",
         "{",
+        "#if defined(UseEdgeDirection)",
+        "\tfloat std = data.x;",
+        "\tvec2 dir = data.yz;",
+        "",
+        "\tfloat edgeDis = ((dx*dir.y)+(dy*dir.x));",
+        "\tfloat x = (((dx*dx)+(dy*dy))+((edgeDis*edgeDis)*((clamp(((c*c)*std),0.0,1.0)*0.7)+-1.0)));",
+        "#else",
+        "\tfloat std = data;",
         "\tfloat x = ((dx*dx)+(dy* dy))* 0.55 + clamp(abs(c)*std, 0.0, 1.0);",
+        "#endif",
+        "",
         "\tfloat w = fastLanczos2(x);",
         "\treturn vec2(w, w * c);",
         "}",
         "",
+        "vec2 edgeDirection(vec4 left, vec4 right)",
+        "{",
+        "\tvec2 dir;",
+        "\tfloat RxLz = (right.x + (-left.z));",
+        "\tfloat RwLy = (right.w + (-left.y));",
+        "\tvec2 delta;",
+        "\tdelta.x = (RxLz + RwLy);",
+        "\tdelta.y = (RxLz + (-RwLy));",
+        "\tfloat lengthInv = inversesqrt((delta.x * delta.x+ 3.075740e-05) + (delta.y * delta.y));",
+        "\tdir.x = (delta.x * lengthInv);",
+        "\tdir.y = (delta.y * lengthInv);",
+        "\treturn dir;",
+        "}",
+        "",
         "void main()",
         "{",
-        "\tint mode = OperationMode;",
-        "\tfloat edgeThreshold = EdgeThreshold;",
-        "\tfloat edgeSharpness = EdgeSharpness;",
-        "",
         "\tvec4 color;",
-        "\tif(mode == 1)",
+        "\tif(OperationMode == 1)",
         "\t\tcolor.xyz = textureLod(ps0,in_TEXCOORD0.xy,0.0).xyz;",
         "\telse",
         "\t\tcolor.xyzw = textureLod(ps0,in_TEXCOORD0.xy,0.0).xyzw;",
@@ -279,8 +448,8 @@ public class SGSRMaterial extends ShaderMaterial {
         "\tyCenter = abs(in_TEXCOORD0.y+-0.5);",
         "",
         "\t//todo: config the SR region based on needs",
-        "\t//if ( mode!=4 && xCenter*xCenter+yCenter*yCenter<=0.4 * 0.4)",
-        "\tif ( mode!=4)",
+        "\t//if ( OperationMode!=4 && xCenter*xCenter+yCenter*yCenter<=0.4 * 0.4)",
+        "\tif ( OperationMode!=4)",
         "\t{",
         "\t\thighp vec2 imgCoord = ((in_TEXCOORD0.xy*ViewportInfo[0].zw)+vec2(-0.5,0.5));",
         "\t\thighp vec2 imgCoordPixel = floor(imgCoord);",
@@ -288,8 +457,8 @@ public class SGSRMaterial extends ShaderMaterial {
         "\t\tvec2 pl = (imgCoord+(-imgCoordPixel));",
         "\t\tvec4  left = textureGather(ps0,coord, OperationMode);",
         "",
-        "\t\tfloat edgeVote = abs(left.z - left.y) + abs(color[mode] - left.y)  + abs(color[mode] - left.z) ;",
-        "\t\tif(edgeVote > edgeThreshold)",
+        "\t\tfloat edgeVote = abs(left.z - left.y) + abs(color[OperationMode] - left.y)  + abs(color[OperationMode] - left.z) ;",
+        "\t\tif(edgeVote > EdgeThreshold)",
         "\t\t{",
         "\t\t\tcoord.x += ViewportInfo[0].x;",
         "",
@@ -302,34 +471,37 @@ public class SGSRMaterial extends ShaderMaterial {
         "\t\t\tleft = left - vec4(mean);",
         "\t\t\tright = right - vec4(mean);",
         "\t\t\tupDown = upDown - vec4(mean);",
-        "\t\t\tcolor.w =color[mode] - mean;",
+        "\t\t\tcolor.w =color[OperationMode] - mean;",
         "",
         "\t\t\tfloat sum = (((((abs(left.x)+abs(left.y))+abs(left.z))+abs(left.w))+(((abs(right.x)+abs(right.y))+abs(right.z))+abs(right.w)))+(((abs(upDown.x)+abs(upDown.y))+abs(upDown.z))+abs(upDown.w)));",
-        "\t\t\tfloat std = 2.181818/sum;",
+        "\t\t\tfloat sumMean = 1.014185e+01/sum;",
+        "\t\t\tfloat std = (sumMean*sumMean);",
         "",
-        "\t\t\tvec2 aWY = weightY(pl.x, pl.y+1.0, upDown.x,std);",
-        "\t\t\taWY += weightY(pl.x-1.0, pl.y+1.0, upDown.y,std);",
-        "\t\t\taWY += weightY(pl.x-1.0, pl.y-2.0, upDown.z,std);",
-        "\t\t\taWY += weightY(pl.x, pl.y-2.0, upDown.w,std);",
-        "\t\t\taWY += weightY(pl.x+1.0, pl.y-1.0, left.x,std);",
-        "\t\t\taWY += weightY(pl.x, pl.y-1.0, left.y,std);",
-        "\t\t\taWY += weightY(pl.x, pl.y, left.z,std);",
-        "\t\t\taWY += weightY(pl.x+1.0, pl.y, left.w,std);",
-        "\t\t\taWY += weightY(pl.x-1.0, pl.y-1.0, right.x,std);",
-        "\t\t\taWY += weightY(pl.x-2.0, pl.y-1.0, right.y,std);",
-        "\t\t\taWY += weightY(pl.x-2.0, pl.y, right.z,std);",
-        "\t\t\taWY += weightY(pl.x-1.0, pl.y, right.w,std);",
+        "#if defined(UseEdgeDirection)",
+        "\t\t\tvec3 data = vec3(std, edgeDirection(left, right));",
+        "#else",
+        "\t\t\tfloat data = std;",
+        "#endif",
+        "\t\t\tvec2 aWY = weightY(pl.x, pl.y+1.0, upDown.x,data);",
+        "\t\t\taWY += weightY(pl.x-1.0, pl.y+1.0, upDown.y,data);",
+        "\t\t\taWY += weightY(pl.x-1.0, pl.y-2.0, upDown.z,data);",
+        "\t\t\taWY += weightY(pl.x, pl.y-2.0, upDown.w,data);",
+        "\t\t\taWY += weightY(pl.x+1.0, pl.y-1.0, left.x,data);",
+        "\t\t\taWY += weightY(pl.x, pl.y-1.0, left.y,data);",
+        "\t\t\taWY += weightY(pl.x, pl.y, left.z,data);",
+        "\t\t\taWY += weightY(pl.x+1.0, pl.y, left.w,data);",
+        "\t\t\taWY += weightY(pl.x-1.0, pl.y-1.0, right.x,data);",
+        "\t\t\taWY += weightY(pl.x-2.0, pl.y-1.0, right.y,data);",
+        "\t\t\taWY += weightY(pl.x-2.0, pl.y, right.z,data);",
+        "\t\t\taWY += weightY(pl.x-1.0, pl.y, right.w,data);",
         "",
         "\t\t\tfloat finalY = aWY.y/aWY.x;",
-        "",
         "\t\t\tfloat maxY = max(max(left.y,left.z),max(right.x,right.w));",
         "\t\t\tfloat minY = min(min(left.y,left.z),min(right.x,right.w));",
-        "\t\t\tfinalY = clamp(edgeSharpness*finalY, minY, maxY);",
-        "",
-        "\t\t\tfloat deltaY = finalY -color.w;",
+        "\t\t\tfloat deltaY = clamp(EdgeSharpness*finalY, minY, maxY) -color.w;",
         "",
         "\t\t\t//smooth high contrast input",
-        "\t\t\tdeltaY = clamp(deltaY, -23.0 / 255.0, 23.0 / 255.0);",
+        "\t\t\tdeltaY = clamp(deltaY, -MaxDelta, MaxDelta);",
         "",
         "\t\t\tcolor.x = clamp((color.x+deltaY),0.0,1.0);",
         "\t\t\tcolor.y = clamp((color.y+deltaY),0.0,1.0);",
