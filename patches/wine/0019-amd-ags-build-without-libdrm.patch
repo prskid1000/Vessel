@@ -1,0 +1,95 @@
+amd_ags_x64: build the unix half without libdrm.
+
+Proton's amd_ags_x64 unixlib includes xf86drm.h, amdgpu_drm.h and amdgpu.h
+unconditionally. That is safe on the Linux desktop it targets and fatal in an
+NDK sysroot, which ships none of them:
+
+    dlls/amd_ags_x64/unixlib.c:34:10: fatal error: 'xf86drm.h' file not found
+    make: *** [dlls/amd_ags_x64/unixlib.o] Error 1
+
+Guarded on HAVE_XF86DRM_H and HAVE_AMDGPU_DRM_H rather than on __ANDROID__.
+Configure already probes for both -- WINE_PACKAGE_FLAGS(DRM) and
+WINE_PACKAGE_FLAGS(DRMAMDGPU) in configure.ac -- so a Linux build that has
+libdrm compiles every line of this file exactly as before, and this patch is
+inert there.
+
+**The module is kept; only its unix half is stubbed.** That is the part of this
+worth stating. `enable_amd_ags_x64=no` at configure time would have been a
+one-line change in build/wine.sh with no patch at all, and it is the wrong fix:
+it removes amd_ags_x64.dll, and a game that lists that DLL in its import table
+then fails to load rather than falling back. AGS is AMD's GPU Services shim, so
+on an Adreno the only honest answer is "no AMD GPU" -- which is a state the PE
+side is already written to handle. amd_ags_x64_main.c computes
+
+    unix_lib_initialized = !__wine_init_unix_call() && !AMD_AGS_CALL( init, NULL );
+
+so an init() that fails leaves the DLL present and reporting no AMD hardware,
+which is precisely what happens on any machine with an NVIDIA or Intel GPU.
+diff --git a/dlls/amd_ags_x64/unixlib.c b/dlls/amd_ags_x64/unixlib.c
+index d34a162b55..7e0d8c406d 100644
+--- a/dlls/amd_ags_x64/unixlib.c
++++ b/dlls/amd_ags_x64/unixlib.c
+@@ -31,9 +31,31 @@
+ #include <fcntl.h>
+ #include <errno.h>
+ 
++/* VESSEL: libdrm is not in the Android NDK, and AGS can never apply here.
++ *
++ * Proton includes these unconditionally, which is safe on the Linux desktop it
++ * targets and fails in an NDK sysroot with
++ *     dlls/amd_ags_x64/unixlib.c:34:10: fatal error: 'xf86drm.h' file not found
++ * Configure already probes for both (WINE_PACKAGE_FLAGS(DRM)/(DRMAMDGPU)), so
++ * the guard is the macros it defines rather than __ANDROID__: a Linux build
++ * with libdrm keeps every line of this file.
++ *
++ * The DLL is kept and only its unix half is stubbed, which is the important
++ * half of this decision. amd_ags_x64 is AMD's GPU Services shim and on an
++ * Adreno it could only ever answer "no AMD GPU" -- but disabling the module
++ * outright would remove amd_ags_x64.dll, and a game that lists it in its import
++ * table would then fail to start rather than fall back. The PE side already
++ * handles exactly this case: amd_ags_x64_main.c computes
++ *     unix_lib_initialized = !__wine_init_unix_call() && !AMD_AGS_CALL( init, NULL );
++ * so an init that returns failure is a supported state, and is the same state a
++ * machine with no AMD card reaches.
++ */
++#if defined(HAVE_XF86DRM_H) && defined(HAVE_AMDGPU_DRM_H)
++#define VESSEL_HAVE_AMDGPU
+ #include <xf86drm.h>
+ #include <amdgpu_drm.h>
+ #include <amdgpu.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -48,6 +70,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(amd_ags);
+ 
+ #define MAX_DEVICE_COUNT 64
+ 
++#ifdef VESSEL_HAVE_AMDGPU
++
+ static unsigned int device_count;
+ static struct drm_amdgpu_info_device *amd_info;
+ 
+@@ -276,6 +300,22 @@ static NTSTATUS get_device_info( void *args )
+     return STATUS_NOT_FOUND;
+ }
+ 
++#else /* VESSEL_HAVE_AMDGPU */
++
++static NTSTATUS init( void *args )
++{
++    TRACE("Built without libdrm; no AMD GPU can be reported.
++");
++    return STATUS_NOT_SUPPORTED;
++}
++
++static NTSTATUS get_device_info( void *args )
++{
++    return STATUS_NOT_FOUND;
++}
++
++#endif /* VESSEL_HAVE_AMDGPU */
++
+ const unixlib_entry_t __wine_unix_call_funcs[] =
+ {
+     init,

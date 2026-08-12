@@ -65,74 +65,64 @@ case "$WINE_REF" in
     ;;
 esac
 
-# **Proton does not commit Wine's generated sources; upstream Wine does.**
+# **Valve's tree does not keep Wine's generated sources current; upstream does.**
 #
-# Two generators have to run before configure on a Proton checkout. Upstream
-# checks their output in, so on an upstream base both blocks below are skipped
-# and nothing changes. Each is guarded on its own output being absent, which is
-# also what makes them cheap to leave in place permanently.
+# Wine generates several sources from other sources. Upstream commits the
+# results, so a checkout is ready to configure. Valve's tree is not: some of
+# those files are absent, and — worse — some are present but STALE.
 #
-# The full set of what Proton leaves out was found by listing the known
-# generated outputs rather than by hitting them one build at a time:
+# Stale is the case that matters, and the one that cost a build here. The first
+# version of this block guarded each generator on its output being missing,
+# which is exactly the wrong test: `include/wine/server_protocol.h` IS committed
+# in proton_11.0, so the guard skipped `make_requests`, and the header it left
+# in place was protocol version 930 describing a `server/protocol.def` that had
+# moved on to 931. Nothing complains at configure time. The build gets a long
+# way in and then fails in ntdll with errors that name none of it:
 #
-#   dlls/ntdll/ntsyscalls.h     tools/make_specfiles       (perl)
-#   dlls/win32u/win32syscalls.h tools/make_specfiles       (perl)
-#   include/wine/vulkan.h       dlls/winevulkan/make_vulkan (python)
-#   + 7 more winevulkan files   dlls/winevulkan/make_vulkan
-#   configure, include/config.h.in                          (autoreconf, below)
+#     fsync.c: field has incomplete type 'enum fsync_type'
+#     fsync.c: use of undeclared identifier 'FSYNC_SHM_PAGE_SIZE'
+#     file.c:  no member named 'query_directory_file_request' in 'union generic_request'
+#     registry.c: variable has incomplete type 'enum prefix_type'
 #
-# server_protocol.h, request.h, trace.c and the NLS tables ARE committed, so
-# make_requests and make_unicode are not needed.
+# Every one of those symbols is defined in protocol.def and absent from the
+# committed header. So on a Proton base every generator runs unconditionally;
+# presence is not evidence of currency, and regenerating a file that was already
+# correct costs seconds and changes nothing.
 #
-# ---
+#   tools/make_requests    (perl)   include/wine/server_protocol.h, server/request_*.h
+#   tools/make_specfiles   (perl)   dlls/ntdll/ntsyscalls.h, dlls/win32u/win32syscalls.h
+#   .../winevulkan/make_vulkan (py) include/wine/vulkan.h + 7 more
+#   configure, config.h.in          autoreconf, below
 #
-# **make_specfiles: the syscall tables.**
+# make_unicode is NOT run: it rebuilds the NLS tables from Unicode data it
+# downloads, which would make the build need the network to produce files this
+# tree already has and does not disagree with.
 #
-# It walks the spec files and rewrites the syscall dispatch headers that
-# `signal_arm64.c`, `signal_arm64ec.c` and `unix/loader.c` include. Absent, the
-# build dies inside config.status with
-#     signal_arm.c:35: error: ntsyscalls.h: No such file or directory
-# for the same reason as the vulkan header: makedep reads the include graph
-# while configure is still writing Makefiles.
-if [ ! -f "$SRC/dlls/ntdll/ntsyscalls.h" ] && [ -x "$SRC/tools/make_specfiles" ]; then
-  log "generating syscall tables (absent from $WINE_REF)"
-  ( cd "$SRC" && ./tools/make_specfiles ) || die "make_specfiles failed"
-  [ -f "$SRC/dlls/ntdll/ntsyscalls.h" ] \
-    || die "make_specfiles ran but did not produce dlls/ntdll/ntsyscalls.h"
-  ok "syscall tables generated"
-fi
+# On an upstream-Wine base this whole block is skipped. There the committed
+# files are the authority, they are current, and regenerating could only
+# introduce a difference.
+#
+# `fetch_source` cleans untracked files, so all of this reruns per build.
+if [ "${WINE_REF#proton}" != "$WINE_REF" ]; then
+  log "regenerating Wine's generated sources ($WINE_REF ships them stale or absent)"
 
-# **winevulkan.**
-#
-# `dlls/winevulkan/make_vulkan` turns `vk.xml` into eight files — the public
-# `include/wine/vulkan.h`, the thunk pairs, the spec and the two ICD manifests.
-# Upstream checks the results in, so nothing ever has to run the generator.
-# Valve's tree checks in only the inputs, and every one of the eight is absent
-# from a fresh checkout.
-#
-# The failure that finds this names none of it. `tools/makedep` reads the
-# `#include` graph while configure is still writing Makefiles, so the whole
-# build dies during `config.status` with
-#     error: open wine/vulkan.h : No such file or directory
-#     config.status: error: could not create Makefile
-# which reads like a broken configure rather than a missing generated header.
-#
-# `-x`/`-X` point the generator at the XML committed beside it. Without them it
-# fetches vk.xml from the Khronos registry into $HOME/.cache/wine, which would
-# make the build require the network and silently track whatever upstream
-# publishes — the tree's own XML is the version Valve's sources were written
-# against, and is the only correct input.
-#
-# Guarded on the header being absent, so an upstream-Wine base skips it: there
-# the committed files are the authority and regenerating could only introduce a
-# difference. `fetch_source` cleans untracked files, so this reruns per build.
-if [ ! -f "$SRC/include/wine/vulkan.h" ] && [ -x "$SRC/dlls/winevulkan/make_vulkan" ]; then
-  log "generating winevulkan sources (absent from $WINE_REF)"
-  ( cd "$SRC/dlls/winevulkan" && python3 ./make_vulkan -x vk.xml -X video.xml ) \
-    || die "make_vulkan failed"
-  [ -f "$SRC/include/wine/vulkan.h" ] \
-    || die "make_vulkan ran but did not produce include/wine/vulkan.h"
-  ok "winevulkan sources generated"
+  # The server protocol first: ntdll and wineserver both compile against it.
+  ( cd "$SRC" && ./tools/make_requests ) || die "make_requests failed"
+
+  # Syscall dispatch tables, included by signal_arm64.c/signal_arm64ec.c.
+  ( cd "$SRC" && ./tools/make_specfiles ) || die "make_specfiles failed"
+
+  # winevulkan. `-x`/`-X` point at the XML committed beside the generator;
+  # without them it fetches vk.xml from the Khronos registry into
+  # $HOME/.cache/wine, which would make the build require the network and
+  # silently track whatever upstream publishes. The tree's own XML is the
+  # version Valve's sources were written against.
+  ( cd "$SRC/dlls/winevulkan" && python3 ./make_vulkan -x vk.xml -X video.xml )     || die "make_vulkan failed"
+
+  for f in include/wine/server_protocol.h dlls/ntdll/ntsyscalls.h            dlls/win32u/win32syscalls.h include/wine/vulkan.h; do
+    [ -f "$SRC/$f" ] || die "generators ran but $f is still missing"
+  done
+  ok "generated sources rebuilt"
 fi
 
 BUILD="$WORK_DIR/wine-android"
