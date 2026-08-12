@@ -13,6 +13,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
@@ -111,7 +118,9 @@ fun VMetricGraph(
     Canvas(
         modifier
             .fillMaxWidth()
-            .height(height)
+            // Zero means the caller sized it — the full-screen view fills the
+            // dialog rather than standing at the inline height in the middle of it.
+            .then(if (height > 0.dp) Modifier.height(height) else Modifier)
             .background(colors.surfaceSunken, metrics.shapeSm)
             .padding(horizontal = metrics.s6, vertical = metrics.s3),
     ) {
@@ -277,7 +286,7 @@ fun VMetricGraphCard(
     // mid-run, and a frame rate whose three identical baselines varied 20%.
     var zoomed by rememberSaveable(title) { mutableStateOf(false) }
     if (zoomed) {
-        VMetricGraphDialog(title, value, unit, stats, series, unavailable) { zoomed = false }
+        VMetricGraphDialog(series) { zoomed = false }
     }
     Column(
         modifier
@@ -602,57 +611,47 @@ private val SampleGpu: List<Int?> =
     listOf(4, 9, 22, 38, 51, null, null, 64, 70, 77, 81, 72, 68, 71, 75, 77)
 
 /**
- * One metric card, given the whole screen.
+ * The chart alone, landscape, edge to edge.
  *
- * `usePlatformDefaultWidth = false` because the axis that matters is time, and a
- * ten-minute run squeezed into a dialog's default width is the problem this
- * exists to solve rather than a smaller version of it.
+ * **Only the chart, and only sideways.** The first version put the whole card in
+ * here — title, value, stats — which is the card again at a larger size, and the
+ * card is what you already have. What is missing at 44 dp is the *shape*: where
+ * a line sagged, how long it held, whether a dip was one sample or twenty. That
+ * needs pixels along the time axis, and the phone has twice as many of them
+ * sideways.
  *
- * The card inside is `zoomable = false`: it is already zoomed, and a second
- * dialog stacked on the first is a thing only a bug does.
+ * `requestedOrientation` is set for as long as the dialog lives and restored to
+ * whatever it was — not to portrait, because the session may already be
+ * landscape and forcing a value nobody asked for is its own bug.
+ *
+ * A tap anywhere closes it: there is no chrome to hang a button on, which is
+ * the point.
  */
 @Composable
-private fun VMetricGraphDialog(
-    title: String,
-    value: String?,
-    unit: String?,
-    stats: List<VMetricStat>,
-    series: List<VMetricSeries>,
-    unavailable: String?,
-    onDismiss: () -> Unit,
-) {
+private fun VMetricGraphDialog(series: List<VMetricSeries>, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    DisposableEffect(Unit) {
+        val activity = context.findHostActivity()
+        val previous = activity?.requestedOrientation
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        onDispose { previous?.let { activity?.requestedOrientation = it } }
+    }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(
+        Box(
             Modifier
                 .fillMaxSize()
                 .background(Vessel.colors.bg)
-                .padding(Vessel.metrics.s11),
-            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+                .clickable(onClick = onDismiss)
+                .padding(Vessel.metrics.s8),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    title.uppercase(),
-                    style = Vessel.type.overline,
-                    color = Vessel.colors.textMuted,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    "Close",
-                    style = Vessel.type.bodySmall,
-                    color = Vessel.colors.accent,
-                    modifier = Modifier.clickable(onClick = onDismiss).padding(Vessel.metrics.s6),
-                )
-            }
-            VMetricGraphCard(
-                title = title,
-                value = value,
-                series = series,
-                unit = unit,
-                stats = stats,
-                unavailable = unavailable,
-                zoomable = false,
-                modifier = Modifier.weight(1f),
-            )
+            VMetricGraph(series, Modifier.fillMaxSize(), height = 0.dp)
         }
     }
+}
+
+/** The Activity behind a Compose context, through any number of wrappers. */
+private tailrec fun Context.findHostActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }
