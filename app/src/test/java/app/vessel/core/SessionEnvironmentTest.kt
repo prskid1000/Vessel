@@ -338,18 +338,50 @@ class SessionEnvironmentTest {
     // — the fixed variables ---------------------------------------------------
 
     @Test
-    fun `fsync is set unconditionally, because it is not a setting`() {
+    fun `fsync is requested, and can still be switched off`() {
         assertEquals("1", env()["WINEFSYNC"])
 
-        // The assertion this replaced asked for `WINEESYNC=1` and for WINEFSYNC
-        // to be absent — exactly backwards, and it passed for months because a
-        // test can only check that we set a variable, never that anything reads
-        // it. Neither Wine 11.14 nor Proton 11.0 contains a single reference to
-        // WINEESYNC: upstream has no esync and no fsync at all, and Valve's tree
-        // has fsync only. So the old expectation encoded a variable that reached
-        // nobody. Kept as a negative assertion so it cannot come back.
+        // WINEESYNC=1 used to be set here and reached nobody: neither Wine 11.14
+        // nor Proton 11.0 contains a single reference to it — upstream has no
+        // esync and no fsync at all, Valve's tree has fsync only. The old test
+        // asserted it anyway, and passed for months, because a test can check
+        // that we set a variable and never that anything reads it. Kept as a
+        // negative assertion so it cannot come back.
         assertFalse(env().containsKey("WINEESYNC"))
         assertFalse(env().containsKey("WINENTSYNC"))
+
+        // The prefix bootstrap must see it too: server and clients start in one
+        // mode or fsync_init() exits.
+        assertTrue("WINEFSYNC" in BOOTSTRAP_SESSION_ENV)
+
+        // And it must NOT be reserved. fsync does not degrade — fsync_init()
+        // ends in exit(1) rather than falling back — so being able to turn it
+        // off from a container's environment table is the whole reason it can be
+        // a default at all. Reserving it would strand a container that will not
+        // start.
+        assertFalse("WINEFSYNC" in RESERVED_SESSION_ENV)
+    }
+
+    @Test
+    fun `a container can override fsync back off`() {
+        val off = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "g", title = "G",
+                    params = listOf(
+                        ParamSpec(
+                            key = "wine.fsync",
+                            title = "Fast synchronisation",
+                            type = ParamType.ENUM,
+                            default = JsonPrimitive("0"),
+                            env = "WINEFSYNC",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertEquals("0", env(manifest = off)["WINEFSYNC"])
     }
 
     @Test
@@ -628,7 +660,7 @@ class SessionEnvironmentTest {
         assertEquals(WINEDEBUG_CHANNELS, environment["WINEDEBUG"])
         assertEquals("startup", environment["TU_DEBUG"])
         // The FEX flags survive a missing manifest because they no longer come
-        // from it — they are fixed in sessionEnvironment beside WINEFSYNC.
+        // from it — they are fixed in sessionEnvironment directly.
         assertEquals("1", environment["FEX_TSOENABLED"])
         assertEquals("0", environment["FEX_VECTORTSOENABLED"])
     }

@@ -1,19 +1,35 @@
+nsiproxy: enumerate interfaces with getifaddrs on Android.
+
+The reasoning for the fallback itself is in the code, beside it. One thing is
+worth stating here because it is a property of the base rather than of the fix:
+
+This patch also adds <errno.h>, which is not incidental. Upstream Wine includes
+it in this file and Valve's proton_11.0 does not, so the fallback below -- which
+reports errno in both its ERR and its WARN -- compiles on upstream and fails on
+Proton with
+
+    dlls/nsiproxy.sys/ndis.c:362: error: use of undeclared identifier 'errno'
+
+The include is unconditional because every path that reports a failure here
+needs it, and it costs nothing on a tree that already has it.
+
 diff --git a/dlls/nsiproxy.sys/ndis.c b/dlls/nsiproxy.sys/ndis.c
-index 158a39e558..079e65c1eb 100644
+index 158a39e558..67ce0fc81d 100644
 --- a/dlls/nsiproxy.sys/ndis.c
 +++ b/dlls/nsiproxy.sys/ndis.c
-@@ -30,6 +30,10 @@
+@@ -29,6 +29,11 @@
+ #include <sys/socket.h>
  #include <sys/ioctl.h>
  #include <unistd.h>
- 
++#include <errno.h>
++
 +#ifdef HAVE_IFADDRS_H
 +#include <ifaddrs.h>
 +#endif
-+
+ 
  #ifdef HAVE_NET_IF_H
  #include <net/if.h>
- #endif
-@@ -328,19 +332,92 @@ static struct if_entry *add_entry( UINT index, const char *name )
+@@ -328,19 +333,92 @@ static struct if_entry *add_entry( UINT index, const char *name )
      return entry;
  }
  

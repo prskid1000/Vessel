@@ -282,10 +282,12 @@ const val DEFAULT_DISPLAY: String = ":0"
 /**
  * Variables this layer owns outright, which a manifest param may never set.
  *
- * Most are simply not settings — `WINEDEBUG` is fixed per `docs/LOGGING.md`,
- * `WINEFSYNC` because fsync is the only accelerated synchronisation mode that
- * the current base has at all (see where it is set for the reading of both
- * trees), and because the server and its clients must agree on the mode.
+ * Most are simply not settings — `WINEDEBUG` is fixed per `docs/LOGGING.md`.
+ *
+ * `WINEFSYNC` is deliberately NOT here. fsync is the only accelerated
+ * synchronisation mode the current base has at all, it is off by default, and
+ * the point of leaving it unreserved is that it can be switched on for one
+ * container and measured. See where it would be set for why it is not.
  *
  * `VKD3D_LOG_FILE` is different: it is listed to guarantee its **absence**.
  * `vkd3d_dbg_init_once` is an if/else — set the variable and it opens the file
@@ -294,7 +296,6 @@ const val DEFAULT_DISPLAY: String = ":0"
  */
 val RESERVED_SESSION_ENV: Set<String> = setOf(
     "WINEPREFIX",
-    "WINEFSYNC",
     "WINEDEBUG",
     WINEDLLOVERRIDES_ENV,
     "DISPLAY",
@@ -783,15 +784,40 @@ fun sessionEnvironment(
     // gated on `WINEFSYNC` — and still no esync. So fsync is the only accelerated
     // mode that exists on the current base, and the only one worth naming.
     //
-    // Safe to ask for unconditionally: `do_fsync()` probes `__NR_futex_waitv` and
-    // returns false on `ENOSYS`/`EPERM`, so a kernel without it falls back to
-    // ordinary server-side waits rather than failing. The variable is a request,
-    // not an assertion.
+    // **On by default. Unmeasured, and with a failure mode worth knowing.**
     //
-    // **UNVERIFIED ON DEVICE.** That fsync engages here — rather than quietly
-    // probing out — has not been confirmed on the target kernel, and neither has
-    // any performance claim. `wineserver` logs the mode it chose; that is what a
-    // first session should be read for.
+    // fsync is the reason to be on this base: it moves the common uncontended
+    // wait out of a round trip to wineserver and into a futex, which is what
+    // makes Proton's synchronisation fast on many-threaded games. Upstream Wine
+    // has neither esync nor fsync, so nothing like it existed here before.
+    //
+    // It needs POSIX shared memory, which bionic does not have at all — its libc
+    // declares the whole option group missing. patches/wine/0020 backs the
+    // region with a plain file, which is what shm_open always was: on glibc a
+    // path under /dev/shm, a tmpfs, and every property fsync depends on comes
+    // from mmap( MAP_SHARED ) on the fd, identical on a regular file.
+    //
+    // **fsync does not degrade.** `fsync_init()` ends in `exit(1)` if it cannot
+    // map the region the server made, or if the server started in a different
+    // mode — so a half-working configuration does not quietly fall back to
+    // server-side waits, it takes the session down. Two ways to land there on
+    // this platform, neither yet ruled out on the device: a kernel without
+    // `__NR_futex_waitv`, and a wineserver and client resolving the shim's
+    // directory differently.
+    //
+    // `do_fsync()` does check futex_waitv and returns false on ENOSYS/EPERM, and
+    // both halves read the same variable, so the intended path is that an
+    // unsupported kernel simply never starts fsync at all. That is the theory;
+    // it has not been run here.
+    //
+    // The escape hatch is why this can be a default rather than a gamble.
+    // WINEFSYNC is deliberately NOT in [RESERVED_SESSION_ENV], and the manifest
+    // loop at the end of this function overwrites anything unreserved — so a
+    // container that will not start sets `WINEFSYNC=0` in its environment table
+    // and is back on the path every previous Vessel build used. It stays in
+    // [BOOTSTRAP_SESSION_ENV] because the server and its clients must agree.
+    //
+    // Read `wineserver`'s startup lines for the mode it actually chose.
     environment["WINEFSYNC"] = "1"
 
     // FEX's memory-ordering behaviour is fixed here, not offered as settings.

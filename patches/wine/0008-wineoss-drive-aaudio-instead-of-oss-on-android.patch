@@ -1,3 +1,52 @@
+wineoss: drive AAudio instead of OSS on Android.
+
+Android has no /dev/dsp and no ALSA. AAudio (libaaudio.so, NDK) is the one audio
+API an app process has, so wineoss.drv's unix half is rebuilt on it. The name is
+kept because mmdevapi probes "pulse,alsa,oss,coreaudio" by default: staying
+"oss" means nothing else has to learn a new one. build/wine.sh force-enables the
+module with enable_wineoss_drv=yes, because the OSS probe must still fail (it
+must not find the build machine's headers).
+
+**On the audio unixlib contract, and a reversal worth recording.**
+
+This driver was first written against Wine 11.14, whose mmdevapi had already
+moved the audio loops onto system threads: `main_loop` split into
+`main_loop_start`/`main_loop_stop`, `timer_loop` was removed as an entry point,
+and drivers spawned their own timer thread with a `create_unix_thread()` helper
+added to unixlib.h.
+
+Valve's proton_11.0 predates all of that, so the first attempt at this port
+backported the two upstream commits that made the change (a70f1eb8ee2,
+4c3dd4e1d0e) in order to keep this file byte-identical to the version verified
+on device. That was measured on the mmdevapi diff alone and it was the wrong
+call: `create_unix_thread()` calls `PsCreateSystemThread`, which on 11.14 is a
+unix-side ntdll export added by a *third* commit (36f81d955de) that also rewrites
+`server_init_thread` to support a thread with no TEB. That commit does not apply
+to Proton -- its `thread_data` differs -- so following the chain meant
+open-heart surgery on ntdll thread creation to avoid editing one file we own.
+
+So the driver is adapted to Proton's contract instead, and the AAudio logic is
+untouched. The whole difference is plumbing:
+
+  - the entry table returns to the 11.0 enum: `main_loop` at index 2 and
+    `timer_loop` restored at index 9 (verified position-for-position against
+    dlls/mmdevapi/unixlib.h);
+  - `oss_timer_loop` is a unixlib entry again -- it takes
+    `struct timer_loop_params`, resolves the stream from the handle, and returns
+    STATUS_SUCCESS, instead of being a thread routine taking the stream;
+  - `oss_start` no longer creates a thread; mmdevapi's PE side does, as it did
+    before the refactor;
+  - `oss_release_stream` joins `params->timer_thread` rather than a handle this
+    driver owned, and the `timer_thread` field is gone from `struct oss_stream`;
+  - `oss_main_loop` is added: mmdevapi calls it once on its own PE thread to say
+    the device-notification loop is up. Nothing here notifies about devices, so
+    it sets the event and returns -- which is exactly what the OSS driver this
+    replaces did.
+
+Getting the table wrong is silent rather than loud, which is why it is checked
+rather than eyeballed: the entries are plain function pointers, so a
+one-position shift links cleanly and calls the wrong function for every audio
+operation.
 diff --git a/dlls/wineoss.drv/Makefile.in b/dlls/wineoss.drv/Makefile.in
 index b8e92e454e..c032c548e9 100644
 --- a/dlls/wineoss.drv/Makefile.in
@@ -16,7 +65,7 @@ index b8e92e454e..c032c548e9 100644
 -	ossmidi.c
 +	oss.c
 diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
-index bcdcc72ba0..cecbfb1d0d 100644
+index bcdcc72ba0..5d820903bc 100644
 --- a/dlls/wineoss.drv/oss.c
 +++ b/dlls/wineoss.drv/oss.c
 @@ -1,5 +1,5 @@
@@ -67,11 +116,9 @@ index bcdcc72ba0..cecbfb1d0d 100644
  #include "winternl.h"
  #include "initguid.h"
  #include "audioclient.h"
-@@ -52,24 +67,60 @@ struct oss_stream
-     UINT flags;
+@@ -53,23 +68,58 @@ struct oss_stream
      AUDCLNT_SHAREMODE share;
      HANDLE event;
-+    HANDLE timer_thread;
  
 -    int fd;
 +    AAudioStream *aas;
@@ -130,7 +177,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  static const REFERENCE_TIME min_period = 50000;
  
  static ULONG_PTR zero_bits = 0;
-@@ -126,265 +177,295 @@ static struct oss_stream *handle_get_stream(stream_handle h)
+@@ -126,265 +176,295 @@ static struct oss_stream *handle_get_stream(stream_handle h)
      return (struct oss_stream *)(UINT_PTR)h;
  }
  
@@ -537,13 +584,20 @@ index bcdcc72ba0..cecbfb1d0d 100644
 -        TRACE("numaudioengines: %d\n", sysinfo.numaudioengines);
 -        print_once = 1;
 -    }
-+    offset = sizeof(*endpoint);
-+    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
- 
+-
 -    if(sysinfo.numaudios <= 0){
 -        WARN("No audio devices!\n");
 -        close(mixer_fd);
 -        params->result = AUDCLNT_E_SERVICE_NOT_RUNNING;
+-        return STATUS_SUCCESS;
+-    }
++    offset = sizeof(*endpoint);
++    needed = offset + name_len * sizeof(WCHAR) + ((device_len + 1) & ~1);
+ 
+-    info = malloc(sysinfo.numaudios * sizeof(*info));
+-    if(!info){
+-        close(mixer_fd);
+-        params->result = E_OUTOFMEMORY;
 -        return STATUS_SUCCESS;
 +    if(needed <= params->size){
 +        endpoint->name = offset;
@@ -553,13 +607,6 @@ index bcdcc72ba0..cecbfb1d0d 100644
 +        memcpy((char *)params->endpoints + offset, device, device_len);
      }
  
--    info = malloc(sysinfo.numaudios * sizeof(*info));
--    if(!info){
--        close(mixer_fd);
--        params->result = E_OUTOFMEMORY;
--        return STATUS_SUCCESS;
--    }
--
 -    get_default_device(params->flow, default_device);
 -
 -    num = 0;
@@ -642,7 +689,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  
      if(needed > params->size){
          params->size = needed;
-@@ -421,40 +502,6 @@ static UINT get_channel_mask(unsigned int channels)
+@@ -421,40 +501,6 @@ static UINT get_channel_mask(unsigned int channels)
      return 0;
  }
  
@@ -683,7 +730,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
  {
      WAVEFORMATEXTENSIBLE *ret;
-@@ -476,75 +523,12 @@ static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
+@@ -476,75 +522,12 @@ static WAVEFORMATEXTENSIBLE *clone_format(const WAVEFORMATEX *fmt)
      return ret;
  }
  
@@ -761,7 +808,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      SIZE_T size;
  
      params->result = S_OK;
-@@ -558,34 +542,12 @@ static NTSTATUS oss_create_stream(void *args)
+@@ -558,34 +541,12 @@ static NTSTATUS oss_create_stream(void *args)
      stream->flow = params->flow;
      pthread_mutex_init(&stream->lock, NULL);
  
@@ -800,7 +847,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      if(FAILED(params->result))
          goto exit;
  
-@@ -599,9 +561,104 @@ static NTSTATUS oss_create_stream(void *args)
+@@ -599,9 +560,104 @@ static NTSTATUS oss_create_stream(void *args)
      stream->period = params->period;
      stream->period_frames = muldiv(params->fmt->nSamplesPerSec, params->period, 10000000);
  
@@ -905,7 +952,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      size = stream->bufsize_frames * params->fmt->nBlockAlign;
      if(NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits,
                                 &size, MEM_COMMIT, PAGE_READWRITE)){
-@@ -611,11 +668,10 @@ static NTSTATUS oss_create_stream(void *args)
+@@ -611,11 +667,10 @@ static NTSTATUS oss_create_stream(void *args)
  
      stream->share = params->share;
      stream->flags = params->flags;
@@ -918,17 +965,8 @@ index bcdcc72ba0..cecbfb1d0d 100644
          if(stream->local_buffer){
              size = 0;
              NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
-@@ -637,13 +693,16 @@ static NTSTATUS oss_release_stream(void *args)
-     struct oss_stream *stream = handle_get_stream(params->stream);
-     SIZE_T size;
- 
--    if(params->timer_thread){
-+    if(stream->timer_thread){
-         stream->please_quit = TRUE;
--        NtWaitForSingleObject(params->timer_thread, FALSE, NULL);
--        NtClose(params->timer_thread);
-+        NtWaitForSingleObject(stream->timer_thread, FALSE, NULL);
-+        NtClose(stream->timer_thread);
+@@ -643,7 +698,10 @@ static NTSTATUS oss_release_stream(void *args)
+         NtClose(params->timer_thread);
      }
  
 -    close(stream->fd);
@@ -939,7 +977,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      if(stream->local_buffer){
          size = 0;
          NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, &size, MEM_RELEASE);
-@@ -652,6 +711,10 @@ static NTSTATUS oss_release_stream(void *args)
+@@ -652,6 +710,10 @@ static NTSTATUS oss_release_stream(void *args)
          size = 0;
          NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
      }
@@ -950,7 +988,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      free(stream->fmt);
      pthread_mutex_destroy(&stream->lock);
      free(stream);
-@@ -660,100 +723,200 @@ static NTSTATUS oss_release_stream(void *args)
+@@ -660,100 +722,200 @@ static NTSTATUS oss_release_stream(void *args)
      return STATUS_SUCCESS;
  }
  
@@ -1217,7 +1255,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  
      if(in_oss_frames > stream->in_oss_frames){
          TRACE("Capping reported frames from %u to %u\n",
-@@ -761,11 +924,48 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -761,11 +923,48 @@ static void oss_write_data(struct oss_stream *stream)
          in_oss_frames = stream->in_oss_frames;
      }
  
@@ -1268,7 +1306,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  
      /*        vvvvvv - in_oss_frames
       * [--xxxxxxxxxx]
-@@ -796,7 +996,6 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -796,7 +995,6 @@ static void oss_write_data(struct oss_stream *stream)
          to_write_frames = new_frames;
  
      to_write_frames = min(to_write_frames, write_limit);
@@ -1276,7 +1314,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      TRACE("going to write %lu frames from %u (%lu of %u)\n", to_write_frames,
              write_offs_frames, to_write_frames + write_offs_frames,
              stream->bufsize_frames);
-@@ -806,18 +1005,71 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -806,18 +1004,71 @@ static void oss_write_data(struct oss_stream *stream)
      if(stream->mute)
          silence_buffer(stream, buf, to_write_frames);
  
@@ -1354,7 +1392,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
          return;
      }
  
-@@ -825,88 +1077,202 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -825,88 +1076,216 @@ static void oss_write_data(struct oss_stream *stream)
          /* wrapped and have some data back at the start to write */
  
          to_write_frames = min(write_limit - written_frames, new_frames - written_frames);
@@ -1386,10 +1424,12 @@ index bcdcc72ba0..cecbfb1d0d 100644
      }
  }
  
- static void oss_read_data(struct oss_stream *stream)
- {
+-static void oss_read_data(struct oss_stream *stream)
+-{
 -    UINT64 pos, readable;
 -    ssize_t nread;
++static void oss_read_data(struct oss_stream *stream)
++{
 +    UINT64 pos, readable_frames;
 +    aaudio_result_t nread;
 +
@@ -1413,9 +1453,22 @@ index bcdcc72ba0..cecbfb1d0d 100644
 +    }
 +}
 +
-+static void oss_timer_loop(void *args)
++/* Proton's mmdevapi runs its device-notification loop on a PE thread and calls
++ * this once, on that thread, to signal it started. There is nothing to notify
++ * about on Android -- devices do not come and go through this driver -- so the
++ * event is set and the call returns, which is what the OSS driver this replaced
++ * did too. */
++static NTSTATUS oss_main_loop(void *args)
 +{
-+    struct oss_stream *stream = args;
++    struct main_loop_params *params = args;
++    NtSetEvent(params->event, NULL);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS oss_timer_loop(void *args)
++{
++    struct timer_loop_params *params = args;
++    struct oss_stream *stream = handle_get_stream(params->stream);
 +    LARGE_INTEGER delay, now, next;
 +    int adjust;
 +
@@ -1458,6 +1511,8 @@ index bcdcc72ba0..cecbfb1d0d 100644
 +    TRACE("timer loop leaving: quit=%d playing=%d held=%u\n",
 +          stream->please_quit, stream->playing, stream->held_frames);
 +    oss_unlock(stream);
++
++    return STATUS_SUCCESS;
 +}
 +
 +static NTSTATUS oss_start(void *args)
@@ -1482,7 +1537,6 @@ index bcdcc72ba0..cecbfb1d0d 100644
 +                     AAUDIO_STREAM_STATE_STARTED);
 +
 +    stream->playing = TRUE;
-+    if (!stream->timer_thread) create_unix_thread( &stream->timer_thread, name, oss_timer_loop, stream );
 +
 +    return oss_unlock_result(stream, &params->result, S_OK);
 +}
@@ -1492,19 +1546,19 @@ index bcdcc72ba0..cecbfb1d0d 100644
 +    struct stop_params *params = args;
 +    struct oss_stream *stream = handle_get_stream(params->stream);
 +    aaudio_result_t res;
++
++    oss_lock(stream);
  
 -    pos = (stream->held_frames + stream->lcl_offs_frames) % stream->bufsize_frames;
 -    readable = (stream->bufsize_frames - pos) * stream->fmt->nBlockAlign;
-+    oss_lock(stream);
++    if(!stream->playing)
++        return oss_unlock_result(stream, &params->result, S_FALSE);
  
 -    nread = read(stream->fd, stream->local_buffer + pos * stream->fmt->nBlockAlign,
 -            readable);
 -    if(nread < 0){
 -        WARN("read failed: %d (%s)\n", errno, strerror(errno));
 -        return;
-+    if(!stream->playing)
-+        return oss_unlock_result(stream, &params->result, S_FALSE);
-+
 +    /* Pause rather than stop: Stop() on an audio client freezes the clock,
 +     * it does not flush. For capture there is no pause, stop is it. */
 +    if(stream->flow == eRender){
@@ -1610,7 +1664,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  }
  
  static NTSTATUS oss_get_render_buffer(void *args)
-@@ -1112,16 +1478,8 @@ static NTSTATUS oss_release_capture_buffer(void *args)
+@@ -1112,16 +1491,8 @@ static NTSTATUS oss_release_capture_buffer(void *args)
  static NTSTATUS oss_is_format_supported(void *args)
  {
      struct is_format_supported_params *params = args;
@@ -1628,7 +1682,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  
      return STATUS_SUCCESS;
  }
-@@ -1130,95 +1488,24 @@ static NTSTATUS oss_get_mix_format(void *args)
+@@ -1130,95 +1501,24 @@ static NTSTATUS oss_get_mix_format(void *args)
  {
      struct get_mix_format_params *params = args;
      WAVEFORMATEXTENSIBLE *fmt = params->fmt;
@@ -1730,7 +1784,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
      fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
  
-@@ -1326,20 +1613,7 @@ static NTSTATUS oss_get_position(void *args)
+@@ -1326,20 +1626,7 @@ static NTSTATUS oss_get_position(void *args)
          if(*pos < stream->last_pos_frames)
              *pos = stream->last_pos_frames;
      }else if(stream->flow == eCapture){
@@ -1752,16 +1806,16 @@ index bcdcc72ba0..cecbfb1d0d 100644
      }
  
      stream->last_pos_frames = *pos;
-@@ -1418,235 +1692,109 @@ static NTSTATUS oss_get_prop_value(void *args)
+@@ -1418,226 +1705,100 @@ static NTSTATUS oss_get_prop_value(void *args)
      return STATUS_SUCCESS;
  }
  
 -/* Aux driver */
--
--static unsigned int num_aux;
 +/* Aux driver: OSS exposed the /dev/mixer channels here. Android has no
 + * mixer device, so there are no aux devices. */
  
+-static unsigned int num_aux;
+-
 -#define MIXER_DEV "/dev/mixer"
 -
 -static UINT aux_init(void)
@@ -1910,14 +1964,14 @@ index bcdcc72ba0..cecbfb1d0d 100644
 -    left   = (LOWORD(vol) * 100) >> 16;
 -    right  = (HIWORD(vol) * 100) >> 16;
 -    volume = (right << 8) | left;
--
++    struct midi_out_message_params *params = args;
+ 
 -    if ((mixer = open(MIXER_DEV, O_RDWR)) < 0)
 -    {
 -        WARN("mixer device not available !\n");
 -        return MMSYSERR_NOTENABLED;
 -    }
-+    struct midi_out_message_params *params = args;
- 
+-
 -    switch(dev_id)
 +    params->notify->send_notify = FALSE;
 +    switch (params->msg)
@@ -1990,11 +2044,11 @@ index bcdcc72ba0..cecbfb1d0d 100644
      case DRVM_DISABLE:
 -        /* FIXME: Pretend this is supported */
 -        *params->err = 0;
--        break;
--    case AUXDM_GETDEVCAPS:
--        *params->err = aux_get_devcaps(params->dev_id, (AUXCAPSW *)params->param_1, params->param_2);
 +        *params->err = MMSYSERR_NOERROR;
          break;
+-    case AUXDM_GETDEVCAPS:
+-        *params->err = aux_get_devcaps(params->dev_id, (AUXCAPSW *)params->param_1, params->param_2);
+-        break;
 -    case AUXDM_GETNUMDEVS:
 -        TRACE("return %d;\n", num_aux);
 -        *params->err = num_aux;
@@ -2029,22 +2083,11 @@ index bcdcc72ba0..cecbfb1d0d 100644
  const unixlib_entry_t __wine_unix_call_funcs[] =
  {
 -    oss_process_attach,
++    oss_not_implemented,
      oss_not_implemented,
--    oss_main_loop,
-+    oss_not_implemented,
-+    oss_not_implemented,
-+    oss_not_implemented,
+     oss_main_loop,
      oss_get_endpoint_ids,
-     oss_create_stream,
-     oss_release_stream,
-     oss_start,
-     oss_stop,
-     oss_reset,
--    oss_timer_loop,
-     oss_get_render_buffer,
-     oss_release_render_buffer,
-     oss_get_capture_buffer,
-@@ -1682,6 +1830,15 @@ C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
+@@ -1682,6 +1843,15 @@ C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
  
  typedef UINT PTR32;
  
@@ -2060,7 +2103,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  static NTSTATUS oss_wow64_test_connect(void *args)
  {
      struct
-@@ -1698,19 +1855,6 @@ static NTSTATUS oss_wow64_test_connect(void *args)
+@@ -1698,19 +1868,6 @@ static NTSTATUS oss_wow64_test_connect(void *args)
      return STATUS_SUCCESS;
  }
  
@@ -2080,7 +2123,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
  static NTSTATUS oss_wow64_get_endpoint_ids(void *args)
  {
      struct
-@@ -1775,13 +1919,11 @@ static NTSTATUS oss_wow64_release_stream(void *args)
+@@ -1775,13 +1932,11 @@ static NTSTATUS oss_wow64_release_stream(void *args)
      struct
      {
          stream_handle stream;
@@ -2094,7 +2137,7 @@ index bcdcc72ba0..cecbfb1d0d 100644
      };
      oss_release_stream(&params);
      params32->result = params.result;
-@@ -2131,18 +2273,105 @@ static NTSTATUS oss_wow64_aux_message(void *args)
+@@ -2131,18 +2286,105 @@ static NTSTATUS oss_wow64_aux_message(void *args)
      return oss_aux_message(&params);
  }
  

@@ -783,6 +783,26 @@ val LOGGABLES: List<Loggable> = listOf(
         oneSessionFrom = WineChannelLevel.WARNINGS,
     ),
     wineChannel(
+        channel = "fsync",
+        secondary = "Whether fast synchronisation started, and every wait it serves.",
+        caution = "One line per wait and wake once it is running.",
+        // The channel that answers "is fsync actually on?", which nothing else
+        // does. Wine is asked for fsync by default (see SessionEnvironment), it
+        // needs POSIX shared memory that bionic does not have — patches/wine/0020
+        // backs the region with a plain file — and its failure mode is exit(1)
+        // rather than a fallback. So "did it start" is a real question with three
+        // possible answers, and at Errors this channel is where the answer is:
+        // fsync_init()'s own ERR lines name the futex_waitv and shared-memory
+        // cases separately.
+        //
+        // Its trace tier is also how vkd3d-proton's queue waits are profiled --
+        // programs/vkd3d-fsync-log-to-profile.py parses exactly this channel and
+        // documents the invocation as `WINEDEBUG=+fsync,... WINEFSYNC=1`. That is
+        // the intended way to see whether D3D12 fence waits are being served by a
+        // futex or by a round trip to wineserver.
+        oneSessionFrom = WineChannelLevel.EVERYTHING,
+    ),
+    wineChannel(
         channel = "msg",
         secondary = "Every window message the program receives.",
         caution = "Includes mouse movement, so it fires whenever the screen is touched.",

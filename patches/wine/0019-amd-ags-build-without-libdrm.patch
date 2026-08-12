@@ -26,31 +26,30 @@ side is already written to handle. amd_ags_x64_main.c computes
 so an init() that fails leaves the DLL present and reporting no AMD hardware,
 which is precisely what happens on any machine with an NVIDIA or Intel GPU.
 diff --git a/dlls/amd_ags_x64/unixlib.c b/dlls/amd_ags_x64/unixlib.c
-index d34a162b55..7e0d8c406d 100644
+index d34a162b55..2c9599b439 100644
 --- a/dlls/amd_ags_x64/unixlib.c
 +++ b/dlls/amd_ags_x64/unixlib.c
-@@ -31,9 +31,31 @@
+@@ -31,9 +31,30 @@
  #include <fcntl.h>
  #include <errno.h>
  
 +/* VESSEL: libdrm is not in the Android NDK, and AGS can never apply here.
 + *
 + * Proton includes these unconditionally, which is safe on the Linux desktop it
-+ * targets and fails in an NDK sysroot with
++ * targets and fatal in an NDK sysroot:
 + *     dlls/amd_ags_x64/unixlib.c:34:10: fatal error: 'xf86drm.h' file not found
-+ * Configure already probes for both (WINE_PACKAGE_FLAGS(DRM)/(DRMAMDGPU)), so
-+ * the guard is the macros it defines rather than __ANDROID__: a Linux build
-+ * with libdrm keeps every line of this file.
++ * Configure already probes for both packages, so the guard is the macros it
++ * defines rather than __ANDROID__: a Linux build with libdrm keeps every line.
 + *
 + * The DLL is kept and only its unix half is stubbed, which is the important
 + * half of this decision. amd_ags_x64 is AMD's GPU Services shim and on an
 + * Adreno it could only ever answer "no AMD GPU" -- but disabling the module
-+ * outright would remove amd_ags_x64.dll, and a game that lists it in its import
++ * outright would remove amd_ags_x64.dll, and a game listing it in its import
 + * table would then fail to start rather than fall back. The PE side already
 + * handles exactly this case: amd_ags_x64_main.c computes
 + *     unix_lib_initialized = !__wine_init_unix_call() && !AMD_AGS_CALL( init, NULL );
-+ * so an init that returns failure is a supported state, and is the same state a
-+ * machine with no AMD card reaches.
++ * so an init that fails is a supported state, and is the same state a machine
++ * with no AMD card reaches.
 + */
 +#if defined(HAVE_XF86DRM_H) && defined(HAVE_AMDGPU_DRM_H)
 +#define VESSEL_HAVE_AMDGPU
@@ -61,7 +60,7 @@ index d34a162b55..7e0d8c406d 100644
  
  #include "ntstatus.h"
  #define WIN32_NO_STATUS
-@@ -48,6 +70,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(amd_ags);
+@@ -48,6 +69,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(amd_ags);
  
  #define MAX_DEVICE_COUNT 64
  
@@ -70,7 +69,7 @@ index d34a162b55..7e0d8c406d 100644
  static unsigned int device_count;
  static struct drm_amdgpu_info_device *amd_info;
  
-@@ -276,6 +300,22 @@ static NTSTATUS get_device_info( void *args )
+@@ -276,6 +299,21 @@ static NTSTATUS get_device_info( void *args )
      return STATUS_NOT_FOUND;
  }
  
@@ -78,8 +77,7 @@ index d34a162b55..7e0d8c406d 100644
 +
 +static NTSTATUS init( void *args )
 +{
-+    TRACE("Built without libdrm; no AMD GPU can be reported.
-+");
++    TRACE( "Built without libdrm; no AMD GPU can be reported.\n" );
 +    return STATUS_NOT_SUPPORTED;
 +}
 +

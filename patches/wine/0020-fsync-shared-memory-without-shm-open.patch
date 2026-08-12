@@ -1,0 +1,221 @@
+ntdll,server: POSIX shared memory for a libc that has none.
+
+Three files in Proton's tree call shm_open()/shm_unlink(). Bionic implements
+neither, and does not merely omit the symbols -- Android's libc declares the
+whole option group missing, in bits/posix_limits.h:
+
+    #define _POSIX_SHARED_MEMORY_OBJECTS __BIONIC_POSIX_FEATURE_MISSING
+    /* mmap/munmap are implemented, but shm_open/shm_unlink are not. */
+
+with no stub to link against, so each fails to compile:
+
+    dlls/ntdll/unix/fsync.c:474:   call to undeclared function 'shm_open'
+    dlls/ntdll/unix/virtual.c:6610: call to undeclared function 'shm_open'
+    server/fsync.c:103:            call to undeclared function 'shm_open'
+
+Two of them are fsync -- Proton's fast synchronisation, the client half and the
+wineserver half -- and the third is FEX's per-process statistics region, which
+is the same call Vessel once carried a patch for against bylaws' tree. Valve's
+tree has that hook too.
+
+A plain file is a complete substitute, because that is all shm_open ever was:
+on glibc it opens a path under /dev/shm, which is a tmpfs. Everything the
+callers rely on comes from mmap( MAP_SHARED ) on the returned descriptor, and
+MAP_SHARED on a regular file is the same shared, coherent mapping. ftruncate,
+mmap, close and unlink are untouched, and so is every line of fsync's own logic
+-- the callers still build the names they always did.
+
+In a header rather than three copies. include/ is on the include path for both
+the server and the ntdll unix half, which are otherwise separate build halves,
+and a shim that fsync's two ends must agree about is exactly the thing not to
+duplicate.
+
+The new header is registered in include/Makefile.in, which is not optional and
+not cosmetic: tools/makedep resolves #include against the files the makefiles
+declare, not against the filesystem, so an unlisted header that exists on disk
+still fails -- during config.status, with
+
+    dlls/ntdll/unix/fsync.c:53: error: wine/vessel_shm.h: No such file or directory
+    config.status: error: could not create Makefile
+
+The directory has to be one every process in the session agrees on and can
+write to. XDG_RUNTIME_DIR is that directory and Vessel always sets it (it is in
+BOOTSTRAP_SESSION_ENV); TMPDIR and a fixed path follow only so that an unset
+variable cannot silently send two processes to two different files -- which for
+fsync means a client that cannot find the server's region and calls exit(1).
+
+Guarded on HAVE_SHM_OPEN, which configure already defines through
+AC_SEARCH_LIBS(shm_open, rt), so a glibc build gets the real functions and
+compiles none of it. `static inline`, so the two of three callers that use only
+shm_open raise no unused-function warning.
+
+**Compiling is not working.** This makes fsync buildable; whether it engages on
+this device is a separate question and is unmeasured. SessionEnvironment.kt asks
+for it by default and deliberately leaves WINEFSYNC out of RESERVED_SESSION_ENV
+so a container can set WINEFSYNC=0 and return to server-side waits -- which
+matters because fsync does not degrade: fsync_init() ends in exit(1) rather than
+falling back. The `fsync` Wine debug channel is offered in Diagnostics for
+exactly this: at Errors it reports which of the two failure paths was taken, and
+at Everything it is the channel vkd3d-proton's own
+programs/vkd3d-fsync-log-to-profile.py parses to show whether D3D12 fence waits
+are served by a futex or by a round trip to wineserver.
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index 25d41cac79..908622b28e 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -50,6 +50,7 @@
+ #include "windef.h"
+ #include "winternl.h"
+ #include "wine/debug.h"
++#include "wine/vessel_shm.h"
+ #include "wine/server.h"
+ 
+ #include "unix_private.h"
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 9689781320..36d34b55dd 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -96,6 +96,7 @@
+ #include "winternl.h"
+ #include "ddk/wdm.h"
+ #include "wine/list.h"
++#include "wine/vessel_shm.h"
+ #include "wine/rbtree.h"
+ #include "unix_private.h"
+ #include "wine/debug.h"
+diff --git a/include/Makefile.in b/include/Makefile.in
+index e0987cead8..d086bfc243 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -993,6 +993,7 @@ SOURCES = \
+ 	wine/svcctl.idl \
+ 	wine/test.h \
+ 	wine/unixlib.h \
++	wine/vessel_shm.h \
+ 	wine/vulkan.h \
+ 	wine/vulkan_driver.h \
+ 	wine/wgl.h \
+diff --git a/include/wine/vessel_shm.h b/include/wine/vessel_shm.h
+new file mode 100644
+index 0000000000..761b277f8b
+--- /dev/null
++++ b/include/wine/vessel_shm.h
+@@ -0,0 +1,106 @@
++/*
++ * VESSEL: POSIX shared memory objects, for a libc that has none.
++ *
++ * Copyright 2026 the Vessel project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++/*
++ * Android's libc does not implement shm_open()/shm_unlink(), and says so:
++ *
++ *     bits/posix_limits.h:
++ *     #define _POSIX_SHARED_MEMORY_OBJECTS __BIONIC_POSIX_FEATURE_MISSING
++ *     // mmap/munmap are implemented, but shm_open/shm_unlink are not.
++ *
++ * There is no stub in libc either, so a translation unit that calls them does
++ * not compile, let alone link. Three in Proton's tree do:
++ *
++ *     dlls/ntdll/unix/fsync.c   the client half of fast synchronisation
++ *     server/fsync.c            the wineserver half of it
++ *     dlls/ntdll/unix/virtual.c FEX's per-process statistics region
++ *
++ * A plain file is a complete substitute, because that is all shm_open ever was.
++ * On glibc it opens a path under /dev/shm, which is a tmpfs; every property the
++ * callers rely on comes from mmap( MAP_SHARED ) on the resulting descriptor,
++ * and MAP_SHARED on a regular file gives the same shared, coherent mapping.
++ * ftruncate, mmap, close and unlink are unchanged.
++ *
++ * The directory must be one that every process in the session agrees on and can
++ * write to. XDG_RUNTIME_DIR is that directory and Vessel always sets it; TMPDIR
++ * and a fixed path follow only so that an unset variable cannot silently send
++ * two processes to two different files -- which, for fsync, would mean a client
++ * that cannot find the server's region and calls exit(1).
++ *
++ * A leading '/' is mandatory in a POSIX shm name and is not part of any path,
++ * so it is dropped. Callers are left exactly as they were: each still builds
++ * the same name it always did, so both fsync halves still agree.
++ *
++ * Guarded on HAVE_SHM_OPEN, which configure defines through
++ * AC_SEARCH_LIBS(shm_open, rt), rather than on __ANDROID__. A glibc build gets
++ * the real functions and compiles none of this.
++ */
++
++#ifndef __WINE_VESSEL_SHM_H
++#define __WINE_VESSEL_SHM_H
++
++#ifndef HAVE_SHM_OPEN
++
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++static inline int vessel_shm_path( char *path, size_t len, const char *name )
++{
++    const char *dir = getenv( "XDG_RUNTIME_DIR" );
++
++    if (!dir || !*dir) dir = getenv( "TMPDIR" );
++    if (!dir || !*dir) dir = "/data/local/tmp";
++    if (*name == '/') name++;
++    if ((size_t)snprintf( path, len, "%s/%s", dir, name ) >= len)
++    {
++        errno = ENAMETOOLONG;
++        return -1;
++    }
++    return 0;
++}
++
++static inline int vessel_shm_open( const char *name, int flags, mode_t mode )
++{
++    char path[PATH_MAX];
++
++    if (vessel_shm_path( path, sizeof(path), name ) == -1) return -1;
++    return open( path, flags, mode );
++}
++
++static inline int vessel_shm_unlink( const char *name )
++{
++    char path[PATH_MAX];
++
++    if (vessel_shm_path( path, sizeof(path), name ) == -1) return -1;
++    return unlink( path );
++}
++
++#define shm_open   vessel_shm_open
++#define shm_unlink vessel_shm_unlink
++
++#endif /* HAVE_SHM_OPEN */
++
++#endif /* __WINE_VESSEL_SHM_H */
+diff --git a/server/fsync.c b/server/fsync.c
+index 7d3ec646f9..428691ef15 100644
+--- a/server/fsync.c
++++ b/server/fsync.c
+@@ -44,6 +44,7 @@
+ #include "handle.h"
+ #include "request.h"
+ #include "fsync.h"
++#include "wine/vessel_shm.h"
+ 
+ #include "pshpack4.h"
+ #include "poppack.h"
