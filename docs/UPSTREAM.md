@@ -72,3 +72,42 @@ device:
 Turning the path off costs 21%, and the native control moved 0.2 ms, so that is
 the ordering path and not thermals. Oryon does not have the erratum and the
 current blocklist is correct.
+
+## Wine: `kernelbase` does not export `FlsGetValue2`
+
+**Why it is worth filing.** The Visual C++ runtime a modern game ships resolves
+it by name at startup, so a title carrying its own `VCRUNTIME140.dll` asks for it
+on every platform. Wine has `FlsAlloc`, `FlsFree`, `FlsGetValue` and
+`FlsSetValue`; the `2` variant is absent from `dlls/kernelbase/kernelbase.spec`
+in 11.14 and, as far as could be found, from master. `GetProcAddress` returns
+NULL and the caller stores that as a function pointer.
+
+Observed under Wine 11.14 (ARM64EC, FEX-2608, Android):
+
+```
+module:LdrGetProcedureAddress "FlsGetValue2" (ordinal 0)
+  not found in L"C:\windows\system32\kernelbase.dll"
+```
+
+**The implementation is `FlsGetValue` without its `SetLastError(ERROR_SUCCESS)`**,
+which is the whole reason Windows carries a second entry point — the write to the
+TEB is pure cost on a path the CRT takes constantly:
+
+```c
+PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue2( DWORD index )
+{
+    void *data;
+    if (!set_ntstatus( RtlFlsGetValue( index, &data ))) return NULL;
+    return data;
+}
+```
+
+`patches/wine/0017` carries this and the matching `.spec` entry. Verified in the
+built DLL rather than on the build exiting zero — `strings` on
+`lib/wine/aarch64-windows/kernelbase.dll` lists it beside `FlsGetValue`, in both
+the aarch64 and ARM64EC trees.
+
+**Filed as a gap, not as a fix for the crash it was found chasing.** The title
+that surfaced it still dies afterwards, at an unrelated address, so this closes a
+real hole in the export table and nothing more. That is worth saying in the issue
+so nobody reads it as a regression report.
