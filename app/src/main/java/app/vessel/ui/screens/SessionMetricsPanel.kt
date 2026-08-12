@@ -247,6 +247,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
 
         VMetricGraphCard(
             title = "memory",
+            axisStyle = ::formatMegabytes,
+            spanSeconds = history.spanSeconds,
             value = sample.sessionRssMb?.let(::formatMegabytes),
             stats = buildList {
                 addAll(history.stats { it.sessionRssMb }.stats(::formatMegabytes))
@@ -284,6 +286,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
         val powerCeiling = history.peak { magnitude(it.powerMilliwatts) }
         VMetricGraphCard(
             title = if ((sample.powerMilliwatts ?: 0) < 0) "power · charging" else "power · total draw",
+            axisStyle = ::formatWatts,
+            spanSeconds = history.spanSeconds,
             value = sample.powerMilliwatts?.let(::formatWatts),
             stats = history.stats { magnitude(it.powerMilliwatts) }.stats(::formatWatts),
             series = listOfNotNull(
@@ -335,6 +339,8 @@ private fun FrameRateCard(state: SessionMetricsState) {
 
     VMetricGraphCard(
         title = "frames",
+        axisStyle = { "$it" },
+        spanSeconds = history.spanSeconds,
         value = stats?.current?.roundToInt()?.toString(),
         unit = "fps",
         stats = buildList {
@@ -408,6 +414,8 @@ private fun D3dCards(state: SessionMetricsState) {
     if (drawPeak == null) {
         VMetricGraphCard(
             title = "d3d",
+            axisStyle = { "$it" },
+            spanSeconds = history.spanSeconds,
             value = null,
             series = emptyList(),
             unavailable = state.unavailable("d3d") ?: NO_D3D,
@@ -421,6 +429,8 @@ private fun D3dCards(state: SessionMetricsState) {
     // normalising them separately would hide exactly that.
     VMetricGraphCard(
         title = "d3d · draw calls",
+        axisStyle = { "$it" },
+        spanSeconds = history.spanSeconds,
         value = sample.d3dDrawCallsPerFrame?.let(::oneDecimal),
         unit = "/frame",
         stats = buildList {
@@ -455,6 +465,8 @@ private fun D3dCards(state: SessionMetricsState) {
     )
     VMetricGraphCard(
         title = "d3d · submissions",
+        axisStyle = { "$it" },
+        spanSeconds = history.spanSeconds,
         value = sample.d3dSubmissionsPerFrame?.let(::oneDecimal),
         unit = "/frame",
         stats = buildList {
@@ -484,6 +496,8 @@ private fun D3dCards(state: SessionMetricsState) {
     val vramPeak = history.peak { it.d3dMemAllocatedMb } ?: 0
     VMetricGraphCard(
         title = "d3d · video memory",
+        axisStyle = ::formatMegabytes,
+        spanSeconds = history.spanSeconds,
         value = sample.d3dMemUsedMb?.let(::formatMegabytes),
         stats = buildList {
             addAll(history.stats { it.d3dMemUsedMb }.stats(::formatMegabytes))
@@ -633,6 +647,8 @@ private fun TemperatureCard(state: SessionMetricsState) {
     val sample = history.latest
     VMetricGraphCard(
         title = "temperature",
+        axisStyle = ::formatDeciCelsius,
+        spanSeconds = history.spanSeconds,
         value = sample?.cpuTempDeciC?.let(::formatDeciCelsius),
         unit = "°C",
         stats = listOfNotNull(
