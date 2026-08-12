@@ -32,6 +32,14 @@ import app.vessel.ui.theme.VElev
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
 import app.vessel.ui.theme.vCard
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 /**
  * Which of the telemetry colours a series takes.
@@ -252,11 +260,30 @@ fun VMetricGraphCard(
     unit: String? = null,
     stats: List<VMetricStat> = emptyList(),
     unavailable: String? = null,
+    /**
+     * Whether tapping the card opens it full screen. See [VMetricGraphDialog].
+     *
+     * On by default because every card in the Metrics panel wants it, and off
+     * for the copy *inside* the dialog, which would otherwise open another one.
+     */
+    zoomable: Boolean = true,
 ) {
+    // **Tap the card, fill the screen with it.**
+    //
+    // A sparkline about 44 dp tall in a scrolling column is enough to see that
+    // something moved and not enough to see when. That is fine for the rail,
+    // whose job is a glance, and wrong for the panel, whose job is a diagnosis —
+    // and today the difference decided an argument twice: a clock line sagging
+    // mid-run, and a frame rate whose three identical baselines varied 20%.
+    var zoomed by rememberSaveable(title) { mutableStateOf(false) }
+    if (zoomed) {
+        VMetricGraphDialog(title, value, unit, stats, series, unavailable) { zoomed = false }
+    }
     Column(
         modifier
             .fillMaxWidth()
             .vCard()
+            .then(if (zoomable) Modifier.clickable { zoomed = true } else Modifier)
             .padding(Vessel.metrics.s11),
         verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
     ) {
@@ -573,3 +600,59 @@ private val SampleCpu: List<Int?> =
 /** Two nulls in the middle: the gap is the case most worth being able to see. */
 private val SampleGpu: List<Int?> =
     listOf(4, 9, 22, 38, 51, null, null, 64, 70, 77, 81, 72, 68, 71, 75, 77)
+
+/**
+ * One metric card, given the whole screen.
+ *
+ * `usePlatformDefaultWidth = false` because the axis that matters is time, and a
+ * ten-minute run squeezed into a dialog's default width is the problem this
+ * exists to solve rather than a smaller version of it.
+ *
+ * The card inside is `zoomable = false`: it is already zoomed, and a second
+ * dialog stacked on the first is a thing only a bug does.
+ */
+@Composable
+private fun VMetricGraphDialog(
+    title: String,
+    value: String?,
+    unit: String?,
+    stats: List<VMetricStat>,
+    series: List<VMetricSeries>,
+    unavailable: String?,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(Vessel.colors.bg)
+                .padding(Vessel.metrics.s11),
+            verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title.uppercase(),
+                    style = Vessel.type.overline,
+                    color = Vessel.colors.textMuted,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "Close",
+                    style = Vessel.type.bodySmall,
+                    color = Vessel.colors.accent,
+                    modifier = Modifier.clickable(onClick = onDismiss).padding(Vessel.metrics.s6),
+                )
+            }
+            VMetricGraphCard(
+                title = title,
+                value = value,
+                series = series,
+                unit = unit,
+                stats = stats,
+                unavailable = unavailable,
+                zoomable = false,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
