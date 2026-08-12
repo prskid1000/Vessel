@@ -42,6 +42,7 @@ import app.vessel.ui.components.VComponentReadout
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VDropdownField
+import app.vessel.ui.components.VExpander
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
@@ -426,10 +427,15 @@ private fun ContainerSheetContent(
 /**
  * One manifest group.
  *
- * The group's title is deliberately *not* drawn. The manifest declares two groups
- * for four controls, and a heading above a single field on a sheet this short is
- * a label for a label. The group's help sentence is kept, because that one says
- * something the field names do not.
+ * The group's title is deliberately *not* drawn. The manifest declares two
+ * groups, and a heading above one or two fields is a label for a label. The
+ * group's help sentence is kept, because that one says something the field names
+ * do not.
+ *
+ * A run of params sharing a [ParamSpec.section] folds into one closed
+ * [VExpander] instead — which is a different thing from a group and not a second
+ * level of one: a group says what a setting is about, a section says how much of
+ * it a reader has to walk past to reach the next thing that matters.
  */
 @Composable
 private fun ParamGroup(group: EditorGroup, onParam: (String, ParamValue) -> Unit) {
@@ -446,7 +452,24 @@ private fun ParamGroup(group: EditorGroup, onParam: (String, ParamValue) -> Unit
         while (index < group.params.size) {
             val here = group.params[index]
             val next = group.params.getOrNull(index + 1)
-            if (here.pairs() && next != null && next.pairs()) {
+            val section = here.resolved.spec.section
+            if (section != null) {
+                // The whole consecutive run, and no further — see ParamSpec.section
+                // for why a section may not gather params declared pages apart.
+                var end = index
+                while (end < group.params.size &&
+                    group.params[end].resolved.spec.section == section
+                ) {
+                    end += 1
+                }
+                val folded = group.params.subList(index, end)
+                VExpander(section, folded.size) {
+                    folded.forEach { ParamControl(it, onParam) }
+                }
+                index = end
+            } else if (here.pairs() && next != null && next.pairs() &&
+                next.resolved.spec.section == null
+            ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
                     Column(Modifier.weight(1f)) { ParamControl(here, onParam) }
                     Column(Modifier.weight(1f)) { ParamControl(next, onParam) }

@@ -121,7 +121,8 @@
           "title": "Edge direction",
           "help": "Reconstructs a diagonal along the direction of its edge instead of evenly around it, which is most of what a 2x upscale does; Qualcomm rates the extra cost as minimal but it is not free.",
           "type": "bool",
-          "default": true
+          "default": true,
+          "section": "Upscaler tuning"
         },
         {
           "key": "display.sgsrSharpness",
@@ -142,7 +143,8 @@
             "2.0": "2.0  (Qualcomm default)",
             "2.5": "2.5",
             "3.0": "3.0  (hard)"
-          }
+          },
+          "section": "Upscaler tuning"
         },
         {
           "key": "display.sgsrEdgeThreshold",
@@ -151,7 +153,8 @@
           "type": "int",
           "min": 1,
           "max": 64,
-          "default": 8
+          "default": 8,
+          "section": "Upscaler tuning"
         },
         {
           "key": "display.sgsrMaxDelta",
@@ -160,7 +163,8 @@
           "type": "int",
           "min": 1,
           "max": 64,
-          "default": 23
+          "default": 23,
+          "section": "Upscaler tuning"
         }
       ]
     },

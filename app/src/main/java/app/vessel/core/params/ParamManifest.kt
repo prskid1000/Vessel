@@ -162,6 +162,25 @@ data class ParamSpec(
     /** Ordering hint only; the editor draws groups in manifest order regardless. */
     val dependsOn: String? = null,
 
+    /**
+     * Folds this param, and the ones declared beside it carrying the same string,
+     * into one collapsed block titled by it.
+     *
+     * **A group is what a setting belongs to; a section is how much of it a
+     * reader has to walk past.** The two are different questions and this is the
+     * second, which is why it is a param field rather than a second level of
+     * [ParamGroup]: the upscaler's four constants belong to Display exactly as
+     * much as Resolution does — they are simply four controls whose right value
+     * is the default, and which are inert unless a container is being magnified.
+     * Four such controls on the sheet push Resolution, the one dial that matters
+     * on this phone, off the first screen.
+     *
+     * Only a *consecutive* run collapses together, so the manifest's order stays
+     * the sheet's order and a section cannot silently gather params declared
+     * pages apart.
+     */
+    val section: String? = null,
+
     /** The value that earns [warnText]. Compared against the current value as JSON. */
     val warnWhen: JsonElement? = null,
     val warnText: String? = null,

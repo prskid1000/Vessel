@@ -1,5 +1,8 @@
 package app.vessel.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,8 +15,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -41,6 +50,66 @@ fun VCaution(text: String, modifier: Modifier = Modifier) {
             modifier = Modifier.size(Vessel.metrics.iconSm).padding(top = Vessel.metrics.hairline),
         )
         Text(text, style = Vessel.type.bodySmall, color = Vessel.colors.warn)
+    }
+}
+
+/**
+ * A titled block that starts closed.
+ *
+ * **Closed is the whole point, so there is no way to ask for it open.** The
+ * callers are runs of settings whose right value is the default — the shape is
+ * "here are four more knobs if you came looking for them", and one that opened
+ * itself would be four controls the reader has to scroll past, which is the
+ * thing being fixed.
+ *
+ * The count is in the header rather than left to be discovered by opening it: a
+ * disclosure whose size is unknown is one a reader has to open to dismiss.
+ *
+ * The caret turns rather than swapping glyph, because the rotation is what says
+ * *this same block* changed state; two different arrows read as two controls.
+ */
+@Composable
+fun VExpander(
+    title: String,
+    count: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    val turn by animateFloatAsState(if (open) 180f else 0f, label = "caret")
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(Vessel.metrics.shapeMd)
+                .clickable { open = !open }
+                .heightIn(min = Vessel.metrics.touchTarget)
+                .padding(horizontal = Vessel.metrics.s6),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                title,
+                style = Vessel.type.body,
+                color = Vessel.colors.text,
+                modifier = Modifier.weight(1f),
+            )
+            Text("$count", style = Vessel.type.bodySmall, color = Vessel.colors.textMuted)
+            Icon(
+                VIcons.CaretDown,
+                contentDescription = null,
+                tint = Vessel.colors.textMuted,
+                modifier = Modifier.size(Vessel.metrics.iconSm).rotate(turn),
+            )
+        }
+        AnimatedVisibility(open) {
+            Column(
+                Modifier.padding(top = Vessel.metrics.s8),
+                verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11),
+            ) {
+                content()
+            }
+        }
     }
 }
 
