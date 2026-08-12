@@ -111,6 +111,21 @@ been watched working on the device.
   rather than reading a build's exit code — `build/wine.sh` prints
   `error: ANDROID_NDK_HOME is not set` and exits 0 when run outside Docker.
 
+- [x] **The on-screen pad is a controller, and the guest was never told.**
+  `refreshPads` asked Android how many *physical* controllers existed and offered
+  the guest that many. With none connected the answer was zero, no HID device was
+  created, and every frame the overlay produced went to a slot the guest did not
+  have. Reported as "the virtual controller does not work but a real one does",
+  which is exactly the shape of it — and it is why the bridge tested clean the
+  day it landed, with a Bluetooth pad connected throughout.
+
+  A glass control carrying a pad identity now makes slot 0 present, by the same
+  argument `mergedWith` already makes: the overlay and a physical pad are one
+  controller to the player. The test is `padControls.isNotEmpty()` rather than
+  "the overlay is visible", so a hand-built keyboard layout does not conjure a
+  device that answers nothing, and presence is recomputed when the layout changes
+  because switching to a pad layout mid-session should give the guest a pad.
+
 - [x] **The input screen is one list of controls.** It had been showing one
   controller under two mental models — a free-form overlay you could add to, and
   a fixed table of twenty-four rows you could only bind — and merging the tabs

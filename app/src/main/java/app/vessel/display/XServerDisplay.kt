@@ -1452,6 +1452,10 @@ private class SessionSurfaceView(
             overlay.config = value.config
             touchLayout = value.overlay
             pressedControls.clear()
+            // A layout that gained or lost its pad identities changes whether the
+            // guest should have a controller at all -- see `refreshPads`. Cheap:
+            // `setPresent` is silent when nothing changed.
+            refreshPads()
             syncLookTimer()
             invalidate()
         }
@@ -1889,8 +1893,31 @@ private class SessionSurfaceView(
      */
     private fun refreshPads() {
         val found = controllers().size
-        for (slot in 0 until PadBridge.SLOTS) padBridge.setPresent(slot, slot < found)
-        Log.i("VesselDisplay", "$found controller(s) offered to the guest")
+
+        /**
+         * **The on-screen pad counts as a controller, and it did not.**
+         *
+         * This asked Android how many physical controllers exist and offered the
+         * guest that many. With none plugged in the answer was zero, no HID
+         * device was created, and every frame the overlay produced went to a slot
+         * the guest did not have — reported as "the virtual controller does not
+         * work but a real one does", which is exactly the shape of that bug.
+         *
+         * A glass control that carries a pad identity is a gamepad control by
+         * the same argument the merge in `mergedWith` already makes: the overlay
+         * and a physical pad are one controller to the player, so either being
+         * present makes slot 0 present. `padControls` is the test rather than
+         * "the overlay is visible", because a hand-built keyboard layout puts
+         * nothing on the pad and should not conjure a device that answers
+         * nothing.
+         *
+         * Only slot 0 is shared. A second physical pad is still its own slot.
+         */
+        val glass = touchLayout.controls.any { it.padControls.isNotEmpty() }
+        for (slot in 0 until PadBridge.SLOTS) {
+            padBridge.setPresent(slot, slot < found || (slot == 0 && glass))
+        }
+        Log.i("VesselDisplay", "$found controller(s)${if (glass) " + the overlay" else ""} offered to the guest")
     }
 
     /** Every non-virtual game controller Android currently knows about. */
