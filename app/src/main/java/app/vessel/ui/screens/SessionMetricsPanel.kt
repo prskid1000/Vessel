@@ -223,6 +223,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             series = listOfNotNull(
                 history.seriesOrNull(100, VSeriesTone.Primary, VSeriesForm.Area, "cpu") { it.cpuPercent },
             ),
+            axisStyle = { "$it%" },
+            spanSeconds = history.spanSeconds,
             unavailable = state.unavailable("cpu"),
         )
 
@@ -236,6 +238,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             series = listOfNotNull(
                 history.seriesOrNull(100, VSeriesTone.Secondary, VSeriesForm.Area, "gpu") { it.gpuPercent },
             ),
+            axisStyle = { "$it%" },
+            spanSeconds = history.spanSeconds,
             unavailable = state.unavailable("gpu"),
         )
 
@@ -616,6 +620,8 @@ private fun CoreClockCard(state: SessionMetricsState) {
             )
         },
         series = listOfNotNull(meanSeries) + series,
+        axisStyle = ::formatMegahertz,
+        spanSeconds = history.spanSeconds,
         unavailable = state.unavailable("clock") ?: if (series.isEmpty()) NO_CORE_CLOCKS else null,
     )
 }

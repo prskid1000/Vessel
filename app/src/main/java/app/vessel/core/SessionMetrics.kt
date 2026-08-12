@@ -228,6 +228,21 @@ class MetricHistory private constructor(
     /** How long the window spans, which for a replayed trace is the run's length. */
     val elapsedMs: Long get() = samples.lastOrNull()?.elapsedMs ?: 0L
 
+    /**
+     * Seconds the window covers, for a graph's X axis.
+     *
+     * The span of the *window*, not of the run: this is a bounded ring, so on a
+     * long session the oldest sample here is minutes after the session started
+     * and labelling the left edge `0s` would be a lie. The axis reads
+     * `-Ns … now`, which is true of both a short run and a clipped one.
+     */
+    val spanSeconds: Int
+        get() {
+            val first = samples.firstOrNull()?.elapsedMs ?: return 0
+            val last = samples.lastOrNull()?.elapsedMs ?: return 0
+            return ((last - first) / 1000L).toInt()
+        }
+
     operator fun plus(sample: MetricSample): MetricHistory {
         val next = if (samples.size < capacity) samples + sample else samples.drop(1) + sample
         return MetricHistory(next, capacity)

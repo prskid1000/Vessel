@@ -25,6 +25,9 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -109,11 +112,25 @@ fun VMetricGraph(
     series: List<VMetricSeries>,
     modifier: Modifier = Modifier,
     height: Dp = Vessel.metrics.graphHeight,
+    /**
+     * How to write a Y value — `{ "$it%" }`, `{ formatMegahertz(it) }`.
+     *
+     * Null draws no axis at all, which is right for a spark and for any card
+     * whose series do not share a unit. The caller knows which it has; this does
+     * not, and guessing would put `100` beside a line measured in megabytes.
+     */
+    axisStyle: ((Int) -> String)? = null,
+    /** The window the samples cover, for the X labels. Zero draws none. */
+    spanSeconds: Int = 0,
 ) {
     val colors = Vessel.colors
+    val axisType = Vessel.type.monoSmall
     val metrics = Vessel.metrics
     val divider = colors.divider
     val resolved = series.map { it to it.tone.ink(colors) }
+
+    val measurer = rememberTextMeasurer()
+    val axisInk = colors.textMuted
 
     Canvas(
         modifier
@@ -124,18 +141,58 @@ fun VMetricGraph(
             .background(colors.surfaceSunken, metrics.shapeSm)
             .padding(horizontal = metrics.s6, vertical = metrics.s3),
     ) {
-        drawLine(
-            color = divider,
-            start = Offset(0f, size.height / 2f),
-            end = Offset(size.width, size.height / 2f),
-            strokeWidth = metrics.hairline.toPx(),
-        )
+        // **Axes only when there is room for them.** A rail spark is 44 dp tall
+        // and three labels down its side would leave nothing to draw the line
+        // in; the number beside it already says what the last reading was. They
+        // appear at the height the panel and the full-screen view use, which are
+        // the two places somebody is reading the shape rather than glancing.
+        val labelled = size.height > 90f && axisStyle != null && series.isNotEmpty()
+        val yGutter = if (labelled) 30.dp.toPx() else 0f
+        val xGutter = if (labelled) 13.dp.toPx() else 0f
+        val plot = Size(size.width - yGutter, size.height - xGutter)
+
+        // **One ceiling for the card, because a card is one unit.** Every series
+        // here shares a scale — eight cores in MHz, four sensors in °C, one
+        // percentage — which is what makes a labelled Y axis honest at all. The
+        // largest ceiling wins so a series normalised against a smaller one
+        // still lands inside the box.
+        val ceiling = series.maxOf { it.ceiling }
+        for (frac in floatArrayOf(0f, 0.5f, 1f)) {
+            val y = plot.height - plot.height * frac
+            drawLine(
+                color = if (frac == 0.5f) divider else divider.copy(alpha = 0.45f),
+                start = Offset(yGutter, y),
+                end = Offset(size.width, y),
+                strokeWidth = metrics.hairline.toPx(),
+            )
+            if (labelled) {
+                val text = measurer.measure(axisStyle!!((ceiling * frac).toInt()), axisType.copy(color = axisInk))
+                drawText(
+                    text,
+                    topLeft = Offset(
+                        yGutter - text.size.width - 3.dp.toPx(),
+                        (y - text.size.height / 2f).coerceIn(0f, plot.height - text.size.height),
+                    ),
+                )
+            }
+        }
+
+        // X is the window the samples cover, oldest on the left. Labelled as
+        // "ago" rather than as a clock: the trace is a ring and its left edge is
+        // wherever the window starts, not a time of day anyone can act on.
+        if (labelled && spanSeconds > 0) {
+            for ((frac, text) in listOf(0f to "-${spanSeconds}s", 1f to "now")) {
+                val label = measurer.measure(text, axisType.copy(color = axisInk))
+                val x = yGutter + (plot.width - label.size.width) * frac
+                drawText(label, topLeft = Offset(x, plot.height + 1.dp.toPx()))
+            }
+        }
 
         resolved.forEach { (line, ink) ->
             // Each run of consecutive readings is its own path. Two runs either
             // side of a gap are two separate strokes, which is what makes a
             // missing sample look missing.
-            runsOf(line).forEach { run ->
+            runsOf(line, yGutter, plot).forEach { run ->
                 drawRun(run, line.form, ink, metrics.graphStroke.toPx(), metrics.graphDot.toPx())
             }
         }
@@ -207,12 +264,16 @@ private fun DrawScope.drawRun(
  * samples in the middle of a hundred draws in the middle, not across the whole
  * box.
  */
-private fun DrawScope.runsOf(series: VMetricSeries): List<List<Offset>> {
+private fun DrawScope.runsOf(
+    series: VMetricSeries,
+    left: Float = 0f,
+    plot: Size = size,
+): List<List<Offset>> {
     val count = series.values.size
     if (count == 0) return emptyList()
     val span = (series.ceiling - series.floor).toFloat()
     if (span <= 0f) return emptyList()
-    val step = if (count > 1) size.width / (count - 1) else 0f
+    val step = if (count > 1) plot.width / (count - 1) else 0f
 
     val runs = mutableListOf<List<Offset>>()
     var current = mutableListOf<Offset>()
@@ -223,7 +284,7 @@ private fun DrawScope.runsOf(series: VMetricSeries): List<List<Offset>> {
             return@forEachIndexed
         }
         val fraction = ((value - series.floor) / span).coerceIn(0f, 1f)
-        current += Offset(index * step, size.height - fraction * size.height)
+        current += Offset(left + index * step, plot.height - fraction * plot.height)
     }
     if (current.isNotEmpty()) runs += current
     return runs
@@ -276,6 +337,10 @@ fun VMetricGraphCard(
      * for the copy *inside* the dialog, which would otherwise open another one.
      */
     zoomable: Boolean = true,
+    /** How to write a Y value for this card's unit. Null draws no Y axis. */
+    axisStyle: ((Int) -> String)? = null,
+    /** Seconds of history the samples cover, for the X axis. Zero draws none. */
+    spanSeconds: Int = 0,
 ) {
     // **Tap the card, fill the screen with it.**
     //
@@ -286,7 +351,7 @@ fun VMetricGraphCard(
     // mid-run, and a frame rate whose three identical baselines varied 20%.
     var zoomed by rememberSaveable(title) { mutableStateOf(false) }
     if (zoomed) {
-        VMetricGraphDialog(series) { zoomed = false }
+        VMetricGraphDialog(series, axisStyle, spanSeconds) { zoomed = false }
     }
     Column(
         modifier
@@ -324,7 +389,7 @@ fun VMetricGraphCard(
             return@Column
         }
 
-        VMetricGraph(series)
+        VMetricGraph(series, axisStyle = axisStyle, spanSeconds = spanSeconds)
 
         if (series.size > 1) {
             // Wrapping, because eight cores is eight legend entries and a Row
@@ -628,7 +693,12 @@ private val SampleGpu: List<Int?> =
  * the point.
  */
 @Composable
-private fun VMetricGraphDialog(series: List<VMetricSeries>, onDismiss: () -> Unit) {
+private fun VMetricGraphDialog(
+    series: List<VMetricSeries>,
+    axisStyle: ((Int) -> String)?,
+    spanSeconds: Int,
+    onDismiss: () -> Unit,
+) {
     val context = LocalContext.current
     DisposableEffect(Unit) {
         val activity = context.findHostActivity()
@@ -644,7 +714,7 @@ private fun VMetricGraphDialog(series: List<VMetricSeries>, onDismiss: () -> Uni
                 .clickable(onClick = onDismiss)
                 .padding(Vessel.metrics.s8),
         ) {
-            VMetricGraph(series, Modifier.fillMaxSize(), height = 0.dp)
+            VMetricGraph(series, Modifier.fillMaxSize(), height = 0.dp, axisStyle = axisStyle, spanSeconds = spanSeconds)
         }
     }
 }
