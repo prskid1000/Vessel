@@ -14,10 +14,10 @@ index 8923911bba3..49600beca5e 100644
 -	ossmidi.c
 +	oss.c
 diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
-index 431264faf31..c48f0984a79 100644
+index 431264faf31..778f38ae772 100644
 --- a/dlls/wineoss.drv/oss.c
 +++ b/dlls/wineoss.drv/oss.c
-@@ -1,2166 +1,2291 @@
+@@ -1,2166 +1,2406 @@
 -/*
 - * OSS driver (unixlib)
 - *
@@ -2266,6 +2266,15 @@ index 431264faf31..c48f0984a79 100644
 +     * than being handed a cushion picked in advance.
 +     */
 +    int32_t last_xruns;
++    /**
++     * Passes to wait before trying to reopen a disconnected stream again.
++     *
++     * Zero means "try on the next failure". Set after a reopen that failed, so a
++     * device that is genuinely gone costs one attempt a second instead of a
++     * hundred -- `AAudioStreamBuilder_openStream` is not cheap and the timer
++     * thread runs every 10 ms.
++     */
++    UINT32 reopen_backoff;
 +    UINT64 written_frames, last_pos_frames;
 +    UINT32 period_frames, bufsize_frames, held_frames, tmp_buffer_frames, in_oss_frames;
 +    UINT32 lcl_offs_frames; /* offs into local_buffer where valid data starts */
@@ -2295,6 +2304,9 @@ index 431264faf31..c48f0984a79 100644
 +WINE_DEFAULT_DEBUG_CHANNEL(oss);
 +
 +static const REFERENCE_TIME def_period = 100000;
++
++/** Timer passes to skip after a reopen that failed. 100 x 10 ms is a second. */
++#define DISCONNECT_RETRY_PASSES 100
 +static const REFERENCE_TIME min_period = 50000;
 +
 +static ULONG_PTR zero_bits = 0;
@@ -2422,6 +2434,29 @@ index 431264faf31..c48f0984a79 100644
 + * running at a different rate than the frames fed to it is a pitch shift, which
 + * is worse than no audio at all.
 + */
++/**
++ * Size the device buffer against the client's ring. Create time, and reopen.
++ *
++ * Extracted so the two agree by construction: a stream rebuilt after a
++ * disconnect that kept AAudio's default buffer would run dry from its first
++ * pass, and that failure would read as a new bug rather than a missing line.
++ */
++static void size_device_buffer(struct oss_stream *stream)
++{
++    int32_t burst = AAudioStream_getFramesPerBurst(stream->aas);
++    int32_t capacity = AAudioStream_getBufferCapacityInFrames(stream->aas);
++    UINT32 want = 4 * stream->period_frames + (burst > 0 ? (UINT32)burst : 0);
++
++    if(capacity > 0 && want > (UINT32)capacity)
++        want = (UINT32)capacity;
++    if(want > stream->bufsize_frames)
++        want = stream->bufsize_frames;
++    AAudioStream_setBufferSizeInFrames(stream->aas, want);
++    TRACE("burst %d, capacity %d, client buffer %u, asked for %u, buffer size set to %d\n",
++          burst, capacity, stream->bufsize_frames, want,
++          AAudioStream_getBufferSizeInFrames(stream->aas));
++}
++
 +static HRESULT finish_aaudio_stream(AAudioStream *aas, const WAVEFORMATEX *fmt)
 +{
 +    /* The one line that says whether the latency below is going to be small.
@@ -2679,7 +2714,6 @@ index 431264faf31..c48f0984a79 100644
 +    struct create_stream_params *params = args;
 +    WAVEFORMATEXTENSIBLE *fmtex;
 +    struct oss_stream *stream;
-+    UINT32 want_frames;
 +    int32_t capacity, burst;
 +    SIZE_T size;
 +
@@ -2800,15 +2834,7 @@ index 431264faf31..c48f0984a79 100644
 +     * Ordered after bufsize_frames for that reason; it used to run before it.
 +     * `burst` and `capacity` are read above now, because the floor applied to
 +     * bufsize_frames needs the burst too. */
-+    want_frames = 4 * stream->period_frames + (burst > 0 ? burst : 0);
-+    if(capacity > 0 && want_frames > (UINT32)capacity)
-+        want_frames = capacity;
-+    if(want_frames > stream->bufsize_frames)
-+        want_frames = stream->bufsize_frames;
-+    AAudioStream_setBufferSizeInFrames(stream->aas, want_frames);
-+    TRACE("burst %d, capacity %d, client buffer %u, asked for %u, buffer size set to %d\n",
-+            burst, capacity, stream->bufsize_frames, want_frames,
-+            AAudioStream_getBufferSizeInFrames(stream->aas));
++    size_device_buffer(stream);
 +
 +    /* AAudio floors the buffer size at one burst, so a client whose entire
 +     * buffer is shorter than a burst cannot reach the threshold however this is
@@ -2987,6 +3013,86 @@ index 431264faf31..c48f0984a79 100644
 +    return queued;
 +}
 +
++/**
++ * Build a fresh stream after Android disconnected the old one.
++ *
++ * **The failure this exists for, measured 2026-08-11.** A 42-minute session lost
++ * audio partway through and never got it back: 47,834 consecutive
++ * `AAUDIO_ERROR_DISCONNECTED` writes, `in_oss: 0` with `held: 2200` -- the guest
++ * still producing, the device taking nothing -- until the game was restarted,
++ * which fixed it because a new process opens a new stream. It did not reproduce
++ * because the trigger is not the game: a route change disconnects the stream,
++ * and connecting a Bluetooth device is enough to cause one.
++ *
++ * AAudio is explicit that a disconnected stream is dead. Every subsequent write
++ * returns -899 forever; the only recovery is to close it and open another. This
++ * driver had no such path and simply logged the warning ten times a second.
++ *
++ * Everything about the guest's side survives: `local_buffer`, `bufsize_frames`,
++ * `held_frames` and `lcl_offs_frames` describe frames the guest wrote, which the
++ * disconnect did not touch. Only `in_oss_frames` must be cleared -- it counts
++ * frames handed to a device that no longer exists, and the new stream has taken
++ * nothing. Leaving it set would make `oss_write_data` believe the device already
++ * held two thousand frames it had never seen.
++ *
++ * Returns FALSE when the reopen failed, and the caller backs off rather than
++ * asking again in ten milliseconds: `openStream` is not cheap, and a device
++ * genuinely gone should cost one attempt a second, not a hundred.
++ */
++static BOOL reopen_aaudio_stream(struct oss_stream *stream)
++{
++    AAudioStream *fresh = NULL;
++    BOOL convert = FALSE;
++
++    if(stream->aas){
++        AAudioStream_close(stream->aas);
++        stream->aas = NULL;
++    }
++
++    if(FAILED(open_aaudio_stream(stream->flow, stream->fmt, &fresh, &convert)) || !fresh){
++        WARN("could not reopen the audio stream after a disconnect\n");
++        return FALSE;
++    }
++
++    stream->aas = fresh;
++    stream->convert_to_i16 = convert;
++    stream->in_oss_frames = 0;
++    stream->last_xruns = 0;
++    size_device_buffer(stream);
++
++    if(stream->playing){
++        aaudio_result_t res = AAudioStream_requestStart(stream->aas);
++
++        if(res != AAUDIO_OK){
++            WARN("the reopened stream would not start: %s\n", AAudio_convertResultToText(res));
++            return FALSE;
++        }
++        aaudio_await(stream->aas, AAUDIO_STREAM_STATE_STARTING, AAUDIO_STREAM_STATE_STARTED);
++    }
++
++    ERR("aaudio: the stream was disconnected and has been rebuilt\n");
++    return TRUE;
++}
++
++/**
++ * One disconnected write, turned into at most one reopen attempt a second.
++ *
++ * The backoff is the whole of the policy. A route change is momentary and the
++ * first attempt almost always takes; a device that is genuinely gone -- the last
++ * output removed, the HAL restarting -- would otherwise have this calling
++ * `openStream` a hundred times a second on the timer thread, which is a worse
++ * failure than the silence it is trying to end.
++ */
++static void handle_disconnect(struct oss_stream *stream)
++{
++    if(stream->reopen_backoff){
++        stream->reopen_backoff--;
++        return;
++    }
++    if(!reopen_aaudio_stream(stream))
++        stream->reopen_backoff = DISCONNECT_RETRY_PASSES;
++}
++
 +static void oss_write_data(struct oss_stream *stream)
 +{
 +    UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
@@ -3090,7 +3196,13 @@ index 431264faf31..c48f0984a79 100644
 +
 +    written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
 +    if(written < 0){
-+        WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
++        /* A disconnect is recoverable and nothing else here is: an argument
++         * error or an out-of-memory will still be true next pass, and only the
++         * dead-stream case is cured by building another one. */
++        if(written == AAUDIO_ERROR_DISCONNECTED)
++            handle_disconnect(stream);
++        else
++            WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
 +        return;
 +    }
 +    written_frames = written;
@@ -3163,7 +3275,10 @@ index 431264faf31..c48f0984a79 100644
 +
 +        written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
 +        if(written < 0){
-+            WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
++            if(written == AAUDIO_ERROR_DISCONNECTED)
++                handle_disconnect(stream);
++            else
++                WARN("write failed: %d (%s)\n", written, AAudio_convertResultToText(written));
 +            return;
 +        }
 +        stream->in_oss_frames += written;

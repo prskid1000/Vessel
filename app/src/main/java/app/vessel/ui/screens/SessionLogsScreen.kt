@@ -61,6 +61,7 @@ fun SessionLogsScreen(
         state = state,
         onBack = onBack,
         onOpenSession = onOpenSession,
+        onDelete = viewModel::delete,
         onDeleteAll = viewModel::deleteAll,
     )
 }
@@ -70,9 +71,12 @@ private fun SessionLogsContent(
     state: SessionLogsUiState,
     onBack: () -> Unit,
     onOpenSession: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
     onDeleteAll: () -> Unit,
 ) {
     var confirmingClear by remember { mutableStateOf(false) }
+    /** The row a confirmation is open for, or null. Held so the sheet can name it. */
+    var confirmingOne by remember { mutableStateOf<SessionRow?>(null) }
 
     VScaffold(
         toolbar = {
@@ -110,7 +114,19 @@ private fun SessionLogsContent(
                 ),
             ) {
                 items(state.rows, key = { it.startedAt }) { row ->
-                    SessionListRow(row) { onOpenSession(row.startedAt) }
+                    SessionListRow(
+                        row = row,
+                        onClick = { onOpenSession(row.startedAt) },
+                        // A running session has a writer holding it open. Deleting
+                        // it would take the file from under the thing still
+                        // writing, so the control is absent rather than disabled:
+                        // it comes back the moment the session ends.
+                        onDelete = if (row.status == SessionExit.RUNNING) {
+                            null
+                        } else {
+                            { confirmingOne = row }
+                        },
+                    )
                 }
             }
         }
@@ -129,6 +145,22 @@ private fun SessionLogsContent(
             onDismiss = { confirmingClear = false },
         )
     }
+
+    confirmingOne?.let { row ->
+        VConfirmSheet(
+            title = "Delete the log from ${row.whenLabel}?",
+            // The size is the reason anyone deletes one of these, so it is the
+            // fact the sheet leads with.
+            message = "${row.sizeLabel} is freed. The other ${state.rows.size - 1} " +
+                "session${if (state.rows.size == 2) "" else "s"} are left alone.",
+            confirmLabel = "Delete",
+            onConfirm = {
+                confirmingOne = null
+                onDelete(row.startedAt)
+            },
+            onDismiss = { confirmingOne = null },
+        )
+    }
 }
 
 /**
@@ -140,7 +172,7 @@ private fun SessionLogsContent(
  * whole reason to open it.
  */
 @Composable
-private fun SessionListRow(row: SessionRow, onClick: () -> Unit) {
+private fun SessionListRow(row: SessionRow, onClick: () -> Unit, onDelete: (() -> Unit)? = null) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -156,6 +188,18 @@ private fun SessionListRow(row: SessionRow, onClick: () -> Unit) {
         ) {
             Text(row.whenLabel, style = Vessel.type.body, modifier = Modifier.weight(1f))
             VTag(statusLabel(row.status), tone = statusTone(row.status))
+            // On the row rather than behind a swipe or a long press: a phone list
+            // that hides its only destructive action behind an undiscoverable
+            // gesture is one people delete the wrong thing from. It is muted
+            // until pressed, so a column of them does not read as a warning.
+            if (onDelete != null) {
+                VIconButton(
+                    VIcons.Trash,
+                    "Delete this log",
+                    onDelete,
+                    tint = Vessel.colors.textMuted,
+                )
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8)) {
             Text(row.durationLabel, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
@@ -205,6 +249,7 @@ private fun SessionLogsPreview() {
             ),
             onBack = {},
             onOpenSession = {},
+            onDelete = {},
             onDeleteAll = {},
         )
     }
@@ -218,6 +263,7 @@ private fun SessionLogsEmptyPreview() {
             state = SessionLogsUiState(loading = false, containerName = "Default"),
             onBack = {},
             onOpenSession = {},
+            onDelete = {},
             onDeleteAll = {},
         )
     }
