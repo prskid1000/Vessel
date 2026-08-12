@@ -94,14 +94,32 @@ data class ContainerDiagnostics(
     /**
      * The record to store once this session has taken its copy.
      *
-     * Every row loud enough to be one-session spends its one launch
-     * here and is gone. Writing this back at launch rather than at teardown is
-     * what makes "one session" survive the app being killed mid-run: the row is
-     * already gone from the stored document by the time the guest process exists,
-     * so the run after a crash gets the ordinary environment.
+     * Every row loud enough to be one-session spends its one launch here.
+     * Writing this back at launch rather than at teardown is what makes "one
+     * session" survive the app being killed mid-run: the row is already spent in
+     * the stored document by the time the guest process exists, so the run after
+     * a crash gets the ordinary environment.
+     *
+     * **The row is disarmed, not deleted.** It used to be dropped outright, and
+     * that lost the one thing the user actually chose. What it looked like from
+     * the outside: arm `seh`, run once, come back to a list with no `seh` in it
+     * and nothing anywhere saying why — indistinguishable from the setting never
+     * having applied, which is exactly the doubt a diagnostic surface must not
+     * create. It cost a real debugging session here, spent wondering whether the
+     * channel was broken when it had worked perfectly and tidied up after itself.
+     *
+     * Dropping to [Loggable.baseline] says the same thing honestly: the row is
+     * still there, holding the name that was typed, sitting at its quiet level.
+     * Re-arming is the level dropdown rather than re-adding the row and finding
+     * the name again — which matters, because one-session rows are the ones
+     * somebody is most likely to want twice in a row.
      */
     fun consumed(): ContainerDiagnostics =
-        copy(rows = rows.filterNot { it.isOneSession })
+        copy(
+            rows = rows.map { row ->
+                if (row.isOneSession) row.copy(level = loggableFor(row.name, row.turnip).baseline) else row
+            },
+        )
 
     // — edits, all addressed by row index -------------------------------------
 

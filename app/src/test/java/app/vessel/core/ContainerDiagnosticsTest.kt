@@ -440,14 +440,25 @@ class ContainerDiagnosticsTest {
     }
 
     @Test
-    fun `one session spends the row, and a quiet one survives`() {
+    fun `one session disarms the row without deleting it`() {
         val record = row("relay")
             .withRowAdded().withRowNamed(1, "file")
         assertTrue(composeWineDebug(record).contains(",+relay"))
 
         val spent = record.consumed()
-        assertEquals(listOf("file"), spent.rows.map { it.name })
-        assertFalse(composeWineDebug(spent).contains("relay"))
+        // Both rows are still there. Deleting the loud one used to be the
+        // behaviour, and it read from the outside as the setting never having
+        // applied -- the one doubt a diagnostic surface must not create.
+        assertEquals(listOf("relay", "file"), spent.rows.map { it.name })
+        // Disarmed: the firehose term is gone. Not "relay is absent" -- a Wine
+        // channel's baseline is ERRORS, not OFF, because `err+all` in the fixed
+        // prefix means every channel already carries that. So the disarmed row
+        // reads `err+relay` and only the bare `,+relay` is the loud one.
+        assertFalse(composeWineDebug(spent).contains(",+relay"))
+        assertEquals(loggableFor("relay").baseline, spent.rows[0].level)
+        assertFalse(spent.rows[0].isOneSession)
+        // Spending is idempotent: a disarmed row has nothing left to spend.
+        assertEquals(spent, spent.consumed())
     }
 
     @Test
