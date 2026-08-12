@@ -97,7 +97,7 @@ data class ContainerDiagnostics(
      */
     fun withRowNamed(index: Int, name: String): ContainerDiagnostics {
         if (index !in rows.indices) return this
-        val loggable = loggableFor(name)
+        val loggable = loggableFor(name, rows[index].turnip)
         return copy(
             rows = rows.mapIndexed { i, row ->
                 if (i != index) {
@@ -161,11 +161,11 @@ data class DiagnosticSetting(
      * A property of the level and not of the thing: `DXVK_LOG_LEVEL` at `warn` is
      * ordinary and at `trace` is a firehose, and the row has to tell them apart.
      */
-    val isOneSession: Boolean get() = loggableFor(name).isOneSession(level)
+    val isOneSession: Boolean get() = loggableFor(name, turnip).isOneSession(level)
 
     /** False while the row's gate is unmet, which is when it must contribute nothing. */
     fun isAllowed(diagnostics: ContainerDiagnostics): Boolean {
-        val loggable = loggableFor(name)
+        val loggable = loggableFor(name, turnip)
         if (!loggable.isRealValue(level)) return false
         val gate = loggable.gate ?: return true
         val gated = LOGGABLES.firstOrNull { it.id == gate } ?: return true
@@ -698,9 +698,41 @@ private const val MESA_LOG_VAR = "MESA_LOG"
  * no one-launch stop — the honest position, since nothing is known about what it
  * costs.
  */
-fun loggableFor(name: String): Loggable =
+fun loggableFor(name: String, turnip: Boolean = false): Loggable =
     LOGGABLES.firstOrNull { it.name == name }
-        ?: wineChannel(name, "A Wine debug channel this build has no description for.")
+        ?: if (turnip) {
+            unknownTurnipFlag(name)
+        } else {
+            wineChannel(name, "A Wine debug channel this build has no description for.")
+        }
+
+/**
+ * A `TU_DEBUG` member this build has no description for, typed by the user.
+ *
+ * **The graphics table takes typed names for the same reason the logging one
+ * does.** Turnip has far more flags than the handful worth curating, they change
+ * between Mesa versions, and the alternative to accepting a typed one is a code
+ * change to try a flag someone read about ten minutes ago. Synthesising it as a
+ * Wine channel — which is what the single-argument [loggableFor] does, and did —
+ * would have quietly composed it into `WINEDEBUG`, where Wine would ignore an
+ * unknown channel and the user would conclude the flag did nothing.
+ *
+ * **Not gated on the driver logger, and that is the honest choice.** Nothing here
+ * can tell whether an unknown flag reports or renders, and gating it would make
+ * a rendering flag unreachable without a logger it has no use for. The caution
+ * says what is and is not known instead.
+ */
+private fun unknownTurnipFlag(flag: String) = Loggable(
+    name = flag,
+    emit = Emit.ListMember("TU_DEBUG", flag),
+    levels = ON_OFF,
+    labels = ON_OFF_LABELS,
+    baseline = Emit.OFF,
+    secondary = "TU_DEBUG — a flag this build has no description for.",
+    addAt = Emit.ON,
+    caution = "Vessel does not know this flag. Turnip ignores one it does not " +
+        "recognise, so a typo looks exactly like a flag that did nothing.",
+)
 
 /** The entries the name column offers, which is everything that can compose. */
 val ADDABLE_LOGGABLES: List<Loggable> = LOGGABLES.filter { it.isAddable }
@@ -871,7 +903,7 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
     }
 
     val added = diagnostics.rows.mapIndexed { index, row ->
-        val loggable = loggableFor(row.name)
+        val loggable = loggableFor(row.name, row.turnip)
         DiagnosticRow(
             index = index,
             name = row.name,
@@ -890,7 +922,11 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             // caution saying what is missing.
             levelEditable = row.name.isNotEmpty() && row.isAllowed(diagnostics),
             removable = true,
-            nameIsInvalid = row.name.isNotEmpty() && !isLoggableName(row.name),
+            // Wine's channel grammar does not apply to a driver flag, and
+            // checking one against the other would flag every valid TU_DEBUG
+            // member that happens to contain an underscore.
+            nameIsInvalid = row.name.isNotEmpty() &&
+                !row.turnip && !isLoggableName(row.name),
             // The stored origin wins for an unnamed row, which has no name to
             // ask; once named the two agree. See `DiagnosticSetting.turnip`.
             isTurnipFlag = row.turnip || loggable.isTurnipFlag,
