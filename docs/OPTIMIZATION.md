@@ -336,6 +336,93 @@ trace and still not in the UI.
 
 ---
 
+## 7. The Adreno draw-efficiency audit — **four candidates closed, one to protect**
+
+The frame-rate work in §6 removed frames nobody saw. This section is the other
+half of the same question: making the frames that *are* shown cheaper. It is
+recorded in full, including the parts that found nothing, because a candidate
+closed with a measurement is worth more than one left open with a hope.
+
+Metro, D3D11 → DXVK → Turnip, GPU-bound at 94–97%, ~375 draws and ~28 render
+passes per frame at 1280×720.
+
+### How it was measured, and the floor that decides what is readable
+
+`TU_DEBUG_FILE` is set per container (§`RESERVED_SESSION_ENV`), and Turnip
+re-reads it while the game runs — so `nolrz`, `gmem`, `sysmem`, `noubwc` and
+`perf` can be switched **mid-session**, against one scene at one temperature.
+That matters more here than anywhere: this document already warns that absolute
+times do not survive between sessions, and the first attempt at this audit
+proved it twice over.
+
+Two failures worth keeping:
+
+1. **The first run sampled at 0.1 Hz.** `SessionMetricsRecorder` drops to
+   `SLOW_INTERVAL_MS` when no graph is on screen, so 22-second windows caught
+   two samples each. The fix was to stop depending on the app: a shell loop
+   under the app's own uid reading `/sys/class/kgsl/kgsl-3d0/gpubusy` and the
+   container's `gfx-stats.json` once a second.
+2. **The first two windows straddled a thermal cliff** — 11.2 W → 5 W, 70 °C →
+   55 °C, 2567 → 1842 MHz, between one window and the next. Nothing measured
+   across that boundary means anything.
+
+**The floor, measured rather than assumed:** three *identical* baseline windows
+in one session, 19 samples each, read **97.9 / 117.5 / 102.7 fps** — a 20%
+spread with draws/frame constant at ~375. Live gameplay cannot resolve anything
+smaller than about ±10%. That single number is what makes the rest of this
+section short.
+
+### What was found
+
+| Flag | Result | Verdict |
+|---|---|---|
+| `nolrz` | 109.2 fps, inside a 98–118 baseline band | **LRZ is already dead in this title.** Turning off early depth rejection changed nothing, so it was contributing nothing |
+| `gmem` | 92.2, and 90.2 in an independent run — at or below the lowest baseline | **Tiling does not help.** Twice |
+| `sysmem` | 98.6 ≈ baseline | The null landed on the null, which is the one thing that says the method worked |
+| `noubwc` | **−21%** (75.7 vs ~96) | **UBWC is load-bearing** — the only effect big enough to clear the floor, and it says protect, not change |
+| `d3d11.relaxedBarriers` + `relaxedGraphicsBarriers` | 29.0 passes / 64.5 barriers vs 28.0 / ~61 | **No effect** |
+| `noconform` | one use in the whole driver (`tu_device.cc:202`, forces `has_hw_multiview`) | Irrelevant to D3D11 |
+
+**The barrier result is the most trustworthy line in this table**, and it is a
+null. It was judged on `renderPassesPerFrame` rather than on frame rate — a
+counter that held steady while fps swung 20% — so a change there would have been
+real. Relaxed barriers work by avoiding `spillRenderPass`; at 28 passes for 375
+draws Metro already batches ~13 draws per pass and is not spilling, so the
+option is aimed at a problem this title does not have.
+
+**`gmem` failing twice upholds the headline finding of the audit rather than
+refuting it.** Turnip ships a driconf profile keyed on `engineName == "DXVK"`
+setting `prefer_sysmem` — see `docs/ARCHITECTURE.md` — and the obvious
+suspicion was that a desktop-derived generalisation was wrong on this part. It
+is not. Forcing tiles is at best neutral and measured slightly negative.
+
+### What was not tested, and why that is a decision rather than a gap
+
+`TU_AUTOTUNE_ALGO=bandwidth`, `TU_AUTOTUNE_FLAGS=big_gmem`,
+`tu_allow_concurrent_binning` and `d3d11.cachedDynamicResources` are all expected
+to be worth a few percent — under the ±10% floor. Two of them
+(`big_gmem`, `concurrent_binning`) only matter *if* tiling helps, and it does
+not. `cachedDynamicResources` changes a memory type to speed CPU-side uploads,
+and the CPU is idling at 5–9% while the GPU is at 95% — it fixes something that
+is not the constraint.
+
+Measuring them needs a fixed scene, not live gameplay. Until one exists they are
+reachable from Diagnostics → Environment variables and are **unmeasured**.
+
+### The conclusion
+
+**No driver-level setting makes this materially faster.** The stack is
+GPU-bound at 95% doing 375 draws and 28 passes a frame with bandwidth
+compression already working, and every knob that could plausibly have changed
+that is now either closed or below the noise.
+
+What remains is the lever that was always the largest and never needed an
+experiment: **render resolution**. 1280×720 → 960×540 is 44% fewer fragments and
+44% less bandwidth, guaranteed by arithmetic. It is one dropdown in the container
+sheet.
+
+---
+
 ## Measured baseline
 
 Motorola Signature, SM8845, `tools/device-bench.sh --scale 1`, best of three,

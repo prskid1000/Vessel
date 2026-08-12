@@ -1409,13 +1409,7 @@ internal fun manifestEnvironment(
     for (spec in manifest?.allParams.orEmpty()) {
         val name = spec.env ?: continue
         val value = profile.params[spec.key] ?: spec.defaultValue() ?: continue
-        // A BOOL with `onValue` writes that word when on and nothing when off,
-        // rather than `1`/`0`. See `ParamSpec.onValue`.
-        val rendered = if (spec.onValue != null && value is ParamValue.Flag) {
-            if (value.value) spec.onValue!! else ""
-        } else {
-            value.asEnvValue()
-        }
+        val rendered = value.asEnvValue()
         // **An empty value means "not set", and that is the only way a manifest
         // param can express it.**
         //

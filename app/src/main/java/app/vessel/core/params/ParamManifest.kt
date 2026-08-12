@@ -144,21 +144,6 @@ data class ParamSpec(
      */
     val placeholder: String? = null,
 
-    /**
-     * [ParamType.BOOL]: what to write when it is on, instead of `1`.
-     *
-     * A switch whose two states are "absent" and "some particular word" is common
-     * outside Vessel and had no vocabulary here: `MESA_GPU_TRACES` wants
-     * `print_csv`, the Turnip driconf options want `true`, and rendering `1` into
-     * either is a value the reader does not recognise. Declaring them as enums
-     * instead worked but drew a dropdown offering `false` and `true`, which is a
-     * checkbox with extra steps.
-     *
-     * Off writes nothing at all — see `manifestEnvironment`, where an empty value
-     * contributes no variable. That is the correct off state for every one of
-     * these: each is a flag whose presence is what enables it.
-     */
-    val onValue: String? = null,
 
     /** [ParamType.COMPONENT]: which `.wcp` type the selector resolves against. */
     val componentType: String? = null,

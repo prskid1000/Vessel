@@ -203,6 +203,87 @@ data class EnvSetting(
     val isReserved: Boolean get() = name.trim() in RESERVED_SESSION_ENV
 }
 
+/**
+ * An environment variable Vessel has something to say about.
+ *
+ * **The declaration the env table is a picker for**, and the reason those six
+ * graphics experiments stopped being container settings. They were manifest
+ * params, which meant an entry and a build to try one — and the manifest's own
+ * law is that a setting must be explainable in one plain sentence to someone who
+ * does not know what a translator is. None of them can be. They belong on the
+ * Diagnostics screen, whose audience is someone whose session is already
+ * strange, and whose table already takes a name and a value.
+ *
+ * What is kept from the manifest version is the *sentence*: knowing that a
+ * variable exists is nearly useless, and [secondary] is the part that was worth
+ * carrying over. [values] turns the value field into a picker where the answers
+ * are a closed set, and stays empty where they are not.
+ */
+data class KnownEnv(
+    val name: String,
+    val secondary: String,
+    val values: List<String> = emptyList(),
+    val placeholder: String? = null,
+    val caution: String? = null,
+)
+
+/**
+ * What the env table offers before anything is typed.
+ *
+ * Ordered by how likely one is to answer a question, not alphabetically: the
+ * tiling pair first, because the driver's own profile opts Direct3D out of tiled
+ * rendering and that is the largest unexamined thing in the stack.
+ */
+val KNOWN_ENV: List<KnownEnv> = listOf(
+    KnownEnv(
+        name = "TU_AUTOTUNE_ALGO",
+        secondary = "How the driver decides between drawing in on-chip tiles and drawing " +
+            "straight to memory. It ships a rule that opts Direct3D games out of tiles " +
+            "entirely, so this game is almost certainly not tiling. 'bandwidth' is the " +
+            "driver's own rule; 'profiled' times both and picks.",
+        values = listOf("bandwidth", "profiled", "prefer_gmem", "prefer_sysmem"),
+    ),
+    KnownEnv(
+        name = "TU_AUTOTUNE_FLAGS",
+        secondary = "'big_gmem' draws a pass in tiles whenever it has ten or more draws. " +
+            "Metro averages about twenty a pass, so this flips most of them.",
+        values = listOf("big_gmem"),
+    ),
+    KnownEnv(
+        name = "tu_allow_concurrent_binning",
+        secondary = "Lets tile setup run alongside drawing. Off in the driver because it " +
+            "costs more than it saves on desktop games, and it means nothing at all " +
+            "unless the game is actually tiling.",
+        values = listOf("true", "false"),
+    ),
+    KnownEnv(
+        name = "disable_conservative_lrz",
+        secondary = "Recovers the early depth rejection the driver gives up on after a " +
+            "blended draw.",
+        values = listOf("true", "false"),
+        caution = "On a game that needs the caution this renders incorrectly rather than " +
+            "crashing. Check the picture, not just the frame rate.",
+    ),
+    KnownEnv(
+        name = "MESA_GPU_TRACES",
+        secondary = "Writes one record per render pass — tiles or not, why depth rejection " +
+            "was dropped, bytes moved — to this container's tmp folder. Costs frame rate " +
+            "while it runs, so read the shape and not the fps.",
+        values = listOf("print_csv", "print", "print_json"),
+    ),
+    KnownEnv(
+        name = "DXVK_CONFIG",
+        secondary = "Passed straight to DXVK, one 'key = value' per line. Three worth " +
+            "trying, none proven: d3d11.cachedDynamicResources = a (this phone shares " +
+            "memory between CPU and GPU, so the memory type DXVK avoids costs nothing " +
+            "here), d3d11.relaxedBarriers = True, d3d11.relaxedGraphicsBarriers = True.",
+        placeholder = "d3d11.cachedDynamicResources = a",
+    ),
+)
+
+/** The declaration for [name], or null when Vessel has nothing to say about it. */
+fun knownEnvFor(name: String): KnownEnv? = KNOWN_ENV.firstOrNull { it.name == name.trim() }
+
 /** One row the user added: what to log, how loudly, and for how long. */
 @Serializable
 data class DiagnosticSetting(

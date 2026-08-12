@@ -19,6 +19,8 @@ import app.vessel.core.ADDABLE_LOG_LOGGABLES
 import app.vessel.core.ADDABLE_TURNIP_LOGGABLES
 import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.EnvSetting
+import app.vessel.core.KNOWN_ENV
+import app.vessel.core.knownEnvFor
 import app.vessel.core.DiagnosticRow
 import app.vessel.core.SessionLogLimits
 import app.vessel.core.costWarning
@@ -26,6 +28,7 @@ import app.vessel.core.diagnosticRows
 import app.vessel.core.loggableFor
 import app.vessel.ui.components.VButton
 import app.vessel.ui.components.VCaution
+import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VConfirmSheet
@@ -347,26 +350,54 @@ private fun EnvRow(
     onValue: (String) -> Unit,
     onRemove: () -> Unit,
 ) {
+    val known = knownEnvFor(row.name)
     Column(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s6)) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            VTextField(
+            // A combo, not a dropdown: the six Vessel knows about are worth
+            // offering, and the seventh is the reason this table exists.
+            VComboField(
                 value = row.name,
+                options = KNOWN_ENV.map { it.name },
                 onValueChange = onName,
                 placeholder = "TU_AUTOTUNE_ALGO",
                 modifier = Modifier.weight(1f),
             )
-            VTextField(
-                value = row.value,
-                onValueChange = onValue,
-                placeholder = "bandwidth",
-                modifier = Modifier.weight(1f),
-            )
+            // The value is a picker only where the answers are a closed set.
+            // `DXVK_CONFIG` takes config lines and has no list to offer, so it
+            // gets a plain field with a real example in it.
+            if (known != null && known.values.isNotEmpty()) {
+                VComboField(
+                    value = row.value,
+                    options = known.values,
+                    onValueChange = onValue,
+                    placeholder = known.values.first(),
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                VTextField(
+                    value = row.value,
+                    onValueChange = onValue,
+                    placeholder = known?.placeholder ?: "value",
+                    modifier = Modifier.weight(1f),
+                )
+            }
             VIconButton(VIcons.X, "Remove", onRemove)
         }
+        // The sentence is the half worth keeping from the manifest: knowing a
+        // variable exists is nearly useless on its own.
+        known?.secondary?.let {
+            Text(
+                it,
+                style = Vessel.type.bodySmall,
+                color = Vessel.colors.textMuted,
+                modifier = Modifier.padding(top = Vessel.metrics.s3),
+            )
+        }
+        known?.caution?.let { VCaution(it) }
         if (row.isReserved) {
             VCaution(
                 "Vessel sets this one itself — it names a path inside this container, " +
