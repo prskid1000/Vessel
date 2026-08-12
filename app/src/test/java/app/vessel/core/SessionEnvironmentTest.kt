@@ -491,6 +491,50 @@ class SessionEnvironmentTest {
     }
 
     @Test
+    fun `a typed environment variable reaches the session and wins over the manifest`() {
+        // Last stage, on purpose: the case it exists for is "the value this build
+        // chose is wrong for my machine", and an override an earlier stage could
+        // overwrite would not be one.
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics(
+                env = listOf(
+                    EnvSetting("TU_AUTOTUNE_ALGO", "bandwidth"),
+                    EnvSetting("SOMETHING_NOBODY_ANTICIPATED", "1"),
+                ),
+            ),
+        )
+        val environment = sessionEnvironment(diagnosed, fexManifest, paths)
+        assertEquals("bandwidth", environment["TU_AUTOTUNE_ALGO"])
+        assertEquals("1", environment["SOMETHING_NOBODY_ANTICIPATED"])
+    }
+
+    @Test
+    fun `a typed environment variable cannot reach a reserved name`() {
+        // The boundary that keeps a container document inside its own directory.
+        // Every one of these names a path this app writes or reads, or plumbing a
+        // session needs to start at all.
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics(
+                env = RESERVED_SESSION_ENV.map { EnvSetting(it, "hijacked") },
+            ),
+        )
+        val environment = sessionEnvironment(diagnosed, fexManifest, paths)
+        assertTrue(environment.values.none { it == "hijacked" })
+        // And the rule is assertable without building an environment at all.
+        assertTrue(diagnosed.diagnostics.environmentOverrides().isEmpty())
+    }
+
+    @Test
+    fun `a blank environment name contributes nothing`() {
+        // What a row that has just been added is, before it is typed into.
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics(env = listOf(EnvSetting("", "orphan"))),
+        )
+        assertTrue(diagnosed.diagnostics.environmentOverrides().isEmpty())
+        assertTrue(sessionEnvironment(diagnosed, fexManifest, paths).values.none { it == "orphan" })
+    }
+
+    @Test
     fun `a frame rate limit caps the renderer as well as the compositor`() {
         // The bug this closes, measured on the device: at a 24 fps cap the
         // composited rate was 24.0 and DXVK's own was 116.5, at 84% GPU and ~760

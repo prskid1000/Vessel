@@ -52,6 +52,31 @@ data class ContainerDiagnostics(
      * name is editable and may be empty or duplicated while it is being typed.
      */
     val rows: List<DiagnosticSetting> = emptyList(),
+    /**
+     * Whole environment variables, typed by name and value.
+     *
+     * **The escape hatch, and the reason it belongs here rather than in the
+     * manifest.** Every graphics experiment so far needed a manifest entry and a
+     * build before it could be tried once — six of them in one afternoon, each
+     * one a data change to answer a question that took thirty seconds. Turnip,
+     * Mesa and DXVK between them expose hundreds of variables and no curated list
+     * will ever contain the one somebody reads about next.
+     *
+     * The manifest keeps the settings that carry a *reason*: a plain sentence
+     * about what the thing does and what it costs. That is its stated law and it
+     * is worth keeping. This is for the seventh variable, which has no sentence
+     * yet because nobody has learned it.
+     *
+     * **[RESERVED_SESSION_ENV] still wins.** A free-text table could otherwise
+     * point `WINEPREFIX` outside the container or move `VESSEL_GFX_STATS`
+     * somewhere the app then reads — the reserved set is not a style rule, it is
+     * the boundary that keeps a container document from reaching outside its own
+     * directory, and it is enforced against this list exactly as against the
+     * manifest.
+     *
+     * Defaulted, so every document written before this parses.
+     */
+    val env: List<EnvSetting> = emptyList(),
     val limits: SessionLogLimits = SessionLogLimits(),
 ) {
     /** True when the user has added nothing, which is what a fresh container is. */
@@ -117,6 +142,36 @@ data class ContainerDiagnostics(
 
     fun withLimits(limits: SessionLogLimits): ContainerDiagnostics = copy(limits = limits)
 
+    // — the environment table, addressed by index for the same reason ----------
+
+    fun withEnvAdded(): ContainerDiagnostics = copy(env = env + EnvSetting())
+
+    fun withEnvRemoved(index: Int): ContainerDiagnostics =
+        if (index !in env.indices) this else copy(env = env.filterIndexed { i, _ -> i != index })
+
+    fun withEnvName(index: Int, name: String): ContainerDiagnostics =
+        mapEnv(index) { it.copy(name = name) }
+
+    fun withEnvValue(index: Int, value: String): ContainerDiagnostics =
+        mapEnv(index) { it.copy(value = value) }
+
+    private fun mapEnv(index: Int, block: (EnvSetting) -> EnvSetting) =
+        if (index !in env.indices) this
+        else copy(env = env.mapIndexed { i, row -> if (i == index) block(row) else row })
+
+    /**
+     * The variables this container adds, with anything it may not set dropped.
+     *
+     * Composed here rather than in the session layer so that one function is the
+     * only place the rule lives, and so a test can assert the rule without
+     * building an environment.
+     */
+    fun environmentOverrides(): Map<String, String> =
+        env.asSequence()
+            .map { it.name.trim() to it.value }
+            .filter { (name, _) -> name.isNotEmpty() && name !in RESERVED_SESSION_ENV }
+            .toMap()
+
     private fun mapRow(index: Int, block: (DiagnosticSetting) -> DiagnosticSetting) =
         if (index !in rows.indices) this
         else copy(rows = rows.mapIndexed { i, row -> if (i == index) block(row) else row })
@@ -130,6 +185,22 @@ data class ContainerDiagnostics(
     companion object {
         val DEFAULT: ContainerDiagnostics = ContainerDiagnostics()
     }
+}
+
+/**
+ * One environment variable the user typed, name and value.
+ *
+ * No level, no ladder and no declaration: the whole point is that Vessel knows
+ * nothing about it. An empty name contributes nothing, which is what a row that
+ * has just been added is.
+ */
+@Serializable
+data class EnvSetting(
+    val name: String = "",
+    val value: String = "",
+) {
+    /** True for a name this layer owns and will not let a container set. */
+    val isReserved: Boolean get() = name.trim() in RESERVED_SESSION_ENV
 }
 
 /** One row the user added: what to log, how loudly, and for how long. */

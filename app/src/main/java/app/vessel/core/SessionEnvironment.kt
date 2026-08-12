@@ -1317,6 +1317,28 @@ fun sessionEnvironment(
         environment[key] = value
     }
 
+    // **Stage four: the container's own environment table, last.**
+    //
+    // Last because it is the escape hatch, and an escape hatch that could be
+    // overwritten by an earlier stage would not be one — the case it exists for
+    // is exactly "the value this build chose is wrong for my machine". It can
+    // therefore rewrite anything the three stages above set, *except* the
+    // reserved names, which `environmentOverrides` has already dropped.
+    //
+    // Reserved is a deny-list here and an allow-list for `diagnosticEnvironment`
+    // above, and the asymmetry is deliberate. That stage backs a curated screen
+    // where every row is a thing Vessel understands, so it can enumerate them.
+    // This one is for variables nobody has anticipated, so it can only enumerate
+    // what must never be reached: the paths this app writes and reads, and the
+    // plumbing a session needs to start at all.
+    //
+    // Same `LinkedHashMap` property as the diagnostics stage: rewriting a key
+    // keeps its original position, so the environment's order does not change
+    // depending on what a container overrode.
+    for ((key, value) in profile.diagnostics.environmentOverrides()) {
+        environment[key] = value
+    }
+
     // The configuration digest used to be appended to `FEX_APP_CACHE_LOCATION`
     // here, last, so that it was taken over the environment as it actually ended
     // up. It still is taken over exactly that environment — [fexCacheHost] is

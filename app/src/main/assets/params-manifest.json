@@ -125,9 +125,10 @@
         {
           "key": "turnip.autotuneAlgorithm",
           "title": "Tiling decision",
-          "help": "Adreno can draw in on-chip tiles or straight to memory. The driver ships a rule that opts Direct3D games out of tiling entirely, so this game is almost certainly not tiling. 'bandwidth' is the driver's own default rule; 'profiled' measures both and picks. Leave on default unless you are testing.",
+          "help": "Adreno can draw in on-chip tiles or straight to memory. The driver ships a rule that opts Direct3D games out of tiling entirely, so this game is almost certainly not tiling. 'bandwidth' is the driver's own rule, which weighs the memory traffic each way; 'profiled' times both and picks. To force one outright, use the gmem or sysmem flag under Diagnostics instead — those can also be switched while the game runs.",
+          "_comment": "prefer_gmem and prefer_sysmem were here and are gone. They are weaker than the TU_DEBUG flags of the same name -- a bias rather than a veto -- and unlike those they cannot be changed mid-session, which is the only way a tiling comparison on this device means anything. Two controls for one question, and this was the worse one.",
           "type": "enum",
-          "options": ["default", "bandwidth", "profiled", "prefer_gmem", "prefer_sysmem"],
+          "options": ["default", "bandwidth", "profiled"],
           "default": "default",
           "env": "TU_AUTOTUNE_ALGO"
         },

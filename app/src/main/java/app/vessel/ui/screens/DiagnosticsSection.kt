@@ -18,12 +18,15 @@ import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.core.ADDABLE_LOG_LOGGABLES
 import app.vessel.core.ADDABLE_TURNIP_LOGGABLES
 import app.vessel.core.ContainerDiagnostics
+import app.vessel.core.EnvSetting
 import app.vessel.core.DiagnosticRow
 import app.vessel.core.SessionLogLimits
 import app.vessel.core.costWarning
 import app.vessel.core.diagnosticRows
 import app.vessel.core.loggableFor
 import app.vessel.ui.components.VButton
+import app.vessel.ui.components.VCaution
+import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VDiagnosticRow
@@ -194,6 +197,40 @@ fun DiagnosticsPanel(
             modifier = Modifier.padding(top = Vessel.metrics.s6),
         )
 
+        /*
+         * The environment table.
+         *
+         * Below the two curated ones, because it is the thing you reach for when
+         * neither of them has what you want — and above "How much to keep",
+         * because it is still about what a session does rather than about logs.
+         */
+        VSectionHeader("Environment variables")
+        diagnostics.env.forEachIndexed { index, row ->
+            EnvRow(
+                row = row,
+                onName = { onChange(diagnostics.withEnvName(index, it)) },
+                onValue = { onChange(diagnostics.withEnvValue(index, it)) },
+                onRemove = { onChange(diagnostics.withEnvRemoved(index)) },
+            )
+        }
+        VButton(
+            "Add",
+            { onChange(diagnostics.withEnvAdded()) },
+            style = VButtonStyle.Primary,
+            icon = VIcons.Plus,
+            modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
+        )
+        Text(
+            "Set anything the driver, the translator or the D3D layer reads. These are " +
+                "applied last, so they win over every setting above. Vessel knows nothing " +
+                "about what you type here and cannot warn you about it — a name it does " +
+                "own is refused rather than applied, because those point at this " +
+                "container's own files.",
+            style = Vessel.type.bodySmall,
+            color = Vessel.colors.textMuted,
+            modifier = Modifier.padding(top = Vessel.metrics.s6),
+        )
+
         VSectionHeader("How much to keep")
         KeepSection(state, onChange, onDeleteLogs = { confirmingDeleteLogs = true })
 
@@ -292,6 +329,51 @@ private fun InventoryRow(
         levelEditable = row.levelEditable,
         nameIsInvalid = row.nameIsInvalid,
     )
+}
+
+/**
+ * One typed variable: name, value, and a cross.
+ *
+ * Two plain fields rather than the diagnostic row's name-and-ladder, because
+ * there is no ladder — a variable Vessel does not know has no levels to offer.
+ * The reserved case is drawn as a caution on the row rather than by refusing the
+ * keystroke: a field that silently will not accept `WINEPREFIX` looks broken,
+ * and the useful thing to say is *why* it cannot be set.
+ */
+@Composable
+private fun EnvRow(
+    row: EnvSetting,
+    onName: (String) -> Unit,
+    onValue: (String) -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s6)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            VTextField(
+                value = row.name,
+                onValueChange = onName,
+                placeholder = "TU_AUTOTUNE_ALGO",
+                modifier = Modifier.weight(1f),
+            )
+            VTextField(
+                value = row.value,
+                onValueChange = onValue,
+                placeholder = "bandwidth",
+                modifier = Modifier.weight(1f),
+            )
+            VIconButton(VIcons.X, "Remove", onRemove)
+        }
+        if (row.isReserved) {
+            VCaution(
+                "Vessel sets this one itself — it names a path inside this container, " +
+                    "so a session cannot be allowed to move it. This row is ignored.",
+            )
+        }
+    }
 }
 
 /**
