@@ -22,7 +22,7 @@ import java.io.InputStream
  */
 interface WcpSource {
 
-    /** The file name, `wine-11.14-canoe.wcp`. Used in every message about it. */
+    /** The file name, `wine-proton-11.0-canoe.wcp`. Used in every message about it. */
     val name: String
 
     /**
@@ -98,7 +98,7 @@ class FileWcpSource(private val file: File) : WcpSource {
  */
 class AssetWcpSource(
     private val assets: AssetManager,
-    /** The full asset path, `components/wine-11.14-canoe.wcp`. */
+    /** The full asset path, `components/wine-proton-11.0-canoe.wcp`. */
     private val path: String,
 ) : WcpSource {
 

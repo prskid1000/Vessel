@@ -302,7 +302,14 @@ class ComponentSetup @Inject constructor(
          * `bundledPackages` in app/build.gradle.kts), and setup then downloaded
          * the HAL anyway — 15 MB for a driver `adoptLatest` can never choose,
          * because it takes the highest version code. The same rule would have
-         * fetched an obsolete 84 MB Wine 10.13 next to the bundled 11.14.
+         * fetched an obsolete 84 MB Wine 10.13 next to the bundled one.
+         *
+         * Note what "highest version code" means once the Wine base can be a
+         * fork: build/wine.sh gives a Proton build a version-code epoch, because
+         * Proton 11.0 is a *lower* Wine version (11.0) than the plain build it
+         * replaces (11.14) and would otherwise lose this comparison and be
+         * installed but never adopted. The rule here is unchanged; what it is
+         * comparing is no longer only "which Wine is newer".
          *
          * Highest installed code per type, and an entry is wanted only if it
          * beats it. Equality is not an upgrade, which also keeps the old

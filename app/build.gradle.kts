@@ -18,16 +18,25 @@ val productName: String = providers.gradleProperty("PRODUCT_NAME").getOrElse("Ve
  *
  * **Named rather than globbed, and the reason is in `dist/` itself.** That
  * directory accumulates every package the build scripts have ever produced,
- * including superseded ones — `wine-10.13-canoe.wcp` sits beside
- * `wine-11.14-canoe.wcp` — and a wildcard would ship both: 66 MB of APK and
- * 900 MB of first-run unpacking for a Wine no container will ever adopt, because
- * `ComponentStore.adoptLatest` takes the highest `versionCode`.
+ * including superseded ones — `wine-10.13-canoe.wcp` and `wine-11.14-canoe.wcp`
+ * sit beside the current one — and a wildcard would ship all of them: 150 MB of
+ * APK and gigabytes of first-run unpacking for a Wine no container will ever
+ * adopt, because `ComponentStore.adoptLatest` takes the highest `versionCode`.
+ *
+ * A name that does not exist in `dist/` is only a *warning*, never an error (see
+ * [bundleComponents] for why), so a stale name here does not fail the build — it
+ * silently ships an APK with that component missing. That is the failure mode to
+ * watch for when a version changes: this list must move with it.
  *
  * Bumping a component is therefore a one-line edit here, which is the right
  * amount of friction for changing what is inside the package a user installs.
  */
 val bundledPackages = listOf(
-    "wine-11.14-canoe.wcp",
+    // Wine is built from Valve's proton_11.0, not upstream Wine — see
+    // native/pins.env. The `proton-` prefix is part of the version string, and
+    // build/wine.sh gives these builds a version-code epoch so they outrank a
+    // plain-Wine package whose Wine version is numerically higher (11.14 > 11.0).
+    "wine-proton-11.0-canoe.wcp",
     "fex-2608-canoe.wcp",
     "dxvk-2.7.1-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",

@@ -338,9 +338,17 @@ class SessionEnvironmentTest {
     // — the fixed variables ---------------------------------------------------
 
     @Test
-    fun `esync is set unconditionally, because it is not a setting`() {
-        assertEquals("1", env()["WINEESYNC"])
-        assertFalse(env().containsKey("WINEFSYNC"))
+    fun `fsync is set unconditionally, because it is not a setting`() {
+        assertEquals("1", env()["WINEFSYNC"])
+
+        // The assertion this replaced asked for `WINEESYNC=1` and for WINEFSYNC
+        // to be absent — exactly backwards, and it passed for months because a
+        // test can only check that we set a variable, never that anything reads
+        // it. Neither Wine 11.14 nor Proton 11.0 contains a single reference to
+        // WINEESYNC: upstream has no esync and no fsync at all, and Valve's tree
+        // has fsync only. So the old expectation encoded a variable that reached
+        // nobody. Kept as a negative assertion so it cannot come back.
+        assertFalse(env().containsKey("WINEESYNC"))
         assertFalse(env().containsKey("WINENTSYNC"))
     }
 
@@ -620,7 +628,7 @@ class SessionEnvironmentTest {
         assertEquals(WINEDEBUG_CHANNELS, environment["WINEDEBUG"])
         assertEquals("startup", environment["TU_DEBUG"])
         // The FEX flags survive a missing manifest because they no longer come
-        // from it — they are fixed in sessionEnvironment beside WINEESYNC.
+        // from it — they are fixed in sessionEnvironment beside WINEFSYNC.
         assertEquals("1", environment["FEX_TSOENABLED"])
         assertEquals("0", environment["FEX_VECTORTSOENABLED"])
     }
@@ -718,7 +726,7 @@ class SessionEnvironmentTest {
         assertEquals(
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
-                "WINEESYNC" to "1",
+                "WINEFSYNC" to "1",
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
@@ -1077,7 +1085,7 @@ class SessionEnvironmentTest {
         val bootstrap = full.filterKeys { it in BOOTSTRAP_SESSION_ENV }
         listOf(
             "WINEDLLPATH", "WINENLSDIR", "LD_LIBRARY_PATH", "PATH",
-            "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEDEBUG", "WINEESYNC",
+            "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEDEBUG", "WINEFSYNC",
         ).forEach { assertTrue("$it is missing from the prefix bootstrap", bootstrap.containsKey(it)) }
     }
 }

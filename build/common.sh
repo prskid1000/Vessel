@@ -319,6 +319,22 @@ fetch_source() {
     # each time the commit being built was already in the local clone, so the
     # only thing the outage cost was the build. If the pin is missing the
     # checkout below still fails, loudly, which is the case that should fail.
+    # **The repository can change, not just the ref.** An existing clone keeps
+    # whatever origin it was created with, so editing <NAME>_REPO in pins.env
+    # used to have no effect whatsoever: the fetch below went to the old remote
+    # and the checkout then failed with
+    #   error: pathspec 'proton_11.0' did not match any file(s) known to git
+    # which names neither the URL nor the fact that it was ignored. Measured
+    # moving Wine from gitlab.winehq.org to ValveSoftware/wine.
+    local origin_url
+    origin_url="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+    if [ "$origin_url" != "$repo" ]; then
+      info "$name: origin moved, re-pointing
+     from $origin_url
+       to $repo"
+      git -C "$dir" remote set-url origin "$repo"
+    fi
+
     info "fetching $name"
     if ! git -C "$dir" fetch --all --tags --prune; then
       warn "$name: fetch failed; continuing against the local clone"
@@ -329,6 +345,14 @@ fetch_source() {
 
   log "checking out $name @ $ref"
   git -C "$dir" checkout --force "$ref"
+  # **Untracked files survive `checkout --force`, and some patches add files.**
+  # patches/wine/0016 creates dlls/winebus.sys/bus_vessel.c; on the next run
+  # `git apply` refuses with "already exists in working directory", so a tree
+  # that had been built once could never be rebuilt. Neither --force nor the
+  # reset below removes an untracked path, so this is the only thing that does.
+  # Safe because a source checkout holds nothing generated: every build writes
+  # to $WORK_DIR, and assert_pristine below already forbids tracked edits.
+  git -C "$dir" clean -fdq
   # Branch pins need an explicit fast-forward; tag pins are already exact.
   if git -C "$dir" symbolic-ref -q HEAD >/dev/null 2>&1; then
     git -C "$dir" reset --hard "origin/$ref"

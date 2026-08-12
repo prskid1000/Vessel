@@ -147,8 +147,8 @@ private fun megabytes(bytes: Long): String = "${bytes / (1024 * 1024)} MB"
 
 private val PreviewSteps = listOf(
     ProvisionStep(
-        "wine-11.14-canoe",
-        "Install Wine 11.14",
+        "wine-proton-11.0-canoe",
+        "Install Wine proton-11.0",
         ProvisionStatus.RUNNING,
         "412 MB unpacked · 2183 files",
     ),
@@ -193,7 +193,7 @@ private fun SetupDialogIncompletePreview() {
                 phase = SetupPhase.INCOMPLETE,
                 steps = PreviewSteps.map {
                     when (it.id) {
-                        "wine-11.14-canoe" -> it.copy(
+                        "wine-proton-11.0-canoe" -> it.copy(
                             status = ProvisionStatus.FAILED,
                             detail = "Not enough space: needs at least 640 MB, 61 MB free",
                         )

@@ -24,9 +24,116 @@ SRC="$NATIVE_DIR/$COMPONENT"
 
 # WINE_REF is a branch, so the ref carries no version; the tree's VERSION file
 # holds it as "Wine version 10.12".
-VERSION="$(sed -n 's/^Wine version[[:space:]]*//p' "$SRC/VERSION" 2>/dev/null | head -1 || true)"
-[ -n "$VERSION" ] || die "could not read a version out of $SRC/VERSION"
-info "wine version $VERSION (branch $WINE_REF @ ${SOURCE_SHA:0:12})"
+WINE_VERSION="$(sed -n 's/^Wine version[[:space:]]*//p' "$SRC/VERSION" 2>/dev/null | head -1 || true)"
+[ -n "$WINE_VERSION" ] || die "could not read a version out of $SRC/VERSION"
+
+# **A Proton build is not ordered by its Wine version, and must not be.**
+#
+# package_wcp.py derives a monotonic integer from the dotted version, and the
+# app picks a component by taking the HIGHEST code: ComponentStore.adoptLatest
+# for a new container, and ComponentSetup's "wanted" filter for what is even
+# offered for install. Proton 11.0 is rebased on Wine *11.0*, so the honest
+# Wine number is 11.0 -> 1100, which sorts BELOW the 11.14 -> 1114 already on
+# the phone. The package would install and then never be chosen, and setup
+# would not offer it at all -- a silent wrong-component run, which has already
+# cost this project two test sessions.
+#
+# So a Proton build declares an epoch that outranks any plain-Wine build. The
+# number stops being "which Wine is newer" and becomes "which base did we
+# choose", which is the question the app is actually asking.
+#
+# THE HAZARD CUTS BOTH WAYS, so it is written here rather than discovered:
+# while this epoch exists, a plain-Wine component can never outrank a Proton
+# one. Moving back to upstream Wine means BOTH restoring pins.env AND deleting
+# the installed Proton component from the phone -- changing pins.env alone will
+# build a package the app then ignores, which looks exactly like a build that
+# did not take.
+WINE_PROTON_EPOCH=1000000
+
+case "$WINE_REF" in
+  proton*)
+    VERSION="proton-$WINE_VERSION"
+    VERSION_CODE=$(( WINE_PROTON_EPOCH + $(python3 -c \
+      'import sys; sys.path.insert(0, "'"$COMMON_SH_DIR"'"); from package_wcp import version_code; print(version_code(sys.argv[1]))' \
+      "$WINE_VERSION") ))
+    info "wine version $WINE_VERSION as $VERSION, code $VERSION_CODE (Proton epoch)"
+    ;;
+  *)
+    VERSION="$WINE_VERSION"
+    VERSION_CODE=
+    info "wine version $VERSION (branch $WINE_REF @ ${SOURCE_SHA:0:12})"
+    ;;
+esac
+
+# **Proton does not commit Wine's generated sources; upstream Wine does.**
+#
+# Two generators have to run before configure on a Proton checkout. Upstream
+# checks their output in, so on an upstream base both blocks below are skipped
+# and nothing changes. Each is guarded on its own output being absent, which is
+# also what makes them cheap to leave in place permanently.
+#
+# The full set of what Proton leaves out was found by listing the known
+# generated outputs rather than by hitting them one build at a time:
+#
+#   dlls/ntdll/ntsyscalls.h     tools/make_specfiles       (perl)
+#   dlls/win32u/win32syscalls.h tools/make_specfiles       (perl)
+#   include/wine/vulkan.h       dlls/winevulkan/make_vulkan (python)
+#   + 7 more winevulkan files   dlls/winevulkan/make_vulkan
+#   configure, include/config.h.in                          (autoreconf, below)
+#
+# server_protocol.h, request.h, trace.c and the NLS tables ARE committed, so
+# make_requests and make_unicode are not needed.
+#
+# ---
+#
+# **make_specfiles: the syscall tables.**
+#
+# It walks the spec files and rewrites the syscall dispatch headers that
+# `signal_arm64.c`, `signal_arm64ec.c` and `unix/loader.c` include. Absent, the
+# build dies inside config.status with
+#     signal_arm.c:35: error: ntsyscalls.h: No such file or directory
+# for the same reason as the vulkan header: makedep reads the include graph
+# while configure is still writing Makefiles.
+if [ ! -f "$SRC/dlls/ntdll/ntsyscalls.h" ] && [ -x "$SRC/tools/make_specfiles" ]; then
+  log "generating syscall tables (absent from $WINE_REF)"
+  ( cd "$SRC" && ./tools/make_specfiles ) || die "make_specfiles failed"
+  [ -f "$SRC/dlls/ntdll/ntsyscalls.h" ] \
+    || die "make_specfiles ran but did not produce dlls/ntdll/ntsyscalls.h"
+  ok "syscall tables generated"
+fi
+
+# **winevulkan.**
+#
+# `dlls/winevulkan/make_vulkan` turns `vk.xml` into eight files — the public
+# `include/wine/vulkan.h`, the thunk pairs, the spec and the two ICD manifests.
+# Upstream checks the results in, so nothing ever has to run the generator.
+# Valve's tree checks in only the inputs, and every one of the eight is absent
+# from a fresh checkout.
+#
+# The failure that finds this names none of it. `tools/makedep` reads the
+# `#include` graph while configure is still writing Makefiles, so the whole
+# build dies during `config.status` with
+#     error: open wine/vulkan.h : No such file or directory
+#     config.status: error: could not create Makefile
+# which reads like a broken configure rather than a missing generated header.
+#
+# `-x`/`-X` point the generator at the XML committed beside it. Without them it
+# fetches vk.xml from the Khronos registry into $HOME/.cache/wine, which would
+# make the build require the network and silently track whatever upstream
+# publishes — the tree's own XML is the version Valve's sources were written
+# against, and is the only correct input.
+#
+# Guarded on the header being absent, so an upstream-Wine base skips it: there
+# the committed files are the authority and regenerating could only introduce a
+# difference. `fetch_source` cleans untracked files, so this reruns per build.
+if [ ! -f "$SRC/include/wine/vulkan.h" ] && [ -x "$SRC/dlls/winevulkan/make_vulkan" ]; then
+  log "generating winevulkan sources (absent from $WINE_REF)"
+  ( cd "$SRC/dlls/winevulkan" && python3 ./make_vulkan -x vk.xml -X video.xml ) \
+    || die "make_vulkan failed"
+  [ -f "$SRC/include/wine/vulkan.h" ] \
+    || die "make_vulkan ran but did not produce include/wine/vulkan.h"
+  ok "winevulkan sources generated"
+fi
 
 BUILD="$WORK_DIR/wine-android"
 TOOLS="$WORK_DIR/wine-tools"
@@ -430,9 +537,10 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Wine \
   --name "Wine $VERSION ARM64EC ($TARGET_NAME)" \
   --version "$VERSION" \
+  ${VERSION_CODE:+--version-code "$VERSION_CODE"} \
   --payload "$PAYLOAD" \
   --provenance "$PAYLOAD/provenance.json" \
-  --description "Wine $VERSION with arm64ec/aarch64/i386 PE modules and a bionic aarch64 unix side, from $WINE_REF @ ${SOURCE_SHA:0:12}" \
+  --description "Wine $WINE_VERSION with arm64ec/aarch64/i386 PE modules and a bionic aarch64 unix side, from $WINE_REF @ ${SOURCE_SHA:0:12}" \
   --out "$DIST_DIR/wine-$VERSION-$TARGET_NAME.wcp"
 
 ok "dist/wine-$VERSION-$TARGET_NAME.wcp"

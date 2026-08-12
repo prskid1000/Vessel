@@ -126,8 +126,9 @@ const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
  * The FEX flags stay because they are correctness rather than graphics: the
  * second `wineboot --update` runs after the emulator key is applied, so it is a
  * translated process, and a translated process with the wrong memory-ordering
- * settings is wrong in the same way here as anywhere else. `WINEESYNC` stays
- * because the server and its clients have to agree about it.
+ * settings is wrong in the same way here as anywhere else. `WINEFSYNC` stays
+ * because the server and its clients have to agree about it — `fsync.c` errors
+ * out explicitly on a process that cannot use the mode the server started in.
  */
 val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     // The exec model. See `wineLauncherEnvironment` for why each is required.
@@ -140,7 +141,7 @@ val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     "XDG_RUNTIME_DIR",
 
     "WINEPREFIX",
-    "WINEESYNC",
+    "WINEFSYNC",
     "WINEDEBUG",
 
     "FEX_SILENTLOG",
@@ -282,8 +283,9 @@ const val DEFAULT_DISPLAY: String = ":0"
  * Variables this layer owns outright, which a manifest param may never set.
  *
  * Most are simply not settings — `WINEDEBUG` is fixed per `docs/LOGGING.md`,
- * `WINEESYNC` because esync is the only synchronisation mode that works here
- * (README, Known limitations).
+ * `WINEFSYNC` because fsync is the only accelerated synchronisation mode that
+ * the current base has at all (see where it is set for the reading of both
+ * trees), and because the server and its clients must agree on the mode.
  *
  * `VKD3D_LOG_FILE` is different: it is listed to guarantee its **absence**.
  * `vkd3d_dbg_init_once` is an if/else — set the variable and it opens the file
@@ -292,7 +294,7 @@ const val DEFAULT_DISPLAY: String = ":0"
  */
 val RESERVED_SESSION_ENV: Set<String> = setOf(
     "WINEPREFIX",
-    "WINEESYNC",
+    "WINEFSYNC",
     "WINEDEBUG",
     WINEDLLOVERRIDES_ENV,
     "DISPLAY",
@@ -767,7 +769,30 @@ fun sessionEnvironment(
     val environment = LinkedHashMap<String, String>()
 
     environment["WINEPREFIX"] = paths.prefix.absolutePath
-    environment["WINEESYNC"] = "1"
+
+    // Accelerated synchronisation, and a correction: `WINEESYNC=1` used to be set
+    // here and never did anything on any base this project has built.
+    //
+    // Checked by reading both trees rather than by reputation. Upstream Wine has
+    // no esync and no fsync at all — no `esync.c`, no `fsync.c`, and no reference
+    // to either variable anywhere in `server/` or `dlls/ntdll/unix/`. Its
+    // accelerated path is ntsync, which needs the `/dev/ntsync` kernel driver that
+    // Android does not expose. So on Wine 11.14 the variable was read by nobody.
+    //
+    // Valve's proton_11.0 ships `server/fsync.c` and `dlls/ntdll/unix/fsync.c`,
+    // gated on `WINEFSYNC` — and still no esync. So fsync is the only accelerated
+    // mode that exists on the current base, and the only one worth naming.
+    //
+    // Safe to ask for unconditionally: `do_fsync()` probes `__NR_futex_waitv` and
+    // returns false on `ENOSYS`/`EPERM`, so a kernel without it falls back to
+    // ordinary server-side waits rather than failing. The variable is a request,
+    // not an assertion.
+    //
+    // **UNVERIFIED ON DEVICE.** That fsync engages here — rather than quietly
+    // probing out — has not been confirmed on the target kernel, and neither has
+    // any performance claim. `wineserver` logs the mode it chose; that is what a
+    // first session should be read for.
+    environment["WINEFSYNC"] = "1"
 
     // FEX's memory-ordering behaviour is fixed here, not offered as settings.
     //
@@ -1226,15 +1251,24 @@ fun sessionEnvironment(
     // (`tu_device.cc:1816-1819`, guarded by `has_cached_non_coherent_memory`;
     // declared in `tu_drirc_gen.py:96`, default false).
     //
-    // FEX tries to set it itself and silently fails on this Wine.
+    // FEX tries to set this itself, and whether its attempt works depends on the
+    // Wine base — which is why setting it here is the thing that does not.
+    //
     // `Source/Windows/Common/EnvironmentVariablesHandling.cpp` resolves
-    // `__wine_set_unix_env` out of ntdll and guards on `Sym &&` — and that
-    // export **does not exist in Wine 11.14**, so the branch never runs and the
-    // option keeps its `false` default. FEX's own comment calls the mechanism
-    // "may also not be long-term viable" and suggests exactly this workaround:
-    // set the variable in the launch script. Its check is
-    // `getenv(...) == nullptr`, so setting it here is also what stops FEX
-    // fighting us if that export ever returns.
+    // `__wine_set_unix_env` out of ntdll and guards on `Sym &&`:
+    //
+    //  - **Upstream Wine 11.14:** the export does not exist, the branch never
+    //    runs, and the option keeps its `false` default. This line was the only
+    //    thing setting it.
+    //  - **Valve's proton_11.0, the current base:** the export *does* exist
+    //    (`dlls/ntdll/ntdll.spec`, `__wine_set_unix_env` in `dlls/ntdll/env.c`),
+    //    so FEX's own path is live.
+    //
+    // Setting it here still wins on both, and that is the point: FEX's check is
+    // `getenv(...) == nullptr`, so a value already in the environment stops FEX
+    // touching it. One line, correct on either tree, and it does not quietly
+    // change meaning when the base moves. FEX's own comment calls its mechanism
+    // "may also not be long-term viable" and suggests exactly this workaround.
     //
     // A plain env var works because Mesa checks one per driconf option name and
     // lets it override the built-in default (`util/xmlconfig.c:424-438`).

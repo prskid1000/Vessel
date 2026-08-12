@@ -271,17 +271,26 @@ object PrefixRegistry {
     /**
      * Where Wine looks for the ARM64EC emulator, i.e. FEX.
      *
-     * **Required, not an assertion.** Read by `load_arm64ec_module()`
-     * (`dlls/ntdll/loader.c:4275` in Wine 11.14), which starts from the literal
-     * `C:\windows\system32\xtajit64.dll` and overwrites only the filename with
-     * this value. Absent, Wine looks for Microsoft's `xtajit64.dll`, which we do
-     * not ship — and the miss is *fatal*: `load_arm64ec_module` ends in
+     * **Belt and braces on the current base; required on upstream Wine.** Read by
+     * `load_arm64ec_module()` (`dlls/ntdll/loader.c`), which starts from a literal
+     * path under `system32` and overwrites only the filename with this value. The
+     * miss is *fatal* either way: `load_arm64ec_module` ends in
      * `NtTerminateProcess`, so every x86-64 program dies at load with nothing but
-     * `could not load …xtajit64.dll` to go on.
+     * `could not load …` to go on.
      *
-     * An earlier version of this comment claimed the built-in fallback was
-     * already `libarm64ecfex.dll`, and that has not been true on any tree this
-     * project builds. The value must be written.
+     * What the literal is depends on the tree, and this comment has now been
+     * wrong in both directions, so both are recorded:
+     *
+     *  - **Upstream Wine (11.14 and before):** `xtajit64.dll`, Microsoft's
+     *    emulator, which Vessel does not ship. Writing this value is the only
+     *    thing that makes an x86-64 program run at all.
+     *  - **Valve's proton_11.0, the current base:** already
+     *    `libarm64ecfex.dll`, and `loader/wine.inf.in` writes the same value into
+     *    this key during `wineboot`. Writing it is redundant there.
+     *
+     * It is still written, deliberately. It costs one registry value, it is
+     * correct on both trees, and the alternative is a seed whose necessity
+     * depends on which fork `native/pins.env` currently points at.
      *
      * The data must be a bare filename — the reader substitutes it into a fixed
      * `system32` path — and `REG_SZ`, which `info->Type == REG_SZ` enforces.
@@ -299,12 +308,21 @@ object PrefixRegistry {
     /**
      * Where Wine looks for the 32-bit x86 emulator under WoW64, i.e. FEX again.
      *
-     * **Also required.** Read by `get_cpu_dll_name()`
-     * (`dlls/wow64/syscall.c:909` in Wine 11.14). Its built-in fallback on an
-     * ARM64 host is `xtajit.dll`, *not* `libwow64fex.dll` — the previous comment
-     * here had that backwards, and with the key unwritten no 32-bit x86 program
-     * can start. `loader/wine.inf.in:402` writes `xtajit.dll` during `wineboot`,
-     * which is exactly the value this has to replace.
+     * **The same split as [arm64ecEmulator], and for the same reason.** Read by
+     * `get_cpu_dll_name()` (`dlls/wow64/syscall.c`), whose built-in fallback on
+     * an ARM64 host is:
+     *
+     *  - **Upstream Wine (11.14 and before):** `xtajit.dll`, and
+     *    `loader/wine.inf.in` writes that value during `wineboot`. Unwritten, no
+     *    32-bit x86 program can start.
+     *  - **Valve's proton_11.0, the current base:** `libwow64fex.dll` already,
+     *    with `wine.inf.in` writing the same.
+     *
+     * Note that Proton's `wine.inf.in` entry carries no `FLG_ADDREG_NOCLOBBER`,
+     * so `wineboot` overwrites whatever is here rather than preserving it. That
+     * is harmless only because it writes the value this seed wants; it does mean
+     * the old "apply before or after wineboot, either lands" reasoning is not a
+     * property of this base, and a *different* value seeded here would be lost.
      *
      * The DLL is loaded by `load_64bit_module`, which resolves it against
      * `get_machine_wow64_dir(IMAGE_FILE_MACHINE_TARGET_HOST)` — `system32`, the
