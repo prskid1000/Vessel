@@ -1,0 +1,301 @@
+mmdevapi: run the audio loops on system threads (backport).
+
+Backport of two upstream Wine commits that Proton 11.0 predates:
+
+    a70f1eb8ee2  mmdevapi: Use a system thread for the audio driver main loop thread.
+    4c3dd4e1d0e  mmdevapi: Use a system thread for the audio driver timer loop thread.
+
+They are cherry-picked here because patch 0008 -- the AAudio driver -- is
+written against the interface they introduce, and that interface is not
+source-compatible with the one Proton 11.0 carries. Concretely, between Wine
+11.0 and 11.14 the unixlib contract changed in four ways that all bear on a
+driver:
+
+  - `main_loop` became `main_loop_start` + `main_loop_stop`, so every entry
+    from index 3 onward shifts by one. A driver built against the newer enum
+    and loaded by the older mmdevapi does not fail to link; it silently calls
+    the wrong function for every operation.
+  - `timer_loop` was removed. The PE side no longer spawns the per-stream timer
+    thread and call it; the driver creates its own and owns its lifetime.
+  - `struct main_loop_params` and `struct timer_loop_params` went away with
+    them, as did `release_stream_params.timer_thread`.
+  - `create_unix_thread()` was added to unixlib.h as the helper a driver uses
+    to make that thread. 0008 calls it, so without this backport the driver
+    does not compile at all.
+
+Adapting the driver backwards was the alternative and was rejected: it is
+verified working on device as written, and the older shape is the one upstream
+moved away from. Backporting the interface keeps 0008 byte-identical to the
+version that was tested.
+
+Only dlls/mmdevapi/ is taken. The upstream commits also touch winealsa,
+winecoreaudio and winepulse, which build/wine.sh configures out
+(--without-alsa, --without-coreaudio, --without-pulse) and which therefore
+never compile here -- and wineoss.drv/oss.c, which 0008 replaces in full.
+
+One hunk needed hand-resolution rather than a straight apply. Upstream's
+DLL_PROCESS_DETACH reads
+
+    if (lpvReserved) break;
+    main_loop_stop();
+    if (drvs.module_unixlib) { __wine_unload_unix_lib( drvs.module ); }
+
+where Proton's calls main_loop_stop() *after* the block that does
+FreeLibrary( drvs.module ). That ordering is harmless while main_loop_stop is a
+PE-side function and wrong the moment it becomes a unix call, so the call is
+moved inside the `drvs.module_unixlib` block, ahead of the FreeLibrary, rather
+than substituted in place.
+diff --git a/dlls/mmdevapi/client.c b/dlls/mmdevapi/client.c
+index 92a33fede5..e04baa79ea 100644
+--- a/dlls/mmdevapi/client.c
++++ b/dlls/mmdevapi/client.c
+@@ -50,16 +50,6 @@ extern HRESULT get_audio_session(const GUID *sessionguid, IMMDevice *device, UIN
+                                  struct audio_session **out);
+ extern struct audio_session_wrapper *session_wrapper_create(struct audio_client *client);
+ 
+-static HANDLE main_loop_thread;
+-
+-void main_loop_stop(void)
+-{
+-    if (main_loop_thread) {
+-        WaitForSingleObject(main_loop_thread, INFINITE);
+-        CloseHandle(main_loop_thread);
+-    }
+-}
+-
+ void set_stream_volumes(struct audio_client *This)
+ {
+     struct set_volumes_params params;
+@@ -210,58 +200,11 @@ static void dump_fmt(const WAVEFORMATEX *fmt)
+     }
+ }
+ 
+-static DWORD CALLBACK main_loop_func(void *event)
+-{
+-    struct main_loop_params params;
+-
+-    SetThreadDescription(GetCurrentThread(), L"audio_client_main");
+-
+-    params.event = event;
+-
+-    wine_unix_call(main_loop, &params);
+-
+-    return 0;
+-}
+-
+-HRESULT main_loop_start(void)
+-{
+-    if (!main_loop_thread) {
+-        HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+-        if (!(main_loop_thread = CreateThread(NULL, 0, main_loop_func, event, 0, NULL))) {
+-            ERR("Failed to create main loop thread\n");
+-            CloseHandle(event);
+-            return E_FAIL;
+-        }
+-
+-        SetThreadPriority(main_loop_thread, THREAD_PRIORITY_TIME_CRITICAL);
+-        WaitForSingleObject(event, INFINITE);
+-        CloseHandle(event);
+-    }
+-
+-    return S_OK;
+-}
+-
+-static DWORD CALLBACK timer_loop_func(void *user)
+-{
+-    struct timer_loop_params params;
+-    struct audio_client *This = user;
+-
+-    SetThreadDescription(GetCurrentThread(), L"audio_client_timer");
+-
+-    params.stream = This->stream;
+-
+-    wine_unix_call(timer_loop, &params);
+-
+-    return 0;
+-}
+-
+-HRESULT stream_release(stream_handle stream, HANDLE timer_thread)
++static HRESULT stream_release(stream_handle stream)
+ {
+     struct release_stream_params params;
+ 
+-    params.stream       = stream;
+-    params.timer_thread = timer_thread;
+-
++    params.stream = stream;
+     wine_unix_call(release_stream, &params);
+ 
+     return params.result;
+@@ -532,10 +475,7 @@ static HRESULT stream_init(struct audio_client *client, const BOOLEAN force_def_
+         return AUDCLNT_E_ALREADY_INITIALIZED;
+     }
+ 
+-    if (FAILED(params.result = main_loop_start())) {
+-        sessions_unlock();
+-        return params.result;
+-    }
++    wine_unix_call( main_loop_start, NULL );
+ 
+     if (flags & AUDCLNT_STREAMFLAGS_LOOPBACK) {
+         struct get_loopback_capture_device_params params;
+@@ -606,7 +546,7 @@ static HRESULT stream_init(struct audio_client *client, const BOOLEAN force_def_
+ 
+ exit:
+     if (FAILED(params.result)) {
+-        stream_release(stream, NULL);
++        stream_release(stream);
+         free(client->vols);
+         client->vols = NULL;
+     } else {
+@@ -794,7 +734,7 @@ static ULONG WINAPI client_Release(IAudioClient3 *iface)
+         free(This->vols);
+ 
+         if (This->stream)
+-            stream_release(This->stream, This->timer_thread);
++            stream_release(This->stream);
+ 
+         free(This->device_name);
+         free(This);
+@@ -988,15 +928,6 @@ static HRESULT WINAPI client_Start(IAudioClient3 *iface)
+     params.stream = This->stream;
+     wine_unix_call(start, &params);
+ 
+-    if (SUCCEEDED(params.result) && !This->timer_thread) {
+-        if ((This->timer_thread = CreateThread(NULL, 0, timer_loop_func, This, 0, NULL)))
+-            SetThreadPriority(This->timer_thread, THREAD_PRIORITY_TIME_CRITICAL);
+-        else {
+-            IAudioClient3_Stop(&This->IAudioClient3_iface);
+-            params.result = E_FAIL;
+-        }
+-    }
+-
+     sessions_unlock();
+ 
+     return params.result;
+diff --git a/dlls/mmdevapi/main.c b/dlls/mmdevapi/main.c
+index 66a63275f5..3c795cdb71 100644
+--- a/dlls/mmdevapi/main.c
++++ b/dlls/mmdevapi/main.c
+@@ -211,6 +211,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+         case DLL_PROCESS_DETACH:
+             if (drvs.module_unixlib)
+             {
++                /* The main loop now runs on a system thread owned by the unix
++                 * half, so stopping it is a unix call and has to happen while
++                 * the unix library is still mapped -- i.e. before the
++                 * FreeLibrary below, not after it as the PE-side
++                 * main_loop_stop() could be. */
++                wine_unix_call( main_loop_stop, NULL );
+                 wine_unix_call( process_detach, NULL );
+                 FreeLibrary( drvs.module );
+                 if (midi_driver.module != drvs.module)
+@@ -219,7 +225,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+                     FreeLibrary( midi_driver.module );
+                 }
+             }
+-            main_loop_stop();
+ 
+             if (!lpvReserved)
+                 MMDevEnum_Free();
+diff --git a/dlls/mmdevapi/mmdevapi_private.h b/dlls/mmdevapi/mmdevapi_private.h
+index 672d901bf6..40b1ed2be2 100644
+--- a/dlls/mmdevapi/mmdevapi_private.h
++++ b/dlls/mmdevapi/mmdevapi_private.h
+@@ -75,8 +75,6 @@ struct audio_client {
+     UINT32 channel_count;
+     stream_handle stream;
+ 
+-    HANDLE timer_thread;
+-
+     struct audio_session *session;
+     struct audio_session_wrapper *session_wrapper;
+ 
+@@ -129,8 +127,6 @@ extern BOOL get_device_name_from_guid( const GUID *guid, char **name, EDataFlow
+ extern HRESULT load_devices_from_reg(void);
+ extern HRESULT load_driver_devices(EDataFlow flow);
+ 
+-extern void main_loop_stop(void);
+-
+ extern const WCHAR drv_keyW[];
+ 
+ extern HRESULT get_audio_sessions(IMMDevice *device, GUID **ret, int *ret_count);
+diff --git a/dlls/mmdevapi/unixlib.h b/dlls/mmdevapi/unixlib.h
+index 3df13e93b3..ddb6bd1005 100644
+--- a/dlls/mmdevapi/unixlib.h
++++ b/dlls/mmdevapi/unixlib.h
+@@ -20,6 +20,25 @@
+ #include "audioclient.h"
+ #include "mmdeviceapi.h"
+ 
++#ifdef WINE_UNIX_LIB
++/* helper to create a thread on the Unix side */
++static inline NTSTATUS create_unix_thread( HANDLE *handle, const WCHAR *name,
++                                           void (*entry)(void *), void *param )
++{
++    DWORD priority = THREAD_PRIORITY_TIME_CRITICAL;
++    THREAD_NAME_INFORMATION info;
++    NTSTATUS status;
++
++    if (!(status = PsCreateSystemThread( handle, THREAD_ALL_ACCESS, NULL, 0, NULL, entry, param )))
++    {
++        RtlInitUnicodeString( &info.ThreadName, name );
++        NtSetInformationThread( *handle, ThreadNameInformation, &info, sizeof(info) );
++        NtSetInformationThread( *handle, ThreadBasePriority, &priority, sizeof(priority) );
++    }
++    return status;
++}
++#endif
++
+ typedef UINT64 stream_handle;
+ 
+ enum driver_priority
+@@ -36,11 +55,6 @@ struct endpoint
+     unsigned int device;
+ };
+ 
+-struct main_loop_params
+-{
+-    HANDLE event;
+-};
+-
+ struct get_endpoint_ids_params
+ {
+     EDataFlow flow;
+@@ -69,7 +83,6 @@ struct create_stream_params
+ struct release_stream_params
+ {
+     stream_handle stream;
+-    HANDLE timer_thread;
+     HRESULT result;
+ };
+ 
+@@ -91,11 +104,6 @@ struct reset_params
+     HRESULT result;
+ };
+ 
+-struct timer_loop_params
+-{
+-    stream_handle stream;
+-};
+-
+ struct get_render_buffer_params
+ {
+     stream_handle stream;
+@@ -315,14 +323,14 @@ enum unix_funcs
+ {
+     process_attach,
+     process_detach,
+-    main_loop,
++    main_loop_start,
++    main_loop_stop,
+     get_endpoint_ids,
+     create_stream,
+     release_stream,
+     start,
+     stop,
+     reset,
+-    timer_loop,
+     get_render_buffer,
+     release_render_buffer,
+     get_capture_buffer,

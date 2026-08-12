@@ -1,5 +1,5 @@
 diff --git a/dlls/winex11.drv/desktop.c b/dlls/winex11.drv/desktop.c
-index 703ab98b7aa..65a051252b5 100644
+index 3c223d66b9..5a6ecf272b 100644
 --- a/dlls/winex11.drv/desktop.c
 +++ b/dlls/winex11.drv/desktop.c
 @@ -24,6 +24,7 @@
@@ -10,13 +10,15 @@ index 703ab98b7aa..65a051252b5 100644
  #include <X11/cursorfont.h>
  #include <X11/Xlib.h>
  
-@@ -53,9 +54,32 @@ BOOL is_virtual_desktop(void)
+@@ -54,11 +55,34 @@ BOOL is_virtual_desktop(void)
   */
- void X11DRV_init_desktop( Window win )
+ void X11DRV_init_desktop( Window win, unsigned int width, unsigned int height )
  {
 +    const char *vessel_managed;
 +
-     host_primary_rect = get_host_primary_monitor_rect();
+     if (host_monitor_rects) free( host_monitor_rects );
+     if (!get_host_monitor_rects( &host_monitor_rects, &host_monitor_rect_count ))
+         ERR("Failed to get host monitor rectangle.\n");
      root_window = win;
      managed_mode = FALSE;  /* no managed windows in desktop mode */
 +

@@ -1,8 +1,8 @@
 diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
-index b315490b1f2..15411e1f9a1 100644
+index 03b43b16d3..aa19f1f621 100644
 --- a/dlls/iphlpapi/iphlpapi_main.c
 +++ b/dlls/iphlpapi/iphlpapi_main.c
-@@ -1187,6 +1187,11 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
+@@ -1188,6 +1188,11 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
          if (!(flags & GAA_FLAG_SKIP_DNS_SERVER))
          {
              servers = (DNS_ADDR_ARRAY *)buf;
@@ -14,7 +14,7 @@ index b315490b1f2..15411e1f9a1 100644
              for (attempt = 0; attempt < 5; attempt++)
              {
                  err = DnsQueryConfig( query, 0, name, NULL, servers, &size );
-@@ -1199,7 +1204,20 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
+@@ -1200,7 +1205,20 @@ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags
                      break;
                  }
              }

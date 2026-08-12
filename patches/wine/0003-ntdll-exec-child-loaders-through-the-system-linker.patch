@@ -35,11 +35,13 @@ as an address-space failure; it has not been exercised yet.
 Not suitable upstream as-is: the linker path is hardcoded, and a real fix would
 come from configure or an environment variable rather than __ANDROID__.
 
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 4deeac79c2..3f883a9c41 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -437,6 +437,35 @@
+@@ -547,6 +547,35 @@ char *get_alternate_wineloader( WORD machine )
  
- static void preloader_exec( char **argv )
+ static void preloader_exec( char **argv, WORD machine )
  {
 +#ifdef __ANDROID__
 +    /* Exec the system linker, never the loader directly.
@@ -71,9 +73,9 @@ come from configure or an environment variable rather than __ANDROID__.
 +    execv( argv[0], argv );
 +#else
  #ifdef HAVE_WINE_PRELOADER
-     asprintf( &argv[0], "%s-preloader", argv[1] );
- #ifdef __APPLE__
-@@ -452,6 +481,7 @@
+ #if !defined(__arm__) && !defined(__aarch64__)
+     if (machine == IMAGE_FILE_MACHINE_AMD64)
+@@ -568,6 +597,7 @@ static void preloader_exec( char **argv, WORD machine )
      free( argv[0] );
  #endif
      execv( argv[1], argv + 1 );

@@ -1,5 +1,5 @@
 diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
-index c2823e13f8d..c23cfdf05b7 100644
+index db32faee5b..9624d106cb 100644
 --- a/dlls/winebus.sys/Makefile.in
 +++ b/dlls/winebus.sys/Makefile.in
 @@ -10,6 +10,7 @@ SOURCES = \
@@ -12,7 +12,7 @@ index c2823e13f8d..c23cfdf05b7 100644
  	unixlib.c \
 diff --git a/dlls/winebus.sys/bus_vessel.c b/dlls/winebus.sys/bus_vessel.c
 new file mode 100644
-index 00000000000..7fa55639ca9
+index 0000000000..7fa55639ca
 --- /dev/null
 +++ b/dlls/winebus.sys/bus_vessel.c
 @@ -0,0 +1,566 @@
@@ -583,10 +583,10 @@ index 00000000000..7fa55639ca9
 +    return STATUS_SUCCESS;
 +}
 diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
-index a6227be9908..b61b077bb9e 100644
+index 4bc967176a..0c26a2f659 100644
 --- a/dlls/winebus.sys/main.c
 +++ b/dlls/winebus.sys/main.c
-@@ -1263,6 +1263,20 @@ static NTSTATUS iohid_driver_init(void)
+@@ -1365,6 +1365,20 @@ static NTSTATUS iohid_driver_init(void)
      return bus_main_thread_start(&bus);
  }
  
@@ -607,15 +607,15 @@ index a6227be9908..b61b077bb9e 100644
  static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
  {
      IO_STACK_LOCATION *irpsp = IoGetCurrentIrpStackLocation(irp);
-@@ -1282,6 +1296,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
-         if (!sdl_driver_init()) options.disable_input = TRUE;
+@@ -1384,6 +1398,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
          udev_driver_init();
+         sdl_driver_init();
          iohid_driver_init();
 +        vessel_driver_init();
  
          irp->IoStatus.Status = STATUS_SUCCESS;
          break;
-@@ -1292,6 +1307,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
+@@ -1394,6 +1409,7 @@ static NTSTATUS fdo_pnp_dispatch(DEVICE_OBJECT *device, IRP *irp)
          winebus_call(sdl_stop, NULL);
          winebus_call(udev_stop, NULL);
          winebus_call(iohid_stop, NULL);
@@ -624,7 +624,7 @@ index a6227be9908..b61b077bb9e 100644
          WaitForMultipleObjects(bus_count, bus_thread, TRUE, INFINITE);
          while (bus_count--) CloseHandle(bus_thread[bus_count]);
 diff --git a/dlls/winebus.sys/unix_private.h b/dlls/winebus.sys/unix_private.h
-index c39c8787247..b3d09ceacbf 100644
+index ba36971df4..504a99580b 100644
 --- a/dlls/winebus.sys/unix_private.h
 +++ b/dlls/winebus.sys/unix_private.h
 @@ -234,6 +234,10 @@ extern NTSTATUS iohid_bus_init(void *);
@@ -639,10 +639,10 @@ index c39c8787247..b3d09ceacbf 100644
  extern void bus_event_queue_destroy(struct list *queue);
  extern BOOL bus_event_queue_device_removed(struct list *queue, struct unix_device *device);
 diff --git a/dlls/winebus.sys/unixlib.c b/dlls/winebus.sys/unixlib.c
-index e3cabbc8c34..306c7247f39 100644
+index bd4351f059..cb81cd91b9 100644
 --- a/dlls/winebus.sys/unixlib.c
 +++ b/dlls/winebus.sys/unixlib.c
-@@ -310,6 +310,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+@@ -311,6 +311,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
      iohid_bus_init,
      iohid_bus_wait,
      iohid_bus_stop,
@@ -653,10 +653,10 @@ index e3cabbc8c34..306c7247f39 100644
      keyboard_device_create,
      unix_device_remove,
 diff --git a/dlls/winebus.sys/unixlib.h b/dlls/winebus.sys/unixlib.h
-index d2b17f4c6d3..85f4a2de900 100644
+index ad3b268b0b..1d4c8482c2 100644
 --- a/dlls/winebus.sys/unixlib.h
 +++ b/dlls/winebus.sys/unixlib.h
-@@ -145,6 +145,9 @@ enum unix_funcs
+@@ -147,6 +147,9 @@ enum unix_funcs
      iohid_init,
      iohid_wait,
      iohid_stop,

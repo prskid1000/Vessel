@@ -1,5 +1,5 @@
 diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
-index 924990e8d4f..d0441c05207 100644
+index 8f65c43fb2..84611dc707 100644
 --- a/dlls/win32u/window.c
 +++ b/dlls/win32u/window.c
 @@ -24,6 +24,7 @@
@@ -9,10 +9,10 @@ index 924990e8d4f..d0441c05207 100644
 +#include <stdlib.h>
  
  #include "ntstatus.h"
- #include "ntgdi_private.h"
-@@ -39,6 +40,22 @@ WINE_DEFAULT_DEBUG_CHANNEL(win);
- 
- static const struct ratio no_dpi;
+ #define WIN32_NO_STATUS
+@@ -38,6 +39,22 @@ WINE_DEFAULT_DEBUG_CHANNEL(win);
+ #define USER_HANDLE_TO_INDEX(hwnd) ((LOWORD(hwnd) - FIRST_USER_HANDLE) >> 1)
+ #define USER_HANDLE_FROM_INDEX(index, generation) UlongToHandle( (index << 1) + FIRST_USER_HANDLE + (generation << 16) )
  
 +/* Vessel: VESSEL_BORDERLESS=1 removes the non-client frame from every top-level
 + * window. Read once — this cannot change within a process, and the answer is
@@ -33,7 +33,7 @@ index 924990e8d4f..d0441c05207 100644
  static void *client_objects[MAX_USER_HANDLES];
  
  #define SWP_AGG_NOGEOMETRYCHANGE \
-@@ -5926,6 +5943,32 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
+@@ -5870,6 +5887,32 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
          if (!(win->dwStyle & WS_POPUP)) win->dwStyle |= WS_CAPTION;
      }
  

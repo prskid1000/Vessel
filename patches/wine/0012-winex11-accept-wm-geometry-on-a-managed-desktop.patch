@@ -1,8 +1,8 @@
 diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index 297695749a1..fd98ebc36bd 100644
+index cc0538d511..772d31594f 100644
 --- a/dlls/winex11.drv/window.c
 +++ b/dlls/winex11.drv/window.c
-@@ -1746,7 +1746,45 @@ static UINT window_update_client_config( struct x11drv_win_data *data )
+@@ -1982,7 +1982,45 @@ static UINT window_update_client_config( struct x11drv_win_data *data )
      UINT flags;
  
      if (!data->managed) return 0; /* unmanaged windows are managed by the Win32 side */

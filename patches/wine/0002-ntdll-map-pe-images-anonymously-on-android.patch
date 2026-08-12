@@ -55,10 +55,10 @@ __ANDROID__, and would ideally narrow the fallback to images that actually get
 relocated.
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index db820a89525..65cf19eedee 100644
+index 6e1697720f..9689781320 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -3050,6 +3050,26 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+@@ -3282,6 +3282,26 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
      SIZE_T align_mask = max( image_info->alignment - 1, page_mask );
      INT_PTR delta;
  

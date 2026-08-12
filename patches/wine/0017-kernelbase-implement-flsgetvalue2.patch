@@ -1,5 +1,5 @@
 diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
-index 0dcf3ee99d3..5e5b7b0042b 100644
+index 8f4a66a96f..cf38d8d85b 100644
 --- a/dlls/kernelbase/kernelbase.spec
 +++ b/dlls/kernelbase/kernelbase.spec
 @@ -388,6 +388,7 @@
@@ -11,10 +11,10 @@ index 0dcf3ee99d3..5e5b7b0042b 100644
  @ stdcall FlushConsoleInputBuffer(long)
  @ stdcall FlushFileBuffers(long)
 diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
-index 9a8ce88411f..c17cfcbb76b 100644
+index 002f3e5e8d..0cd610e9a1 100644
 --- a/dlls/kernelbase/thread.c
 +++ b/dlls/kernelbase/thread.c
-@@ -1296,6 +1296,29 @@ PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue( DWORD index )
+@@ -1293,6 +1293,29 @@ PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue( DWORD index )
  }
  
  
