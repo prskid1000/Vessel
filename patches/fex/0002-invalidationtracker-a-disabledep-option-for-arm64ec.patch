@@ -1,0 +1,53 @@
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index fa56db44c..6de5aaa50 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -436,6 +436,19 @@
+           "\tfull: Validate code before every run (slow)"
+         ]
+       },
++      "DisableDEP": {
++        "Type": "bool",
++        "Default": "true",
++        "Desc": [
++          "Treat every readable guest page as executable, as a process with DEP off would.",
++          "Permission tracking is FEX's own interval map, not a query to the host, and a",
++          "page the guest never marked executable makes an entry block fail to decode:",
++          "'NoExec instruction in entry block'. Programs that build code at runtime and",
++          "expect DEP to be off -- packers, anti-tamper stubs, some JITs -- die there.",
++          "The cost is that a genuinely wild jump is translated instead of faulting, so a",
++          "bug that would have been a clean access violation becomes silent corruption."
++        ]
++      },
+       "TSOEnabled": {
+         "Type": "bool",
+         "Default": "true",
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 155403d35..d111647c4 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -28,6 +28,24 @@ InvalidationTracker::InvalidationTracker(FEXCore::Context::Context& CTX, const s
+ 
+     Address = BaseAddress + Info.RegionSize;
+   }
++
++  // VESSEL: honour DisableDEP, because nothing else on this path ever can.
++  //
++  // DEPDisabled is only ever set by HandleProcessExecuteFlagsChange, and the
++  // one caller of that is BTCpuNotifyProcessExecuteFlagsChange in the WOW64
++  // module. The ARM64EC module has no equivalent, so for a 64-bit guest the
++  // flag is false at construction and stays false for the life of the process
++  // -- a program that legitimately runs with DEP off is still treated as
++  // strict, and the permissive path below is unreachable rather than declined.
++  //
++  // Routed through the same handler rather than assigning the flag, so the
++  // DEP-promoted interval bookkeeping and the VirtualQuery sweep it does run
++  // exactly as they would for a guest that asked. Called after the sweep above
++  // so the intervals it re-walks are already populated.
++  FEX_CONFIG_OPT(DisableDEP, DISABLEDEP);
++  if (DisableDEP) {
++    HandleProcessExecuteFlagsChange(MEM_EXECUTE_OPTION_ENABLE);
++  }
+ }
+ 
+ static bool ProtHasExec(ULONG Prot) {
