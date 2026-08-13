@@ -1,0 +1,79 @@
+win32u: clamp the swapchain extent to maxImageExtent, not just min
+
+Resident Evil Requiem dies at `vkCreateSwapchainKHR` with an access violation
+inside the driver. patches/wine/0025's trace shows every step of Wine's own
+work succeeding and the fault landing on the call out:
+
+    win32u_vkCreateSwapchainKHR  old_swapchain 0x0, surface 0xb400007755609090
+    win32u_vkCreateSwapchainKHR  create_info copied, extent 1926x1127, format 44
+    win32u_vkCreateSwapchainKHR  surface->hwnd 0x3006a
+    win32u_vkCreateSwapchainKHR  host surface 0xb4000077f5611830
+    win32u_vkCreateSwapchainKHR  calling vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+    win32u_vkCreateSwapchainKHR  capabilities res 0
+    win32u_vkCreateSwapchainKHR  scaling decided, allocating swapchain
+    win32u_vkCreateSwapchainKHR  calling driver vkCreateSwapchainKHR
+    err:vulkan:vkCreateSwapchainKHR Exception 0xc0000005 in Unix call.
+
+1926x1127 is the giveaway. vkd3d asked for 1920x1080 on a 1920x1080 desktop;
+this is that rect plus its decorations -- six pixels of border and a
+forty-seven pixel caption -- so the extent handed to the driver is larger than
+the desktop it has to fit inside.
+
+The code above says it adjusts the extent "back to the host capabilities" and
+then applies only the lower bound. There is no upper clamp, so anything
+oversized passes through untouched. imageExtent must lie within
+[minImageExtent, maxImageExtent] per
+VUID-VkSwapchainCreateInfoKHR-imageExtent-01274, which makes this invalid
+usage, and a driver may respond however it likes. Turnip faults.
+
+Turnip faulting on out-of-range input is a driver bug and this does not
+pretend otherwise. It stops Vessel sending input no driver is obliged to
+accept, which is the half that is ours.
+
+The capabilities are traced now as well -- currentExtent, min, max and the
+image count range. `capabilities res 0` reported that the query succeeded
+without saying what it returned, which left the bounds to be inferred rather
+than read, and an inference is not worth an hour of build time twice.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2625,9 +2625,39 @@
+     TRACE( "  capabilities res %d\n", res );
+     if (res) return res;
+ 
++    TRACE( "  caps current %ux%u, min %ux%u, max %ux%u, images %u..%u\n",
++           capabilities.currentExtent.width, capabilities.currentExtent.height,
++           capabilities.minImageExtent.width, capabilities.minImageExtent.height,
++           capabilities.maxImageExtent.width, capabilities.maxImageExtent.height,
++           capabilities.minImageCount, capabilities.maxImageCount );
++
+     create_info_host.imageExtent.width = max( create_info_host.imageExtent.width, capabilities.minImageExtent.width );
+     create_info_host.imageExtent.height = max( create_info_host.imageExtent.height, capabilities.minImageExtent.height );
+ 
++    /* Vessel: and back down to maxImageExtent, which upstream never does.
++     *
++     * The comment above says the extent is adjusted "back to the host
++     * capabilities" and then only the lower bound is applied. imageExtent must
++     * lie within [minImageExtent, maxImageExtent] --
++     * VUID-VkSwapchainCreateInfoKHR-imageExtent-01274 -- so an oversized extent
++     * is invalid usage and a driver may do anything with it. Turnip faults:
++     *
++     *     win32u_vkCreateSwapchainKHR  create_info copied, extent 1926x1127
++     *     win32u_vkCreateSwapchainKHR  calling driver vkCreateSwapchainKHR
++     *     err:vulkan:vkCreateSwapchainKHR Exception 0xc0000005 in Unix call.
++     *
++     * measured with Resident Evil Requiem, which asks vkd3d for 1920x1080 on a
++     * 1920x1080 desktop and arrives here at 1926x1127 -- that rect plus its
++     * decorations, six pixels of border and a forty-seven pixel caption.
++     *
++     * A driver that faults on out-of-range input is a driver bug and this does
++     * not excuse it. It stops Vessel sending input no driver is obliged to
++     * accept, which is the half that is ours. */
++    create_info_host.imageExtent.width = min( create_info_host.imageExtent.width, capabilities.maxImageExtent.width );
++    create_info_host.imageExtent.height = min( create_info_host.imageExtent.height, capabilities.maxImageExtent.height );
++
++    TRACE( "  extent clamped to %ux%u\n", create_info_host.imageExtent.width, create_info_host.imageExtent.height );
++
+     /* If the swapchain image size is not equal to the presentation size (e.g. because of DPI virtualization or
+      * display mode change emulation), MoltenVK's vkQueuePresentKHR returns VK_SUBOPTIMAL_KHR.
+      * Create the swapchain with VkSwapchainPresentScalingCreateInfoEXT to avoid this.
