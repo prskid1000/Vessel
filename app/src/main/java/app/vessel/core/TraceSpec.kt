@@ -450,6 +450,17 @@ val TRACE_TOPICS: List<TraceTopic> = listOf(
         // Offering `errors` and `warnings` as separate stops here would be four
         // controls that all do the same thing, which is precisely the ladder
         // defect this file exists to fix. One stop, with the measurement on it.
+        //
+        // **`patches/fex/0003` gives it real stops, and this table must not
+        // claim them until that patch is in the shipped component.** The patch
+        // adds a level ceiling to `MsgHandler` — defaulting to ERROR, raised by
+        // this very topic, which FEX reads out of `VESSEL_TRACE` itself because
+        // the Kotlin side has no variable to express it through. When the
+        // component is rebuilt, this topic gains `stubs` (FEX's DEBUG tier, the
+        // unaligned-atomic flood) and `everything` (its INFO tier), and the stop
+        // below drops to a few dozen lines a minute. Adding those stops now
+        // would put a figure on this screen that the running binary does not
+        // produce, which is the one thing a volume hint may never do.
         stops = listOf(
             TraceStop(
                 TraceLevel.ERRORS,
