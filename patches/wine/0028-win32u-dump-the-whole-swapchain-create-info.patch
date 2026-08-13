@@ -1,0 +1,67 @@
+win32u: dump the whole swapchain create_info, and its pNext chain
+
+Metro Redux and Resident Evil Requiem reach the driver call with identical
+values in every field patches/wine/0025 prints:
+
+    create_info copied, surface handle 0x…, extent 1920x1080, format 44
+    caps current 1920x1080, min 1920x1080, max 1920x1080, images 3..0
+    extent clamped to 1920x1080
+    calling driver vkCreateSwapchainKHR
+
+Metro gets a swapchain. Requiem faults inside the driver. Same surface, same
+capabilities, same extent, same format, same clamp -- so whatever differs is a
+field that was not being printed, and three cheap guesses have now been spent
+on fields that turned out to be identical.
+
+pNext is the first suspect and the reason the chain is walked rather than just
+counted: vkd3d-proton attaches present-id and present-wait structures that DXVK
+never sends, and a WSI that handles the plain path can fault on the extended
+one. sType alone is enough -- the question is which structures are in the
+chain, not what is in them.
+
+The rest of the struct is printed for the same reason the capabilities were
+added to 0025: an inference is not worth an hour of build time twice, and every
+field left unprinted is another round trip.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2700,6 +2700,39 @@
+                    create_info_host.imageFormat );
+     }
+ 
++    /* Vessel: everything the driver is actually given, and the pNext chain.
++     *
++     * The fields above were not enough. Metro Redux and Resident Evil Requiem
++     * reach here with the same surface, the same capabilities, the same
++     * 1920x1080 extent and the same format 44; Metro gets a swapchain and
++     * Requiem faults inside the driver. Whatever differs is in this struct and
++     * was not being printed, so all of it is printed now.
++     *
++     * pNext matters most: vkd3d-proton attaches present-id and present-wait
++     * structures that DXVK never sends, and a half-initialised WSI can handle
++     * the plain path and fault on the extended one. sType is printed rather
++     * than the contents because the identity of the chain is the question. */
++    TRACE( "  create_info minImageCount %u, format %u, colorSpace %u, arrayLayers %u\n",
++           create_info_host.minImageCount, create_info_host.imageFormat,
++           create_info_host.imageColorSpace, create_info_host.imageArrayLayers );
++    TRACE( "  create_info usage %#x, sharing %u, preTransform %#x, composite %#x\n",
++           create_info_host.imageUsage, create_info_host.imageSharingMode,
++           create_info_host.preTransform, create_info_host.compositeAlpha );
++    TRACE( "  create_info presentMode %u, clipped %u, flags %#x, oldSwapchain %p\n",
++           create_info_host.presentMode, create_info_host.clipped, create_info_host.flags,
++           (void *)(UINT_PTR)create_info_host.oldSwapchain );
++    {
++        const VkBaseInStructure *chain = create_info_host.pNext;
++        unsigned int depth = 0;
++        while (chain && depth < 16)
++        {
++            TRACE( "  create_info pNext[%u] sType %u\n", depth, chain->sType );
++            chain = chain->pNext;
++            depth++;
++        }
++        if (!depth) TRACE( "  create_info pNext empty\n" );
++    }
++
+     TRACE( "  calling driver vkCreateSwapchainKHR\n" );
+     if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
+     {

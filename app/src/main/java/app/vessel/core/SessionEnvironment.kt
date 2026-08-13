@@ -240,16 +240,30 @@ const val MANAGED_DESKTOP: Boolean = true
  * path was genuinely selected rather than skipped.
  *
  * *No X protocol error was logged*, which rules out the obvious first guess —
- * an unimplemented request coming back as an error reply — and leaves the cause
- * unproven. What is known is a real gap: `DRI3Extension` answers version 1.0
- * and exactly five opcodes (QueryVersion, Open, PixmapFromBuffer,
- * BufferFromPixmap, PixmapFromBuffers) and throws `BadImplementation` for
- * everything else, so `GetSupportedModifiers` (4), `FenceFromFD` (5) and
- * `FDFromFence` (6) are all absent. `FenceFromFD` is the one that matters:
- * Mesa's DRI3 uses an xshmfence to know when the server has finished with a
- * buffer, and there is no honest way to stub it — accepting the fd and ignoring
- * it would hand back frames that are still being read, which is corruption
- * rather than a crash.
+ * an unimplemented request coming back as an error reply — and left the cause
+ * unproven.
+ *
+ * **The gap that explained it has since been closed, and this note was wrong
+ * about it twice.** It said the server implemented five opcodes and was missing
+ * `GetSupportedModifiers` (4), `FenceFromFD` (5) and `FDFromFence` (6). Those
+ * numbers are not the protocol's: `FenceFromFD` is 4, `FDFromFence` is 5 and
+ * `GetSupportedModifiers` is 6. And `FenceFromFD` is no longer missing —
+ * `DRI3Extension.ClientOpcodes` carries it, `fenceFromFD` is implemented
+ * against `SyncExtension`, and `app/src/main/cpp/winlator/src/xshmfence.c`
+ * backs it with a real futex rather than the stub this note said would be
+ * dishonest. That was written after the failed attempt, so the 2026-08-10
+ * result predates the fix and is not evidence about the current server.
+ *
+ * What the server answers today is version 1.0 with opcodes 0, 1, 2, 3, 4 and
+ * 7 — QueryVersion, Open, PixmapFromBuffer, BufferFromPixmap, FenceFromFD and
+ * PixmapFromBuffers. At 1.0 Mesa asks for no more than that: modifiers and
+ * `BuffersFromPixmap` are 1.2 features it will not reach for, so `FDFromFence`
+ * and `GetSupportedModifiers` being absent is not a gap at the version we
+ * advertise.
+ *
+ * So this is worth retrying, and `tools/gfx/run-presentbench.sh` is how —
+ * it fixes `MESA_VK_WSI_DEBUG` from outside the app and puts both paths side by
+ * side in one run, without reinstalling anything or needing a game.
  *
  * There is also a deeper question this attempt did not answer. Mesa's DRI3 WSI
  * is written against DRM, which is what `HAVE_X11_DRM` names; Turnip here talks
