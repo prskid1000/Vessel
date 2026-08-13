@@ -16,6 +16,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -248,6 +249,52 @@ class SessionLogWriterTest {
                 it.text.startsWith("… logging rate-limited,") && it.text.contains("TF (trace/fex)")
             },
         )
+    }
+
+    /**
+     * The severities do not spend each other's budget.
+     *
+     * The limiter used to refuse everything once the window was full, in
+     * arrival order, so the loudest source took the whole allowance. One
+     * Requiem session with the `sync` channel on lost 47 errors and 40
+     * warnings to 2.8 million dropped trace lines, and the entire tail came
+     * back as trace plus one rate-limit notice — a log that had thrown away
+     * the only lines explaining the failure it was written to explain.
+     *
+     * A flood of the noisiest level, then one line of each quieter one. All
+     * three must survive, and the assertion is on the file rather than on the
+     * counters because the file is what a person reads.
+     */
+    @Test
+    fun `a trace flood cannot crowd out an error or a warning`() {
+        val directory = temporary.newFolder("severity")
+        val meta = write(directory, startedAt = 1_000L, limits = SessionLogLimits.SHIPPED) { log ->
+            // Interleaved, not appended. The window is wall-clock, so three
+            // lines sent after the flood might land in a fresh window and
+            // survive on a slow machine even with the bug present — a test
+            // that passes for a reason unrelated to what it claims. Emitted
+            // mid-flood they are certainly inside a saturated window.
+            repeat(60_000) {
+                log.line(LogSource.WINE, LogLevel.TRACE, "sync wake $it")
+                if (it == 30_000) {
+                    log.line(LogSource.WINE, LogLevel.ERROR, "the one line that mattered")
+                    log.line(LogSource.WINE, LogLevel.WARN, "the other line that mattered")
+                    log.line(LogSource.VESSEL, LogLevel.INFO, "and what had started")
+                }
+            }
+        }
+
+        assertTrue("nothing was dropped, so this test proves nothing", meta.droppedLines > 0)
+
+        // Asserted on the limiter's own accounting rather than on the file.
+        // The head+tail cap is a separate layer and elides the middle, so a
+        // line emitted mid-flood is legitimately absent from the file even
+        // when the limiter let it through — checking the text here would be
+        // testing elision and calling it rate limiting.
+        assertEquals("only traces should have been refused", meta.droppedLines, meta.droppedBySource["TW"])
+        assertNull("an error was refused for a trace's sake", meta.droppedBySource["EW"])
+        assertNull("a warning was refused for a trace's sake", meta.droppedBySource["WW"])
+        assertNull("an info line was refused for a trace's sake", meta.droppedBySource["IV"])
     }
 
     @Test

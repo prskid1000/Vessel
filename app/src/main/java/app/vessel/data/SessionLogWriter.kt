@@ -130,7 +130,15 @@ internal class SessionLogWriter(
     private var pendingCount = 0
 
     private var windowStartedAt = 0L
-    private var windowLines = 0
+
+    /**
+     * Lines allowed so far this window, per severity — see [emit].
+     *
+     * One counter per [LogLevel] rather than one for the window, so the levels
+     * cannot spend each other's budget. Indexed by ordinal because this is on
+     * the path of every single line and a map lookup here is not free.
+     */
+    private val windowLinesByLevel = IntArray(LogLevel.entries.size)
     private var rateLimited = 0
 
     private var lines = 0
@@ -302,14 +310,38 @@ internal class SessionLogWriter(
         val now = System.currentTimeMillis()
         if (now - windowStartedAt >= RATE_WINDOW_MS) {
             windowStartedAt = now
-            windowLines = 0
+            windowLinesByLevel.fill(0)
             if (rateLimited > 0) {
                 val refused = rateLimited
                 rateLimited = 0
                 writeRateLimitMarker(refused)
             }
         }
-        if (windowLines >= limits.rateLimitLines) {
+        // **A trace must never cost us an error, and a warning must not
+        // either.** The limiter used to refuse every line once the window was
+        // full, in arrival order, so whichever source was loudest spent the
+        // whole budget and everything arriving later in that second died with
+        // it -- regardless of what it had to say.
+        //
+        // Measured on one Requiem session with the `sync` channel on:
+        // 4,802,393 lines, 2,841,303 dropped, 99.98% of them TW trace, and
+        // among the casualties 47 EW errors and 40 WW warnings. The
+        // 16,289-line tail came back as sync lines and a single rate-limit
+        // notice, so the end of the log -- the only part worth reading after a
+        // hang -- held nothing else.
+        //
+        // Each severity now has its own budget, so they cannot crowd each
+        // other out: errors survive a warning flood, and both survive a trace
+        // flood. Every level is still bounded, so a runaway loop is still
+        // caught; it is now bounded against its own kind. INFO and TRACE keep
+        // separate budgets too, which costs nothing and means a chatty trace
+        // channel cannot bury the one INFO line that says what started.
+        //
+        // The ceiling is [LogLevel] count times the configured rate rather
+        // than one times it. That is the price of never losing an error to
+        // chatter, and it is the right trade for a log that exists to explain
+        // a failure.
+        if (windowLinesByLevel[level.ordinal] >= limits.rateLimitLines) {
             rateLimited++
             dropped++
             // **Attributed, and attributed here rather than reconstructed
@@ -325,7 +357,7 @@ internal class SessionLogWriter(
             droppedThisWindow[key] = (droppedThisWindow[key] ?: 0) + 1
             return
         }
-        windowLines++
+        windowLinesByLevel[level.ordinal]++
         write(source, level, text)
     }
 
