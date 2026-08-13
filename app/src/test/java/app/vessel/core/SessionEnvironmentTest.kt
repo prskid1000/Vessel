@@ -743,7 +743,6 @@ class SessionEnvironmentTest {
                 "VKD3D_CONFIG" to "nodxr",
                 "MESA_SHADER_CACHE_DISABLE" to "false",
                 "MESA_SHADER_CACHE_DIR" to File(caches, "mesa").absolutePath,
-                "DXVK_STATE_CACHE_PATH" to File(caches, "dxvk").absolutePath,
                 // Not a unix path: see VKD3D_CACHE_DOS_PATH for why the unix
                 // form vkd3d used to get here fails the disk-cache open on
                 // every launch in a Vessel prefix (no `Z:`).
@@ -1065,7 +1064,7 @@ class SessionEnvironmentTest {
         val bootstrap = full.filterKeys { it in BOOTSTRAP_SESSION_ENV }
         val forbidden = listOf(
             "DISPLAY", WINEDLLOVERRIDES_ENV, "TU_DEBUG",
-            "DXVK_LOG_LEVEL", "DXVK_LOG_PATH", "DXVK_STATE_CACHE_PATH",
+            "DXVK_LOG_LEVEL", "DXVK_LOG_PATH",
             "VKD3D_DEBUG", "VKD3D_SHADER_DEBUG", "VKD3D_CONFIG", "VKD3D_SHADER_CACHE_PATH",
             "VKD3D_DISABLE_EXTENSIONS",
             "MESA_SHADER_CACHE_DISABLE", "MESA_SHADER_CACHE_DIR",

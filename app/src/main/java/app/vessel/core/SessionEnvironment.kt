@@ -409,7 +409,6 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // half of Mesa's X11 WSI compiled in, and clearing this sends every
     // swapchain into an `UNREACHABLE`. The whole argument is at the assignment.
     "MESA_VK_WSI_DEBUG",
-    "DXVK_STATE_CACHE_PATH",
     "VKD3D_SHADER_CACHE_PATH",
     "VKD3D_CONFIG",
 
@@ -1173,17 +1172,20 @@ fun sessionEnvironment(
     // is the largest avoidable cost in the whole stack.
     environment["MESA_SHADER_CACHE_DISABLE"] = "false"
     environment["MESA_SHADER_CACHE_DIR"] = File(paths.caches, "mesa").absolutePath
-    // **Dead, and kept anyway.** DXVK 2.x removed its on-disk state cache --
-    // graphics pipeline libraries replaced it -- so nothing in the vendored
-    // 2.7.1 source reads this name and `caches/dxvk` stays empty. Kept because
-    // setting it costs nothing and it works again the day DXVK restores it.
+    // `DXVK_STATE_CACHE_PATH` used to be set here and is deliberately gone.
+    // DXVK 2.x removed the on-disk state cache -- graphics pipeline libraries
+    // replaced it -- and nothing in the vendored 2.7.1 source reads the name or
+    // implements the cache, so it set a variable no one would ever read and
+    // created an empty `caches/dxvk` beside two directories that fill up.
     //
-    // Stated plainly because its emptiness is not evidence of anything. This
-    // variable was once taken as proof that the unix-path scheme worked, which
-    // sent the vkd3d cache investigation the wrong way: nothing there was ever
-    // opening a file to fail on. What actually caches for a DXVK title is
-    // MESA_SHADER_CACHE_DIR above, which does fill up.
-    environment["DXVK_STATE_CACHE_PATH"] = File(paths.caches, "dxvk").absolutePath
+    // Removed rather than left harmless because that empty directory was read
+    // as proof the unix-path scheme worked, and it sent the vkd3d disk-cache
+    // hunt looking for a difference between two paths when the truth was that
+    // only one of them ever opened a file. A cache that cannot fail looks
+    // exactly like a cache that works.
+    //
+    // A DXVK title is cached by `MESA_SHADER_CACHE_DIR` above, which is 7.5 MB
+    // after one session. If DXVK restores its own cache, add it back then.
     // Not a unix path, unlike its two neighbours above: see
     // VKD3D_CACHE_DOS_PATH for why that fails on every launch here.
     environment["VKD3D_SHADER_CACHE_PATH"] = VKD3D_CACHE_DOS_PATH

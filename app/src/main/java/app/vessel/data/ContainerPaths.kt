@@ -172,15 +172,19 @@ data class ContainerLayout(
     val legacyComponents: File get() = File(base, LEGACY_COMPONENTS)
 
     /**
-     * The three shader caches, one directory per layer.
+     * The shader caches, one directory per layer that has one.
      *
-     * [SessionEnvironment] names `caches/mesa` and `caches/dxvk` directly, in
-     * `MESA_SHADER_CACHE_DIR` and `DXVK_STATE_CACHE_PATH`. It is a pure
-     * function with no disk, so it can name them but cannot make them, and
-     * until this existed nothing did: the variables pointed at paths that were
-     * not there. Mesa creates its own tree and survived; DXVK opens its state
-     * cache as a file and does not (or would not — DXVK 2.x has dropped the
-     * on-disk state cache entirely, so this one is now inert either way).
+     * [SessionEnvironment] names `caches/mesa` directly in
+     * `MESA_SHADER_CACHE_DIR`. It is a pure function with no disk, so it can
+     * name a directory but cannot make it, and until this existed nothing did:
+     * the variables pointed at paths that were not there. Mesa creates its own
+     * tree and survived that; a layer that opens its cache as a file would not.
+     *
+     * There is no `caches/dxvk` any more. DXVK 2.x dropped the on-disk state
+     * cache, so the directory was created for a variable nothing reads — and an
+     * empty cache directory is indistinguishable from a working one, which is
+     * how it came to be cited as evidence that a path scheme worked while the
+     * identical scheme was silently failing for vkd3d.
      *
      * `caches/vkd3d` is named too, but `VKD3D_SHADER_CACHE_PATH` does not hold
      * this path — vkd3d-proton runs as a Windows PE DLL inside Wine and
@@ -198,7 +202,7 @@ data class ContainerLayout(
 
     /** Where each layer's cache goes, in the order [SessionEnvironment] names them. */
     val cacheDirectories: List<File>
-        get() = listOf("mesa", "dxvk", "vkd3d").map { File(caches, it) }
+        get() = listOf("mesa", "vkd3d").map { File(caches, it) }
 
     /** Every directory the layout promises, created if absent. */
     fun createDirectories(): Boolean =
