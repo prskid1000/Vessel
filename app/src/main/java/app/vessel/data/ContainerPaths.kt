@@ -174,12 +174,20 @@ data class ContainerLayout(
     /**
      * The three shader caches, one directory per layer.
      *
-     * [SessionEnvironment] names `caches/mesa`, `caches/dxvk` and `caches/vkd3d`
-     * in `MESA_SHADER_CACHE_DIR`, `DXVK_STATE_CACHE_PATH` and
-     * `VKD3D_SHADER_CACHE_PATH`. It is a pure function with no disk, so it can
-     * name them but cannot make them, and until this existed nothing did: the
-     * variables pointed at paths that were not there. Mesa creates its own tree
-     * and survived; DXVK opens its state cache as a file and does not.
+     * [SessionEnvironment] names `caches/mesa` and `caches/dxvk` directly, in
+     * `MESA_SHADER_CACHE_DIR` and `DXVK_STATE_CACHE_PATH`. It is a pure
+     * function with no disk, so it can name them but cannot make them, and
+     * until this existed nothing did: the variables pointed at paths that were
+     * not there. Mesa creates its own tree and survived; DXVK opens its state
+     * cache as a file and does not (or would not — DXVK 2.x has dropped the
+     * on-disk state cache entirely, so this one is now inert either way).
+     *
+     * `caches/vkd3d` is named too, but `VKD3D_SHADER_CACHE_PATH` does not hold
+     * this path — vkd3d-proton runs as a Windows PE DLL inside Wine and
+     * rewrites a Unix path here to a `Z:\` one that no Vessel prefix has (see
+     * `VKD3D_CACHE_DOS_PATH`), so it is handed a DOS path instead and
+     * `SessionRuntime.linkVkd3dCache` symlinks that DOS path to this directory
+     * every launch. The bytes still land here either way.
      *
      * This is the difference between compiling every pipeline on every launch
      * and compiling it once, which on a phone is the largest avoidable cost in

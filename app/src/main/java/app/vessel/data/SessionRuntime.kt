@@ -23,6 +23,7 @@ import app.vessel.core.SessionScratch
 import app.vessel.core.FEX_CACHE_DOS_DIR
 import app.vessel.core.fexCacheHost
 import app.vessel.core.fexCacheLink
+import app.vessel.core.vkd3dCacheLink
 import app.vessel.core.FexPackage
 import app.vessel.core.TurnipDriver
 import app.vessel.core.UpscalerRequest
@@ -718,6 +719,14 @@ class SessionRuntime @Inject constructor(
         // idempotent, and the alternative is recompiling every pipeline on every
         // launch.
         layout.cacheDirectories.forEach { if (!it.isDirectory) it.mkdirs() }
+
+        // **Before the stale-lock sweep below, and before the environment is
+        // handed to Wine.** vkd3d is given VKD3D_CACHE_DOS_PATH
+        // (`C:\vessel\vkd3dcache\`), not the unix `caches/vkd3d` that Mesa and
+        // DXVK get — see that constant for why a unix path there fails the
+        // open outright — so the DOS path needs something real to resolve to
+        // before the guest starts, the same way [linkFexCache] does for FEX.
+        linkVkd3dCache(layout.prefix, File(layout.caches, "vkd3d"), log)
 
         // **A `.cache.write` left by a killed session stops the next one caching
         // at all.** vkd3d-proton opens its stream archive with `_O_CREAT |
@@ -1772,6 +1781,55 @@ class SessionRuntime @Inject constructor(
                     LogSource.VESSEL,
                     LogLevel.WARN,
                     "the FEX code cache could not be linked into the prefix: ${it.message}",
+                )
+            }
+        }
+    }
+
+    /**
+     * Point `drive_c/vessel/vkd3dcache` at this container's `caches/vkd3d`.
+     *
+     * Same shape as [linkFexCache] and the same motive: vkd3d-proton is handed
+     * a DOS path (`VKD3D_CACHE_DOS_PATH`) because the unix path it used to get
+     * is rewritten to `Z:\...` on the way in and Vessel's prefixes carry no
+     * `Z:` — see that constant for the failure this replaces. The bytes still
+     * live under `caches/`, so the DOS path lands on a symlink, same as FEX's.
+     *
+     * Never re-pointed once made, unlike [linkFexCache]: FEX's link moves
+     * because its target is keyed on a configuration digest that can change
+     * between launches, and `caches/vkd3d` is not keyed on anything — it is
+     * the same directory for the life of the container, so a link already
+     * pointing at it is already correct.
+     *
+     * Best-effort and never fatal, for the same reason as [linkFexCache]:
+     * losing this link costs a slower launch, not a launch.
+     */
+    private suspend fun linkVkd3dCache(prefix: File, host: File, log: SessionLog) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                host.mkdirs()
+                val link = vkd3dCacheLink(prefix)
+                link.parentFile?.mkdirs()
+                val path = link.toPath()
+                val target = host.toPath()
+                if (Files.isSymbolicLink(path)) {
+                    if (Files.readSymbolicLink(path) == target) return@runCatching
+                    Files.delete(path)
+                } else if (link.exists()) {
+                    log.line(
+                        LogSource.VESSEL,
+                        LogLevel.WARN,
+                        "${link.path} is a real directory, not a link; " +
+                            "the vkd3d shader cache will not be under caches/",
+                    )
+                    return@runCatching
+                }
+                Files.createSymbolicLink(path, target)
+            }.onFailure {
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.WARN,
+                    "the vkd3d shader cache could not be linked into the prefix: ${it.message}",
                 )
             }
         }

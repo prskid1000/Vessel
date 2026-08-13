@@ -641,6 +641,41 @@ internal fun fexCacheLink(prefix: File): File =
     File(File(File(prefix, DriveMap.DRIVE_C), "vessel"), "fexcache")
 
 /**
+ * What vkd3d-proton is told, and the only shape of string that reaches
+ * `caches/vkd3d` rather than a drive that is never there.
+ *
+ * vkd3d's disk cache treats a value starting with `/` as a Unix path and
+ * rewrites it to `Z:\...` before opening it — "Match DXVK style here",
+ * `native/vkd3d/libs/vkd3d/cache.c:vkd3d_pipeline_library_init_disk_cache` —
+ * on the standard Wine assumption that `Z:` is a symlink to the Unix root.
+ * [DriveMap.removeRootDrive] takes `Z:` out of every prefix on purpose, so
+ * that rewrite names a drive that has no `dosdevices/z:` to resolve through,
+ * `_open()` fails on the very first launch rather than only after a killed
+ * one, and vkd3d logs
+ *
+ *     Failed to open stream archive write file exclusively: Z:\...cache.write
+ *
+ * and never writes a pipeline cache — every shader recompiles on every start.
+ * `DXVK_STATE_CACHE_PATH` right below this does not hit the same wall only
+ * because DXVK 2.x no longer has an on-disk state cache to open; the variable
+ * is set and never read.
+ *
+ * A path that is already Windows-shaped skips the rewrite (the `else if
+ * (path)` branch beside it), so this is a DOS path under `C:` — the one
+ * drive every prefix has — the same fix [FEX_APP_CACHE_LOCATION] already
+ * uses for the same reason. [vkd3dCacheLink] is what makes it resolve to
+ * `caches/vkd3d`.
+ */
+internal const val VKD3D_CACHE_DOS_PATH = "C:\\vessel\\vkd3dcache\\"
+
+/**
+ * The host side of [VKD3D_CACHE_DOS_PATH] — the symlink the session
+ * maintains. See [fexCacheLink], which does the same thing for FEX.
+ */
+internal fun vkd3dCacheLink(prefix: File): File =
+    File(File(File(prefix, DriveMap.DRIVE_C), "vessel"), "vkd3dcache")
+
+/**
  * Where the bytes actually live: `caches/fex/<digest>/`.
  *
  * The digest is [fexCacheKey] over [environment], so this must be called with
@@ -1133,7 +1168,28 @@ fun sessionEnvironment(
     environment["MESA_SHADER_CACHE_DISABLE"] = "false"
     environment["MESA_SHADER_CACHE_DIR"] = File(paths.caches, "mesa").absolutePath
     environment["DXVK_STATE_CACHE_PATH"] = File(paths.caches, "dxvk").absolutePath
-    environment["VKD3D_SHADER_CACHE_PATH"] = File(paths.caches, "vkd3d").absolutePath
+    // Not a unix path, unlike its two neighbours above: see
+    // VKD3D_CACHE_DOS_PATH for why that fails on every launch here.
+    environment["VKD3D_SHADER_CACHE_PATH"] = VKD3D_CACHE_DOS_PATH
+
+    // **Resident Evil Requiem faults inside the driver at vkCreateSwapchainKHR
+    // unless these two are off.** Metro Redux reaches the same call with the same
+    // surface, the same capabilities, the same extent and the same format, and
+    // gets a swapchain; the difference is the pNext chain, which is what the
+    // create_info dump (patches/wine/0028) was written to show. vkd3d-proton
+    // attaches present-id and present-wait structures there and DXVK attaches
+    // nothing, so the extended path is the one Android's WSI cannot survive.
+    //
+    // Version 2 names, not version 1: vkd3d uses `VK_KHR_present_id2` and
+    // `VK_KHR_present_wait2`, and a first attempt that named the v1 extensions
+    // disabled nothing while looking like it had. Whatever replaces this must be
+    // checked against the guest's own extension list, not against memory.
+    //
+    // Losing them costs nothing here. Both exist to let an application pace
+    // itself against real present completion, and Vessel composites through the
+    // Android surface anyway, so the timing they would report is not the timing
+    // the user sees.
+    environment["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id2,VK_KHR_present_wait2"
 
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
 

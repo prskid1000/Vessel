@@ -58,6 +58,33 @@ every container made before this change would otherwise never get them.
 Mesa disables its own cache by default when it detects a translation layer, so
 under Wine the default is *off*.
 
+Making the directory exist was not enough for vkd3d specifically — see the next
+section. It fixed Mesa (reads the path directly, native side) and, incidentally,
+did nothing for DXVK either way, because DXVK 2.x has no on-disk state cache
+left to open; `DXVK_STATE_CACHE_PATH` is set and never read.
+
+## 1a. vkd3d's cache path pointed at a drive that does not exist — **fixed**
+
+Even with `caches/vkd3d` created, vkd3d-proton logged `Failed to open stream
+archive write file exclusively` on every launch and never wrote a cache.
+vkd3d-proton is a Windows PE DLL loaded inside Wine (built by `build/vkd3d.sh`
+with mingw), not a native binary, so it reaches that directory through Win32
+file APIs, and its disk-cache init
+(`native/vkd3d/libs/vkd3d/cache.c:vkd3d_pipeline_library_init_disk_cache`)
+rewrites a `VKD3D_SHADER_CACHE_PATH` starting with `/` into `Z:\...` before
+opening it — the standard Wine assumption that `Z:` is a symlink to the Unix
+root. Vessel removes `Z:` from every prefix on purpose
+(`DriveMap.removeRootDrive`), so that rewritten path named a drive with no
+`dosdevices/z:` to resolve through, and the open failed outright, every time,
+not just after a killed session.
+
+Fixed by not handing vkd3d a Unix path at all: `VKD3D_SHADER_CACHE_PATH` is now
+`C:\vessel\vkd3dcache\` (`VKD3D_CACHE_DOS_PATH`), the same DOS-path shape
+`FEX_APP_CACHE_LOCATION` already used for the same reason. `SessionRuntime`
+symlinks `drive_c/vessel/vkd3dcache` to `caches/vkd3d` every launch
+(`linkVkd3dCache`), so the bytes still live under `caches/` — a container reset
+still clears them — while the path vkd3d actually opens never leaves `C:`.
+
 > **Unmeasured.** Cold-vs-warm launch is exactly what `device-bench.sh` measures;
 > run it before quoting a number.
 
