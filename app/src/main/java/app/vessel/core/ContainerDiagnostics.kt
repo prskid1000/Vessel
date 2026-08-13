@@ -787,13 +787,15 @@ val LOGGABLES: List<Loggable> = listOf(
         secondary = "Whether fast synchronisation started, and every wait it serves.",
         caution = "One line per wait and wake once it is running.",
         // The channel that answers "is fsync actually on?", which nothing else
-        // does. Wine is asked for fsync by default (see SessionEnvironment), it
-        // needs POSIX shared memory that bionic does not have — patches/wine/0020
-        // backs the region with a plain file — and its failure mode is exit(1)
-        // rather than a fallback. So "did it start" is a real question with three
-        // possible answers, and at Errors this channel is where the answer is:
-        // fsync_init()'s own ERR lines name the futex_waitv and shared-memory
-        // cases separately.
+        // does. fsync is off by default (see SessionEnvironment) because Android's
+        // seccomp policy answers futex_waitv with SIGSYS rather than ENOSYS, so a
+        // container only reaches this code by opting back in on a device whose
+        // policy permits arm64 449. When it is on, its failure mode is exit(1)
+        // rather than a fallback — it also needs POSIX shared memory that bionic
+        // does not have, which patches/wine/0020 backs with a plain file. So "did
+        // it start" is a real question, and at Errors this channel is where the
+        // answer is: fsync_init()'s own ERR lines name the futex_waitv and
+        // shared-memory cases separately.
         //
         // Its trace tier is also how vkd3d-proton's queue waits are profiled --
         // programs/vkd3d-fsync-log-to-profile.py parses exactly this channel and

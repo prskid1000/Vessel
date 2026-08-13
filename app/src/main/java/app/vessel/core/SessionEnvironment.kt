@@ -784,41 +784,52 @@ fun sessionEnvironment(
     // gated on `WINEFSYNC` — and still no esync. So fsync is the only accelerated
     // mode that exists on the current base, and the only one worth naming.
     //
-    // **On by default. Unmeasured, and with a failure mode worth knowing.**
+    // **Off by default, because on this platform turning it on is fatal.**
     //
-    // fsync is the reason to be on this base: it moves the common uncontended
-    // wait out of a round trip to wineserver and into a futex, which is what
-    // makes Proton's synchronisation fast on many-threaded games. Upstream Wine
-    // has neither esync nor fsync, so nothing like it existed here before.
+    // fsync was the reason to move to this base: it takes the common uncontended
+    // wait out of a round trip to wineserver and puts it in a futex, which is
+    // what makes Proton's synchronisation fast on many-threaded games. Upstream
+    // Wine has neither esync nor fsync, so nothing like it existed here before.
     //
-    // It needs POSIX shared memory, which bionic does not have at all — its libc
-    // declares the whole option group missing. patches/wine/0020 backs the
-    // region with a plain file, which is what shm_open always was: on glibc a
-    // path under /dev/shm, a tmpfs, and every property fsync depends on comes
-    // from mmap( MAP_SHARED ) on the fd, identical on a regular file.
+    // It does not work on Android, and the way it fails is not the way the code
+    // expects. Measured on the device 2026-08-13, Wine proton-11.0:
     //
-    // **fsync does not degrade.** `fsync_init()` ends in `exit(1)` if it cannot
-    // map the region the server made, or if the server started in a different
-    // mode — so a half-working configuration does not quietly fall back to
-    // server-side waits, it takes the session down. Two ways to land there on
-    // this platform, neither yet ruled out on the device: a kernel without
-    // `__NR_futex_waitv`, and a wineserver and client resolving the shim's
-    // directory differently.
+    //     Fatal signal 31 (SIGSYS), code 1 (SYS_SECCOMP), syscall 449
+    //     Cause: seccomp prevented call to disallowed arm64 system call 449
     //
-    // `do_fsync()` does check futex_waitv and returns false on ENOSYS/EPERM, and
-    // both halves read the same variable, so the intended path is that an
-    // unsupported kernel simply never starts fsync at all. That is the theory;
-    // it has not been run here.
+    // arm64 449 is `futex_waitv`. Android's seccomp policy for app UIDs does not
+    // refuse it, it kills the caller — so the probe every fsync path opens with
+    // never returns a value to test. `server/fsync.c:fsync_check_support()` ran
+    // that probe *before* looking at the variable, so wineserver died at startup
+    // whatever WINEFSYNC was set to, and the session never got a server at all.
+    // The 159 that first-pass wineboot exits with is the same thing seen from the
+    // other side: 128 + 31, killed by SIGSYS.
     //
-    // The escape hatch is why this can be a default rather than a gamble.
+    // patches/wine/0022 reorders that check to read the environment first and
+    // only issue the syscall once fsync has actually been asked for. That is what
+    // makes `0` here a working configuration rather than a dead one — the syscall
+    // is never reached, so the seccomp filter is never tripped.
+    //
+    // Which also means `1` is still fatal on any device whose seccomp policy
+    // blocks 449, and this one does. It is left reachable rather than removed
+    // because the block is a policy, not an architecture limit: a device that
+    // allows the syscall gets working fsync by setting WINEFSYNC=1, and patch
+    // 0020 has already dealt with the other bionic gap in the way (no POSIX
+    // shared memory — the region is backed by a plain file, which is what
+    // shm_open always was).
+    //
+    // **fsync does not degrade**, so do not treat `1` as a thing to try casually:
+    // `fsync_init()` ends in `exit(1)` if it cannot map the region the server
+    // made or if the server started in a different mode. A half-working
+    // configuration takes the session down rather than falling back.
+    //
     // WINEFSYNC is deliberately NOT in [RESERVED_SESSION_ENV], and the manifest
-    // loop at the end of this function overwrites anything unreserved — so a
-    // container that will not start sets `WINEFSYNC=0` in its environment table
-    // and is back on the path every previous Vessel build used. It stays in
-    // [BOOTSTRAP_SESSION_ENV] because the server and its clients must agree.
+    // loop at the end of this function overwrites anything unreserved, so a
+    // container can set either value. It stays in [BOOTSTRAP_SESSION_ENV]
+    // because the server and its clients must agree.
     //
     // Read `wineserver`'s startup lines for the mode it actually chose.
-    environment["WINEFSYNC"] = "1"
+    environment["WINEFSYNC"] = "0"
 
     // FEX's memory-ordering behaviour is fixed here, not offered as settings.
     //

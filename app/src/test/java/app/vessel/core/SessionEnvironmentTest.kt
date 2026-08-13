@@ -338,8 +338,13 @@ class SessionEnvironmentTest {
     // — the fixed variables ---------------------------------------------------
 
     @Test
-    fun `fsync is requested, and can still be switched off`() {
-        assertEquals("1", env()["WINEFSYNC"])
+    fun `fsync is off, because futex_waitv is seccomp-blocked on Android`() {
+        // Was "1" for exactly one build. arm64 syscall 449 (futex_waitv) is not
+        // refused by Android's seccomp policy, it kills the caller with SIGSYS —
+        // so wineserver died at startup and no session could begin. See the
+        // comment on this default in SessionEnvironment for the crash and for
+        // what patches/wine/0022 changed.
+        assertEquals("0", env()["WINEFSYNC"])
 
         // WINEESYNC=1 used to be set here and reached nobody: neither Wine 11.14
         // nor Proton 11.0 contains a single reference to it — upstream has no
@@ -354,17 +359,17 @@ class SessionEnvironmentTest {
         // mode or fsync_init() exits.
         assertTrue("WINEFSYNC" in BOOTSTRAP_SESSION_ENV)
 
-        // And it must NOT be reserved. fsync does not degrade — fsync_init()
-        // ends in exit(1) rather than falling back — so being able to turn it
-        // off from a container's environment table is the whole reason it can be
-        // a default at all. Reserving it would strand a container that will not
-        // start.
+        // And it must NOT be reserved — a device whose seccomp policy allows 449
+        // turns fsync on from its container environment table.
         assertFalse("WINEFSYNC" in RESERVED_SESSION_ENV)
     }
 
     @Test
-    fun `a container can override fsync back off`() {
-        val off = ParamManifest(
+    fun `a container can turn fsync on where the kernel allows futex_waitv`() {
+        // The override that matters now runs the other way: the default is off,
+        // and a device whose seccomp policy permits arm64 449 opts back in. This
+        // one is fatal on the Motorola — see the default's comment.
+        val on = ParamManifest(
             schemaVersion = 1,
             groups = listOf(
                 ParamGroup(
@@ -374,14 +379,14 @@ class SessionEnvironmentTest {
                             key = "wine.fsync",
                             title = "Fast synchronisation",
                             type = ParamType.ENUM,
-                            default = JsonPrimitive("0"),
+                            default = JsonPrimitive("1"),
                             env = "WINEFSYNC",
                         ),
                     ),
                 ),
             ),
         )
-        assertEquals("0", env(manifest = off)["WINEFSYNC"])
+        assertEquals("1", env(manifest = on)["WINEFSYNC"])
     }
 
     @Test
@@ -758,7 +763,7 @@ class SessionEnvironmentTest {
         assertEquals(
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
-                "WINEFSYNC" to "1",
+                "WINEFSYNC" to "0",
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
