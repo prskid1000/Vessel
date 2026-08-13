@@ -1,0 +1,28 @@
+diff --git a/dlls/ntdll/unix/uffd_tmp_defs.h b/dlls/ntdll/unix/uffd_tmp_defs.h
+index d9f7a286c58..09c29abe668 100644
+--- a/dlls/ntdll/unix/uffd_tmp_defs.h
++++ b/dlls/ntdll/unix/uffd_tmp_defs.h
+@@ -3,10 +3,19 @@
+ 
+ #define UFFD_USER_MODE_ONLY 1
+ 
+-#ifdef __x86_64__
+-#define __NR_userfaultfd 323
+-#else
+-#define __NR_userfaultfd 374
++/* 374 is i386's number, and the #else reached every non-x86_64 target with it.
++ * On arm64 userfaultfd is 282 and 374 is not assigned at all, so this issued a
++ * syscall that does not exist — which Android's seccomp filter answers with
++ * SIGSYS rather than ENOSYS, killing wineboot during prefix creation. Take the
++ * value from the headers when they have it and only guess when they do not. */
++#ifndef __NR_userfaultfd
++# if defined(__x86_64__)
++#  define __NR_userfaultfd 323
++# elif defined(__aarch64__)
++#  define __NR_userfaultfd 282
++# else
++#  define __NR_userfaultfd 374
++# endif
+ #endif
+ 
+ #ifndef UFFD_FEATURE_WP_ASYNC
