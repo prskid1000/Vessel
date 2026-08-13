@@ -1,0 +1,29 @@
+diff --git a/Source/Common/Config.cpp b/Source/Common/Config.cpp
+index 13a922e5c..028191902 100644
+--- a/Source/Common/Config.cpp
++++ b/Source/Common/Config.cpp
+@@ -40,7 +40,23 @@ namespace JSON {
+     const json_t* json = FEX::JSON::CreateJSON(Data, Pool);
+ 
+     if (!json) {
+-      ERROR_AND_DIE_FMT("Failed to parse JSON from file '{}' - invalid JSON format", Config);
++      // Vessel: skip a config that will not parse, rather than kill the process.
++      //
++      // This runs from ProcessInit before FEX::Windows::Logging::Init(), so the
++      // ERROR_AND_DIE that used to be here killed the process two lines before
++      // there was any way to say why -- the symptom is an unexplained
++      // c000001d at libarm64ecfex.dll +0x1747E4, which is how it presented for
++      // every tools/gfx harness in a Vessel container.
++      //
++      // The file is also chosen by program name, and GetApplicationConfig falls
++      // back to a relative './<program>.json' when it cannot create the config
++      // directory, so on Android the file read depends on the process working
++      // directory rather than on anything the user set.
++      //
++      // A config layer is an override. An override that cannot be read should
++      // leave the defaults standing. Failing quiet is deliberate: there is no
++      // log handler yet, so there is nothing to report through.
++      return;
+     }
+ 
+     const json_t* ConfigList = json_getProperty(json, "Config");

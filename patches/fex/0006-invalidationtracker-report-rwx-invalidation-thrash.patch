@@ -1,0 +1,42 @@
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index d111647c4..b0fa5f9f9 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ 
+ #include <FEXCore/Utils/LogManager.h>
++#include <atomic>
+ #include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/Utils/SignalScopeGuards.h>
+ #include <FEXCore/Core/Context.h>
+@@ -244,6 +245,29 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+   }(FaultAddress);
+ 
+   if (NeedsInvalidate) {
++    // Vessel: name the pages that keep faulting.
++    //
++    // Each of these costs an invalidation and a later recompile of everything
++    // on the page. A few are normal -- a JIT writing its own output, a loader
++    // applying relocations. The same page arriving over and over is the
++    // code-and-data-share-a-page thrash, and at a million cycles it is a
++    // process that burns a core and renders nothing, which is what Requiem
++    // does. DetectMonoBackpatcherBlock below exists for one known instance of
++    // this shape.
++    //
++    // The page, not the fault address: what matters is whether a small set
++    // repeats, and two writes eight bytes apart are the same page and the
++    // same recompile. One line in 4096 keeps a healthy title at the cost of
++    // an increment.
++    {
++      static std::atomic<uint64_t> RWXFaults {0};
++      const uint64_t Seen = RWXFaults.fetch_add(1, std::memory_order_relaxed) + 1;
++      if (Seen == 1 || (Seen % 4096) == 0) {
++        LogMan::Msg::IFmt("RWX invalidation {} on page {:X} (pc {:X})", Seen,
++                          FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, HostPc);
++      }
++    }
++
+     // IntervalsLock cannot be held during invalidation
+     {
+       std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());

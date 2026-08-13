@@ -1165,6 +1165,23 @@ in that case.**
   beginning `A `. Whatever the earlier run did, it was not reading that stream
   with `SilentLog` off in the process that died.
 
+  **Corrected 2026-08-13: that last paragraph is wrong for the assert that
+  actually fires, and the reason is ordering, not the sink.**
+  `Source/Windows/ARM64EC/Module.cpp:657` calls `FEX::Config::LoadConfig` and
+  line 659 calls `FEX::Windows::Logging::Init()`. The die is inside
+  `LoadJSonConfig`, reached from `LoadConfig` — two lines before a log handler
+  exists. So `FEX_SILENTLOG=0` genuinely does work for everything after
+  `ProcessInit`, which is what the `Load module` lines above prove, and
+  genuinely cannot show this one. Expecting a line beginning `A ` here will
+  waste a run.
+
+  What did work was `WINEDEBUG=+seh,+unwind`, which gave a clean ARM64 unwind
+  naming the site without FEX's log at all:
+  `ProcessInit → LoadConfig → AppLoader::AppLoader → Load → LoadJSonConfig →
+  ForcedAssert`, at `libarm64ecfex.dll +0x1747E4`, 5/5 reproducible.
+  `patches/fex/0005` stops it being fatal: a config layer is an override, and
+  an override that cannot be read should leave the defaults standing.
+
 - [x] **At session start the desktop background is black until something
   repaints it.** Fixed in code and not yet watched: a texture is uploaded at
   allocation and after that only on damage, and the desktop's background paint
