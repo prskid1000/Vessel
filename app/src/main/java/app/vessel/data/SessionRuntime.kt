@@ -954,7 +954,28 @@ class SessionRuntime @Inject constructor(
         // killed" and the container looked like it would not start at all. A
         // best-effort cache is never worth a launch, so it now runs beside the
         // desktop and teardown collects it.
-        codeCacheJob = scope.launch { generateCodeCache(running, log) }
+        // **Off by default, because it has never once finished.** Measured on
+        // 2026-08-13 across four sessions: the catch-up starts at line 16 of the
+        // log, runs 210 s, 230 s and 326 s, and is cancelled by teardown every
+        // time. `caches/fex/*/cache/` is empty and `codemap/ready/` holds 69
+        // entries, so nothing accumulates between runs either — each session
+        // redoes the same work and loses it.
+        //
+        // What it does cost is real. `cpu %` sat at a steady 12.9 of a
+        // hundred for the whole of a Requiem session, and with eight cores that
+        // is one core saturated from launch to teardown, competing with the game
+        // for the CPU that FEX needs most. It also puts a second Wine process in
+        // the prefix, which made a critical-section deadlock impossible to
+        // attribute: the timeout lines carry no process name, so "which of these
+        // two is holding the heap" could not be answered from the log at all.
+        //
+        // The feature is not wrong — a persistent code cache is worth having —
+        // but it cannot be paid for by every session while never delivering. It
+        // needs a moment when nothing else wants the CPU and teardown is not
+        // about to kill it, and there is no such moment inside a session.
+        if (CODE_CACHE_DURING_SESSION) {
+            codeCacheJob = scope.launch { generateCodeCache(running, log) }
+        }
 
         // Opened before the first guest process and read for the whole session,
         // because the guest talks for far longer than any one child of ours
@@ -2385,6 +2406,20 @@ class SessionRuntime @Inject constructor(
 
         /** Which component version is currently in the prefix. See stagedVersions. */
         const val STAGED_COMPONENTS = "staged-components"
+
+        /**
+         * Whether to compile the FEX code cache beside a running session.
+         *
+         * False, and the long comment at the launch site has the measurements.
+         * The short version: it took 210-326 s on every session that ran it,
+         * was cancelled by teardown every time, produced no cache at all, and
+         * cost one saturated core of the eight for the whole session.
+         *
+         * A constant rather than a deletion because the compiler works -- it
+         * parses and merges correctly, it simply never gets to finish -- and
+         * what it needs is a place to run, not a rewrite.
+         */
+        const val CODE_CACHE_DURING_SESSION: Boolean = false
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
 
