@@ -762,7 +762,23 @@ val LOGGABLES: List<Loggable> = listOf(
         addAt = WineChannelLevel.WARNINGS,
         oneSessionFrom = WineChannelLevel.WARNINGS,
     ),
-    wineChannel("vulkan", "How Wine found and opened the graphics driver."),
+    // The only channel that can see the unix half of a Vulkan call, which is
+    // where Resident Evil Requiem dies:
+    //
+    //     msvcrt:_wassert (L"!status && \"vkCreateSwapchainKHR\"",
+    //                      L"dlls/winevulkan/loader_thunks.c", 3681)
+    //
+    // That assert is on the NTSTATUS of the unix call rather than on the
+    // VkResult — the unix side failed before Vulkan returned anything, so there
+    // is no VkResult to read. `seh` cannot substitute: its ERR tier is already
+    // on through `err+all`, and its trace tier measured 191,000 lines of
+    // RtlInitializeExtendedContext2 in one session with no dispatch in it.
+    wineChannel(
+        "vulkan",
+        "How Wine found and opened the graphics driver, and every call it forwards.",
+        caution = "Above warnings it is one line per Vulkan call, so a drawn frame is thousands.",
+        oneSessionFrom = WineChannelLevel.STUBS,
+    ),
     wineChannel(
         channel = "oss",
         secondary = "The audio driver: what the guest wrote and what the device took.",

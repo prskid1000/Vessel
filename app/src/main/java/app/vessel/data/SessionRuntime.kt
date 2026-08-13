@@ -700,6 +700,38 @@ class SessionRuntime @Inject constructor(
         // launch.
         layout.cacheDirectories.forEach { if (!it.isDirectory) it.mkdirs() }
 
+        // **A `.cache.write` left by a killed session stops the next one caching
+        // at all.** vkd3d-proton opens its stream archive with `_O_CREAT |
+        // _O_EXCL` (native/vkd3d/libs/vkd3d-common/file_utils.c:93), so the open
+        // fails outright if the file is already there, and it reports
+        //
+        //     vkd3d-proton:vkd3d_pipeline_library_disk_cache_notify_blob_insert:
+        //     Failed to open stream archive write file exclusively: …cache.write
+        //
+        // and then compiles every pipeline again, every launch. Its own comment
+        // calls the exclusive open safe because "this doesn't really happen in
+        // practice" — one process per application. That reasoning holds for a
+        // desktop and not for Vessel: sessions here are killed rather than
+        // closed, so the file outlives the process that made it routinely
+        // rather than never. Resident Evil Requiem compiles 3,025 shaders on
+        // each start, so the cost of getting this wrong is the whole startup.
+        //
+        // Deleted at start rather than at teardown for the same reason the file
+        // is there at all: teardown is the code path that does not run.
+        runCatching {
+            File(layout.caches, "vkd3d").listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".cache.write") }
+                ?.forEach { stale ->
+                    if (stale.delete()) {
+                        log.line(
+                            LogSource.VESSEL,
+                            LogLevel.INFO,
+                            "removed a stale vkd3d shader cache lock (${stale.name})",
+                        )
+                    }
+                }
+        }
+
         val turnip = turnipDriver(containerId)
         val fex = fexPackage(containerId)
         // `tmp` explicitly, even though the default derives the same directory:
