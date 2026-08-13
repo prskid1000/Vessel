@@ -674,6 +674,24 @@ class SessionRuntime @Inject constructor(
 
         mark(STEP_COMPONENTS, ProvisionStatus.RUNNING)
         val adopted = components.adoptLatest(containerId)
+        // **Say it, every time, before anything else can be blamed for it.**
+        //
+        // What is left here after adoptLatest is Wine, which keeps the version
+        // its prefix was booted against. That is deliberate, but it is also the
+        // shape of a whole day's worth of wrong conclusions: a component was
+        // installed, listed as installed, and not loaded, and the session that
+        // followed was read as evidence about the new build when it had run the
+        // old one. A container that is behind now says so in its own log.
+        for ((type, versions) in components.staleReferences(containerId)) {
+            val (referenced, newest) = versions
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "${type.label} is pinned at $referenced but $newest is installed — " +
+                    "a prefix keeps the ${type.label} it was booted against, so this " +
+                    "session runs $referenced. Create a new container to use $newest.",
+            )
+        }
         val wineDir = components.directoryFor(containerId, ComponentType.WINE)
         if (wineDir == null) {
             return failStep(

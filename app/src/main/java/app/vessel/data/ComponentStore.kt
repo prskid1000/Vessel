@@ -160,10 +160,32 @@ class ComponentStore @Inject constructor(
      * store and a container that has never been provisioned would otherwise have
      * [directoryFor] return null for Wine and no way to fix it from any screen.
      *
-     * **Existing references are never re-pointed.** A container running on an
-     * older Wine keeps it: its prefix was booted against that build, and silently
-     * moving it to a newer one on the next launch is the kind of upgrade that
-     * breaks a working setup with no user action to blame it on.
+     * **A Wine reference is never re-pointed. Every other type is.**
+     *
+     * The original rule was blanket — no existing reference was ever changed —
+     * and the reason given was that a container's prefix was booted against its
+     * Wine build, so moving it silently is an upgrade that breaks a working
+     * setup with nothing to blame. That is true, and it is still true, *of Wine*.
+     *
+     * It is not true of anything else here. FEX, DXVK, vkd3d, D8VK, Turnip and
+     * OpenGL are payloads copied into `system32` by
+     * [SessionRuntime.copyWindowsPayload] on every launch; the prefix holds no
+     * state derived from which version was used last. Refusing to re-point them
+     * did not protect anything, it just made an installed component unreachable.
+     *
+     * **What that cost, measured on 2026-08-13.** A FEX build carrying a fix for
+     * a startup crash installed correctly, was listed as installed, and was
+     * never loaded: the container kept its reference to the previous version. The
+     * next session crashed identically, at a byte-identical address, and that was
+     * read as "the fix did not work" rather than "the fix did not run". Four test
+     * cycles went that way, across three different mechanisms that each end in a
+     * container quietly running old components — this one, the version-code
+     * collision in the build scripts, and the file-length staging check in
+     * SessionRuntime.
+     *
+     * Wine still holds, and the honest consequence is that a Wine update needs a
+     * new container. [staleReferences] exists so that is visible rather than
+     * discovered.
      */
     suspend fun adoptLatest(containerId: String): Map<ComponentType, Int> =
         withContext(Dispatchers.IO) {
@@ -172,8 +194,19 @@ class ComponentStore @Inject constructor(
             val existing = referencesOf(container)
             val adopted = LinkedHashMap<ComponentType, Int>()
             for (type in ComponentType.entries) {
-                if (existing.containsKey(type.wire)) continue
-                adopted[type] = layout.versions(type).firstOrNull() ?: continue
+                val newest = layout.versions(type).firstOrNull() ?: continue
+                val current = existing[type.wire]
+                when {
+                    // Never referenced: adopt, which is what lets a container
+                    // launch at all.
+                    current == null -> adopted[type] = newest
+                    // Wine keeps what it booted against. See the note above.
+                    type in PREFIX_STATEFUL -> continue
+                    // Only ever forward. A store holding an older build beside a
+                    // newer one must not walk a container backwards.
+                    newest > current -> adopted[type] = newest
+                    else -> continue
+                }
             }
             if (adopted.isEmpty()) return@withContext emptyMap()
 
@@ -195,6 +228,28 @@ class ComponentStore @Inject constructor(
             // would have the launcher announce components the next `prune` cannot
             // see anything holding.
             if (written) adopted else emptyMap()
+        }
+
+    /**
+     * Types this container references at an older version than the store holds.
+     *
+     * In practice this is Wine and only Wine — [adoptLatest] moves everything
+     * else forward on the next launch — and it exists so that "your container is
+     * on an older build than the one you just installed" is a line in the log
+     * rather than something worked out from a crash address. Reported as
+     * `type to (referenced, newest)`; empty when nothing is behind.
+     */
+    suspend fun staleReferences(containerId: String): Map<ComponentType, Pair<Int, Int>> =
+        withContext(Dispatchers.IO) {
+            migrate()
+            val existing = referencesOf(paths.of(containerId))
+            buildMap {
+                for (type in ComponentType.entries) {
+                    val current = existing[type.wire] ?: continue
+                    val newest = layout.versions(type).firstOrNull() ?: continue
+                    if (newest > current) put(type, current to newest)
+                }
+            }
         }
 
     /**
@@ -406,5 +461,22 @@ class ComponentStore @Inject constructor(
         return runCatching {
             json.decodeFromString(ProvisionedState.serializer(), file.readText())
         }.getOrNull()
+    }
+
+    private companion object {
+        /**
+         * Types whose version a prefix carries state from, and which therefore
+         * keep the version a container was provisioned with.
+         *
+         * Wine boots the prefix: the registry, the drive layout and the DLL set
+         * under `drive_c/windows` are all written by the build that ran
+         * `wineboot`, so a later build inherits a prefix it did not create.
+         * Proton is the same thing under another name.
+         *
+         * Everything else is copied into `system32` on every launch and leaves
+         * nothing behind, so there is no state to be inconsistent with and no
+         * reason to hold a container back from a newer one.
+         */
+        val PREFIX_STATEFUL = setOf(ComponentType.WINE, ComponentType.PROTON)
     }
 }
