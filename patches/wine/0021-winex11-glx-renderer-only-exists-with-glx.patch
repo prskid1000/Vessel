@@ -1,0 +1,57 @@
+winex11: glx_renderer only exists when GLX does.
+
+X11DRV_HasWindowManager() answers "xwayland_glx_nvidia" by reading
+`glx_renderer`, which x11drv.h declares unconditionally and opengl.c defines
+inside `#ifdef SONAME_LIBGL`. Configure the tree without libGL and the reference
+has nothing to bind to:
+
+    ld.lld: error: undefined symbol: glx_renderer
+    make: *** [dlls/winex11.drv/winex11.so] Error 1
+
+after every object has compiled, which is a long way to go to find a missing
+`#ifdef`.
+
+This is Valve's code -- upstream Wine 11.14's window.c has no reference to
+glx_renderer at all -- and a Proton build on a desktop always has libGL, so
+nothing there ever hits it.
+
+The Android build never can. There is no GLX: Vessel drives Vulkan directly and
+ships Zink as a native opengl32.dll, so build/wine.sh configures GLX out and
+SONAME_LIBGL is undefined.
+
+Returning FALSE is not a stub, it is the correct answer. The query asks whether
+the host is XWayland running on NVIDIA's GLX driver, which is a workaround for
+one desktop configuration; Vessel's X server is neither. The other branch of the
+same function, the plain "xwayland" query, needs no guard and keeps working.
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index cc0538d511..ab65dab339 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -4150,9 +4150,27 @@ BOOL X11DRV_HasWindowManager( const char *name )
+     int opcode, event, error;
+ 
+     if (!strcmp( name, "xwayland" )) return XQueryExtension( gdi_display, "XWAYLAND", &opcode, &event, &error );
++#ifdef SONAME_LIBGL
+     if (!strcmp( name, "xwayland_glx_nvidia" ))
+         return XQueryExtension( gdi_display, "XWAYLAND", &opcode, &event, &error ) && glx_renderer
+                && strstr( glx_renderer, "NVIDIA" );
++#else
++    /* VESSEL: glx_renderer only exists when GLX does.
++     *
++     * It is declared in x11drv.h unconditionally but defined in opengl.c inside
++     * `#ifdef SONAME_LIBGL`, so on a build configured without libGL this
++     * reference has no definition to bind to and winex11.so fails to link:
++     *     ld.lld: error: undefined symbol: glx_renderer
++     * The Android build is exactly that build -- there is no GLX, Vessel drives
++     * Vulkan directly and ships Zink as opengl32.dll.
++     *
++     * The answer is FALSE rather than a stub renderer string, and it is the
++     * true answer: this asks "is the host XWayland running on the NVIDIA GLX
++     * driver", a Valve workaround for a desktop configuration. Vessel's X server
++     * is neither XWayland nor NVIDIA.
++     */
++    if (!strcmp( name, "xwayland_glx_nvidia" )) return FALSE;
++#endif
+     return data->window_manager && !strcmp( data->window_manager, name );
+ }
+ 

@@ -1,8 +1,8 @@
 diff --git a/dlls/nsiproxy.sys/ip.c b/dlls/nsiproxy.sys/ip.c
-index 6c4d5808be4..ff296d3aca2 100644
+index 002d2b48f5..ed22fff640 100644
 --- a/dlls/nsiproxy.sys/ip.c
 +++ b/dlls/nsiproxy.sys/ip.c
-@@ -1548,7 +1548,51 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void
+@@ -1543,7 +1543,51 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void
          }
          freeifaddrs( addrs );
  

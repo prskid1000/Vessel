@@ -1,5 +1,5 @@
 diff --git a/dlls/dnsapi/dnsapi.h b/dlls/dnsapi/dnsapi.h
-index d2b57b96972..23ac95786f6 100644
+index d2b57b9697..23ac95786f 100644
 --- a/dlls/dnsapi/dnsapi.h
 +++ b/dlls/dnsapi/dnsapi.h
 @@ -130,4 +130,31 @@ enum unix_funcs

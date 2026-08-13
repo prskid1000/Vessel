@@ -41,12 +41,12 @@ it. Once the platform loader is in the process it has already bound its driver,
 and a second attempt cannot change which one answered.
 
 diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
-index 1bb4735587f..fca77abb721 100644
+index e85c9d2a0a..ecb082b799 100644
 --- a/dlls/win32u/vulkan.c
 +++ b/dlls/win32u/vulkan.c
-@@ -25,6 +25,9 @@
- #include "config.h"
+@@ -26,6 +26,9 @@
  
+ #include <math.h>
  #include <dlfcn.h>
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -54,7 +54,7 @@ index 1bb4735587f..fca77abb721 100644
  #include <pthread.h>
  #include <unistd.h>
  
-@@ -33,6 +36,7 @@
+@@ -35,6 +38,7 @@
  #include "ntuser_private.h"
  
  WINE_DEFAULT_DEBUG_CHANNEL(vulkan);
@@ -62,7 +62,7 @@ index 1bb4735587f..fca77abb721 100644
  
  static PFN_vkGetDeviceProcAddr p_vkGetDeviceProcAddr;
  static PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr;
-@@ -3054,6 +3058,85 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
+@@ -4045,6 +4049,85 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
      .p_map_device_extensions = lazydrv_map_device_extensions,
  };
  
@@ -148,9 +148,9 @@ index 1bb4735587f..fca77abb721 100644
  static void vulkan_init_once(void)
  {
      struct vulkan_instance_extensions extensions = {0};
-@@ -3061,8 +3144,14 @@ static void vulkan_init_once(void)
-     uint32_t count = 0;
-     VkResult res;
+@@ -4055,8 +4138,14 @@ static void vulkan_init_once(void)
+     const char *env = getenv( "WINE_DISABLE_FULLSCREEN_HACK" );
+     fshack_enabled = !env || !atoi( env );
  
 +#ifdef __ANDROID__
 +    /* Ahead of the plain dlopen, not after it: once the platform loader is in

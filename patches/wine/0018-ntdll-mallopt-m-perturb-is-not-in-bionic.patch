@@ -1,0 +1,55 @@
+ntdll: M_PERTURB is not in bionic.
+
+Proton calls `mallopt( M_PERTURB, 0xff )` on the way into ntdll's start-up and
+`mallopt( M_PERTURB, 0 )` on the way out, so that a use-after-free of an
+allocation made during loader init reads 0xff rather than plausible data. It is
+Valve's addition -- upstream Wine 11.14 has no reference to M_PERTURB anywhere.
+
+M_PERTURB is a glibc constant. Bionic's malloc.h defines M_DECAY_TIME and
+nothing else of that family, so both calls fail to compile:
+
+    dlls/ntdll/unix/loader.c:2483: error: use of undeclared identifier 'M_PERTURB'
+    dlls/ntdll/unix/loader.c:2492: error: use of undeclared identifier 'M_PERTURB'
+
+Compiled out rather than emulated. Android's allocator has no equivalent knob,
+and passing a constant bionic does not define would be a no-op with a magic
+number in it. Nothing in the function reads the setting back, so removing it
+costs only the hardening it provides -- which glibc builds keep, because the
+guard is on the macro rather than on __ANDROID__.
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 3f883a9c41..adba5b12da 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2480,7 +2480,22 @@ static void start_main_thread(void)
+     set_thread_teb( teb );
+ #endif
+ 
++    /* VESSEL: bionic's mallopt() has no M_PERTURB.
++     *
++     * Proton fills freshly freed memory with 0xff across ntdll's own start-up
++     * and turns it off again once the loader is up, so that a use-after-free of
++     * an early allocation is loud instead of a silent read of plausible data.
++     * It is a hardening measure, not a dependency: the identifier is glibc's,
++     * bionic's malloc.h defines only M_DECAY_TIME, and nothing in this function
++     * observes the setting.
++     *
++     * Compiled out rather than replaced. Android's allocator offers no
++     * equivalent, and calling mallopt() with a glibc constant it does not know
++     * would be a silently ignored no-op with a number in it.
++     */
++#ifdef M_PERTURB
+     mallopt( M_PERTURB, 0xff );
++#endif
+     init_startup_info();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+@@ -2489,7 +2504,9 @@ static void start_main_thread(void)
+     load_ntdll();
+     load_wow64_ntdll( main_image_info.Machine );
+     load_apiset_dll();
++#ifdef M_PERTURB
+     mallopt( M_PERTURB, 0 );
++#endif
+     server_init_process_done();
+ }
+ 

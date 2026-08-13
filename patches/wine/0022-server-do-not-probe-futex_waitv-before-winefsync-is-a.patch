@@ -1,0 +1,24 @@
+diff --git a/server/fsync.c b/server/fsync.c
+index 428691ef156..f79a31ae8ff 100644
+--- a/server/fsync.c
++++ b/server/fsync.c
+@@ -58,8 +58,18 @@ int do_fsync_cached = -1;
+ int fsync_check_support(void)
+ {
+ #ifdef __linux__
++    const char *env = getenv( "WINEFSYNC" );
++
++    /* Probing by making the call is only safe where an unsupported syscall
++     * comes back as ENOSYS or EPERM. Under Android's seccomp policy futex_waitv
++     * (arm64 449) is not refused, it is fatal: the kernel raises SIGSYS and the
++     * process dies inside this function, taking wineserver with it before it
++     * has served a single request. So decide from the environment first and
++     * only issue the syscall once fsync has actually been asked for. */
++    if (!env || !atoi( env )) return 0;
++
+     syscall( __NR_futex_waitv, 0, 0, 0, 0, 0 );
+-    return getenv( "WINEFSYNC" ) && atoi(getenv( "WINEFSYNC" )) && errno != ENOSYS && errno != EPERM;
++    return errno != ENOSYS && errno != EPERM;
+ #else
+     return 0;
+ #endif

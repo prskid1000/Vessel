@@ -27,7 +27,11 @@ val productName: String = providers.gradleProperty("PRODUCT_NAME").getOrElse("Ve
  * amount of friction for changing what is inside the package a user installs.
  */
 val bundledPackages = listOf(
-    "wine-11.14-canoe.wcp",
+    // Valve's experimental_11.0, not upstream Wine and not proton_11.0 — see
+    // native/pins.env for which 461 commits made that the choice. It packages
+    // under the Proton epoch, so its versionCode outranks any plain-Wine build
+    // and `wine-11.14-canoe.wcp` beside it in dist/ can never be adopted again.
+    "wine-proton-exp-11.0-canoe.wcp",
     "fex-2608-canoe.wcp",
     "dxvk-2.7.1-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",

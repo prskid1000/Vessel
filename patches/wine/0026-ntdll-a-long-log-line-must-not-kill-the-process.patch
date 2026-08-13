@@ -1,0 +1,105 @@
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 0869b3b4f64..d60c8a319c2 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -69,16 +69,54 @@ static void init_options(void)
+     while (debug_options[nb_debug_options].name[0]) nb_debug_options++;
+ }
+ 
+-/* add a string to the output buffer */
++/* add a string to the output buffer
++ *
++ * Vessel: a line longer than the buffer is flushed straight through instead of
++ * raising STATUS_BUFFER_OVERFLOW.
++ *
++ * __wine_dbg_output is not Wine's private channel here. It is the one export
++ * that FEX, DXVK and vkd3d-proton all resolve out of ntdll and write every
++ * diagnostic through (FEX Source/Windows/Common/Logging.cpp:42, DXVK
++ * src/util/log/log.cpp:62, vkd3d libs/vkd3d-common/debug.c:125), and every one
++ * of them formats into a buffer larger than this one -- vkd3d into
++ * char local_buffer[4096] at debug.c:239, FEX into an unbounded
++ * fextl::fmt::format. So a single log line over 1019 bytes, from a component
++ * that has done nothing wrong, took the process down with
++ * STATUS_BUFFER_OVERFLOW; the unix half of this same function called abort().
++ *
++ * DXVK is the only one of the three that defends against it, and its comment
++ * says exactly what it is defending against: "__wine_dbg_output tries to buffer
++ * lines up to 1020 characters including null terminator, and will cause a hang
++ * if we submit anything longer than that even in consecutive calls"
++ * (log.cpp:81-86). Fixing it once here is better than three client-side
++ * workarounds, only one of which exists.
++ *
++ * That failure mode gets *more* likely the more tracing is switched on, which
++ * makes it a tracing bug rather than an unrelated one: a vkd3d trace line
++ * carrying a shader name, or a Wine fixme carrying a serialised structure, is
++ * routinely over a kilobyte.
++ *
++ * The ERR_(thread) that used to announce it is dropped rather than kept. It
++ * existed to report a Wine-internal programming error, and it fires on the
++ * ordinary behaviour of three components Vessel ships -- an error line per long
++ * log line is noise about a condition this function now handles. */
+ static int append_output( struct debug_info *info, const char *str, size_t len )
+ {
+     if (len >= sizeof(info->output) - info->out_pos)
+     {
+-        __wine_dbg_write( info->output, info->out_pos );
+-        info->out_pos = 0;
+-        ERR_(thread)( "debug buffer overflow:\n" );
+-        __wine_dbg_write( str, len );
+-        RtlRaiseStatus( STATUS_BUFFER_OVERFLOW );
++        if (info->out_pos)
++        {
++            __wine_dbg_write( info->output, info->out_pos );
++            info->out_pos = 0;
++        }
++        /* Still too long for an empty buffer: it can never be buffered, so
++         * write it as its own call. Ordering is preserved because anything
++         * pending was just flushed. */
++        if (len >= sizeof(info->output))
++        {
++            __wine_dbg_write( str, len );
++            return len;
++        }
+     }
+     memcpy( info->output + info->out_pos, str, len );
+     info->out_pos += len;
+diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
+index 992e7c4a50e..9752a20e284 100644
+--- a/dlls/ntdll/unix/debug.c
++++ b/dlls/ntdll/unix/debug.c
+@@ -79,14 +79,31 @@ static inline struct debug_info *get_info(void)
+ #endif
+ }
+ 
+-/* add a string to the output buffer */
++/* add a string to the output buffer
++ *
++ * Vessel: flush and pass through rather than abort(). The unix half of the same
++ * change as dlls/ntdll/thread.c's append_output -- see the long comment there
++ * for who produces lines this long and why. This half is the worse of the two:
++ * a log line over 1019 bytes aborted the process outright, with a diagnostic
++ * that named the *previous* buffer contents rather than the line that did it.
++ *
++ * wine_dbg_vprintf's own buffer is char buffer[1024] (include/wine/debug.h:168),
++ * so Wine's unix side can reach this on its own without any external component
++ * involved: 1023 characters with no newline in them is enough. */
+ static int append_output( struct debug_info *info, const char *str, size_t len )
+ {
+     if (len >= sizeof(info->output) - info->out_pos)
+     {
+-       fprintf( stderr, "wine_dbg_output: debugstr buffer overflow (contents: '%s')\n", info->output );
+-       info->out_pos = 0;
+-       abort();
++        if (info->out_pos)
++        {
++            write( 2, info->output, info->out_pos );
++            info->out_pos = 0;
++        }
++        if (len >= sizeof(info->output))
++        {
++            write( 2, str, len );
++            return len;
++        }
+     }
+     memcpy( info->output + info->out_pos, str, len );
+     info->out_pos += len;

@@ -1,0 +1,110 @@
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index babe3c592ff..c0265540d25 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2535,17 +2535,53 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+                                              const VkAllocationCallbacks *allocator, VkSwapchainKHR *ret )
+ {
+     VkSwapchainPresentScalingCreateInfoEXT scaling = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT};
+-    struct swapchain *swapchain, *old_swapchain = swapchain_from_handle( create_info->oldSwapchain );
+-    struct surface *surface = surface_from_handle( create_info->surface );
+-    struct vulkan_device *device = vulkan_device_from_handle( client_device );
+-    struct vulkan_physical_device *physical_device = device->physical_device;
+-    struct vulkan_instance *instance = physical_device->instance;
+-    VkSwapchainCreateInfoKHR create_info_host = *create_info;
++    struct swapchain *swapchain, *old_swapchain;
++    struct surface *surface;
++    struct vulkan_device *device;
++    struct vulkan_physical_device *physical_device;
++    struct vulkan_instance *instance;
++    VkSwapchainCreateInfoKHR create_info_host;
+     VkSurfaceCapabilitiesKHR capabilities;
+     VkSwapchainKHR host_swapchain;
+     RECT client_rect;
+     VkResult res;
+ 
++    /* **Split out of the declaration block so a fault here can be located.**
++     *
++     * This function dies on Android before it reaches any of its own logging,
++     * so the caller sees only
++     *
++     *     msvcrt:_wassert (L"!status && \"vkCreateSwapchainKHR\"",
++     *                      L"dlls/winevulkan/loader_thunks.c", 3681)
++     *
++     * — the assert is on the NTSTATUS of the unix call, and thunk64 always
++     * returns STATUS_SUCCESS (vulkan_thunks.c:53700), so a non-zero status can
++     * only be a fault propagating out. Five pointers are dereferenced above
++     * before anything could print, and the declaration block gave no way to
++     * tell which. Each step now announces itself first; the last line in the
++     * log is the one that killed it.
++     *
++     * Trace-only. Every assignment below is what the declarations already did,
++     * in the same order. */
++    TRACE( "device %p, create_info %p, allocator %p, ret %p\n",
++           client_device, create_info, allocator, ret );
++
++    device = vulkan_device_from_handle( client_device );
++    TRACE( "  device %p\n", device );
++    physical_device = device->physical_device;
++    TRACE( "  physical_device %p\n", physical_device );
++    instance = physical_device->instance;
++    TRACE( "  instance %p\n", instance );
++
++    old_swapchain = swapchain_from_handle( create_info->oldSwapchain );
++    surface = surface_from_handle( create_info->surface );
++    TRACE( "  old_swapchain %p, surface %p\n", old_swapchain, surface );
++
++    create_info_host = *create_info;
++    TRACE( "  create_info copied, surface handle %p, extent %ux%u, format %d\n",
++           (void *)(UINT_PTR)create_info->surface, create_info->imageExtent.width,
++           create_info->imageExtent.height, create_info->imageFormat );
++
+     /* `surface->hwnd` was read here, eight lines above the `if (surface)` that
+      * admits it can be NULL. surface_from_handle() is a plain cast of the
+      * client handle, so a swapchain created against a surface this instance did
+@@ -2571,6 +2607,8 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+         return VK_ERROR_SURFACE_LOST_KHR;
+     }
+ 
++    TRACE( "  surface->hwnd %p\n", surface->hwnd );
++
+     if (!NtUserIsWindow( surface->hwnd ))
+     {
+         ERR( "surface %p, hwnd %p is invalid!\n", surface, surface->hwnd );
+@@ -2578,10 +2616,13 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+     }
+ 
+     create_info_host.surface = surface->obj.host.surface;
++    TRACE( "  host surface %p\n", (void *)(UINT_PTR)create_info_host.surface );
+     if (old_swapchain) create_info_host.oldSwapchain = old_swapchain->obj.host.swapchain;
+ 
+     /* Windows allows client rect to be empty, but host Vulkan often doesn't, adjust extents back to the host capabilities */
++    TRACE( "  calling vkGetPhysicalDeviceSurfaceCapabilitiesKHR\n" );
+     res = instance->p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR( physical_device->host.physical_device, surface->obj.host.surface, &capabilities );
++    TRACE( "  capabilities res %d\n", res );
+     if (res) return res;
+ 
+     create_info_host.imageExtent.width = max( create_info_host.imageExtent.width, capabilities.minImageExtent.width );
+@@ -2600,6 +2641,8 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+         create_info_host.pNext = &scaling;
+     }
+ 
++    TRACE( "  scaling decided, allocating swapchain\n" );
++
+     if (!(swapchain = calloc( 1, sizeof(*swapchain) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
+ 
+     if ((swapchain->fshack_dpi = surface_get_fshack_dpi( surface )))
+@@ -2627,11 +2670,13 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+                    create_info_host.imageFormat );
+     }
+ 
++    TRACE( "  calling driver vkCreateSwapchainKHR\n" );
+     if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
+     {
+         free( swapchain );
+         return res;
+     }
++    TRACE( "  driver returned swapchain %p\n", (void *)(UINT_PTR)host_swapchain );
+ 
+     vulkan_object_init( &swapchain->obj.obj, host_swapchain );
+     swapchain->surface = surface;

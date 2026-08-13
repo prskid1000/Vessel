@@ -1611,7 +1611,22 @@ class SessionRuntime @Inject constructor(
         val dosCompiler = FEX_CACHE_DOS_DIR + compiler.name
         val spec = ProcessSpec(
             argv = current.tree.programArgv(dosCompiler, listOf("process-all")),
-            environment = current.environment,
+            // **`FEX_SILENTLOG` is overridden here, and only here.**
+            //
+            // The session default is silent, because FEX's debug tier was 99.9%
+            // of a 49 MB log — a line pair per unaligned atomic, which is a cost
+            // of *executing* translated code. This process does not execute any:
+            // it reads codemaps and translates them ahead of time, so the flood
+            // that justified the default cannot happen here.
+            //
+            // What silence did cost was the ability to see this fail. The
+            // compiler exited 1 after 3m30s on two consecutive sessions and said
+            // nothing at all, because `FEX_SILENTLOG=1` means no message handler
+            // is installed and `patches/fex/0003`'s error ceiling has nothing to
+            // filter. Three and a half minutes of full-CPU work, an empty
+            // `cache/` directory, and no diagnostic — which is the worst of the
+            // three possible outcomes.
+            environment = current.environment + ("FEX_SILENTLOG" to "0"),
             workingDirectory = current.layout.base,
         )
         val outcome = runCatching {
@@ -1804,7 +1819,7 @@ class SessionRuntime @Inject constructor(
                 "no $WOW64_FEX in the FEX package; 32-bit x86 programs will not start",
             )
         }
-        val deployed = copyWindowsPayload(source, layout)
+        val deployed = copyWindowsPayload(source, layout, ComponentType.FEXCORE.wire)
         "$ARM64EC_FEX — ${deployed.describe()}"
     }
 
@@ -1827,7 +1842,7 @@ class SessionRuntime @Inject constructor(
         for (type in D3D_COMPONENTS) {
             val source = components.directoryFor(containerId, type) ?: continue
             installed += type.label
-            total += copyWindowsPayload(source, layout)
+            total += copyWindowsPayload(source, layout, type.wire)
         }
         if (installed.isEmpty()) {
             log.line(
@@ -1944,7 +1959,7 @@ class SessionRuntime @Inject constructor(
      * lands in `system32`. Import libraries (`.dll.a`) are link-time artifacts
      * and are skipped, as is anything already there at the same size.
      */
-    private fun copyWindowsPayload(source: File, layout: ContainerLayout): Deployed {
+    private fun copyWindowsPayload(source: File, layout: ContainerLayout, key: String): Deployed {
         val windows = File(layout.prefix, DRIVE_C_WINDOWS)
         val system32 = File(windows, SYSTEM32)
         val groups = listOf(
@@ -1953,25 +1968,83 @@ class SessionRuntime @Inject constructor(
             File(source, SYSWOW64).listFiles().orEmpty() to File(windows, SYSWOW64),
         )
 
+        // The installed version, which is the directory's name — `ComponentStore`
+        // keys by type and version code and hands back `…/FEXCore/260802`. That
+        // string is the identity of the bytes; see [stagedVersions].
+        val version = source.name
+        val staged = stagedVersions(layout)
+        val alreadyStaged = staged[key] == version &&
+            groups.all { (files, destination) ->
+                files.none { it.isFile && it.name.endsWith(DLL_SUFFIX) } ||
+                    files.filter { it.isFile && it.name.endsWith(DLL_SUFFIX) }
+                        .all { File(destination, it.name).isFile }
+            }
+
         var copied = 0
         var present = 0
         for ((files, destination) in groups) {
             val dlls = files.filter { it.isFile && it.name.endsWith(DLL_SUFFIX) }
             if (dlls.isEmpty()) continue
+            if (alreadyStaged) {
+                present += dlls.size
+                continue
+            }
             if (!destination.isDirectory && !destination.mkdirs()) {
                 error("could not create ${destination.path}")
             }
             for (file in dlls) {
-                val target = File(destination, file.name)
-                if (target.isFile && target.length() == file.length()) {
-                    present++
-                    continue
-                }
-                file.copyTo(target, overwrite = true)
+                file.copyTo(File(destination, file.name), overwrite = true)
                 copied++
             }
         }
+        if (!alreadyStaged) recordStaged(layout, key, version)
         return Deployed(copied, present)
+    }
+
+    /**
+     * Which version of each component was last written into this prefix.
+     *
+     * **This exists because "same size" was being used to mean "same file", and
+     * it is not.** The old check skipped a copy whenever the target existed and
+     * `target.length() == file.length()`. FEX `260801` and `260802` are both
+     * exactly 5,152,768 bytes and have different SHA-256s — one carries a
+     * `thread_local` that faults during startup, the other does not — so the
+     * newer component installed correctly, the prefix kept the older binary, and
+     * two consecutive test sessions crashed at a byte-identical address while
+     * apparently running different builds. Nothing anywhere said the prefix was
+     * stale; the component list showed both versions present and the newest
+     * adopted.
+     *
+     * A recompile very often changes no size at all, so this was not an unlucky
+     * collision — it is the normal case for a patch that adds no code.
+     *
+     * Version is the right identity and hashing is not needed: components are
+     * unpacked into immutable, version-named directories, so the name settles it
+     * in one string comparison rather than by reading 68 MB of Wine per session.
+     * The presence check beside it covers a prefix that was emptied underneath a
+     * marker that survived.
+     *
+     * Kept in `base/` rather than in the prefix: it is Vessel's bookkeeping, and
+     * the guest has no business seeing it on any drive.
+     */
+    private fun stagedVersions(layout: ContainerLayout): Map<String, String> {
+        val file = File(layout.base, STAGED_COMPONENTS)
+        if (!file.isFile) return emptyMap()
+        return runCatching {
+            file.readLines().mapNotNull { line ->
+                val at = line.indexOf('=')
+                if (at <= 0) null else line.substring(0, at) to line.substring(at + 1)
+            }.toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    /** Record [key] as staged at [version]; see [stagedVersions]. */
+    private fun recordStaged(layout: ContainerLayout, key: String, version: String) {
+        runCatching {
+            val updated = stagedVersions(layout) + (key to version)
+            File(layout.base, STAGED_COMPONENTS)
+                .writeText(updated.entries.joinToString("\n") { "${it.key}=${it.value}" })
+        }
     }
 
     // — resolution helpers -----------------------------------------------------
@@ -2259,6 +2332,9 @@ class SessionRuntime @Inject constructor(
 
         const val DRIVE_C_WINDOWS = "drive_c/windows"
         const val SYSTEM32 = "system32"
+
+        /** Which component version is currently in the prefix. See stagedVersions. */
+        const val STAGED_COMPONENTS = "staged-components"
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
 

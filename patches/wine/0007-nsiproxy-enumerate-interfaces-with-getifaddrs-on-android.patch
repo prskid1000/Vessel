@@ -1,19 +1,35 @@
+nsiproxy: enumerate interfaces with getifaddrs on Android.
+
+The reasoning for the fallback itself is in the code, beside it. One thing is
+worth stating here because it is a property of the base rather than of the fix:
+
+This patch also adds <errno.h>, which is not incidental. Upstream Wine includes
+it in this file and Valve's proton_11.0 does not, so the fallback below -- which
+reports errno in both its ERR and its WARN -- compiles on upstream and fails on
+Proton with
+
+    dlls/nsiproxy.sys/ndis.c:362: error: use of undeclared identifier 'errno'
+
+The include is unconditional because every path that reports a failure here
+needs it, and it costs nothing on a tree that already has it.
+
 diff --git a/dlls/nsiproxy.sys/ndis.c b/dlls/nsiproxy.sys/ndis.c
-index 5dde17244d9..752f3d4f4bd 100644
+index 158a39e558..67ce0fc81d 100644
 --- a/dlls/nsiproxy.sys/ndis.c
 +++ b/dlls/nsiproxy.sys/ndis.c
-@@ -31,6 +31,10 @@
+@@ -29,6 +29,11 @@
+ #include <sys/socket.h>
+ #include <sys/ioctl.h>
  #include <unistd.h>
- #include <errno.h>
- 
++#include <errno.h>
++
 +#ifdef HAVE_IFADDRS_H
 +#include <ifaddrs.h>
 +#endif
-+
+ 
  #ifdef HAVE_NET_IF_H
  #include <net/if.h>
- #endif
-@@ -307,16 +311,80 @@ static struct if_entry *add_entry( UINT index, char *name )
+@@ -328,19 +333,92 @@ static struct if_entry *add_entry( UINT index, const char *name )
      return entry;
  }
  
@@ -66,40 +82,53 @@ index 5dde17244d9..752f3d4f4bd 100644
 +
  static unsigned int update_if_table( void )
  {
-     struct if_nameindex *indices, *entry;
+     struct if_nameindex *indices = if_nameindex(), *entry;
      unsigned int append_count = 0;
+     struct if_entry *if_entry;
  
-     indices = if_nameindex();
--    if (!indices)
+-    for (entry = indices; entry->if_index; entry++)
 +    /* VESSEL: empty counts as failure, not just NULL. Measured on Android 16:
 +     * ipconfig still printed nothing with the fallback in place, because
 +     * bionic's if_nameindex() does not return NULL when the netlink bind is
 +     * refused -- it returns a list whose first entry is the terminator. A NULL
-+     * check alone never fired and the getifaddrs path below was dead code. */
++     * check alone never fired and the getifaddrs path below was dead code.
++     *
++     * Note this falls through rather than returning, so the fake ethernet
++     * adapter below is still considered on the getifaddrs path. */
 +    if (!indices || !indices->if_index)
-     {
-+#ifdef HAVE_IFADDRS_H
-+        static int warned;
-+        unsigned int from_ifaddrs;
-+
++    {
 +        if (indices) if_freenameindex( indices );
-+        from_ifaddrs = update_if_table_from_ifaddrs();
-+        if (!warned++)
-+            WARN( "if_nameindex gave nothing (errno %d); getifaddrs found %u.\n",
-+                  errno, from_ifaddrs );
-+        return from_ifaddrs;
++        indices = NULL;
++#ifdef HAVE_IFADDRS_H
++        {
++            static int warned;
++
++            append_count = update_if_table_from_ifaddrs();
++            if (!warned++)
++                WARN( "if_nameindex gave nothing (errno %d); getifaddrs found %u.\n",
++                      errno, append_count );
++        }
 +#else
-         ERR( "if_nameindex failed, errno %d.\n", errno );
-         return 0;
++        ERR( "if_nameindex failed, errno %d.\n", errno );
 +#endif
++    }
++
++    for (entry = indices; entry && entry->if_index; entry++)
+     {
+         if (!find_entry_from_index( entry->if_index ) && add_entry( entry->if_index, entry->if_name ))
+             ++append_count;
      }
  
-     for (entry = indices; entry->if_index; entry++)
+-    if_freenameindex( indices );
++    if (indices) if_freenameindex( indices );
+ 
+     if (!have_ethernet_iface && fake_ethernet_adapter() && (if_entry = add_entry( 0xdeadbeef, "eth0faked" )))
+     {
 diff --git a/dlls/nsiproxy.sys/nsi.c b/dlls/nsiproxy.sys/nsi.c
-index 09ced8f814e..407c58dbd21 100644
+index a13d77a47a..437eeb3241 100644
 --- a/dlls/nsiproxy.sys/nsi.c
 +++ b/dlls/nsiproxy.sys/nsi.c
-@@ -189,11 +189,23 @@ static NTSTATUS add_notification( const NPI_MODULEID *module, UINT32 table )
+@@ -190,11 +190,23 @@ static NTSTATUS add_notification( const NPI_MODULEID *module, UINT32 table )
  static NTSTATUS poll_events(void)
  {
      static int netlink_fd = -1;
@@ -123,7 +152,7 @@ index 09ced8f814e..407c58dbd21 100644
      if (netlink_fd == -1)
      {
          struct sockaddr_nl addr;
-@@ -211,7 +223,8 @@ static NTSTATUS poll_events(void)
+@@ -212,7 +224,8 @@ static NTSTATUS poll_events(void)
          {
              close( netlink_fd );
              netlink_fd = -1;

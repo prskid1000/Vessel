@@ -43,10 +43,10 @@ device entry point is resolved from it on first use. A device cannot exist
 before the instance that created it, so it is always there in time.
 
 diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
-index 7c20315605a..c009d76085a 100644
+index ecb082b799..9dfcd71ef3 100644
 --- a/dlls/win32u/vulkan.c
 +++ b/dlls/win32u/vulkan.c
-@@ -3060,6 +3060,120 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
+@@ -4051,6 +4051,120 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
  
  #ifdef __ANDROID__
  
@@ -167,7 +167,7 @@ index 7c20315605a..c009d76085a 100644
  /* adrenotools/priv.h: ADRENOTOOLS_DRIVER_CUSTOM. Spelled out rather than
   * included, because libadrenotools is a runtime dependency of the host
   * application and not a build dependency of Wine. */
-@@ -3147,8 +3261,13 @@ static void vulkan_init_once(void)
+@@ -4141,8 +4255,13 @@ static void vulkan_init_once(void)
  #ifdef __ANDROID__
      /* Ahead of the plain dlopen, not after it: once the platform loader is in
       * the process it has already bound its driver, and a second attempt cannot
@@ -183,7 +183,7 @@ index 7c20315605a..c009d76085a 100644
  #endif
  #ifdef SONAME_LIBVULKAN
      if (!vulkan_handle) vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW );
-@@ -3167,8 +3286,20 @@ static void vulkan_init_once(void)
+@@ -4161,8 +4280,20 @@ static void vulkan_init_once(void)
          return;                                                                                    \
      }
  

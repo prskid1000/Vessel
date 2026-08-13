@@ -44,6 +44,8 @@ costs nothing to read.
 
 Not suitable upstream as-is: the protocol is specific to this app's helper.
 
+diff --git a/dlls/winex11.drv/bitblt.c b/dlls/winex11.drv/bitblt.c
+index ad3a863504..e2d2e1c509 100644
 --- a/dlls/winex11.drv/bitblt.c
 +++ b/dlls/winex11.drv/bitblt.c
 @@ -29,6 +29,11 @@
@@ -69,7 +71,7 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
  
  
  #define DST 0   /* Destination drawable */
-@@ -1602,6 +1611,138 @@ static int xshm_error_handler( Display *display, XErrorEvent *event, void *arg )
+@@ -1606,6 +1615,138 @@ static int xshm_error_handler( Display *display, XErrorEvent *event, void *arg )
      return 1;  /* FIXME: should check event contents */
  }
  
@@ -208,7 +210,7 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
  static XImage *create_shm_image( const XVisualInfo *vis, int width, int height, x11drv_xshm_info_t *shminfo )
  {
      XImage *image;
-@@ -1611,10 +1752,31 @@ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height,
+@@ -1615,10 +1756,31 @@ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height,
      if (!image) return NULL;
      if (image->bytes_per_line & 3) goto failed;  /* we need 32-bit alignment */
  
@@ -243,7 +245,7 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
      if (shminfo->shmaddr != (char *)-1)
      {
          BOOL ok;
-@@ -1626,12 +1788,36 @@ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height,
+@@ -1630,12 +1792,36 @@ static XImage *create_shm_image( const XVisualInfo *vis, int width, int height,
          if (!X11DRV_check_error() && ok)
          {
              image->data = shminfo->shmaddr;
@@ -283,7 +285,7 @@ Not suitable upstream as-is: the protocol is specific to this app's helper.
      shminfo->shmid = -1;
  
  failed:
-@@ -1644,7 +1830,14 @@ static BOOL destroy_shm_image( XImage *image, x11drv_xshm_info_t *shminfo )
+@@ -1648,7 +1834,14 @@ static BOOL destroy_shm_image( XImage *image, x11drv_xshm_info_t *shminfo )
      if (shminfo->shmid == -1) return FALSE;
  
      XShmDetach( gdi_display, shminfo );

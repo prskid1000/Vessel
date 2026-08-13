@@ -18,19 +18,141 @@ setup_mingw
 COMPONENT=wine
 COMPONENT_REF="$WINE_REF"
 
-fetch_source "$COMPONENT" "$WINE_REPO" "$WINE_REF"
+fetch_source "$COMPONENT" "$WINE_REPO" "$WINE_REF" "${WINE_EXACT:-}"
 
 SRC="$NATIVE_DIR/$COMPONENT"
 
 # WINE_REF is a branch, so the ref carries no version; the tree's VERSION file
 # holds it as "Wine version 10.12".
-VERSION="$(sed -n 's/^Wine version[[:space:]]*//p' "$SRC/VERSION" 2>/dev/null | head -1 || true)"
-# Vessel patches change what this builds without moving the upstream
-# version, and the component store is keyed by type and version code --
-# so an unchanged code makes the rebuild a silent no-op on the device.
-VERSION_CODE="$(vessel_version_code "$VERSION" "${WINE_REVISION:-0}")"
-[ -n "$VERSION" ] || die "could not read a version out of $SRC/VERSION"
-info "wine version $VERSION (branch $WINE_REF @ ${SOURCE_SHA:0:12})"
+WINE_VERSION="$(sed -n 's/^Wine version[[:space:]]*//p' "$SRC/VERSION" 2>/dev/null | head -1 || true)"
+[ -n "$WINE_VERSION" ] || die "could not read a version out of $SRC/VERSION"
+
+# **A Proton build is not ordered by its Wine version, and must not be.**
+#
+# package_wcp.py derives a monotonic integer from the dotted version, and the
+# app picks a component by taking the HIGHEST code: ComponentStore.adoptLatest
+# for a new container, and ComponentSetup's "wanted" filter for what is even
+# offered for install. Proton 11.0 is rebased on Wine *11.0*, so the honest
+# Wine number is 11.0 -> 1100, which sorts BELOW the 11.14 -> 1114 already on
+# the phone. The package would install and then never be chosen, and setup
+# would not offer it at all -- a silent wrong-component run, which has already
+# cost this project two test sessions.
+#
+# So a Proton build declares an epoch that outranks any plain-Wine build. The
+# number stops being "which Wine is newer" and becomes "which base did we
+# choose", which is the question the app is actually asking.
+#
+# THE HAZARD CUTS BOTH WAYS, so it is written here rather than discovered:
+# while this epoch exists, a plain-Wine component can never outrank a Proton
+# one. Moving back to upstream Wine means BOTH restoring pins.env AND deleting
+# the installed Proton component from the phone -- changing pins.env alone will
+# build a package the app then ignores, which looks exactly like a build that
+# did not take.
+WINE_PROTON_EPOCH=1000000
+
+# Is this a Valve base? Decided once, here, because the answer is needed in two
+# places and they must never disagree.
+#
+# **They did disagree, and it is why this is a variable.** Both tests originally
+# matched only `proton*`. Pointing WINE_REF at `experimental_11.0` -- as much a
+# Proton base as `proton_11.0` is, same Wine 11.0, 461 commits further on --
+# missed both: the version arm below fell through to plain Wine and produced an
+# empty VERSION_CODE, and the generated-sources block was skipped entirely, so
+# configure died with
+#
+#     error: open wine/vulkan.h : No such file or directory
+#
+# naming a file no part of the build had said anything about. One predicate,
+# used twice, cannot drift like that.
+case "$WINE_REF" in
+  proton*|experimental*) VALVE_BASE=1 ;;
+  *)                     VALVE_BASE= ;;
+esac
+
+case "$WINE_REF" in
+  proton*|experimental*)
+    # Named apart so the two are distinguishable in dist/ and in the app: both
+    # are Wine 11.0 and both would otherwise package as `proton-11.0`, which
+    # would make an experimental build silently look like the stable one.
+    case "$WINE_REF" in
+      experimental*) VERSION="proton-exp-$WINE_VERSION" ;;
+      *)             VERSION="proton-$WINE_VERSION" ;;
+    esac
+    # Epoch first, then two digits for Vessel's own patch revision. The epoch
+    # says which base was chosen; the revision says which patch set, and
+    # without it a rebuild carrying a new patch keeps its version code and
+    # ComponentStore treats it as bytes it already has. See vessel_version_code.
+    VERSION_CODE=$(( (WINE_PROTON_EPOCH + $(python3 -c \
+      'import sys; sys.path.insert(0, "'"$COMMON_SH_DIR"'"); from package_wcp import version_code; print(version_code(sys.argv[1]))' \
+      "$WINE_VERSION")) * 100 + ${WINE_REVISION:-0} ))
+    info "wine version $WINE_VERSION as $VERSION, code $VERSION_CODE (Proton epoch)"
+    ;;
+  *)
+    VERSION="$WINE_VERSION"
+    VERSION_CODE=
+    info "wine version $VERSION (branch $WINE_REF @ ${SOURCE_SHA:0:12})"
+    ;;
+esac
+
+# **Valve's tree does not keep Wine's generated sources current; upstream does.**
+#
+# Wine generates several sources from other sources. Upstream commits the
+# results, so a checkout is ready to configure. Valve's tree is not: some of
+# those files are absent, and — worse — some are present but STALE.
+#
+# Stale is the case that matters, and the one that cost a build here. The first
+# version of this block guarded each generator on its output being missing,
+# which is exactly the wrong test: `include/wine/server_protocol.h` IS committed
+# in proton_11.0, so the guard skipped `make_requests`, and the header it left
+# in place was protocol version 930 describing a `server/protocol.def` that had
+# moved on to 931. Nothing complains at configure time. The build gets a long
+# way in and then fails in ntdll with errors that name none of it:
+#
+#     fsync.c: field has incomplete type 'enum fsync_type'
+#     fsync.c: use of undeclared identifier 'FSYNC_SHM_PAGE_SIZE'
+#     file.c:  no member named 'query_directory_file_request' in 'union generic_request'
+#     registry.c: variable has incomplete type 'enum prefix_type'
+#
+# Every one of those symbols is defined in protocol.def and absent from the
+# committed header. So on a Proton base every generator runs unconditionally;
+# presence is not evidence of currency, and regenerating a file that was already
+# correct costs seconds and changes nothing.
+#
+#   tools/make_requests    (perl)   include/wine/server_protocol.h, server/request_*.h
+#   tools/make_specfiles   (perl)   dlls/ntdll/ntsyscalls.h, dlls/win32u/win32syscalls.h
+#   .../winevulkan/make_vulkan (py) include/wine/vulkan.h + 7 more
+#   configure, config.h.in          autoreconf, below
+#
+# make_unicode is NOT run: it rebuilds the NLS tables from Unicode data it
+# downloads, which would make the build need the network to produce files this
+# tree already has and does not disagree with.
+#
+# On an upstream-Wine base this whole block is skipped. There the committed
+# files are the authority, they are current, and regenerating could only
+# introduce a difference.
+#
+# `fetch_source` cleans untracked files, so all of this reruns per build.
+if [ -n "$VALVE_BASE" ]; then
+  log "regenerating Wine's generated sources ($WINE_REF ships them stale or absent)"
+
+  # The server protocol first: ntdll and wineserver both compile against it.
+  ( cd "$SRC" && ./tools/make_requests ) || die "make_requests failed"
+
+  # Syscall dispatch tables, included by signal_arm64.c/signal_arm64ec.c.
+  ( cd "$SRC" && ./tools/make_specfiles ) || die "make_specfiles failed"
+
+  # winevulkan. `-x`/`-X` point at the XML committed beside the generator;
+  # without them it fetches vk.xml from the Khronos registry into
+  # $HOME/.cache/wine, which would make the build require the network and
+  # silently track whatever upstream publishes. The tree's own XML is the
+  # version Valve's sources were written against.
+  ( cd "$SRC/dlls/winevulkan" && python3 ./make_vulkan -x vk.xml -X video.xml )     || die "make_vulkan failed"
+
+  for f in include/wine/server_protocol.h dlls/ntdll/ntsyscalls.h            dlls/win32u/win32syscalls.h include/wine/vulkan.h; do
+    [ -f "$SRC/$f" ] || die "generators ran but $f is still missing"
+  done
+  ok "generated sources rebuilt"
+fi
 
 BUILD="$WORK_DIR/wine-android"
 TOOLS="$WORK_DIR/wine-tools"
@@ -328,6 +450,70 @@ make -C "$BUILD" install-lib DESTDIR="$STAGE" || die "make install-lib failed"
 
 [ -d "$PAYLOAD" ] || die "make install-lib produced nothing under $PAYLOAD"
 
+# --- Ship Wine's own addons, Mono and Gecko -------------------------------------
+# `make install-lib` does not include them, and a package without them is a
+# container that stops on a dialog. `dlls/appwiz.cpl/addons.c:765` searches
+# `$WINEDATADIR/<subdir>/` and `$INSTALL_DATADIR/wine/<subdir>/` before it offers
+# to download; configure ran with --prefix=/usr, so INSTALL_DATADIR is
+# /usr/share and the second path is exactly what lands here. Present, wineboot
+# installs them silently and offline. Absent, the user is asked, and then 233 MB
+# comes over the network per container — measured on the device.
+#
+# addons.c refuses any file whose SHA-256 is not the one it was compiled with, so
+# these are verified here rather than trusted: a mismatch means the pins have
+# drifted from the Wine base and is worth failing the build for, not shipping a
+# file Wine will silently reject on the phone.
+#
+# Both Gecko architectures, because appwiz.cpl is built for i386 as well as
+# arm64ec and each copy asks for its own (addons.c:47-52). Mono ships a single
+# x86 .msi that serves every architecture (addons.c:60-61).
+fetch_addon() {
+  # <url> <destination directory> <expected sha256>
+  local url="$1" dir="$2" want="$3" name got
+  name="$(basename "$url")"
+  mkdir -p "$dir"
+  if [ ! -f "$dir/$name" ]; then
+    info "wine addons: fetching $name"
+    curl -fSL --retry 3 -o "$dir/$name.part" "$url" \
+      || die "could not download $url"
+    mv "$dir/$name.part" "$dir/$name"
+  fi
+  got="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+  [ "$got" = "$want" ] \
+    || die "$name sha256 is $got, addons.c expects $want — update native/pins.env to match the Wine base"
+}
+
+# **Mono only. Gecko is deliberately not shipped.** Measured: mono is 85.5 MB and
+# the two Gecko builds are 55.2 + 53.9 MB, and none of it compresses — xz -9 took
+# the mono .msi from 85,504,000 to 83,246,320 bytes, 2.6%, because an .msi is a
+# CAB and already compressed. So Gecko is 109 MB of package for the embedded
+# MSHTML browser control, which games do not use: engines that want web content
+# bundle CEF, and Resident Evil Requiem asked for neither addon — the 233 MB that
+# appeared in a prefix here was Wine offering them at creation, not a program
+# requiring them. An app that does want Gecko gets the same download prompt it
+# would have got anyway.
+#
+# Mono stays because .NET is what launchers, patchers and mod tools are written
+# in, and a missing one stops an install behind a dialog. Note Unity games ship
+# their own Mono and never consult this one.
+# Neither is staged today. The helper and the pins stay because the decision is
+# about *packaging*, not about whether the addons are wanted — see native/pins.env
+# for the sizes and the reasoning, and add two lines here to bring either back:
+#
+#   WINE_ADDON_CACHE="$WORK_DIR/wine-addons"
+#   fetch_addon "https://dl.winehq.org/wine/wine-mono/$WINE_MONO_VERSION/wine-mono-$WINE_MONO_VERSION-x86.msi" \
+#     "$WINE_ADDON_CACHE/mono" "$WINE_MONO_SHA256"
+#   mkdir -p "$PAYLOAD/share/wine/mono"
+#   cp "$WINE_ADDON_CACHE/mono/"*.msi "$PAYLOAD/share/wine/mono/"
+#
+# Measured, so the next person does not have to: bundling both took the package
+# from 66.3 to 249.6 MiB, mono alone to 146.1 MiB. The right home for them is a
+# component of their own — the store is already keyed by type and version code,
+# so a `WineMono` component keeps the base small, makes the addon opt-in per
+# container, and stops a Mono update forcing a full Wine re-download. That is the
+# same mechanism the VC++ runtimes and a real .NET runtime would need, since Wine
+# Mono covers .NET Framework only: no WPF, and nothing for .NET 5 and later.
+
 # --- Ship the X11/FreeType runtime ----------------------------------------------
 # `make install-lib` installs Wine and nothing else, so without this the package
 # holds a winex11.so whose NEEDED entries name libX11.so and libXext.so and a
@@ -435,9 +621,10 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --name "Wine $VERSION ARM64EC ($TARGET_NAME)" \
   --version "$VERSION" \
   --version-code "$VERSION_CODE" \
+  ${VERSION_CODE:+--version-code "$VERSION_CODE"} \
   --payload "$PAYLOAD" \
   --provenance "$PAYLOAD/provenance.json" \
-  --description "Wine $VERSION with arm64ec/aarch64/i386 PE modules and a bionic aarch64 unix side, from $WINE_REF @ ${SOURCE_SHA:0:12}" \
+  --description "Wine $WINE_VERSION with arm64ec/aarch64/i386 PE modules and a bionic aarch64 unix side, from $WINE_REF @ ${SOURCE_SHA:0:12}" \
   --out "$DIST_DIR/wine-$VERSION-$TARGET_NAME.wcp"
 
 ok "dist/wine-$VERSION-$TARGET_NAME.wcp"
