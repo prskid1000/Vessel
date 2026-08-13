@@ -63,6 +63,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
+import app.vessel.core.WcpProfile
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.Files
@@ -1986,10 +1987,21 @@ class SessionRuntime @Inject constructor(
             File(source, SYSWOW64).listFiles().orEmpty() to File(windows, SYSWOW64),
         )
 
-        // The installed version, which is the directory's name — `ComponentStore`
-        // keys by type and version code and hands back `…/FEXCore/260802`. That
-        // string is the identity of the bytes; see [stagedVersions].
-        val version = source.name
+        // The payload's own content hash where the package carries one, and the
+        // directory name — the version code — where it does not.
+        //
+        // The version is a *name*, and a name cannot answer "are these the same
+        // bytes": FEX 260801 and 260802 were both exactly 5,152,768 bytes and
+        // differed by a thread_local that faulted at startup. The hash is
+        // computed once at package time over the file list and their contents,
+        // so comparing it is a string compare rather than a re-read of 68 MB of
+        // Wine on every launch.
+        //
+        // The fallback is not a formality. Components installed before
+        // `payloadSha256` existed have no digest, and treating that as a
+        // mismatch would re-stage every payload on the next launch of every
+        // container on the device.
+        val version = payloadIdentity(source)
         val staged = stagedVersions(layout)
         val alreadyStaged = staged[key] == version &&
             groups.all { (files, destination) ->
@@ -2045,6 +2057,26 @@ class SessionRuntime @Inject constructor(
      * Kept in `base/` rather than in the prefix: it is Vessel's bookkeeping, and
      * the guest has no business seeing it on any drive.
      */
+    /**
+     * What identifies this component's bytes: its payload hash, or its version
+     * code when the package predates the hash.
+     *
+     * Read straight from the component directory's own `profile.json` rather
+     * than through [ComponentStore], because this runs per component per launch
+     * and the store's accessors migrate and re-scan. A malformed or missing
+     * manifest falls back to the directory name, which is the behaviour this
+     * replaced and is never worse than it.
+     */
+    private fun payloadIdentity(source: File): String {
+        val profile = File(source, WCP_PROFILE)
+        if (!profile.isFile) return source.name
+        return runCatching {
+            json.decodeFromString(WcpProfile.serializer(), profile.readText())
+                .payloadSha256
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: source.name
+    }
+
     private fun stagedVersions(layout: ContainerLayout): Map<String, String> {
         val file = File(layout.base, STAGED_COMPONENTS)
         if (!file.isFile) return emptyMap()

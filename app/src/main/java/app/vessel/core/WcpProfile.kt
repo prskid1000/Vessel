@@ -36,6 +36,25 @@ data class WcpProfile(
      */
     val files: List<String> = emptyList(),
 
+    /**
+     * What the payload *is*, as opposed to what it is called: sha256 over
+     * `<relpath>\0<sha256>\n` for every file in sorted order.
+     *
+     * **A version code answers "which is newer" and cannot answer "are these the
+     * same bytes."** Confusing the two cost three separate bugs on 2026-08-13.
+     * Two FEX builds shared an upstream tag, a version code and an identical
+     * 5,152,768-byte `libarm64ecfex.dll` — one carrying a `thread_local` that
+     * faulted during ARM64EC startup and one without. Every layer that compared
+     * names or sizes concluded they were the same file, and two sessions crashed
+     * at a byte-identical address while apparently running different builds.
+     *
+     * Null for anything packaged before this field existed, which is why every
+     * reader falls back rather than treating absence as a mismatch: a container
+     * running happily on an older component must not be made to re-stage
+     * because the manifest predates the check.
+     */
+    val payloadSha256: String? = null,
+
     val vessel: WcpVessel? = null,
 ) {
     /** The known [ComponentType], or null when the packager used a type we cannot load. */

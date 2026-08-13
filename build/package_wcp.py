@@ -48,6 +48,28 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def payload_digest(payload: Path, files: list[str]) -> str:
+    """A content hash of the payload, independent of packaging.
+
+    Over ``<relpath>\\0<sha256>\\n`` for every file in sorted order, so it depends
+    on the names and the bytes and on nothing else. Deliberately not
+    ``sha256_file`` of the archive: that also covers compression settings, tar
+    ordering and mtimes, so two identical payloads packaged twice would hash
+    differently and the value could not be used to answer "is this already
+    installed".
+
+    ``collect_files`` already excludes ``provenance.json``, which carries a build
+    timestamp and would make every rebuild look like new content.
+    """
+    h = hashlib.sha256()
+    for rel in files:
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(sha256_file(payload / rel).encode("ascii"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
 def version_code(version: str) -> int:
     """Derive a monotonic integer from a dotted version.
 
@@ -142,6 +164,23 @@ def main() -> int:
         "name": args.name,
         "description": args.description,
         "files": files,
+        # What the payload *is*, as opposed to what it is called.
+        #
+        # A version code answers "which is newer" and cannot answer "are these
+        # the same bytes", and the two questions were confused three separate
+        # times on 2026-08-13. Two FEX builds carried the same upstream tag, the
+        # same version code and the same 5,152,768-byte libarm64ecfex.dll, one
+        # with a thread_local that faulted during startup and one without. Every
+        # layer that compared names or sizes concluded they were identical: the
+        # store skipped the install, the prefix skipped the copy, and two test
+        # sessions crashed at a byte-identical address while apparently running
+        # different builds.
+        #
+        # Content-addressed and order-independent, so a rebuild that changes
+        # nothing produces the same digest and a rebuild that changes one byte
+        # does not. Not the archive's own sha256, which also covers compression
+        # and tar metadata and so differs between identical payloads.
+        "payloadSha256": payload_digest(payload, files),
         "vessel": {
             "builtAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "formatVersion": 1,
