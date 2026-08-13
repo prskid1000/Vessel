@@ -32,6 +32,9 @@ XORG_BASE=https://www.x.org/releases/individual
 # SourceForge, not FreeType's own savannah host, which returned 502 for hours on
 # 2026-08-07. It is an official mirror with identical tarballs.
 FREETYPE_BASE=https://downloads.sourceforge.net/project/freetype/freetype2
+GNU_BASE=https://ftp.gnu.org/gnu
+GMP_BASE=https://gmplib.org/download/gmp
+GNUTLS_BASE=https://www.gnupg.org/ftp/gcrypt/gnutls
 
 # Build order is dependency order: every entry needs the .pc files installed by
 # the ones above it.  <url>|<name>-<version>|<extra configure args>
@@ -69,6 +72,24 @@ PACKAGES=(
   # treats a missing FreeType as a hard error. Building it here is what keeps
   # --without-freetype — a Wine with no glyph rasterizer — off the table.
   "$FREETYPE_BASE/$FREETYPE_VERSION/freetype-$FREETYPE_VERSION.tar.xz|freetype-$FREETYPE_VERSION|--without-harfbuzz --without-brotli --without-bzip2 --without-png --with-zlib=yes"
+  # GnuTLS and its dependencies — the backend Wine's bcrypt needs. Without
+  # these, dlls/bcrypt/gnutls.c compiles to nothing and every asymmetric call
+  # returns STATUS_NOT_IMPLEMENTED. See the note in native/pins.env.
+  #
+  # gmp: --disable-assembly because gmp picks its assembly from the build
+  # machine's idea of the target and an Android aarch64 cross build is exactly
+  # where that misfires. Slower big-integer maths, and nothing here is on a
+  # frame path.
+  "$GMP_BASE/gmp-$GMP_VERSION.tar.xz|gmp-$GMP_VERSION|--disable-assembly --enable-static --disable-shared"
+  # nettle: hogweed is the half GnuTLS uses and the half that needs gmp.
+  # --disable-openssl keeps it from linking a host OpenSSL for its test suite.
+  "$GNU_BASE/nettle/nettle-$NETTLE_VERSION.tar.gz|nettle-$NETTLE_VERSION|--disable-openssl --disable-documentation --enable-static --disable-shared --with-include-path=$SYSROOT/usr/include --with-lib-path=$SYSROOT/usr/lib"
+  "$GNU_BASE/libtasn1/libtasn1-$LIBTASN1_VERSION.tar.gz|libtasn1-$LIBTASN1_VERSION|--disable-doc --enable-static --disable-shared"
+  # GnuTLS itself, kept as small as it will go: no PKCS#11, no IDN, no docs,
+  # no command line tools, no C++ binding, and its own bundled unistring so
+  # the sysroot does not need a fifth package. Shared, because bcrypt dlopens
+  # it by SONAME at runtime.
+  "$GNUTLS_BASE/v$GNUTLS_SERIES/gnutls-$GNUTLS_VERSION.tar.xz|gnutls-$GNUTLS_VERSION|--without-p11-kit --without-idn --without-tpm --without-tpm2 --disable-doc --disable-tools --disable-tests --disable-cxx --disable-nls --with-included-unistring --enable-shared"
 )
 
 # The stamp is the whole pin set, so changing any one component invalidates it.
@@ -188,7 +209,9 @@ for entry in "${PACKAGES[@]}"; do
 
   src="$BUILD_ROOT/$dirname"
   rm -rf "$src"
-  tar -xJf "$tarball" -C "$BUILD_ROOT" || die "could not unpack $tarball"
+  # -xf, not -xJf: the X11 set is all .tar.xz but the GNU packages ship
+  # .tar.gz, and GNU tar picks the decompressor from the file itself.
+  tar -xf "$tarball" -C "$BUILD_ROOT" || die "could not unpack $tarball"
   [ -x "$src/configure" ] || die "$dirname ships no configure script.
      Upstream moved this release to meson-only; pin the last autotools version
      in native/pins.env, or port this script to meson for that package."
@@ -240,7 +263,7 @@ done
 # one built by the wrong compiler.
 
 for pc in xproto xau xcb x11 xext xrender xfixes xi xrandr xcursor xcomposite \
-          xxf86vm xinerama xtrans xshmfence freetype2; do
+          xxf86vm xinerama xtrans xshmfence freetype2 gnutls; do
   [ -f "$SYSROOT/usr/lib/pkgconfig/$pc.pc" ] || [ -f "$SYSROOT/usr/share/pkgconfig/$pc.pc" ] \
     || die "no $pc.pc in the sysroot — the package that provides it did not install.
      Look for '$pc' in the log above."
@@ -248,7 +271,8 @@ done
 
 for lib in libX11.so libXext.so libXrender.so libXfixes.so libXi.so \
            libXrandr.so libXcursor.so libXcomposite.so libXxf86vm.so \
-           libXinerama.so libxcb.so libXau.so libxshmfence.so libfreetype.so; do
+           libXinerama.so libxcb.so libXau.so libxshmfence.so libfreetype.so \
+           libgnutls.so; do
   path="$SYSROOT/usr/lib/$lib"
   [ -e "$path" ] || die "the sysroot has no $lib"
   # A host build reads "x86-64" here, and Wine links against it happily right up
