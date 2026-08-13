@@ -1,44 +1,37 @@
+ntdll: a long log line must not kill the process
+
+`info->output` is `char[1020]`, and a line that does not fit in what is left
+of it killed the process outright: `RtlRaiseStatus( STATUS_BUFFER_OVERFLOW )`
+on the PE side, `abort()` on the unix side. The unix diagnostic was worse
+than useless -- it printed the buffer's *previous* contents, naming an
+innocent line rather than the one that overflowed.
+
+Nothing in Wine emits lines that long. The components running on top of it
+do: FEX and vkd3d both format into 4096-byte buffers and pass the result
+straight to the debug channel, and DXVK is the only one of the three that
+checks the length first. Wine's own unix side can also reach it unaided --
+`wine_dbg_vprintf` buffers into `char buffer[1024]`, so 1023 characters with
+no newline is enough.
+
+What makes this worth fixing rather than working around is *when* it fires.
+The probability rises with the amount of logging enabled, so it goes off
+precisely when someone has turned channels up to diagnose something else, and
+it presents as the program dying rather than as a logging fault. That is a
+tracing bug wearing someone else's clothes.
+
+Flush what is buffered, write an oversized line straight out, carry on.
+Truncating instead was considered and rejected: a silently shortened log line
+is a measurement that lies, which is worse than a long one.
+
+Rebased from the Proton 11 tree this was written against; 11.14's context
+around both functions differs, and the unix half there used fprintf where
+this uses write.
+
 diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
-index 0869b3b4f64..d60c8a319c2 100644
+index fe083befbca..e15279e69d7 100644
 --- a/dlls/ntdll/thread.c
 +++ b/dlls/ntdll/thread.c
-@@ -69,16 +69,54 @@ static void init_options(void)
-     while (debug_options[nb_debug_options].name[0]) nb_debug_options++;
- }
- 
--/* add a string to the output buffer */
-+/* add a string to the output buffer
-+ *
-+ * Vessel: a line longer than the buffer is flushed straight through instead of
-+ * raising STATUS_BUFFER_OVERFLOW.
-+ *
-+ * __wine_dbg_output is not Wine's private channel here. It is the one export
-+ * that FEX, DXVK and vkd3d-proton all resolve out of ntdll and write every
-+ * diagnostic through (FEX Source/Windows/Common/Logging.cpp:42, DXVK
-+ * src/util/log/log.cpp:62, vkd3d libs/vkd3d-common/debug.c:125), and every one
-+ * of them formats into a buffer larger than this one -- vkd3d into
-+ * char local_buffer[4096] at debug.c:239, FEX into an unbounded
-+ * fextl::fmt::format. So a single log line over 1019 bytes, from a component
-+ * that has done nothing wrong, took the process down with
-+ * STATUS_BUFFER_OVERFLOW; the unix half of this same function called abort().
-+ *
-+ * DXVK is the only one of the three that defends against it, and its comment
-+ * says exactly what it is defending against: "__wine_dbg_output tries to buffer
-+ * lines up to 1020 characters including null terminator, and will cause a hang
-+ * if we submit anything longer than that even in consecutive calls"
-+ * (log.cpp:81-86). Fixing it once here is better than three client-side
-+ * workarounds, only one of which exists.
-+ *
-+ * That failure mode gets *more* likely the more tracing is switched on, which
-+ * makes it a tracing bug rather than an unrelated one: a vkd3d trace line
-+ * carrying a shader name, or a Wine fixme carrying a serialised structure, is
-+ * routinely over a kilobyte.
-+ *
-+ * The ERR_(thread) that used to announce it is dropped rather than kept. It
-+ * existed to report a Wine-internal programming error, and it fires on the
-+ * ordinary behaviour of three components Vessel ships -- an error line per long
-+ * log line is noise about a condition this function now handles. */
- static int append_output( struct debug_info *info, const char *str, size_t len )
+@@ -72,11 +72,30 @@ static int append_output( struct debug_info *info, const char *str, size_t len )
  {
      if (len >= sizeof(info->output) - info->out_pos)
      {
@@ -47,14 +40,25 @@ index 0869b3b4f64..d60c8a319c2 100644
 -        ERR_(thread)( "debug buffer overflow:\n" );
 -        __wine_dbg_write( str, len );
 -        RtlRaiseStatus( STATUS_BUFFER_OVERFLOW );
++        /* Vessel: flush and pass through rather than raise.
++         *
++         * info->output is char[1020], and a line longer than what is left in it
++         * killed the process outright -- RtlRaiseStatus here, abort() in the
++         * unix half. Nothing in Wine produces lines that long, but the
++         * components running on top of it do: FEX and vkd3d both format into
++         * 4096-byte buffers and hand the result straight to the debug channel,
++         * and DXVK is the only one that checks first.
++         *
++         * That makes it a *tracing* bug rather than a component bug: it gets
++         * more likely the more logging is switched on, so it fires exactly when
++         * someone is trying to diagnose something else. Truncation would be the
++         * other option and is worse -- a silently shortened log line is a
++         * measurement that lies. */
 +        if (info->out_pos)
 +        {
 +            __wine_dbg_write( info->output, info->out_pos );
 +            info->out_pos = 0;
 +        }
-+        /* Still too long for an empty buffer: it can never be buffered, so
-+         * write it as its own call. Ordering is preserved because anything
-+         * pending was just flushed. */
 +        if (len >= sizeof(info->output))
 +        {
 +            __wine_dbg_write( str, len );
@@ -64,32 +68,25 @@ index 0869b3b4f64..d60c8a319c2 100644
      memcpy( info->output + info->out_pos, str, len );
      info->out_pos += len;
 diff --git a/dlls/ntdll/unix/debug.c b/dlls/ntdll/unix/debug.c
-index 992e7c4a50e..9752a20e284 100644
+index cfa57c50881..df0e9f9da0c 100644
 --- a/dlls/ntdll/unix/debug.c
 +++ b/dlls/ntdll/unix/debug.c
-@@ -79,14 +79,31 @@ static inline struct debug_info *get_info(void)
- #endif
- }
- 
--/* add a string to the output buffer */
-+/* add a string to the output buffer
-+ *
-+ * Vessel: flush and pass through rather than abort(). The unix half of the same
-+ * change as dlls/ntdll/thread.c's append_output -- see the long comment there
-+ * for who produces lines this long and why. This half is the worse of the two:
-+ * a log line over 1019 bytes aborted the process outright, with a diagnostic
-+ * that named the *previous* buffer contents rather than the line that did it.
-+ *
-+ * wine_dbg_vprintf's own buffer is char buffer[1024] (include/wine/debug.h:168),
-+ * so Wine's unix side can reach this on its own without any external component
-+ * involved: 1023 characters with no newline in them is enough. */
- static int append_output( struct debug_info *info, const char *str, size_t len )
+@@ -76,9 +76,25 @@ static int append_output( struct debug_info *info, const char *str, size_t len )
  {
      if (len >= sizeof(info->output) - info->out_pos)
      {
 -       fprintf( stderr, "wine_dbg_output: debugstr buffer overflow (contents: '%s')\n", info->output );
 -       info->out_pos = 0;
 -       abort();
++        /* Vessel: the unix half of the same change as dlls/ntdll/thread.c's
++         * append_output -- see the long comment there for who produces lines
++         * this long and why. This half was the worse of the two: it abort()ed
++         * the process, and the diagnostic it printed named the *previous*
++         * buffer contents rather than the line that overflowed it.
++         *
++         * wine_dbg_vprintf's own buffer is char buffer[1024]
++         * (include/wine/debug.h), so Wine's unix side can reach this without
++         * any external component involved: 1023 characters and no newline. */
 +        if (info->out_pos)
 +        {
 +            write( 2, info->output, info->out_pos );

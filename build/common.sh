@@ -271,10 +271,24 @@ harden_checkout() {
 # the whole reason `apply_patches` is a hard error is that a half-patched build
 # is not reproducible. Submodules are excluded: they are updated on the next
 # line and their own dirtiness is not this tree's.
+#
+# **Untracked files count, and used to not.** `checkout --force` resets tracked
+# content and leaves everything else alone, so a patch that *adds* a file --
+# 0016's dlls/winebus.sys/bus_vessel.c, 0005's include/wine/vessel_shm.h -- left
+# it behind for the next build to trip over. With `--untracked-files=no` this
+# guard could not see them, so the run got all the way to
+#
+#     error: dlls/winebus.sys/bus_vessel.c: already exists in working directory
+#     error: patch does not apply: 0016-winebus-a-bus-the-app-feeds-over-a-socket
+#
+# with fifteen patches already on the tree: a half-patched build, arrived at
+# through the check written to prevent one. The message blamed a moved pin,
+# which was wrong and would have sent the next reader to pins.env. fetch_source
+# now cleans before calling this, and this now looks.
 assert_pristine() {
   local dir="$1" name="$2"
   local dirty
-  dirty="$(git -C "$dir" status --porcelain --untracked-files=no --ignore-submodules=all)"
+  dirty="$(git -C "$dir" status --porcelain --untracked-files=normal --ignore-submodules=all)"
   [ -z "$dirty" ] || die "$name: the checkout is not clean after 'checkout --force':
 
 $dirty
@@ -343,6 +357,13 @@ fetch_source() {
     git -C "$dir" checkout --force --detach "$exact"
   fi
 
+  # Remove what `checkout --force` cannot: the files our own patches added on a
+  # previous run. Untracked residue is the normal end state of a patched build,
+  # not a symptom of anything wrong, so it is cleaned rather than reported.
+  # Ignored files are left (-d, not -dx): those are build output, and Wine's
+  # tree is not where this builds anyway.
+  git -C "$dir" clean -ffdq
+
   assert_pristine "$dir" "$name"
 
   git -C "$dir" submodule update --init --recursive
@@ -366,7 +387,11 @@ apply_patches() {
     [ -e "$p" ] || continue
     info "applying $(basename "$p")"
     git -C "$dir" apply --check "$p" \
-      || die "patch does not apply: $p (the pinned ref probably moved)"
+      || die "patch does not apply: $p
+
+     Either the pinned ref moved under the patch, or the tree was not clean
+     when patching started — 'already exists in working directory' means the
+     second, and fetch_source's clean is what should have prevented it."
     git -C "$dir" apply "$p"
     applied=$((applied + 1))
   done
