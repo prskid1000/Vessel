@@ -1,0 +1,44 @@
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 9dfcd71ef3c..babe3c592ff 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2546,13 +2546,38 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+     RECT client_rect;
+     VkResult res;
+ 
++    /* `surface->hwnd` was read here, eight lines above the `if (surface)` that
++     * admits it can be NULL. surface_from_handle() is a plain cast of the
++     * client handle, so a swapchain created against a surface this instance did
++     * not make dereferences whatever the caller passed and faults on the unix
++     * side — before any logging in this function, which is how it presents:
++     *
++     *     msvcrt:_wassert (L"!status && \"vkCreateSwapchainKHR\"",
++     *                      L"dlls/winevulkan/loader_thunks.c", 3681)
++     *
++     * The assert is on the NTSTATUS of the unix call, so the caller sees only
++     * "the call did not complete": no VkResult, no Wine exception, and this
++     * whole function silent even with the vulkan channel at Stubs. Measured
++     * with Resident Evil Requiem, which reaches here through NVIDIA
++     * Streamline's swapchain interposer.
++     *
++     * Refusing is what the surface-less path already meant to do. Doing it
++     * before the dereference turns a process-killing fault into a VkResult the
++     * program can handle, and names the handle so the next one is diagnosable. */
++    if (!surface)
++    {
++        ERR( "no surface for swapchain, create_info->surface %p\n",
++             (void *)(UINT_PTR)create_info->surface );
++        return VK_ERROR_SURFACE_LOST_KHR;
++    }
++
+     if (!NtUserIsWindow( surface->hwnd ))
+     {
+         ERR( "surface %p, hwnd %p is invalid!\n", surface, surface->hwnd );
+         return VK_ERROR_INITIALIZATION_FAILED;
+     }
+ 
+-    if (surface) create_info_host.surface = surface->obj.host.surface;
++    create_info_host.surface = surface->obj.host.surface;
+     if (old_swapchain) create_info_host.oldSwapchain = old_swapchain->obj.host.swapchain;
+ 
+     /* Windows allows client rect to be empty, but host Vulkan often doesn't, adjust extents back to the host capabilities */
