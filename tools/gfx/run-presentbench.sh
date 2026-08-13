@@ -99,7 +99,35 @@ in_app_test "test -s $PREFIX/system.reg" \
 say "container $CONTAINER"
 
 # --- the components the guest needs --------------------------------------------
-component() { in_app "ls -d files/components/$1/*/ 2>/dev/null | sort | tail -1"; }
+
+# **Ask the container, do not guess from the directory listing.**
+#
+# This used to be `ls -d files/components/$1/*/ | sort | tail -1`, which is a
+# lexicographic sort over version codes and picks whichever string happens to
+# come last. With a Proton build installed beside an upstream one the store
+# holds 100110001, 100110002 and 111401, and that sort chooses 111401 -- the
+# old upstream Wine -- while the session runs 100110002. The probe then joins
+# a wineserver it was not built against:
+#
+#     wine client error:0: version mismatch 931/957.
+#
+# which reads like a broken install and is really a harness resolving a
+# different Wine than the app. `provisioned.json` is the only file that knows
+# what a container is actually using; the listing never did.
+component() {
+  local type="$1" code
+  code="$(in_app "cat files/containers/$CONTAINER/provisioned.json 2>/dev/null" \
+          | tr ',{}' '\n\n\n' | sed -n "s/.*\"$type\"[[:space:]]*:[[:space:]]*\([0-9]\+\).*/\1/p" \
+          | head -1)"
+  if [ -n "$code" ] && in_app_test "test -d files/components/$type/$code"; then
+    echo "files/components/$type/$code"
+    return
+  fi
+  # No reference yet -- a container that has never launched. Fall back to the
+  # highest code numerically, which is what the store would adopt.
+  in_app "ls files/components/$type 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1" \
+    | sed "s|^|files/components/$type/|"
+}
 WINE_DIR="$(component Wine)"
 TURNIP_DIR="$(component Turnip)"
 [ -n "$WINE_DIR" ] || die "no Wine component installed"
