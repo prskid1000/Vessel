@@ -2418,8 +2418,21 @@ class SessionRuntime @Inject constructor(
          * A constant rather than a deletion because the compiler works -- it
          * parses and merges correctly, it simply never gets to finish -- and
          * what it needs is a place to run, not a rewrite.
+         *
+         * **Back on, deliberately, with that cost accepted.** The cache is only
+         * ever built by a session long enough to outlast the compile, and a
+         * session that never runs it never gets one, so leaving it off means it
+         * can never come into existence. On means a long run can finish it and
+         * every later session loads it.
+         *
+         * The price is stated once here so it is not rediscovered: a second
+         * Wine process in the prefix for the length of the compile, one core of
+         * the eight, and critical-section timeout lines that carry no process
+         * name -- so while it is running, "which process holds the heap" is not
+         * answerable from the log. Turn it off for a session whose purpose is
+         * diagnosing a hang.
          */
-        const val CODE_CACHE_DURING_SESSION: Boolean = false
+        const val CODE_CACHE_DURING_SESSION: Boolean = true
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
 
