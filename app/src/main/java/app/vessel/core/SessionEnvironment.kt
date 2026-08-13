@@ -1482,7 +1482,8 @@ fun sessionEnvironment(
  * [manifestEnvironment] leaves it alone and this function is the only writer.
  */
 internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): String {
-    val base = D3D_DLL_OVERRIDES.joinToString(",") + "=n"
+    val base = D3D_DLL_OVERRIDES.joinToString(",") + "=n" +
+        ";" + STREAMLINE_DLL_OVERRIDES.joinToString(",") + "="
     val extra = manifest?.allParams.orEmpty()
         .firstOrNull { it.key == DLL_OVERRIDES_KEY }
         ?.let { spec -> profile.params[spec.key] ?: spec.defaultValue() }
@@ -1505,6 +1506,50 @@ internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): 
  * another constant here.
  */
 private const val DLL_OVERRIDES_KEY = "wine.dllOverrides"
+
+/**
+ * NVIDIA Streamline, refused for every title.
+ *
+ * **This is the thing that stopped Resident Evil Requiem, and it stops on
+ * hardware, not on Vessel.** Wine reported
+ * `RtlpWaitForCriticalSection section 00000000388A7E28 wait timed out in
+ * thread 0184, blocked by 021c`. Those ids are 388 and 540 in decimal, and the
+ * lines immediately above them are Streamline's own:
+ *
+ * ```
+ * [streamline][error][tid:388] 'kFeaturePCL' context is missing
+ * [streamline][error][tid:540] 'kFeatureReflex' context is missing
+ * ```
+ *
+ * The same two threads. Streamline cannot initialise Reflex or PCL because
+ * there is no NVIDIA GPU here, and then deadlocks two of its own threads. Every
+ * layer below it had already done its job — the swapchain was created at
+ * 1920x1080 with three images and vkd3d was compiling pipelines.
+ *
+ * Blocked for everything rather than per title, because nothing Streamline
+ * offers can work on an Adreno: DLSS, Reflex, frame generation and PCL are all
+ * NVIDIA-hardware features, so the best case is a framework that loads, finds
+ * nothing, and costs threads and startup time. There is no container this
+ * should be on for, which is what makes it a default and not a setting.
+ *
+ * Empty value, not `=b`: an empty override is Wine's "disable this DLL
+ * entirely", so `LoadLibrary` fails and a title takes the path it already has
+ * for a machine without Streamline — the path every non-NVIDIA PC takes. `=b`
+ * would ask Wine for a builtin it does not have.
+ *
+ * Named without the `.dll` suffix because that is the form `WINEDLLOVERRIDES`
+ * matches on. `sl.interposer` is the entry point every other module is reached
+ * through; the rest are listed so a title that loads one directly still finds
+ * nothing.
+ */
+val STREAMLINE_DLL_OVERRIDES: List<String> = listOf(
+    "sl.interposer",
+    "sl.common",
+    "sl.dlss",
+    "sl.dlss_g",
+    "sl.reflex",
+    "sl.pcl",
+)
 
 internal fun manifestEnvironment(
     profile: ContainerProfile,

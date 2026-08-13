@@ -354,7 +354,7 @@ class SessionEnvironmentTest {
     @Test
     fun `WINEDLLOVERRIDES names every D3D and WGL DLL as native`() {
         assertEquals(
-            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
+            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;sl.interposer,sl.common,sl.dlss,sl.dlss_g,sl.reflex,sl.pcl=",
             env()["WINEDLLOVERRIDES"],
         )
     }
@@ -371,7 +371,7 @@ class SessionEnvironmentTest {
             manifest = manifest,
         )
         assertEquals(
-            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;winhttp=n,b",
+            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;sl.interposer,sl.common,sl.dlss,sl.dlss_g,sl.reflex,sl.pcl=;winhttp=n,b",
             environment["WINEDLLOVERRIDES"],
         )
     }
@@ -383,7 +383,7 @@ class SessionEnvironmentTest {
         val manifest = fexManifest.withDllOverrides()
         for (blank in listOf("", "   ", ";")) {
             assertEquals(
-                "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
+                "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;sl.interposer,sl.common,sl.dlss,sl.dlss_g,sl.reflex,sl.pcl=",
                 env(mapOf("wine.dllOverrides" to ParamValue.Text(blank)), manifest)["WINEDLLOVERRIDES"],
             )
         }
@@ -720,7 +720,7 @@ class SessionEnvironmentTest {
                 "WINEPREFIX" to prefix.absolutePath,
                 "WINEESYNC" to "1",
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
-                "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
+                "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;sl.interposer,sl.common,sl.dlss,sl.dlss_g,sl.reflex,sl.pcl=",
                 "DISPLAY" to ":0",
                 // No Win32 caption on any top-level window. Measured before the
                 // patch existed: a 1280x720 game window had a 1274x673 client at
