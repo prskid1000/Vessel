@@ -421,6 +421,70 @@ make -C "$BUILD" install-lib DESTDIR="$STAGE" || die "make install-lib failed"
 
 [ -d "$PAYLOAD" ] || die "make install-lib produced nothing under $PAYLOAD"
 
+# --- Ship Wine's own addons, Mono and Gecko -------------------------------------
+# `make install-lib` does not include them, and a package without them is a
+# container that stops on a dialog. `dlls/appwiz.cpl/addons.c:765` searches
+# `$WINEDATADIR/<subdir>/` and `$INSTALL_DATADIR/wine/<subdir>/` before it offers
+# to download; configure ran with --prefix=/usr, so INSTALL_DATADIR is
+# /usr/share and the second path is exactly what lands here. Present, wineboot
+# installs them silently and offline. Absent, the user is asked, and then 233 MB
+# comes over the network per container — measured on the device.
+#
+# addons.c refuses any file whose SHA-256 is not the one it was compiled with, so
+# these are verified here rather than trusted: a mismatch means the pins have
+# drifted from the Wine base and is worth failing the build for, not shipping a
+# file Wine will silently reject on the phone.
+#
+# Both Gecko architectures, because appwiz.cpl is built for i386 as well as
+# arm64ec and each copy asks for its own (addons.c:47-52). Mono ships a single
+# x86 .msi that serves every architecture (addons.c:60-61).
+fetch_addon() {
+  # <url> <destination directory> <expected sha256>
+  local url="$1" dir="$2" want="$3" name got
+  name="$(basename "$url")"
+  mkdir -p "$dir"
+  if [ ! -f "$dir/$name" ]; then
+    info "wine addons: fetching $name"
+    curl -fSL --retry 3 -o "$dir/$name.part" "$url" \
+      || die "could not download $url"
+    mv "$dir/$name.part" "$dir/$name"
+  fi
+  got="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+  [ "$got" = "$want" ] \
+    || die "$name sha256 is $got, addons.c expects $want — update native/pins.env to match the Wine base"
+}
+
+# **Mono only. Gecko is deliberately not shipped.** Measured: mono is 85.5 MB and
+# the two Gecko builds are 55.2 + 53.9 MB, and none of it compresses — xz -9 took
+# the mono .msi from 85,504,000 to 83,246,320 bytes, 2.6%, because an .msi is a
+# CAB and already compressed. So Gecko is 109 MB of package for the embedded
+# MSHTML browser control, which games do not use: engines that want web content
+# bundle CEF, and Resident Evil Requiem asked for neither addon — the 233 MB that
+# appeared in a prefix here was Wine offering them at creation, not a program
+# requiring them. An app that does want Gecko gets the same download prompt it
+# would have got anyway.
+#
+# Mono stays because .NET is what launchers, patchers and mod tools are written
+# in, and a missing one stops an install behind a dialog. Note Unity games ship
+# their own Mono and never consult this one.
+# Neither is staged today. The helper and the pins stay because the decision is
+# about *packaging*, not about whether the addons are wanted — see native/pins.env
+# for the sizes and the reasoning, and add two lines here to bring either back:
+#
+#   WINE_ADDON_CACHE="$WORK_DIR/wine-addons"
+#   fetch_addon "https://dl.winehq.org/wine/wine-mono/$WINE_MONO_VERSION/wine-mono-$WINE_MONO_VERSION-x86.msi" \
+#     "$WINE_ADDON_CACHE/mono" "$WINE_MONO_SHA256"
+#   mkdir -p "$PAYLOAD/share/wine/mono"
+#   cp "$WINE_ADDON_CACHE/mono/"*.msi "$PAYLOAD/share/wine/mono/"
+#
+# Measured, so the next person does not have to: bundling both took the package
+# from 66.3 to 249.6 MiB, mono alone to 146.1 MiB. The right home for them is a
+# component of their own — the store is already keyed by type and version code,
+# so a `WineMono` component keeps the base small, makes the addon opt-in per
+# container, and stops a Mono update forcing a full Wine re-download. That is the
+# same mechanism the VC++ runtimes and a real .NET runtime would need, since Wine
+# Mono covers .NET Framework only: no WPF, and nothing for .NET 5 and later.
+
 # --- Ship the X11/FreeType runtime ----------------------------------------------
 # `make install-lib` installs Wine and nothing else, so without this the package
 # holds a winex11.so whose NEEDED entries name libX11.so and libXext.so and a

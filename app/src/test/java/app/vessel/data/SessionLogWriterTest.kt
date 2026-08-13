@@ -1,10 +1,14 @@
 package app.vessel.data
 
+import app.vessel.core.LogEntry
 import app.vessel.core.LogLevel
 import app.vessel.core.LogSource
 import app.vessel.core.SessionLogLimits
 import app.vessel.core.decodeLogLine
 import app.vessel.core.encodeLogLine
+import app.vessel.core.errorDigestHeading
+import app.vessel.core.logPrefixLegend
+import app.vessel.core.tailContinuedMarker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,7 +47,7 @@ class SessionLogWriterTest {
             log.line(LogSource.WINE, LogLevel.ERROR, "module:import_dll missing")
         }
 
-        val lines = read(directory, 1_000L)
+        val lines = body(directory, 1_000L)
         assertEquals(2, lines.size)
         assertEquals("d3d:check_format stub  ×5", lines[0].text)
         assertEquals(LogLevel.WARN, lines[0].level)
@@ -62,7 +66,7 @@ class SessionLogWriterTest {
 
         // Alternating lines are exactly what dedup cannot help with, which is
         // why the rate limiter exists behind it.
-        assertEquals(listOf("a", "b", "a", "b", "a", "b"), read(directory, 1_000L).map { it.text })
+        assertEquals(listOf("a", "b", "a", "b", "a", "b"), body(directory, 1_000L).map { it.text })
     }
 
     @Test
@@ -73,12 +77,177 @@ class SessionLogWriterTest {
             log.line(LogSource.WINE, LogLevel.INFO, "started")
         }
 
-        val lines = read(directory, 1_000L)
-        assertEquals(3, lines.size)
+        val lines = body(directory, 1_000L)
+        // Two given lines, three of legend, then the session's own output. The
+        // legend is not optional and not conditional; see `logPrefixLegend`.
+        assertEquals(2 + logPrefixLegend().size + 1, lines.size)
         assertEquals(LogSource.VESSEL, lines[0].source)
         assertEquals("wine  wine-11.0-arm64ec", lines[0].text)
         assertEquals("driver  turnip-25.2.0", lines[1].text)
-        assertEquals("started", lines[2].text)
+        assertEquals("started", lines.last().text)
+    }
+
+    /**
+     * The legend the log carries about itself.
+     *
+     * Asserted against the enums rather than against literals, because the
+     * property that matters is that it stays true when a source is added — a
+     * hand-written legend that has gone stale is worse than none, since it is
+     * read as authoritative.
+     */
+    @Test
+    fun `every level and every source is named in the header legend`() {
+        val directory = temporary.newFolder("legend")
+        write(directory, startedAt = 1_000L) { log -> log.header(listOf("wine  x")) }
+
+        val legend = body(directory, 1_000L).map { it.text }.filter { it.startsWith("legend") }
+        assertEquals(logPrefixLegend(), legend)
+        LogLevel.entries.forEach { level ->
+            assertTrue(
+                "the legend does not name ${level.label}",
+                legend.any { it.contains("${level.wire} ${level.label}") },
+            )
+        }
+        LogSource.entries.forEach { source ->
+            assertTrue(
+                "the legend does not name ${source.label}",
+                legend.any { it.contains("${source.wire} ${source.label}") },
+            )
+        }
+    }
+
+    /**
+     * The histogram that would have caught both measured volume disasters in the
+     * first minute rather than in a manual `cut | sort | uniq -c` afterwards.
+     */
+    @Test
+    fun `every line is counted against its own two-letter prefix`() {
+        val directory = temporary.newFolder("histogram")
+        val meta = write(directory, startedAt = 1_000L) { log ->
+            repeat(7) { log.line(LogSource.FEX, LogLevel.TRACE, "Handled unaligned atomic $it") }
+            repeat(2) { log.line(LogSource.VKD3D, LogLevel.WARN, "skip_dword_unknown $it") }
+            log.line(LogSource.WINE, LogLevel.ERROR, "module:import_dll missing")
+        }
+
+        assertEquals(7, meta.sourceCounts["TF"])
+        assertEquals(2, meta.sourceCounts["WK"])
+        assertEquals(1, meta.sourceCounts["EW"])
+        // The invariant that makes the histogram usable as an accounting of the
+        // file rather than of some of it: every line the writer wrote, including
+        // its own markers and the digest trailer, is in exactly one bucket.
+        assertEquals(meta.lines, meta.sourceCounts.values.sum())
+        assertEquals(meta.lines, read(directory, 1_000L).size)
+    }
+
+    /**
+     * The digest, which is the answer to "what went wrong" without scrolling a
+     * hundred thousand lines to find out.
+     */
+    @Test
+    fun `the session ends with its distinct errors, most frequent first`() {
+        val directory = temporary.newFolder("digest")
+        val meta = write(directory, startedAt = 1_000L) { log ->
+            // Consecutive, so dedup collapses them into one `×4` line — which the
+            // digest has to undo, or a run of four counts as one.
+            repeat(4) { log.line(LogSource.WINE, LogLevel.ERROR, "seh:NtRaiseException c0000005") }
+            log.line(LogSource.DXVK, LogLevel.ERROR, "DXVK: device lost")
+            log.line(LogSource.WINE, LogLevel.WARN, "d3d:check_format stub")
+        }
+
+        assertEquals(2, meta.errorDigest.size)
+        assertEquals("seh:NtRaiseException c0000005", meta.errorDigest[0].text)
+        assertEquals(4, meta.errorDigest[0].count)
+        assertEquals(LogSource.WINE.wire, meta.errorDigest[0].source)
+        assertEquals("DXVK: device lost", meta.errorDigest[1].text)
+        assertEquals(1, meta.errorDigest[1].count)
+
+        val trailer = trailer(directory, 1_000L).map { it.text }
+        assertEquals(errorDigestHeading(distinct = 2, total = 5), trailer.first())
+        assertTrue(
+            "the digest must name the repeated failure first",
+            trailer[1].startsWith("×4"),
+        )
+    }
+
+    /**
+     * A clean session still gets a trailer, and that is the useful half: a log
+     * that simply stops is indistinguishable from one whose digest failed.
+     */
+    @Test
+    fun `a session with no errors says so rather than saying nothing`() {
+        val directory = temporary.newFolder("clean")
+        val meta = write(directory, startedAt = 1_000L) { log ->
+            log.line(LogSource.WINE, LogLevel.INFO, "loaddll kernel32.dll")
+        }
+
+        assertTrue(meta.errorDigest.isEmpty())
+        assertEquals(listOf(errorDigestHeading(0, 0)), trailer(directory, 1_000L).map { it.text })
+        assertEquals(LogLevel.INFO, trailer(directory, 1_000L).first().level)
+    }
+
+    /**
+     * The head file says where the rest of the session is.
+     *
+     * Driven by a head allowance small enough that a handful of lines overruns
+     * it, because what is being tested is the breadcrumb and not the rotation.
+     */
+    @Test
+    fun `the head file's last line says the session continues elsewhere`() {
+        val directory = temporary.newFolder("breadcrumb")
+        val tiny = SessionLogLimits(headBytes = 200L, tailBytes = 4_096L, rateLimitLines = 20_000)
+        val writer = SessionLogWriter(
+            directory = directory,
+            containerId = "c1",
+            startedAt = 1_000L,
+            json = json,
+            scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+            onChanged = {},
+            onFinished = {},
+            limits = tiny,
+        )
+        repeat(40) { writer.line(LogSource.WINE, LogLevel.INFO, "a line of output number $it") }
+        // Read the head before finalise merges the segments back into it.
+        val deadline = System.currentTimeMillis() + AWAIT_MS
+        var headLines = emptyList<String>()
+        while (System.currentTimeMillis() < deadline) {
+            if (tailFile(directory, 1_000L, 0).isFile) {
+                headLines = logFile(directory, 1_000L).readLines()
+                if (headLines.isNotEmpty()) break
+            }
+            Thread.sleep(5)
+        }
+        writer.close()
+        awaitFinished(directory, 1_000L)
+
+        assertTrue("the head never rotated, so this test proves nothing", headLines.isNotEmpty())
+        assertEquals(
+            tailContinuedMarker("1000.log.t0"),
+            decodeLogLine(headLines.last(), 0).text,
+        )
+    }
+
+    /**
+     * A drop that says *whose* lines went.
+     *
+     * The old marker said only how many, which answers none of the three
+     * questions a reader has — what was shouting, whether their line was in it,
+     * and what to turn down.
+     */
+    @Test
+    fun `a rate-limited burst names the source that filled the window`() {
+        val directory = temporary.newFolder("attribution")
+        val meta = write(directory, startedAt = 1_000L, limits = SessionLogLimits.SHIPPED) { log ->
+            repeat(6_000) { log.line(LogSource.FEX, LogLevel.TRACE, "unaligned atomic $it") }
+        }
+
+        assertTrue("nothing was dropped, so this test proves nothing", meta.droppedLines > 0)
+        assertEquals(meta.droppedLines, meta.droppedBySource["TF"])
+        assertTrue(
+            "the marker has to name the source",
+            body(directory, 1_000L).any {
+                it.text.startsWith("… logging rate-limited,") && it.text.contains("TF (trace/fex)")
+            },
+        )
     }
 
     @Test
@@ -95,7 +264,7 @@ class SessionLogWriterTest {
             repeat(flood) { log.line(LogSource.WINE, LogLevel.ERROR, "draw failed at $it") }
         }
 
-        val lines = read(directory, 1_000L)
+        val lines = body(directory, 1_000L)
         assertTrue("expected fewer lines than were sent", lines.size < flood)
         assertTrue("expected drops to be counted", meta.droppedLines > 0)
         assertTrue(
@@ -116,7 +285,10 @@ class SessionLogWriterTest {
         assertEquals(SessionExit.OK, meta.exit)
         assertEquals("c1", meta.containerId)
         assertEquals(4_242L, meta.startedAt)
-        assertEquals(2, meta.lines)
+        assertEquals(2, body(directory, 4_242L).size)
+        // `lines` counts the file, trailer included, and is asserted against the
+        // file rather than against a literal so the two cannot drift.
+        assertEquals(read(directory, 4_242L).size, meta.lines)
         assertTrue(meta.hasErrors)
         assertTrue(meta.sizeBytes > 0)
         assertTrue((meta.endedAt ?: 0) >= meta.startedAt)
@@ -171,15 +343,16 @@ class SessionLogWriterTest {
         writer.close()
 
         val meta = awaitFinished(directory, 1_000L)
-        val lines = read(directory, 1_000L)
+        val lines = body(directory, 1_000L)
         assertTrue("nothing overflowed, so this test proves nothing", meta.overflowLines > 0)
         assertTrue(
             "the file has to admit what it never saw",
             lines.any { it.text.startsWith("… ") && it.text.endsWith("before the sink could write them …") },
         )
         // Every line is accounted for: written, or dropped and counted. The one
-        // extra line in the file is the marker saying so.
-        assertEquals(sent, meta.overflowLines + meta.lines - 1)
+        // extra line in the body is the marker saying so; the digest trailer is
+        // not session output and is excluded by `body`.
+        assertEquals(sent, meta.overflowLines + lines.size - 1)
         assertEquals(0, meta.droppedLines)
         executor.shutdown()
     }
@@ -213,6 +386,28 @@ class SessionLogWriterTest {
             decodeLogLine(raw, index)
         }
 
+    /**
+     * The session's own output — everything before the digest trailer.
+     *
+     * Split rather than folded into `read` because the two are different
+     * artefacts and the tests that predate the trailer are about the first one.
+     * The boundary is found from the heading `errorDigestHeading` produces for
+     * this session's own numbers, so it cannot be matched by a line the session
+     * happened to print.
+     */
+    private fun body(directory: File, startedAt: Long): List<LogEntry> {
+        val all = read(directory, startedAt)
+        val at = all.indexOfFirst { DIGEST_HEADING.matches(it.text) }
+        return if (at < 0) all else all.take(at)
+    }
+
+    /** The digest trailer alone. Empty when the writer never got to finalise. */
+    private fun trailer(directory: File, startedAt: Long): List<LogEntry> {
+        val all = read(directory, startedAt)
+        val at = all.indexOfFirst { DIGEST_HEADING.matches(it.text) }
+        return if (at < 0) emptyList() else all.drop(at)
+    }
+
     private fun awaitFinished(directory: File, startedAt: Long): SessionLogMeta {
         val deadline = System.currentTimeMillis() + AWAIT_MS
         while (System.currentTimeMillis() < deadline) {
@@ -225,6 +420,10 @@ class SessionLogWriterTest {
 
     private companion object {
         const val AWAIT_MS = 20_000L
+
+        /** Either shape [app.vessel.core.errorDigestHeading] can produce. */
+        val DIGEST_HEADING =
+            Regex("^… (no errors in this session|\\d+ distinct errors?, \\d+ in total).*")
     }
 }
 
