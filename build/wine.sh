@@ -25,6 +25,10 @@ SRC="$NATIVE_DIR/$COMPONENT"
 # WINE_REF is a branch, so the ref carries no version; the tree's VERSION file
 # holds it as "Wine version 10.12".
 VERSION="$(sed -n 's/^Wine version[[:space:]]*//p' "$SRC/VERSION" 2>/dev/null | head -1 || true)"
+# Vessel patches change what this builds without moving the upstream
+# version, and the component store is keyed by type and version code --
+# so an unchanged code makes the rebuild a silent no-op on the device.
+VERSION_CODE="$(vessel_version_code "$VERSION" "${WINE_REVISION:-0}")"
 [ -n "$VERSION" ] || die "could not read a version out of $SRC/VERSION"
 info "wine version $VERSION (branch $WINE_REF @ ${SOURCE_SHA:0:12})"
 
@@ -430,6 +434,7 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Wine \
   --name "Wine $VERSION ARM64EC ($TARGET_NAME)" \
   --version "$VERSION" \
+  --version-code "$VERSION_CODE" \
   --payload "$PAYLOAD" \
   --provenance "$PAYLOAD/provenance.json" \
   --description "Wine $VERSION with arm64ec/aarch64/i386 PE modules and a bionic aarch64 unix side, from $WINE_REF @ ${SOURCE_SHA:0:12}" \

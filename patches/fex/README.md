@@ -141,3 +141,40 @@ after the Windows includes; nothing else in the file wants either name.
 file — and pointedly so for this one, since the honest version of this change is
 a real config option in `Config.json.in` rather than a Vessel environment
 variable read from a Windows-only file.
+
+## `0004-arm64ec-a-notification-hook-must-not-block-on-the-way-in`
+
+The Resident Evil Requiem deadlock, fixed at the lock rather than at the
+trigger. The commit message carries the full derivation; the short version is
+that `ThreadCreationMutex` is held across the memory and read syscalls, because
+Wine calls those notifications as a before/after pair, and that leaves FEX
+sitting on both sides of a lock order it does not own:
+
+```
+0188  heap section held  ->  NtAllocateVirtualMemory  ->  wants ThreadCreationMutex
+0280  ThreadCreationMutex held  ->  Wine's own syscall allocates  ->  wants heap section
+```
+
+- **The unnamed section was identified by arithmetic, not by guessing.**
+  `libarm64ecfex.dll` is mapped at `0x6FFDCB0000` and is 5,148,672 bytes, so the
+  waited-on `0x6FFE04D498` is `0x39D498` into its data. `std::recursive_mutex`
+  is what `RTL_CRITICAL_SECTION` backs, which is what `RtlpWaitForCriticalSection`
+  waits on, and `ThreadCreationMutex` is the only such object on those paths.
+- **`try_lock` is the whole fix.** A cycle needs both edges; this removes the one
+  Wine forces from inside a syscall. Nothing is skipped when the try fails — the
+  notification still runs, and the interval map stays consistent because
+  `InvalidationTracker` locks `IntervalsLock` around every mutation of it.
+- **What is actually given up** is coarse serialisation against thread creation,
+  narrowing to a race the two halves of the pair already allowed. That is a real
+  cost and it is why this is a mitigation rather than a redesign: the honest fix
+  is for the notification hooks not to share a mutex with thread bookkeeping.
+- **Per-level tracking, not one flag.** The pairs nest, so a failed try at one
+  level must not release a mutex a different level acquired.
+- **Deliberately not touched.** `BTCpu64NotifyReadFile` also holds
+  `CTX->GetCodeInvalidationMutex()` across the read, and `NotifyMapViewOfSection`
+  still blocks on a `scoped_lock`. Neither was in the measured cycle, and neither
+  can be made non-blocking without dropping work that has to happen.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file.

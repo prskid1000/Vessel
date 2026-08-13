@@ -18,6 +18,9 @@ COMPONENT=fex
 COMPONENT_REF="$FEX_REF"
 # FEX tags are FEX-YYMM; strip the prefix so package_wcp.py orders them.
 VERSION="${FEX_REF#FEX-}"
+# Vessel patches change what this builds without moving the upstream tag, so the
+# store would treat a rebuild as bytes it already has. See vessel_version_code.
+VERSION_CODE="$(vessel_version_code "$VERSION" "${FEX_REVISION:-0}")"
 
 fetch_source "$COMPONENT" "$FEX_REPO" "$FEX_REF"
 
@@ -185,6 +188,7 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type FEXCore \
   --name "FEX $VERSION ($TARGET_NAME)" \
   --version "$VERSION" \
+  --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
   --description "FEXCore $VERSION PE DLLs (arm64ec + wow64) built for $TARGET_DESC" \

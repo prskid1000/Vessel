@@ -373,6 +373,30 @@ apply_patches() {
   [ "$applied" -eq 0 ] || ok "$applied patch(es) applied to $name"
 }
 
+# --- Version codes -----------------------------------------------------------
+
+# The integer the component store orders by, with room for Vessel's own patch
+# revisions underneath the upstream version.
+#
+# **This exists because of a silent failure that is very hard to read as one.**
+# `ComponentStore` is keyed by type *and version code*, so a package whose code
+# already exists on the phone is treated as the same bytes and is not unpacked.
+# Every component here derives its version from an upstream tag, which does not
+# move when a patch under `patches/` is added — so rebuilding with a new patch
+# produced a package the app then ignored. The build says "ok", the .wcp is on
+# disk with the new bytes in it, `adb install` succeeds, and nothing on the
+# device changes. It looks exactly like a patch that did not work.
+#
+# Multiplying by 100 leaves two digits that upstream can never collide with:
+# FEX-2608 revision 1 is 260801, and the next tag FEX-2609 is 260900, still
+# above it. Bump `<COMPONENT>_REVISION` in native/pins.env whenever a patch
+# changes what a component builds.
+vessel_version_code() {
+  local version="$1" revision="${2:-0}"
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[3]); from package_wcp import version_code; print(version_code(sys.argv[1]) * 100 + int(sys.argv[2]))' \
+    "$version" "$revision" "$COMMON_SH_DIR"
+}
+
 # --- Provenance --------------------------------------------------------------
 
 # Everything needed to explain or reproduce a build, embedded into the .wcp so

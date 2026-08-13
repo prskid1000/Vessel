@@ -1,0 +1,212 @@
+arm64ec: a notification hook must not block on the way in
+
+Resident Evil Requiem deadlocks about twenty seconds in, with CPU and GPU
+both flat at 0%. Wine's own critical-section timeout diagnostics name the
+whole cycle:
+
+    section 00000000004500D0 "ntdll/heap.c: main process heap section"
+        wait timed out in thread 0280, blocked by 0188
+    section 0000006FFE04D498 "?"
+        wait timed out in thread 0188, blocked by 0280
+
+The unnamed section is FEX's. libarm64ecfex.dll is mapped at 0x6FFDCB0000
+and is 5,148,672 bytes, so 0x6FFE04D498 is 0x39D498 into its data, and
+ThreadCreationMutex is a std::recursive_mutex -- which is what backs an
+RTL_CRITICAL_SECTION and so what RtlpWaitForCriticalSection waits on.
+
+Wine calls the memory and read notifications as a before/after pair around
+the syscall, so locking in the "before" half holds the mutex across
+NtAllocateVirtualMemory, NtFreeVirtualMemory, NtProtectVirtualMemory,
+NtUnmapViewOfSection and NtReadFile. That gives two opposite lock orders:
+
+  0188  RtlAllocateHeap takes the process heap section, the heap needs to
+        grow, NtAllocateVirtualMemory calls NotifyMemoryAlloc(After=FALSE)
+        -- blocks on ThreadCreationMutex
+
+  0280  LdrLoadDll holds the loader section, enters a notification hook and
+        takes ThreadCreationMutex; the syscall Wine then performs allocates
+        -- blocks on the process heap section
+
+0184, 01f8 and 0284 pile up behind them. The trigger measured here is
+DStorageCore.dll being mapped late in startup while other threads allocate,
+which is why DirectStorage titles hit it so reliably -- but nothing about
+the cycle is specific to that DLL.
+
+try_lock breaks the edge Wine forces on us from inside a syscall, and
+breaking either edge is enough. When the try fails the notification still
+runs; the interval map is unaffected because InvalidationTracker takes
+IntervalsLock around every mutation of it. What is given up is the coarse
+serialisation against thread creation, which narrows to a race the two
+halves of the pair already permitted.
+
+The acquisition is tracked per thread and per nesting level rather than
+with one flag: the pairs nest, and a failed try at one level must not
+release a mutex that a different level acquired.
+
+Not fixed here, and left deliberately: BTCpu64NotifyReadFile also holds
+CTX->GetCodeInvalidationMutex() across the read, and NotifyMapViewOfSection
+still blocks on a scoped_lock. Neither appeared in the measured cycle, and
+neither can be made non-blocking without dropping work that has to happen.
+
+VESSEL-LOCAL. native/fex/CLAUDE.md forbids AI-generated code in
+contributions to FEX, so this must not be sent upstream.
+
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index ab3e7a35e..5e5de35d3 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -148,6 +148,69 @@ std::recursive_mutex ThreadCreationMutex;
+ // Map of TIDs to their FEX thread state, `ThreadCreationMutex` must be locked when accessing
+ std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*> Threads;
+ 
++// VESSEL: the memory notification hooks must never *block* on the way in.
++//
++// Wine calls NotifyMemory{Alloc,Free,Protect} and NotifyUnmapViewOfSection as a
++// before/after pair around the memory syscall itself, so taking the mutex in the
++// "before" half holds it across NtAllocateVirtualMemory and friends. That puts
++// FEX on both sides of a lock order it does not own, and the two orders are
++// opposite:
++//
++//   thread A  RtlAllocateHeap takes the process heap section, needs to grow the
++//             heap, calls NtAllocateVirtualMemory, and lands in
++//             NotifyMemoryAlloc(After=FALSE) -- blocks on ThreadCreationMutex
++//   thread B  inside LdrLoadDll (loader section held) enters a notify hook and
++//             takes ThreadCreationMutex; the syscall Wine then performs itself
++//             allocates -- blocks on the process heap section
++//
++// Measured on device with Resident Evil Requiem loading DStorageCore.dll:
++//
++//   section ...4500D0 "heap.c: main process heap section" blocked by 0188
++//   section ...E04D498 "?"  (this mutex)                  blocked by 0280
++//
++// 0280 held the loader section and this mutex while waiting on the heap, 0188
++// held the heap while waiting on this mutex, and 0184/01f8/0284 piled up behind
++// them. CPU and GPU both flatlined at 0%.
++//
++// try_lock cannot close that cycle: breaking either edge is enough, and this
++// breaks the one Wine forces on us from inside a syscall. When the try fails the
++// notification runs without the coarse mutex, which is safe for the interval map
++// itself -- InvalidationTracker takes IntervalsLock around every mutation. What
++// is given up is coarse serialisation against thread creation, narrowing to a
++// race that the two halves of the pair already allowed.
++//
++// The acquisition is tracked per thread and per nesting level rather than with a
++// single flag, because the pairs nest and a failed try at one level must not
++// unlock a mutex a different level acquired.
++constexpr uint32_t NotifyLockMaxDepth = 64;
++thread_local uint64_t NotifyLockAcquired = 0;
++thread_local uint32_t NotifyLockDepth = 0;
++
++// Enter the "before" half of a notification pair without ever blocking.
++void NotifyLockEnter() {
++  const uint32_t Level = NotifyLockDepth++;
++  if (Level >= NotifyLockMaxDepth) {
++    return;
++  }
++  if (ThreadCreationMutex.try_lock()) {
++    NotifyLockAcquired |= (1ull << Level);
++  } else {
++    NotifyLockAcquired &= ~(1ull << Level);
++  }
++}
++
++// Leave the "after" half, releasing only if this level actually acquired.
++void NotifyLockLeave() {
++  if (!NotifyLockDepth) {
++    return;
++  }
++  const uint32_t Level = --NotifyLockDepth;
++  if (Level < NotifyLockMaxDepth && (NotifyLockAcquired & (1ull << Level))) {
++    NotifyLockAcquired &= ~(1ull << Level);
++    NotifyLockLeave();
++  }
++}
++
+ std::pair<NTSTATUS, ThreadCPUArea> GetThreadCPUArea(HANDLE Thread) {
+   THREAD_BASIC_INFORMATION Info;
+   const NTSTATUS Err = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), nullptr);
+@@ -784,13 +847,13 @@ void NotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot, BOOL
+   }
+ 
+   if (!After) {
+-    ThreadCreationMutex.lock();
++    NotifyLockEnter();
+   } else {
+     // MEM_RESET(_UNDO) ignores the passed permissions
+     if (!Status && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
+       InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot);
+     }
+-    ThreadCreationMutex.unlock();
++    NotifyLockLeave();
+   }
+ }
+ 
+@@ -800,12 +863,12 @@ void NotifyMemoryFree(void* Address, SIZE_T Size, ULONG FreeType, BOOL After, NT
+   }
+ 
+   if (!After) {
+-    ThreadCreationMutex.lock();
++    NotifyLockEnter();
+   } else {
+     if (!Status) {
+       InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), true);
+     }
+-    ThreadCreationMutex.unlock();
++    NotifyLockLeave();
+   }
+ }
+ 
+@@ -815,12 +878,12 @@ void NotifyMemoryProtect(void* Address, SIZE_T Size, ULONG NewProt, BOOL After,
+   }
+ 
+   if (!After) {
+-    ThreadCreationMutex.lock();
++    NotifyLockEnter();
+   } else {
+     if (!Status) {
+       InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), NewProt);
+     }
+-    ThreadCreationMutex.unlock();
++    NotifyLockLeave();
+   }
+ }
+ 
+@@ -844,13 +907,13 @@ void NotifyUnmapViewOfSection(void* Address, BOOL After, NTSTATUS Status) {
+   }
+ 
+   if (!After) {
+-    ThreadCreationMutex.lock();
++    NotifyLockEnter();
+     auto [Start, Size] = InvalidationTracker->InvalidateContainingSection(reinterpret_cast<uint64_t>(Address), true);
+     if (Size) {
+       HandleImageUnmap(Start, Size);
+     }
+   } else {
+-    ThreadCreationMutex.unlock();
++    NotifyLockLeave();
+   }
+ }
+ 
+@@ -889,19 +952,19 @@ void BTCpu64NotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After
+ 
+   auto& InLockedRWXRead = GetFrontendThreadData(ThreadState)->InLockedRWXRead;
+   if (!After) {
+-    ThreadCreationMutex.lock();
++    NotifyLockEnter();
+     CTX->GetCodeInvalidationMutex().lock();
+     if (InvalidationTracker->BeginUntrackedWriteLocked(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size))) {
+       InLockedRWXRead = true;
+     } else {
+       CTX->GetCodeInvalidationMutex().unlock();
+-      ThreadCreationMutex.unlock();
++      NotifyLockLeave();
+     }
+   } else {
+     if (InLockedRWXRead) {
+       InLockedRWXRead = false;
+       CTX->GetCodeInvalidationMutex().unlock();
+-      ThreadCreationMutex.unlock();
++      NotifyLockLeave();
+     }
+   }
+ }

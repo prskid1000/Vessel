@@ -21,6 +21,10 @@ setup_mingw
 COMPONENT=vkd3d
 COMPONENT_REF="$VKD3D_REF"
 VERSION="${VKD3D_REF#v}"
+# Vessel patches change what this builds without moving the upstream
+# version, and the component store is keyed by type and version code --
+# so an unchanged code makes the rebuild a silent no-op on the device.
+VERSION_CODE="$(vessel_version_code "$VERSION" "${VKD3D_REVISION:-0}")"
 
 fetch_source "$COMPONENT" "$VKD3D_REPO" "$VKD3D_REF"
 
@@ -172,6 +176,7 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type VKD3D \
   --name "vkd3d-proton $VERSION ARM64EC ($TARGET_NAME)" \
   --version "$VERSION" \
+  --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
   --description "vkd3d-proton $VERSION, arm64ec system32 + i386 syswow64, built for $TARGET_DESC" \
