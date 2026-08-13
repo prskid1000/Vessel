@@ -88,7 +88,15 @@ class SessionService : Service() {
         // from `startForegroundService` to call this, and provisioning a
         // container is far longer than that.
         intent?.getStringExtra(EXTRA_CONTAINER_ID)?.takeIf { it.isNotBlank() }?.let { running = it }
-        notify(intent?.getStringExtra(EXTRA_NAME).orEmpty(), SessionPhase.PREPARING)
+        // The phase has to match what this call is actually doing. It used to be
+        // PREPARING unconditionally, and the notification's own Stop button is a
+        // getService PendingIntent that arrives here — so pressing Stop relabelled
+        // the notification "Preparing the container" while the session tore down.
+        notify(
+            intent?.getStringExtra(EXTRA_NAME).orEmpty(),
+            SessionPhase.PREPARING,
+            stopping = intent?.action == ACTION_STOP,
+        )
 
         when (intent?.action) {
             ACTION_STOP -> {
@@ -179,7 +187,7 @@ class SessionService : Service() {
         audioFocus = null
     }
 
-    private fun notify(containerName: String, phase: SessionPhase) {
+    private fun notify(containerName: String, phase: SessionPhase, stopping: Boolean = false) {
         val stop = PendingIntent.getService(
             this,
             REQUEST_STOP,
@@ -195,9 +203,14 @@ class SessionService : Service() {
                 channelName = "Running session",
                 title = containerName.ifBlank { "Session" },
                 icon = android.R.drawable.ic_media_play,
-                text = when (phase) {
-                    SessionPhase.PREPARING -> "Preparing the container"
-                    SessionPhase.STARTING -> "Starting Wine"
+                // Stopping is not a SessionPhase — the runtime goes straight to a
+                // terminal phase and the collector tears the notification down —
+                // so it is carried separately rather than invented as a state the
+                // rest of the app would then have to handle.
+                text = when {
+                    stopping -> "Stopping the session"
+                    phase == SessionPhase.PREPARING -> "Preparing the container"
+                    phase == SessionPhase.STARTING -> "Starting Wine"
                     else -> "Running"
                 },
                 // Straight to the session, not to the container list. The
