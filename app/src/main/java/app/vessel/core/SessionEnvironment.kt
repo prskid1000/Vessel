@@ -1173,6 +1173,16 @@ fun sessionEnvironment(
     // is the largest avoidable cost in the whole stack.
     environment["MESA_SHADER_CACHE_DISABLE"] = "false"
     environment["MESA_SHADER_CACHE_DIR"] = File(paths.caches, "mesa").absolutePath
+    // **Dead, and kept anyway.** DXVK 2.x removed its on-disk state cache --
+    // graphics pipeline libraries replaced it -- so nothing in the vendored
+    // 2.7.1 source reads this name and `caches/dxvk` stays empty. Kept because
+    // setting it costs nothing and it works again the day DXVK restores it.
+    //
+    // Stated plainly because its emptiness is not evidence of anything. This
+    // variable was once taken as proof that the unix-path scheme worked, which
+    // sent the vkd3d cache investigation the wrong way: nothing there was ever
+    // opening a file to fail on. What actually caches for a DXVK title is
+    // MESA_SHADER_CACHE_DIR above, which does fill up.
     environment["DXVK_STATE_CACHE_PATH"] = File(paths.caches, "dxvk").absolutePath
     // Not a unix path, unlike its two neighbours above: see
     // VKD3D_CACHE_DOS_PATH for why that fails on every launch here.
