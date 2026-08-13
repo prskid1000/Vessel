@@ -868,6 +868,23 @@ val LOGGABLES: List<Loggable> = listOf(
         oneSessionFrom = WineChannelLevel.WARNINGS,
     ),
     wineChannel(
+        channel = "futexwho",
+        secondary = "Names the thread broadcasting Win32 futex wakes that nobody is waiting for.",
+        // Vessel's own channel, not upstream Wine's — patches/wine/0029. `sync`
+        // counts wakes and waits but cannot say who is calling, and a program
+        // that wakes an address hundreds of thousands of times while 259 waits
+        // ever queue is spinning rather than deadlocked. That ratio is what
+        // Resident Evil Requiem shows on a black screen, and this is the channel
+        // that turns it into a thread id.
+        //
+        // Cheap by construction: it prints one wake in 8192, and only for wakes
+        // that found an empty queue, so an ordinary session pays a counter
+        // increment. Left at EVERYTHING because a rate-limited backtrace has no
+        // meaningful quieter tier.
+        addAt = WineChannelLevel.EVERYTHING,
+        oneSessionFrom = WineChannelLevel.EVERYTHING,
+    ),
+    wineChannel(
         channel = "msg",
         secondary = "Every window message the program receives.",
         caution = "Includes mouse movement, so it fires whenever the screen is touched.",
