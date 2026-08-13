@@ -1,0 +1,63 @@
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index 18e61e47368..b430c0bb4fe 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -39,6 +39,7 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
++WINE_DECLARE_DEBUG_CHANNEL(futexwho);
+ 
+ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+ {
+@@ -924,6 +925,41 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
+     return ret;
+ }
+ 
++/* Vessel: report a wake that found nobody waiting.
++ *
++ * A handful of these is normal -- the last releaser of an uncontended lock
++ * always wakes an empty queue. Hundreds of thousands of them from one thread
++ * on one address is a spin, and it is invisible in aggregate counts because
++ * every individual call is correct and cheap.
++ *
++ * The thread id is the part that matters. These callers are guest x86-64 under
++ * FEX, so the captured frames typically stop at the ARM64EC entry thunk and
++ * tell us only that ntdll called itself; the tid crossed with +thread names
++ * the start routine and therefore the subsystem. Frames are captured anyway
++ * for the cases where the caller really is native.
++ */
++static void trace_futile_wake( const void *addr )
++{
++    static LONG futile_count;
++    void *frames[8];
++    ULONG i, n;
++    LONG seq;
++
++    if (!TRACE_ON(futexwho)) return;
++
++    seq = InterlockedIncrement( &futile_count );
++    if (seq != 1 && (seq % 8192)) return;
++
++    TRACE_(futexwho)( "futile wake %ld on addr %p from tid %04lx\n",
++                      (long)seq, addr, GetCurrentThreadId() );
++
++    /* Best effort: skip this frame, and do not let an unwind failure matter. */
++    n = RtlCaptureStackBackTrace( 1, ARRAY_SIZE(frames), frames, NULL );
++    for (i = 0; i < n; i++)
++        TRACE_(futexwho)( "    frame %lu %p\n", (unsigned long)i, frames[i] );
++    if (!n) TRACE_(futexwho)( "    no frames (guest caller)\n" );
++}
++
+ /***********************************************************************
+  *           RtlWakeAddressAll    (NTDLL.@)
+  */
+@@ -963,6 +999,8 @@ void WINAPI RtlWakeAddressAll( const void *addr )
+     spin_unlock( &queue->lock );
+     if (count)
+         NtAlertMultipleThreadByThreadId( tids, count, NULL, NULL );
++    else
++        trace_futile_wake( addr );
+ }
+ 
+ /***********************************************************************
