@@ -881,6 +881,13 @@ val LOGGABLES: List<Loggable> = listOf(
         // that found an empty queue, so an ordinary session pays a counter
         // increment. Left at EVERYTHING because a rate-limited backtrace has no
         // meaningful quieter tier.
+        //
+        // First session with it on printed nothing at all, which is a result
+        // and not a dud: the trace always prints the first futile wake, so zero
+        // lines means the storm did not happen. Requiem now blocks with every
+        // thread asleep instead of one thread spinning. That run also carried a
+        // working shader cache and a different extension set, so nothing here
+        // says which change moved it.
         addAt = WineChannelLevel.EVERYTHING,
         oneSessionFrom = WineChannelLevel.EVERYTHING,
     ),

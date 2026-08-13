@@ -2489,6 +2489,15 @@ class SessionRuntime @Inject constructor(
          * name -- so while it is running, "which process holds the heap" is not
          * answerable from the log. Turn it off for a session whose purpose is
          * diagnosing a hang.
+         *
+         * **It does produce a cache now, and the "produced no cache at all"
+         * above is history rather than the current state.** A Requiem session
+         * leaves ~11 MB under `caches/fex/<digest>/codemap`, split the way the
+         * compiler works: finished modules in `ready/` -- kernelbase, winmm,
+         * dstorage, sl.dlss_g, amd_fidelityfx_loader_dx12 -- and the executable
+         * itself still accumulating in `new/`. That layout is the answer to
+         * whether a killed session loses everything: it does not, because
+         * `ready/` is per-module and already written.
          */
         const val CODE_CACHE_DURING_SESSION: Boolean = true
         const val SYSWOW64 = "syswow64"

@@ -665,6 +665,12 @@ internal fun fexCacheLink(prefix: File): File =
  * drive every prefix has — the same fix [FEX_APP_CACHE_LOCATION] already
  * uses for the same reason. [vkd3dCacheLink] is what makes it resolve to
  * `caches/vkd3d`.
+ *
+ * **Confirmed on device.** After the change Requiem logs `Performing async
+ * setup of stream archive ... Done` where it used to log the failure, and
+ * `caches/vkd3d/vkd3d-proton.re9.exe.cache.write` is a real file with real
+ * bytes in it. Both halves matter: the absence of an error message would also
+ * be what a silently skipped cache looks like.
  */
 internal const val VKD3D_CACHE_DOS_PATH = "C:\\vessel\\vkd3dcache\\"
 
@@ -1184,6 +1190,17 @@ fun sessionEnvironment(
     // `VK_KHR_present_wait2`, and a first attempt that named the v1 extensions
     // disabled nothing while looking like it had. Whatever replaces this must be
     // checked against the guest's own extension list, not against memory.
+    //
+    // **Two, not four, and that is measured.** This began as four names set by
+    // hand on one container, `swapchain_maintenance1` included on suspicion.
+    // With only the pair below disabled Requiem logs `Creating swapchain
+    // (1920 x 1080), BufferCount = 3` and then `Got 3 swapchain images` inside
+    // the present task, so maintenance1 is innocent and stays enabled.
+    //
+    // The value was confirmed to arrive by reading `/proc/<pid>/environ` of the
+    // live `re9.exe`, not by reading this file. Setting a variable the guest
+    // never receives is the specific way this question was answered wrongly
+    // once already, and it looks exactly like a negative result.
     //
     // Losing them costs nothing here. Both exist to let an application pace
     // itself against real present completion, and Vessel composites through the

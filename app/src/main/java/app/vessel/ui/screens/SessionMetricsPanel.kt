@@ -284,8 +284,22 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
         TemperatureCard(state)
 
         val powerCeiling = history.peak { magnitude(it.powerMilliwatts) }
+        // **Positive is charging, and this test used to be the other way round.**
+        // `MetricSampler.powerMilliwatts` states the convention it inherits from
+        // the platform: the sign is current *entering* the battery. Measured on
+        // this device while the charger was in — `current_now` +3,657,000 µA
+        // against `status: Charging` — 15 W of charging was being titled
+        // "total draw", which reads as the session burning it.
+        //
+        // The number is worth nothing without the label. Draw is the reason to
+        // watch this graph at all, and a reading that silently means its
+        // opposite is worse than no reading, because it invites tuning against
+        // whether the phone happens to be plugged in.
+        //
+        // The series stays on `magnitude`, so the shape is unchanged either way
+        // and only the title distinguishes them.
         VMetricGraphCard(
-            title = if ((sample.powerMilliwatts ?: 0) < 0) "power · charging" else "power · total draw",
+            title = if ((sample.powerMilliwatts ?: 0) > 0) "power · charging" else "power · total draw",
             axisStyle = ::formatWatts,
             spanSeconds = history.spanSeconds,
             value = sample.powerMilliwatts?.let(::formatWatts),
