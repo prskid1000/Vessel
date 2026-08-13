@@ -184,24 +184,49 @@ class ComponentStoreTest {
     }
 
     /**
-     * The upgrade that must not happen behind the user's back.
+     * Wine is re-pointed like everything else, and this test used to assert the
+     * opposite.
      *
-     * A container's prefix was booted against the build it references. Silently
-     * re-pointing it at a newer one on the next launch breaks a working setup
-     * with no user action to attribute it to.
+     * The old rule held a container on the Wine its prefix was booted against,
+     * on the argument that a silent upgrade breaks a working setup with nothing
+     * to attribute it to. That is a real risk. It was outweighed on 2026-08-13
+     * by the fifth instance of its opposite: a Wine build carrying a new debug
+     * channel was installed, the container stayed on the previous version, and
+     * the channel was enabled and read as silence — because Wine ignores an
+     * unknown channel in `WINEDEBUG` without a word. The conclusion drawn was
+     * "the bug is gone".
+     *
+     * A stale component that produces a confident wrong measurement costs more
+     * than an upgrade that announces itself, so the exception is gone.
      */
     @Test
-    fun `an existing reference is never re-pointed at a newer version`() {
+    fun `an existing Wine reference is re-pointed at a newer version`() {
         runBlocking {
             store.install(wine(1013), "wine-10.13-canoe")
             store.install(wine(1114), "wine-11.14-canoe")
         }
         container("pinned", ComponentType.WINE to 1013)
 
-        assertFalse(ComponentType.WINE in runBlocking { store.adoptLatest("pinned") })
+        assertEquals(1114, runBlocking { store.adoptLatest("pinned") }[ComponentType.WINE])
         assertEquals(
-            paths.components.version(ComponentType.WINE, 1013),
+            paths.components.version(ComponentType.WINE, 1114),
             runBlocking { store.directoryFor("pinned", ComponentType.WINE) },
+        )
+    }
+
+    /** Forward only: a store holding an older build must not walk a container back. */
+    @Test
+    fun `an existing reference is never re-pointed at an older version`() {
+        runBlocking {
+            store.install(wine(1114), "wine-11.14-canoe")
+            store.install(wine(1013), "wine-10.13-canoe")
+        }
+        container("ahead", ComponentType.WINE to 1114)
+
+        assertFalse(ComponentType.WINE in runBlocking { store.adoptLatest("ahead") })
+        assertEquals(
+            paths.components.version(ComponentType.WINE, 1114),
+            runBlocking { store.directoryFor("ahead", ComponentType.WINE) },
         )
     }
 

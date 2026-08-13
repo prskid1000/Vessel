@@ -183,9 +183,29 @@ class ComponentStore @Inject constructor(
      * collision in the build scripts, and the file-length staging check in
      * SessionRuntime.
      *
-     * Wine still holds, and the honest consequence is that a Wine update needs a
-     * new container. [staleReferences] exists so that is visible rather than
-     * discovered.
+     * **Wine no longer holds either, and the fifth repeat is why.** The rule
+     * above kept Wine pinned and offered [staleReferences] as the consolation,
+     * on the argument that an upgrade under a booted prefix breaks a working
+     * setup with nothing to blame. What actually happened on 2026-08-13 is the
+     * failure this class was written to end, one more time: a Wine build
+     * carrying a new debug channel installed correctly, the container kept
+     * 100110003, and the channel was switched on and read as *silence*. Wine
+     * ignores an unknown channel in `WINEDEBUG` without complaint, so the
+     * instrument reported "the bug is gone" when the instrument was not there.
+     * A warning in a list nobody was reading did not prevent that, and a
+     * measurement that is confidently wrong is worse than a broken launch,
+     * which at least announces itself.
+     *
+     * So every type is re-pointed now, Wine included. The upgrade risk is real
+     * but bounded and loud: a prefix whose Wine moved gets a `wineboot` update
+     * on the next launch, which is the path Wine itself supports and the same
+     * one a user takes when they change the build by hand. The risk of the old
+     * rule was neither bounded nor loud.
+     *
+     * Identity is the payload digest, not the version code — see
+     * [WcpProfile.payloadSha256]. A rebuild that changes nothing produces the
+     * same digest and is not adopted, so this re-points on a real change
+     * rather than on every build number that happens to increment.
      */
     suspend fun adoptLatest(containerId: String): Map<ComponentType, Int> =
         withContext(Dispatchers.IO) {
@@ -200,10 +220,10 @@ class ComponentStore @Inject constructor(
                     // Never referenced: adopt, which is what lets a container
                     // launch at all.
                     current == null -> adopted[type] = newest
-                    // Wine keeps what it booted against. See the note above.
-                    type in PREFIX_STATEFUL -> continue
                     // Only ever forward. A store holding an older build beside a
-                    // newer one must not walk a container backwards.
+                    // newer one must not walk a container backwards. Wine is no
+                    // longer excepted here — see the note above for the fifth
+                    // repeat of the failure that exception caused.
                     newest > current -> adopted[type] = newest
                     else -> continue
                 }
@@ -465,17 +485,17 @@ class ComponentStore @Inject constructor(
 
     private companion object {
         /**
-         * Types whose version a prefix carries state from, and which therefore
-         * keep the version a container was provisioned with.
+         * Types whose version a prefix carries state from.
          *
          * Wine boots the prefix: the registry, the drive layout and the DLL set
          * under `drive_c/windows` are all written by the build that ran
          * `wineboot`, so a later build inherits a prefix it did not create.
          * Proton is the same thing under another name.
          *
-         * Everything else is copied into `system32` on every launch and leaves
-         * nothing behind, so there is no state to be inconsistent with and no
-         * reason to hold a container back from a newer one.
+         * **This no longer blocks adoption**, and [adoptLatest] records why. It
+         * survives as the reason a Wine change is worth *saying* — a prefix
+         * whose Wine moved wants a `wineboot` update — rather than as a reason
+         * to leave a container running a build the user believes they replaced.
          */
         val PREFIX_STATEFUL = setOf(ComponentType.WINE, ComponentType.PROTON)
     }
