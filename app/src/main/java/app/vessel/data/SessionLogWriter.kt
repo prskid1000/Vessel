@@ -4,10 +4,16 @@ import app.vessel.core.LogLevel
 import app.vessel.core.LogSource
 import app.vessel.core.SessionLogLimits
 import app.vessel.core.encodeLogLine
+import app.vessel.core.errorDigestElided
+import app.vessel.core.errorDigestHeading
+import app.vessel.core.errorDigestLine
+import app.vessel.core.logPrefixKey
+import app.vessel.core.logPrefixLegend
 import app.vessel.core.overflowLogMarker
 import app.vessel.core.parseSessionLogLine
 import app.vessel.core.rateLimitedLogMarker
 import app.vessel.core.repeatedLogLine
+import app.vessel.core.tailContinuedMarker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -131,6 +137,41 @@ internal class SessionLogWriter(
     private var elided = 0
     private var dropped = 0
     private var hasErrors = false
+
+    /**
+     * Lines written, by `<level><source>` prefix. See
+     * [SessionLogMeta.sourceCounts] for why this is recorded at write time and
+     * not recovered on read.
+     *
+     * A plain `LinkedHashMap` and no synchronisation, because like every other
+     * counter below it is touched only by the pump coroutine. Bounded by the
+     * cross product of the two enums — twenty-four keys at most, most sessions
+     * under ten.
+     */
+    private val sourceCounts = LinkedHashMap<String, Int>()
+
+    /** The same, for lines the rate limiter refused. */
+    private val droppedBySource = LinkedHashMap<String, Int>()
+
+    /**
+     * Drops attributed within the current rate-limit window only, so the marker
+     * can name the source that filled it and then start again.
+     */
+    private val droppedThisWindow = LinkedHashMap<String, Int>()
+
+    /**
+     * Distinct ERROR lines and their counts, in first-seen order.
+     *
+     * Capped at [MAX_DIGEST_ENTRIES] *keys* rather than by total volume: a
+     * session with nine distinct errors repeated ten thousand times each costs
+     * nine entries, which is the shape this is for. Past the cap new distinct
+     * errors are counted in [digestOverflow] rather than dropped in silence.
+     */
+    private val errorDigest = LinkedHashMap<String, ErrorTally>()
+    private var digestOverflow = 0
+    private var errorLines = 0
+
+    private class ErrorTally(val source: LogSource, var count: Int)
     private var unflushed = 0
     private var lastPublishedAt = 0L
     private var broken = false
@@ -209,7 +250,15 @@ internal class SessionLogWriter(
         when (command) {
             is Command.Header -> {
                 flushPending()
-                command.lines.forEach { write(LogSource.VESSEL, LogLevel.INFO, it) }
+                // **The legend goes with the versions, and for the same reason
+                // they do.** A log without its component versions "cannot be
+                // acted on"; a log whose every line begins with two undocumented
+                // letters cannot be *read*. Three lines, once, at the top, so a
+                // log pasted into a bug report carries its own key rather than
+                // depending on the reader having seen this codebase.
+                (command.lines + logPrefixLegend()).forEach {
+                    write(LogSource.VESSEL, LogLevel.INFO, it)
+                }
             }
 
             is Command.Line -> {
@@ -257,16 +306,43 @@ internal class SessionLogWriter(
             if (rateLimited > 0) {
                 val refused = rateLimited
                 rateLimited = 0
-                write(LogSource.VESSEL, LogLevel.WARN, rateLimitedLogMarker(refused))
+                writeRateLimitMarker(refused)
             }
         }
         if (windowLines >= limits.rateLimitLines) {
             rateLimited++
             dropped++
+            // **Attributed, and attributed here rather than reconstructed
+            // later.** The limiter is the only layer that knows whose line it is
+            // refusing at the moment it refuses; once the line is gone the
+            // information is gone with it, which is how two separate volume
+            // disasters both ended up being diagnosed by hand afterwards. Two
+            // tallies because they answer different questions: the window one is
+            // for the marker written into the file, the session one for the
+            // sidecar. See [SessionLogMeta.droppedBySource].
+            val key = logPrefixKey(source, level)
+            droppedBySource[key] = (droppedBySource[key] ?: 0) + 1
+            droppedThisWindow[key] = (droppedThisWindow[key] ?: 0) + 1
             return
         }
         windowLines++
         write(source, level, text)
+    }
+
+    /**
+     * The rate-limit marker, naming whichever source lost the most.
+     *
+     * Through [write] rather than [emit], like every other marker, so the
+     * limiter cannot suppress the line that explains the limiter.
+     */
+    private fun writeRateLimitMarker(refused: Int) {
+        val worst = droppedThisWindow.maxByOrNull { it.value }
+        droppedThisWindow.clear()
+        write(
+            LogSource.VESSEL,
+            LogLevel.WARN,
+            rateLimitedLogMarker(refused, worst?.key, worst?.value ?: 0),
+        )
     }
 
     /**
@@ -299,11 +375,67 @@ internal class SessionLogWriter(
         }
         lines++
         unflushed++
-        if (level == LogLevel.ERROR) hasErrors = true
+        val key = logPrefixKey(source, level)
+        sourceCounts[key] = (sourceCounts[key] ?: 0) + 1
+        if (level == LogLevel.ERROR) {
+            hasErrors = true
+            tally(source, text)
+        }
     }
 
-    /** The head is full: close it and start writing into the first tail segment. */
+    /**
+     * Fold one error line into the digest.
+     *
+     * The `×N` suffix is stripped first, so a run that dedup already collapsed
+     * counts as the N it represents rather than as one line with a decoration.
+     * Without that, a session whose only error fired ten thousand times in a row
+     * would report a count of one.
+     */
+    private fun tally(source: LogSource, text: String) {
+        val marker = text.lastIndexOf(REPEAT_MARKER)
+        val repeats = if (marker < 0) {
+            1
+        } else {
+            text.substring(marker + REPEAT_MARKER.length).toIntOrNull() ?: 1
+        }
+        val key = if (marker < 0 || repeats == 1) text else text.substring(0, marker)
+        errorLines += repeats
+
+        val existing = errorDigest[key]
+        if (existing != null) {
+            existing.count += repeats
+            return
+        }
+        if (errorDigest.size >= MAX_DIGEST_ENTRIES) {
+            digestOverflow++
+            return
+        }
+        errorDigest[key] = ErrorTally(source, repeats)
+    }
+
+    /**
+     * The head is full: close it and start writing into the first tail segment.
+     *
+     * The breadcrumb is written *before* the head is closed and is the last line
+     * in it. See [tailContinuedMarker] for the wrong answer that reading the head
+     * of a live session produced, and why one line here is the whole fix.
+     *
+     * **Straight onto the stream and not through [write]**, which is not
+     * fastidiousness: `write` is what calls this, from a branch conditioned on
+     * `tail == null && headBytes + cost > headBytes`, and that condition is still
+     * true on re-entry. Going back through it is unbounded recursion. Counted by
+     * hand for the same reason.
+     */
     private fun startTail() {
+        val breadcrumb = tailContinuedMarker(tailFile(directory, startedAt, 0).name)
+        runCatching {
+            head?.write(encodeLogLine(LogSource.VESSEL, LogLevel.WARN, breadcrumb))
+            head?.newLine()
+        }
+        lines++
+        val key = logPrefixKey(LogSource.VESSEL, LogLevel.WARN)
+        sourceCounts[key] = (sourceCounts[key] ?: 0) + 1
+
         head?.flush()
         head?.close()
         head = null
@@ -398,17 +530,72 @@ internal class SessionLogWriter(
             if (rateLimited > 0) {
                 // Reopened for one line: the sink refused output right up to the
                 // end, and the file must say so.
-                appendMarker(rateLimitedLogMarker(rateLimited))
+                val worst = droppedThisWindow.maxByOrNull { it.value }
+                appendMarker(rateLimitedLogMarker(rateLimited, worst?.key, worst?.value ?: 0))
+                droppedThisWindow.clear()
                 rateLimited = 0
             }
             if (mergeTailSegments(directory, startedAt, elided)) lines++
+            appendDigest()
         }
         writeSessionMeta(directory, snapshot(exit, code, System.currentTimeMillis()), json)
         onFinished(this)
         onChanged()
     }
 
-    private fun appendMarker(text: String) {
+    /**
+     * The digest of distinct errors, appended after the merge.
+     *
+     * **After the merge, on purpose.** It is the last thing in the finished file,
+     * which is where somebody opening a crashed session starts — and putting it
+     * anywhere earlier would mean writing it before the errors it summarises had
+     * all happened.
+     *
+     * **Written even when there are none**, and that is the more useful half. A
+     * log that ends in `… no errors in this session …` has answered the question
+     * "did anything go wrong" for a session whose program vanished cleanly, which
+     * is exactly the Metro case in `docs/LOGGING.md` — and it does so without
+     * anyone having to trust that they scrolled far enough. The alternative,
+     * printing nothing, is indistinguishable from the digest having failed.
+     *
+     * Ordered by count and not by first appearance: this is a summary and the
+     * repeated failure is the one to look at first. The order lines *happened* in
+     * is not lost — it is the log, immediately above.
+     */
+    private fun appendDigest() {
+        val body = digestEntries().map { (text, tally) ->
+            errorDigestLine(tally.source, tally.count, text)
+        }
+        val overflow =
+            if (digestOverflow > 0) listOf(errorDigestElided(digestOverflow)) else emptyList()
+        val heading = errorDigestHeading(errorDigest.size + digestOverflow, errorLines)
+        appendMarkers(
+            listOf(heading) + body + overflow,
+            // INFO when there is nothing to report, so a clean session's trailer
+            // is not a page of red for the absence of a problem.
+            if (errorDigest.isEmpty()) LogLevel.INFO else LogLevel.ERROR,
+        )
+    }
+
+    /** The digest, loudest first. Shared by the file trailer and the sidecar. */
+    private fun digestEntries(): List<Map.Entry<String, ErrorTally>> =
+        errorDigest.entries.sortedByDescending { it.value.count }
+
+    private fun appendMarker(text: String, level: LogLevel = LogLevel.WARN) =
+        appendMarkers(listOf(text), level)
+
+    /**
+     * Append lines to the finished file, reopening it for one pass.
+     *
+     * A list rather than one call per line because the digest is up to
+     * [MAX_DIGEST_ENTRIES] + 2 of them and each call is an open, a write and a
+     * close. Counted into [sourceCounts] as well as [lines], so that
+     * `lines == sourceCounts.values.sum()` holds for the whole file rather than
+     * for the part written before teardown — an invariant a test can assert, and
+     * one a histogram is worth much less without.
+     */
+    private fun appendMarkers(texts: List<String>, level: LogLevel) {
+        if (texts.isEmpty()) return
         runCatching {
             val target = if (tailFile(directory, startedAt, 0).isFile) {
                 tailFile(directory, startedAt, 0)
@@ -416,10 +603,14 @@ internal class SessionLogWriter(
                 logFile(directory, startedAt)
             }
             FileOutputStream(target, true).bufferedWriter(Charsets.UTF_8).use { out ->
-                out.write(encodeLogLine(LogSource.VESSEL, LogLevel.WARN, text))
-                out.newLine()
+                texts.forEach { text ->
+                    out.write(encodeLogLine(LogSource.VESSEL, level, text))
+                    out.newLine()
+                }
             }
-            lines++
+            lines += texts.size
+            val key = logPrefixKey(LogSource.VESSEL, level)
+            sourceCounts[key] = (sourceCounts[key] ?: 0) + texts.size
         }
     }
 
@@ -439,6 +630,13 @@ internal class SessionLogWriter(
         overflowLines = overflowed.get(),
         sizeBytes = segmentsOf(directory, startedAt).sumOf { it.length() },
         hasErrors = hasErrors,
+        // Copied rather than shared: the snapshot outlives this call and the
+        // maps keep being written to while the session runs.
+        sourceCounts = LinkedHashMap(sourceCounts),
+        droppedBySource = LinkedHashMap(droppedBySource),
+        errorDigest = digestEntries().map { (text, tally) ->
+            SessionErrorCount(text = text, count = tally.count, source = tally.source.wire)
+        },
     )
 
     /** One failed write is enough: from here the sink accepts lines and forgets them. */
@@ -467,5 +665,21 @@ internal class SessionLogWriter(
         const val FLUSH_LINES = 512
         const val WRITE_BUFFER_BYTES = 64 * 1024
         const val PUBLISH_INTERVAL_MS = 400L
+
+        /**
+         * How many *distinct* error lines the digest names.
+         *
+         * Thirty-two, and the number is chosen against the artefact rather than
+         * against memory: the digest is a trailer somebody reads on a phone, and
+         * past a screenful it stops being a summary. The sessions this is for
+         * have single figures of distinct errors repeated thousands of times —
+         * the 26,966-line vkd3d burst was two distinct messages. A session with
+         * more than thirty-two genuinely different errors has a different
+         * problem, and the count of the rest is still reported.
+         */
+        const val MAX_DIGEST_ENTRIES = 32
+
+        /** The separator [repeatedLogLine] writes, undone by [tally]. */
+        const val REPEAT_MARKER = "  ×"
     }
 }

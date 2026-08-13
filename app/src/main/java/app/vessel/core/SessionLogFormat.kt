@@ -252,6 +252,166 @@ fun decodeLogLine(raw: String, index: Int): LogEntry {
 fun repeatedLogLine(text: String, count: Int): String =
     if (count <= 1) text else "$text  ×$count"
 
+/**
+ * `TF`, `WK`, `ED` — the two-letter prefix, as a key.
+ *
+ * **The accounting unit for everything downstream**, and the thing that had to
+ * be recovered with `cut -c1-2 | sort | uniq -c` on a session before either of
+ * the two biggest volume problems could be attributed. Level first and source
+ * second, matching [encodeLogLine] character for character so a histogram key
+ * and a line prefix can never disagree about what they mean.
+ */
+fun logPrefixKey(source: LogSource, level: LogLevel): String = "${level.wire}${source.wire}"
+
+/**
+ * The legend for those two letters, written into every session's header.
+ *
+ * **Nothing documented this and it cost real time.** A session log is a wall of
+ * `TF`, `WK`, `ED`, `IW` with no key anywhere in the product, the docs or the
+ * file itself — so the first thing anyone does with a log they have been handed
+ * is work out the alphabet, and the second is get it wrong. Two of the three
+ * cheap wins in this area are counts keyed on these letters, and a histogram
+ * whose keys nobody can read is a worse artefact than no histogram.
+ *
+ * Derived from the two enums rather than written out, so a source added to
+ * [LogSource] appears here without anyone remembering to say so. In the header
+ * rather than in a document because the header travels with the file: a log
+ * pasted into a bug report carries its own key.
+ */
+fun logPrefixLegend(): List<String> = listOf(
+    "legend  every line starts with <level><source>, no space between them",
+    "legend  level   " + LogLevel.entries.joinToString("  ") { "${it.wire} ${it.label}" },
+    "legend  source  " + LogSource.entries.joinToString("  ") { "${it.wire} ${it.label}" },
+)
+
+/**
+ * `… continues in <name> …` — the last line written into the head file.
+ *
+ * **The trap this closes produced a wrong answer, not merely lost time.** A
+ * session past its head allowance is three files, and `<startedAt>.log` is the
+ * *oldest* of them: it holds startup and then stops. Running `tail` on it during
+ * a live session shows the last line of the head, which is a DLL load from ten
+ * minutes ago, and the honest-looking reading of that is "nothing went wrong
+ * after startup". That was reported once and it was false — the live end was in
+ * `.log.t0` the whole time.
+ *
+ * The head now ends by saying where the rest is. One line, written at the moment
+ * the head is closed so it can never be stale, and the merge at finalise leaves
+ * it in place as a true record of where the head ended.
+ */
+fun tailContinuedMarker(name: String): String =
+    "… this file ends here; the session continues in $name, and while it is running the " +
+        "live end is always .log.t0 …"
+
+/**
+ * The heading over the digest of distinct errors, written at session end.
+ *
+ * @param distinct how many different error lines there were.
+ * @param total how many error lines altogether, counting repeats.
+ */
+fun errorDigestHeading(distinct: Int, total: Int): String =
+    if (distinct == 0) {
+        "… no errors in this session …"
+    } else {
+        "… $distinct distinct error${if (distinct == 1) "" else "s"}, $total in total, " +
+            "most frequent first …"
+    }
+
+/** One row of that digest: `×N  <source>  <text>`. */
+fun errorDigestLine(source: LogSource, count: Int, text: String): String =
+    "×$count  ${source.label}  $text"
+
+/**
+ * Said when the digest itself was capped.
+ *
+ * The digest exists because error lines are buried among hundreds of thousands
+ * of others; a digest that silently kept only some of them would recreate that
+ * problem one level up, which is the rule every other layer here already
+ * follows.
+ */
+fun errorDigestElided(remaining: Int): String =
+    "… and $remaining further distinct errors, not listed …"
+
+/**
+ * What the rate limiter says when it refuses output — now naming the source that
+ * caused it.
+ *
+ * **The attribution is the whole point of the change.** The old wording,
+ * `… logging rate-limited, 9214 lines dropped …`, is a true statement that
+ * answers none of the three questions a reader has: what was shouting, whether
+ * the thing they are looking for was in it, and what to turn down. Two separate
+ * volume disasters — FEX at 508,000 lines and vkd3d's shader channel at 26,966 —
+ * both had to be attributed afterwards by running `cut -c1-2 | sort | uniq -c`
+ * over the whole file, and in both cases a single source was over 98% of it.
+ * The limiter already knows which source it is refusing at the moment it
+ * refuses, so it says so.
+ *
+ * @param worst the prefix key of the source that lost the most, or null when
+ *   nothing was counted per source — in which case the line falls back to the
+ *   old wording rather than inventing an attribution.
+ */
+fun rateLimitedLogMarker(dropped: Int, worst: String?, worstCount: Int): String =
+    if (worst == null || worstCount <= 0) {
+        rateLimitedLogMarker(dropped)
+    } else {
+        "… logging rate-limited, $dropped lines dropped, $worstCount of them $worst " +
+            "(${describePrefix(worst)}) …"
+    }
+
+/**
+ * `98% trace/fex` — the one thing worth saying about a session's histogram in a
+ * list row.
+ *
+ * **The histogram's whole value is that one source usually dominates**, and in
+ * both measured cases it dominated overwhelmingly: FEX at 99.9% of 508,000
+ * lines, then vkd3d's shader channel at 98% of what was left. Neither was
+ * suspected until somebody counted. A row that says `98% trace/fex` makes that
+ * the first thing seen rather than the conclusion of an investigation.
+ *
+ * Null below [DOMINANCE_THRESHOLD], and that is the point of having a threshold
+ * rather than always naming the largest bucket: a healthy session's biggest
+ * source is `IW` at 30% of four hundred lines, which is not a finding, and a
+ * badge that appears on every row stops being a signal — the same rule the
+ * *errors logged* tag on that row already follows.
+ *
+ * @param counts [SessionLogMeta.sourceCounts], keyed by [logPrefixKey].
+ */
+fun dominantSourceLabel(counts: Map<String, Int>): String? {
+    val total = counts.values.sum()
+    if (total < MIN_LINES_FOR_DOMINANCE) return null
+    val top = counts.maxByOrNull { it.value } ?: return null
+    val share = top.value.toDouble() / total
+    if (share < DOMINANCE_THRESHOLD) return null
+    return "${(share * 100).toInt()}% ${describePrefix(top.key)}"
+}
+
+/**
+ * Two thirds. Chosen against the artefact: a source over two thirds of a log is
+ * one whose output is the log, which is the state worth naming, and no healthy
+ * session measured here comes close to it.
+ */
+private const val DOMINANCE_THRESHOLD = 0.66
+
+/**
+ * Below this a share is arithmetic rather than evidence — three lines out of
+ * four is 75% and means nothing at all.
+ */
+private const val MIN_LINES_FOR_DOMINANCE = 500
+
+/**
+ * `TF` as `trace/fex`, for a marker that has to be readable without the legend.
+ *
+ * Falls back to the raw key rather than to a guess: a prefix that does not
+ * decode belongs to a build that wrote it, and printing it verbatim is what lets
+ * somebody recognise it.
+ */
+fun describePrefix(key: String): String {
+    if (key.length != 2) return key
+    val level = LogLevel.ofWire(key[0]) ?: return key
+    val source = LogSource.ofWire(key[1]) ?: return key
+    return "${level.label}/${source.label}"
+}
+
 /** The one line that replaces the middle of a log that outgrew its cap. */
 fun elidedLogMarker(lines: Int): String = "… $lines lines elided …"
 

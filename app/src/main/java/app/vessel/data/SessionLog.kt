@@ -118,10 +118,87 @@ data class SessionLogMeta(
      * it means reading the body, which is what this file exists to avoid.
      */
     val hasErrors: Boolean = false,
+    /**
+     * How many lines each `<level><source>` prefix contributed — `{"TF": 508000,
+     * "TW": 294, …}`.
+     *
+     * **The cheapest of the three cheap wins, and the one that would have caught
+     * both of the volume disasters in the first minute.** A six-minute session
+     * of Resident Evil Requiem wrote 49 MB and ~508,000 lines; 99.9% of them were
+     * one FEX message per unaligned atomic, and every other source combined came
+     * to about 350. With FEX silenced, 98% of what was left was vkd3d's shader
+     * channel. Both facts were recovered afterwards by running
+     * `cut -c1-2 | sort | uniq -c` over the whole file by hand, twice, because
+     * nothing in the product counted.
+     *
+     * Recorded here rather than computed on read for the same reason every other
+     * field is: the sidecar exists so the list never opens a body, and counting
+     * 508,000 lines to draw a row is exactly the cost it was created to avoid.
+     * The writer already sees every line and every line already carries the key,
+     * so the count is one map lookup on a path that was doing a file write.
+     *
+     * Keyed by [app.vessel.core.logPrefixKey], whose legend is written into the
+     * log's own header — a histogram whose keys nobody can read is worse than
+     * none.
+     */
+    val sourceCounts: Map<String, Int> = emptyMap(),
+    /**
+     * How many lines each prefix *lost*, by the same key.
+     *
+     * Separate from [sourceCounts] and not derivable from it. [droppedLines] and
+     * [overflowLines] already say that lines went; this says whose, which is the
+     * question actually asked when the line explaining a crash is not where it
+     * should be. A drop of 18,000 lines that were all `TF` is a non-event; a drop
+     * of eighteen that included the only `EW` is the whole investigation.
+     *
+     * Only the rate limiter can attribute. The producer channel's drops
+     * ([overflowLines]) cannot be attributed and are deliberately not guessed
+     * at: `onUndeliveredElement` runs on the sender's thread with the discarded
+     * element in hand, but the discarded element is the *oldest* queued one
+     * rather than the one being sent, so counting it there would attribute the
+     * loss to whichever source happened to be sending at the time.
+     */
+    val droppedBySource: Map<String, Int> = emptyMap(),
+    /**
+     * Every distinct error line the session produced, with its count.
+     *
+     * **The second cheap win.** `hasErrors` says whether to look and the body
+     * says nothing until it has been read; between the two there is the question
+     * anybody actually opens a log to answer, which is *what went wrong*. On a
+     * session at the 48 MB cap that is a hundred thousand lines to scroll for
+     * perhaps nine distinct failures, most of them repeats of each other.
+     *
+     * Distinct by exact text after the `×N` repeat suffix is stripped, which is
+     * deliberately the weakest normalisation that works: collapsing digits or
+     * addresses would merge `Library d3dx9_43.dll not found` with
+     * `Library d3dx11_43.dll not found`, and those are two different missing
+     * DLLs. The cost of under-normalising is a longer digest; the cost of
+     * over-normalising is a wrong one.
+     *
+     * Capped — see [SessionLogWriter.MAX_DIGEST_ENTRIES] — and the cap is
+     * announced in the log when it bites.
+     */
+    val errorDigest: List<SessionErrorCount> = emptyList(),
 )
 
-/** Bumped when the sidecar's shape changes in a way a reader has to know about. */
-const val SESSION_LOG_SCHEMA: Int = 1
+/** One distinct error line and how many times the session produced it. */
+@Serializable
+data class SessionErrorCount(
+    val text: String = "",
+    val count: Int = 0,
+    /** [app.vessel.core.LogSource.wire], so the digest can say which layer failed. */
+    val source: Char = 'V',
+)
+
+/**
+ * Bumped when the sidecar's shape changes in a way a reader has to know about.
+ *
+ * 2: added [SessionLogMeta.sourceCounts], [SessionLogMeta.droppedBySource] and
+ * [SessionLogMeta.errorDigest]. Every one of them is defaulted, so a version 1
+ * sidecar still parses and simply reports nothing — which is the truth about a
+ * session recorded before anything counted.
+ */
+const val SESSION_LOG_SCHEMA: Int = 2
 
 /**
  * Where a read has got to.

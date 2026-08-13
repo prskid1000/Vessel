@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.vessel.core.dominantSourceLabel
 import app.vessel.data.ContainerRepository
 import app.vessel.data.SessionExit
 import app.vessel.data.SessionLogMeta
@@ -35,6 +36,16 @@ data class SessionRow(
     val sizeLabel: String,
     val status: SessionExit,
     val hasErrors: Boolean,
+    /**
+     * `98% trace/fex`, when one source produced most of the run — otherwise
+     * null. See [app.vessel.core.dominantSourceLabel] for why a threshold rather
+     * than always naming the largest.
+     *
+     * Null for every session recorded before the writer counted, which is honest:
+     * an old sidecar has no histogram and inventing one from the body would mean
+     * reading it, which is what the sidecar exists to avoid.
+     */
+    val dominantSource: String? = null,
 )
 
 @Immutable
@@ -94,6 +105,7 @@ class SessionLogsViewModel @Inject constructor(
         sizeLabel = sizeLabel(meta.sizeBytes),
         status = meta.exit,
         hasErrors = meta.hasErrors,
+        dominantSource = dominantSourceLabel(meta.sourceCounts),
     )
 }
 

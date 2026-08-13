@@ -42,9 +42,18 @@ VKD3D_SHADER_DEBUG=warn
 TU_DEBUG=<existing flags>,startup
 # MESA_LOG deliberately NOT set by default — see the Turnip section
 
-FEX_SILENTLOG=0
+FEX_SILENTLOG=1                    # silent, and see below — this block said 0
 FEX_OUTPUTLOG=stderr               # intent only; Windows never reads it
 ```
+
+**`FEX_SILENTLOG` is `1` and this block said `0` for a release cycle.** The code
+has been `FIXED_FEX_SILENTLOG = "1"` since the measurement below and
+`SessionEnvironmentTest` has asserted it, so what drifted was this document
+rather than the environment. The reason it changed is in the FEX section at the
+end and it is the largest single logging measurement this project has: one
+six-minute session at `0` produced 49 MB and ~508,000 lines, 99.9% of them one
+message. `patches/fex/0003` is what makes `0` usable again by giving FEX the
+level it does not have — see `docs/TRACING.md`.
 
 That is every logging variable a session is sent, and the set is asserted:
 `SessionEnvironmentTest`'s *a fully provisioned container produces exactly this
@@ -195,11 +204,27 @@ takes over, since it lacks extensions DXVK 2.x requires. `logDeviceInfo()` dumps
 device name, driver, the enabled-extension list and every feature flag.
 
 **`VKD3D_SHADER_DEBUG` is a separate channel** from `VKD3D_DEBUG` — an array of
-two, with independent levels. `VKD3D_DEBUG=warn` does **not** carry shader
-translation failures. Both default to FIXME, so `warn` adds only the WARN tier,
-which is bounded by shader count at pipeline-compile time rather than per-frame.
-D3D12 on Adreno is the weakest part of this stack, so these should not be
-silent. Do not set `trace` — that is the per-shader firehose.
+two, with independent levels (`libs/vkd3d-common/debug.c:49-53`).
+`VKD3D_DEBUG=warn` does **not** carry shader translation failures. Both default
+to FIXME, so `warn` adds only the WARN tier, which is bounded by shader count at
+pipeline-compile time rather than per-frame. D3D12 on Adreno is the weakest part
+of this stack, so these should not be silent. Do not set `trace` — that is the
+per-shader firehose.
+
+**"Bounded by shader count" was measured and is not a bound worth having.** One
+Resident Evil Requiem session produced **26,966 lines** on this channel — 98% of
+everything the session logged once FEX was silenced — from two messages in
+`libs/vkd3d-shader/dxbc.c`: `Ignoring DXBC checksum` at `:124` and
+`skip_dword_unknown` at `:66-73`. Eight lines per DXBC parse, times 3,025
+shaders, is 24,200; the count confirms the mechanism.
+
+Two corrections fall out of that, and both were wrong in the other direction
+first. The burst was attributed to `VKD3D_DEBUG` and mitigated by lowering it,
+which cannot have worked: `dxbc.c:20` puts that whole translation unit on the
+*shader* channel. And these are not warnings — vkd3d ignores the DXBC checksum
+on every blob it has ever parsed. `patches/vkd3d/0001` moves them to TRACE, which
+takes them out of the tier that has to stay readable without silencing the
+translation failures this variable is set to `warn` for. See `docs/TRACING.md`.
 
 **D3D9 through wined3d** is a diagnose-on-demand case, not an always-on one.
 `err:d3d:` alone is not sufficient (capability shortfalls land at WARN/FIXME),
@@ -227,8 +252,17 @@ layers:
 3. **Head+tail cap** — keep the first part (init: module loads, driver and D3D
    setup) and the last part (the crash), eliding the middle.
 
-Every layer announces itself. A log that hides its own truncation is worse than
-no log.
+Every layer announces itself, and layer 2 now announces *whose* lines it
+refused: `… logging rate-limited, 9214 lines dropped, 9200 of them TF
+(trace/fex) …`. A log that hides its own truncation is worse than no log, and one
+that admits a truncation without saying what caused it still leaves the reader
+with the investigation. Both of the volume disasters above had to be attributed
+by hand, after the fact, with `cut -c1-2 | sort | uniq -c`.
+
+Three things exist now so that nobody does that again, all described in
+`docs/TRACING.md`: a per-source histogram in the sidecar (and on the session-list
+row, as `99% trace/fex`), a digest of distinct errors appended to the finished
+log, and the two-letter prefix legend written into every session's header.
 
 **Layer 0 broke that rule until the caps became adjustable**, and it is worth
 recording why it went unnoticed: `trySend` reports success whether or not the
@@ -314,3 +348,12 @@ the setting is app-global rather than per-container.
 Vessel offers none of them. Choosing well among 521 requires knowing what each
 costs, and the three traps above mean a user who chooses correctly can still get
 nothing. A fixed set that works beats a menu that mostly does not.
+
+## Seeing something this document does not cover
+
+This document is the *default*, and the argument for why it is fixed. The way to
+see something else — one variable, one ladder, topics named after outcomes
+instead of after tools, and a stated cost per stop — is `docs/TRACING.md` and
+`VESSEL_TRACE`. It composes into exactly the variables above rather than around
+them: the fixed prefix is still un-deletable and every rule in this document
+still holds.

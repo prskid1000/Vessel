@@ -404,6 +404,11 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // of this one: the guarantee is that a *manifest param* can never reach a
     // diagnostic variable, whatever the Diagnostics surface may do with it.
     "MESA_LOG",
+    // And which severity floor it applies, which is a second variable and not a
+    // spelling of the first — see [FIXED_MESA_LOG_LEVEL]. Reserved for the same
+    // reason as its neighbour, and added at the same time as the `driver` trace
+    // topic, which is the first thing in this product that sets it.
+    "MESA_LOG_LEVEL",
 )
 
 /**
@@ -450,6 +455,7 @@ val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     "TU_DEBUG",
     "FEX_SILENTLOG",
     "MESA_LOG",
+    "MESA_LOG_LEVEL",
 )
 
 /**

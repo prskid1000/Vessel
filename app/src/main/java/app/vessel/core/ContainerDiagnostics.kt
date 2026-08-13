@@ -190,6 +190,30 @@ data class ContainerDiagnostics(
             .filter { (name, _) -> name.isNotEmpty() && name !in RESERVED_SESSION_ENV }
             .toMap()
 
+    /**
+     * `VESSEL_TRACE`, parsed — the one row in the env table this layer reads
+     * rather than merely forwards.
+     *
+     * **Why it lives in the env table and not as a field of its own.** The table
+     * already exists for exactly this shape of thing: a name and a value that
+     * Vessel did not have to anticipate. Giving the trace spec a dedicated field
+     * would mean a schema change, a migration for every stored document, and a
+     * second surface to build — to gain nothing, because the value is one string
+     * and the table renders strings. [KNOWN_ENV] carries its description, so the
+     * row is a picker rather than a thing you have to already know about.
+     *
+     * The last row wins, matching every other list here: the table is ordered and
+     * the user's most recent edit is the one they mean.
+     *
+     * Unlike every other entry in the table this one is **both** expanded here
+     * *and* passed through to the guest — see [TRACE_SPEC_ENV] for the two things
+     * it means that no environment variable can express.
+     */
+    fun traceSpec(): TraceSpec =
+        env.lastOrNull { it.name.trim() == TRACE_SPEC_ENV }
+            ?.let { parseTraceSpec(it.value) }
+            ?: TraceSpec.EMPTY
+
     private fun mapRow(index: Int, block: (DiagnosticSetting) -> DiagnosticSetting) =
         if (index !in rows.indices) this
         else copy(rows = rows.mapIndexed { i, row -> if (i == index) block(row) else row })
@@ -253,6 +277,18 @@ data class KnownEnv(
  * rendering and that is the largest unexamined thing in the stack.
  */
 val KNOWN_ENV: List<KnownEnv> = listOf(
+    // First, and it is not a graphics experiment: it is the one row that can
+    // answer a question without knowing which of five tools prints the answer.
+    // Every other entry in this list is a variable somebody read about; this one
+    // is the reason they should not have to. See [TraceSpec].
+    KnownEnv(
+        name = TRACE_SPEC_ENV,
+        secondary = traceSpecHelp(),
+        placeholder = "graphics:stubs,x86:errors",
+        caution = "Check the volume before you launch: the loud stops fill this " +
+            "container's whole log budget in under a minute, and the log says which " +
+            "source filled it.",
+    ),
     KnownEnv(
         name = "TU_AUTOTUNE_ALGO",
         secondary = "How the driver decides between drawing in on-chip tiles and drawing " +
@@ -456,6 +492,14 @@ class EmittedEnvironment {
  *   remove cross, which is what distinguishes it from a fixed one.
  * @param levelIsMachine set the value in mono, for a ladder whose stops are a
  *   tool's own words rather than English.
+ * @param volumes what a stop is known to *cost*, keyed by level, in one clause
+ *   that also says how it is known. **The ladder's third defect and the one it
+ *   hid best.** A ladder tells you the order of its stops and nothing about the
+ *   distance between them, so `seh` at *Everything* read as one notch past
+ *   *+ Stubs* and was 191,000 lines; `FEX_SILENTLOG=0` read as a switch and was
+ *   49 MB. Two twenty-minute device runs bought nothing because of it. Only
+ *   populated where a real number exists — an invented one would be worse than
+ *   the silence it replaces, so a stop with no entry shows nothing.
  */
 data class Loggable(
     val name: String,
@@ -470,6 +514,7 @@ data class Loggable(
     val oneSessionFrom: String? = null,
     val gate: String? = null,
     val levelIsMachine: Boolean = false,
+    val volumes: Map<String, String> = emptyMap(),
 ) {
     /** Stable across renames of the display text; used by [gate] and by tests. */
     val id: String get() = name
@@ -500,6 +545,9 @@ data class Loggable(
     val isAddable: Boolean get() = emit !is Emit.Fixed
 
     fun label(level: String): String = labels[level] ?: level
+
+    /** What [level] is known to cost, or null when nobody has measured it. */
+    fun volume(level: String): String? = volumes[level]
 
     /** Whether [level] is a stop this thing actually has. */
     fun isRealValue(level: String): Boolean = level in levels
@@ -534,6 +582,7 @@ private fun wineChannel(
     fixed: WineChannelLevel? = null,
     oneSessionFrom: WineChannelLevel? = null,
     addable: Boolean = true,
+    volumes: Map<WineChannelLevel, String> = emptyMap(),
 ) = Loggable(
     name = channel,
     // A real strategy even when the row is fixed. `fixedLevel` makes the
@@ -552,6 +601,7 @@ private fun wineChannel(
     fixedLevel = fixed?.name,
     addAt = addAt.name,
     oneSessionFrom = oneSessionFrom?.name,
+    volumes = volumes.mapKeys { (level, _) -> level.name },
 )
 
 /**
@@ -680,12 +730,17 @@ val LOGGABLES: List<Loggable> = listOf(
     Loggable(
         name = "FEX_SILENTLOG",
         emit = Emit.Variable("FEX_SILENTLOG", FIXED_FEX_SILENTLOG),
-        levels = listOf("0", "1"),
-        labels = mapOf("0" to "0  speaks", "1" to "1  silent"),
+        // Quietest first, as every other row here is ordered, so that moving
+        // right always means more output. That puts the default at the left.
+        levels = listOf("1", "0"),
+        labels = mapOf("1" to "1  silent", "0" to "0  speaks"),
         baseline = FIXED_FEX_SILENTLOG,
         secondary = "Whether the x86 translator may report. Silent hides its own " +
             "configuration mistakes as well as its crashes.",
-        addAt = "1",
+        caution = "Speaks is a firehose: it logs a pair of lines per unaligned atomic, " +
+            "which measured 49 MB in six minutes and drowns everything else in this log.",
+        addAt = "0",
+        oneSessionFrom = "0",
         levelIsMachine = true,
     ),
     Loggable(
@@ -757,7 +812,37 @@ val LOGGABLES: List<Loggable> = listOf(
         addAt = WineChannelLevel.WARNINGS,
         oneSessionFrom = WineChannelLevel.WARNINGS,
     ),
-    wineChannel("vulkan", "How Wine found and opened the graphics driver."),
+    // The only channel that can see the unix half of a Vulkan call. On a Proton
+    // 11 base that was where Resident Evil Requiem died:
+    //
+    //     msvcrt:_wassert (L"!status && \"vkCreateSwapchainKHR\"",
+    //                      L"dlls/winevulkan/loader_thunks.c", 3681)
+    //
+    // That assert is on the NTSTATUS of the unix call rather than on the
+    // VkResult — the unix side failed before Vulkan returned anything, so there
+    // is no VkResult to read. **This base does not get that far**, so the assert
+    // is recorded as the reason the channel is documented rather than as a thing
+    // to expect here. `seh` cannot substitute: its ERR tier is already on through
+    // `err+all`, and its trace tier measured 191,000 lines of
+    // RtlInitializeExtendedContext2 in one session with no dispatch in it.
+    wineChannel(
+        "vulkan",
+        "How Wine found and opened the graphics driver, and every call it forwards.",
+        caution = "Above warnings it is one line per Vulkan call, so a drawn frame is thousands.",
+        oneSessionFrom = WineChannelLevel.STUBS,
+        // **The Stubs entry is a warning that this stop is a no-op, and it cost a
+        // device run to learn.** This channel has no FIXME sites: everything
+        // above its WARN tier is `TRACE_(vulkan)`, so *+ Stubs* enables nothing
+        // that *+ Warnings* did not already have. A twenty-minute session was
+        // spent at that stop expecting the unix half of `vkCreateSwapchainKHR`
+        // and got no traces at all.
+        volumes = mapOf(
+            WineChannelLevel.STUBS to
+                "nothing beyond warnings — this channel has no stub tier, measured",
+            WineChannelLevel.EVERYTHING to
+                "thousands of lines a frame — one per forwarded Vulkan call, counted",
+        ),
+    ),
     wineChannel(
         channel = "oss",
         secondary = "The audio driver: what the guest wrote and what the device took.",
@@ -797,6 +882,18 @@ val LOGGABLES: List<Loggable> = listOf(
         // version of this.
         addAt = WineChannelLevel.EVERYTHING,
         oneSessionFrom = WineChannelLevel.EVERYTHING,
+        volumes = mapOf(
+            // Two facts and they point opposite ways, so both are stated. The
+            // documented cost is enormous; and relay is compiled out for
+            // arm64ec outright — `#if (…) && !defined(__arm64ec__)`,
+            // `dlls/ntdll/relay.c:37` — while every PE module here is ARM64X.
+            // So this may also print nothing whatsoever, and one session
+            // settles which.
+            WineChannelLevel.EVERYTHING to
+                "hundreds of megabytes in seconds if it works at all — relay is " +
+                    "compiled out for arm64ec, and whether an ARM64X module keeps " +
+                    "its thunks is unverified here",
+        ),
     ),
     wineChannel(
         channel = "seh",
@@ -977,11 +1074,61 @@ const val FIXED_DXVK_LOG_LEVEL: String = "info"
 const val FIXED_DXVK_LOG_PATH: String = "none"
 const val FIXED_VKD3D_DEBUG: String = "warn"
 const val FIXED_VKD3D_SHADER_DEBUG: String = "warn"
-const val FIXED_FEX_SILENTLOG: String = "0"
+/**
+ * Silent, because the translator's debug tier is not a diagnostic — it is the
+ * whole log.
+ *
+ * Measured on the device 2026-08-13, one Resident Evil Requiem session of about
+ * six minutes: 49 MB across the head and both tail files, ~508,000 lines, of
+ * which **99.9%** were a single pair repeated per instruction —
+ *
+ *     TF Exception: Code: 80000002 Address: <pc>
+ *     TF Handled unaligned atomic: new pc: <pc>
+ *
+ * every non-FEX source in the same session came to roughly 350 lines. It is
+ * `LogMan::Msg::DFmt` at `Source/Windows/ARM64EC/Module.cpp:716`, and `MSG_LEVEL`
+ * is a `constexpr = INFO` in `LogManager.h:41`, so the call is compiled in and
+ * cannot be built out. The rate limiter was dropping 9,000-18,000 lines at a
+ * time and still could not keep up.
+ *
+ * `SILENTLOG` is the only gate: `Source/Windows/Common/Logging.cpp:36-49`
+ * returns before `InstallHandler` when it is set, so nothing is formatted and
+ * nothing is written. Left as `0` the same file resolves `__wine_dbg_output`
+ * and writes into the pipe this app drains into the session log — so the cost
+ * is paid twice, once formatting and once draining.
+ *
+ * Set to `0` from the row to get it back for one session; that is the right
+ * move when FEX itself is the suspect, and only then.
+ */
+const val FIXED_FEX_SILENTLOG: String = "1"
 const val FIXED_FEX_OUTPUTLOG: String = "stderr"
 
 /** Unset: Mesa then picks its Android default, which is logcat. */
 const val FIXED_MESA_LOG: String = ""
+
+/**
+ * Also unset, and it is a **different variable from [FIXED_MESA_LOG]** — a
+ * distinction this project did not have and needed.
+ *
+ * `MESA_LOG` chooses the *sink* and `MESA_LOG_LEVEL` chooses the *severity
+ * floor*; they are parsed by two separate lines of `mesa_log_init_once`
+ * (`native/mesa/src/util/log.c:116-117` and `:134-137`). Turning the file logger
+ * on without saying anything about the level therefore gets whatever the build
+ * defaults to, which in a release build is `MESA_LOG_INFO`
+ * (`native/mesa/src/util/log.h:50-53`) — INFO and everything above it, from the
+ * whole of Mesa and not only Turnip.
+ *
+ * Left unset here for the same reason [FIXED_MESA_LOG] is: absent is Mesa's own
+ * choice and this layer has no measurement that says otherwise. The `driver`
+ * topic sets both together, which is the point of having a topic.
+ *
+ * Note the accepted words are `error`, `warning`, `info`, `debug` — **`warning`
+ * and not `warn`** (`log.c:76-89`). An unrecognised value is not an error: it
+ * yields `MESA_NUM_LOG_LEVELS` and `log.c:468-474` quietly resets to the default
+ * and warns once, which is exactly the silent no-op this facility exists to
+ * remove.
+ */
+const val FIXED_MESA_LOG_LEVEL: String = ""
 
 /**
  * The five Wine rows above, as the exact terms [WINEDEBUG_CHANNELS] is made of.
@@ -1015,6 +1162,15 @@ data class DiagnosticRow(
     val levelLabels: Map<String, String>,
     val level: String,
     val levelIsMachine: Boolean,
+    /**
+     * What the *currently selected* stop is known to cost, or null.
+     *
+     * A property of the row's level rather than of the row, so it changes as the
+     * dropdown moves — which is the only way it can answer the question it
+     * exists for, which is asked while the dropdown is open. See
+     * [Loggable.volumes] for why most stops have nothing here.
+     */
+    val volume: String?,
     /** True when this row is loud enough to remove itself after one launch. */
     val oneSession: Boolean,
     /**
@@ -1062,6 +1218,7 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             levelLabels = loggable.labels,
             level = loggable.fixedLevel.orEmpty(),
             levelIsMachine = loggable.levelIsMachine,
+            volume = loggable.volume(loggable.fixedLevel.orEmpty()),
             // These are sent every session, by definition.
             oneSession = false,
             nameEditable = false,
@@ -1083,6 +1240,7 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             levelLabels = loggable.labels,
             level = row.level,
             levelIsMachine = loggable.levelIsMachine,
+            volume = if (row.name.isEmpty()) null else loggable.volume(row.level),
             oneSession = row.isOneSession,
             // Always: this row is the user's, so its name is theirs to set even
             // when — especially when — it is still empty.
@@ -1209,9 +1367,23 @@ fun diagnosticEnvironment(
     return out
 }
 
-/** Every row's contribution, folded. There is no branch here on what a row is. */
+/**
+ * The trace spec's contribution and then every row's, folded.
+ *
+ * **The order is the precedence rule and it is free rather than arranged.** The
+ * topics go first and the hand-added rows second, so a row wins: a topic is the
+ * broad brush and a row is the instrument, and someone who has typed both means
+ * the second one. Nothing enforces that — Wine's parser takes the last term
+ * (`native/wine/dlls/ntdll/unix/debug.c:135-188`, left to right) and a
+ * `LinkedHashMap` takes the last `put`, so writing them in this order *is* the
+ * rule.
+ *
+ * There is still no branch here on what a row is, and now none on what a topic
+ * is either: both fold through the same [Emit] strategies.
+ */
 private fun emitted(diagnostics: ContainerDiagnostics): EmittedEnvironment {
     val out = EmittedEnvironment()
+    applyTraceSpec(diagnostics.traceSpec(), out)
     diagnostics.inForce().rows.forEach { row ->
         loggableFor(row.name).emit.apply(row.level, out)
     }
@@ -1227,8 +1399,14 @@ private fun emitted(diagnostics: ContainerDiagnostics): EmittedEnvironment {
  * one-session, names the mechanism, because naming it is what stops the dialog
  * reading as a scary-sounding thing people learn to dismiss.
  */
-fun costWarning(caution: String?, oneSession: Boolean): String = buildString {
+fun costWarning(caution: String?, oneSession: Boolean, volume: String? = null): String = buildString {
     if (!caution.isNullOrBlank()) append(caution).append(' ')
+    // **The number comes before the prose, when there is one.** "The log will
+    // hit its cap sooner" is true of every expensive stop and is therefore not
+    // information; "191,000 lines in one session, measured" is the sentence that
+    // stops somebody spending twenty minutes on the device to find that out.
+    // See [Loggable.volumes].
+    if (!volume.isNullOrBlank()) append("Expect ").append(volume).append(". ")
     append("The log will hit its cap sooner and the session will run slower.")
     if (oneSession) {
         append(" It removes itself after the next launch.")

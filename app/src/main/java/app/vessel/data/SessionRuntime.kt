@@ -700,6 +700,38 @@ class SessionRuntime @Inject constructor(
         // launch.
         layout.cacheDirectories.forEach { if (!it.isDirectory) it.mkdirs() }
 
+        // **A `.cache.write` left by a killed session stops the next one caching
+        // at all.** vkd3d-proton opens its stream archive with `_O_CREAT |
+        // _O_EXCL` (native/vkd3d/libs/vkd3d-common/file_utils.c:93), so the open
+        // fails outright if the file is already there, and it reports
+        //
+        //     vkd3d-proton:vkd3d_pipeline_library_disk_cache_notify_blob_insert:
+        //     Failed to open stream archive write file exclusively: …cache.write
+        //
+        // and then compiles every pipeline again, every launch. Its own comment
+        // calls the exclusive open safe because "this doesn't really happen in
+        // practice" — one process per application. That reasoning holds for a
+        // desktop and not for Vessel: sessions here are killed rather than
+        // closed, so the file outlives the process that made it routinely
+        // rather than never. Resident Evil Requiem compiles 3,025 shaders on
+        // each start, so the cost of getting this wrong is the whole startup.
+        //
+        // Deleted at start rather than at teardown for the same reason the file
+        // is there at all: teardown is the code path that does not run.
+        runCatching {
+            File(layout.caches, "vkd3d").listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".cache.write") }
+                ?.forEach { stale ->
+                    if (stale.delete()) {
+                        log.line(
+                            LogSource.VESSEL,
+                            LogLevel.INFO,
+                            "removed a stale vkd3d shader cache lock (${stale.name})",
+                        )
+                    }
+                }
+        }
+
         val turnip = turnipDriver(containerId)
         val fex = fexPackage(containerId)
         // `tmp` explicitly, even though the default derives the same directory:
@@ -1466,18 +1498,32 @@ class SessionRuntime @Inject constructor(
         guestOutput?.close()
         guestOutput = null
 
-        // Between the guest dying and the wake lock going, which is the only
-        // window in which the CPU is both idle and still ours.
-        //
         // The start-of-session catch-up may still be going; it is compiling the
-        // *previous* run's codemaps and this call wants to compile this run's,
-        // so two of them at once would have the compiler merging the same
-        // reference set from two processes. Cancelled rather than joined: the
-        // session is already over, the user is waiting, and whatever the
-        // catch-up does not finish is still in `codemap/new` for the next start.
+        // *previous* run's codemaps and a call here would want this run's, so
+        // two at once would have the compiler merging the same reference set
+        // from two processes. Cancelled rather than joined: the session is
+        // already over, the user is waiting, and whatever the catch-up does not
+        // finish is still in `codemap/new` for the next start.
         codeCacheJob?.cancelAndJoin()
         codeCacheJob = null
-        if (current != null) generateCodeCache(current, log)
+
+        // **And nothing is compiled here.** This used to call generateCodeCache
+        // once more, on the theory that teardown is the quiet moment. It cannot
+        // work from this point: the compiler is a Windows program, every path
+        // above has already run `wineserver -k`, and a Wine client with no
+        // server to talk to exits immediately. The session log said so on every
+        // run that reached it —
+        //
+        //     IV exec .../bin/wineserver -k
+        //     IV building the FEX code cache from 1 new codemap(s)
+        //     WV the FEX code cache compiler exited with 127 after 17 ms
+        //
+        // — 127 being "could not start it at all", 17 ms being how long that
+        // takes to discover. Moving the call above the kill would fix the exit
+        // code and buy a teardown that blocks for as long as the compile takes,
+        // which is the reason it was made a background job in the first place.
+        // So the catch-up at session start is now the only place it happens,
+        // and `codemap/new` carries the work forward until then.
 
         runCatching { display.stop() }
         releaseWakeLock()
@@ -2287,15 +2333,29 @@ class SessionRuntime @Inject constructor(
         const val FEX_CACHE_LOCATION_ENV = "FEX_APP_CACHE_LOCATION"
 
         /**
-         * How long teardown will wait for the cache compiler.
+         * How long the catch-up compile may run before it is given up on.
          *
-         * Generous because it is compiling every block a whole session
-         * translated, and bounded because it sits between Stop and the session
-         * being over. A run that needs longer than this loses that launch's
-         * codemap merge and nothing else — `process-all` leaves the reference
-         * codemaps it already wrote and picks the rest up next time.
+         * **Was 120 s, which was a Metro number.** It is not a teardown budget
+         * any more — nothing waits on this — so the only thing it has to be is
+         * longer than a real compile. Metro's code map is 15,399 blocks and
+         * finished inside the old limit; Resident Evil Requiem's is **394,170**,
+         * twenty-five times bigger, and was killed at 120 s on every single run:
+         *
+         *     IW Writing 394170 blocks to C:\vessel\fexcache\codemap/ready/re9.exe-…
+         *     WV the FEX code cache did not finish in 120 s and was killed
+         *
+         * Killed at the same point each time means the cache never appeared, so
+         * every launch paid full translation again — `caches/fex/…/cache` was
+         * still empty after seven sessions.
+         *
+         * A limit this long is safe because the job runs beside the desktop and
+         * is cancelled at teardown: it can waste background CPU, it cannot delay
+         * a launch or a stop. It exists only so a wedged compiler is eventually
+         * reaped. A run that still exceeds it loses that merge and nothing else
+         * — `process-all` keeps the reference codemaps it already wrote and
+         * resumes next start.
          */
-        const val CODE_CACHE_TIMEOUT_MS = 120_000L
+        const val CODE_CACHE_TIMEOUT_MS = 900_000L
 
         /** Long enough for a prefix with processes to shut down, short enough to feel like Stop. */
         const val KILL_TIMEOUT_MS = 8_000L

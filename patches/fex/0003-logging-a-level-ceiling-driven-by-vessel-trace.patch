@@ -1,0 +1,136 @@
+diff --git a/Source/Windows/Common/Logging.cpp b/Source/Windows/Common/Logging.cpp
+index 8980bda8d..67433f924 100644
+--- a/Source/Windows/Common/Logging.cpp
++++ b/Source/Windows/Common/Logging.cpp
+@@ -4,16 +4,119 @@
+ #include <FEXCore/Utils/LogManager.h>
+ 
+ #include <cstdio>
++#include <cstdlib>
++#include <string_view>
+ #include <ntstatus.h>
+ #include <windef.h>
+ #include <winternl.h>
+ #include <winnt.h>
+ 
++// Some Windows header sets define ERROR (and DEBUG) as object-like macros,
++// which would turn LogMan::DebugLevels::ERROR below into a syntax error rather
++// than into anything a reader could diagnose. Undefined after the Windows
++// includes and before any use; nothing else in this file wants either name.
++#ifdef ERROR
++#undef ERROR
++#endif
++#ifdef DEBUG
++#undef DEBUG
++#endif
++
+ namespace {
+ void (*WineDbgOut)(const char* Message);
+ FILE* LogFile;
+ 
++/* Vessel: the ceiling FEX's own messages are held to.
++ *
++ * Upstream has exactly two states -- FEX_SILENTLOG installs no handler at all,
++ * or it installs one that never looks at Level (MsgHandler below, which uses it
++ * only to pick a prefix character). There is no level option anywhere in FEX:
++ * the "Logging" group of FEXCore/Source/Interface/Config/Config.json.in:386-401
++ * is SilentLog, OutputLog, TelemetryDirectory and ProfileStats, and MSG_LEVEL is
++ * a constexpr = INFO in FEXCore/Include/FEXCore/Utils/LogManager.h:41, so every
++ * DFmt in the tree is compiled in and cannot be built out.
++ *
++ * What that costs, measured on the device 2026-08-13: one Resident Evil Requiem
++ * session of about six minutes with FEX_SILENTLOG=0 produced 49 MB and ~508,000
++ * lines, of which 99.9% were a single DFmt pair per unaligned atomic --
++ * Source/Windows/ARM64EC/Module.cpp:716. Every other source in the same session
++ * came to roughly 350 lines. So "let FEX speak" and "read anything else" were
++ * mutually exclusive, and Vessel's answer was to leave FEX silent.
++ *
++ * Which hides more than the noise. FEX's host-feature parser reports an
++ * unrecognised token with EFmt and nothing else (Source/Common/HostFeatures.cpp
++ * :149 and :180), so with the default a typo in FEX_HOSTFEATURES is completely
++ * invisible. Errors and asserts are what anyone wants from FEX; the DEBUG tier
++ * is what makes them unreadable.
++ *
++ * ERROR by default, therefore, and raisable from VESSEL_TRACE's x86 topic. The
++ * three FEX levels above ASSERT map onto the topic's stops rather than onto
++ * FEX's own vocabulary, because the whole point of that variable is that a user
++ * names what they want to see once, in one language, for the whole stack. */
++LogMan::DebugLevels MaxLevel = LogMan::DebugLevels::ERROR;
++
++LogMan::DebugLevels LevelFromWord(std::string_view Word) {
++  // `off` still lets an assert through: FEX_SILENTLOG is how a caller asks for
++  // true silence, and an assertion is the one message that is never noise.
++  if (Word == "off") {
++    return LogMan::DebugLevels::ASSERT;
++  }
++  if (Word == "stubs") {
++    return LogMan::DebugLevels::DEBUG;
++  }
++  if (Word == "everything") {
++    return LogMan::DebugLevels::INFO;
++  }
++  // `errors` and `warnings` are the same thing here, and honestly so: FEX has
++  // no warning tier to offer.
++  return LogMan::DebugLevels::ERROR;
++}
++
++/* Read the x86 topic out of VESSEL_TRACE, in the same grammar the rest of the
++ * stack reads it in: `topic[:level]`, comma separated, `all` meaning every
++ * topic. A specific `x86` term wins over `all` wherever it appears, which is
++ * why this scans to the end rather than stopping at the first match. */
++LogMan::DebugLevels CeilingFromEnvironment() {
++  const char* Spec = getenv("VESSEL_TRACE");
++  if (!Spec) {
++    return LogMan::DebugLevels::ERROR;
++  }
++
++  LogMan::DebugLevels Found = LogMan::DebugLevels::ERROR;
++  std::string_view Rest {Spec};
++  while (!Rest.empty()) {
++    const auto Comma = Rest.find(',');
++    std::string_view Term = Rest.substr(0, Comma);
++    Rest = Comma == std::string_view::npos ? std::string_view {} : Rest.substr(Comma + 1);
++
++    while (!Term.empty() && (Term.front() == ' ' || Term.front() == '\t')) {
++      Term.remove_prefix(1);
++    }
++    while (!Term.empty() && (Term.back() == ' ' || Term.back() == '\t')) {
++      Term.remove_suffix(1);
++    }
++
++    const auto Colon = Term.find(':');
++    const std::string_view Topic = Term.substr(0, Colon);
++    if (Topic != "x86" && Topic != "all") {
++      continue;
++    }
++    // A topic named with no level runs at `warnings`, which for FEX is ERROR.
++    Found = LevelFromWord(Colon == std::string_view::npos ? std::string_view {"warnings"} : Term.substr(Colon + 1));
++    if (Topic == "x86") {
++      break;
++    }
++  }
++  return Found;
++}
++
+ static void MsgHandler(LogMan::DebugLevels Level, const char* Message) {
++  // Before the format, not after: the flood this exists to stop is 508,000
++  // fextl::fmt::format calls, and a filter that formats first would remove the
++  // output while keeping most of the cost.
++  if (Level > MaxLevel) {
++    return;
++  }
+   const auto Output = fextl::fmt::format("{} {:X} {}\n", LogMan::DebugLevelStr(Level), GetCurrentThreadId(), Message);
+   if (WineDbgOut) {
+     WineDbgOut(Output.c_str());
+@@ -39,6 +142,11 @@ void Init() {
+     return;
+   }
+ 
++  // Vessel: read once, here, for the same reason SilentLog is read once here --
++  // there is nowhere else in the Windows entry path that runs before the first
++  // message, and a getenv per log line would be its own performance problem.
++  MaxLevel = CeilingFromEnvironment();
++
+   WineDbgOut = reinterpret_cast<decltype(WineDbgOut)>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "__wine_dbg_output"));
+   if (!WineDbgOut) {
+     const auto Path = fextl::fmt::format("{}\\fex-{}.log", getenv("LOCALAPPDATA"), GetCurrentProcessId());

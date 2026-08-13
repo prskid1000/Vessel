@@ -111,7 +111,12 @@ fun DiagnosticsPanel(
         if (row == null || caution == null || wasCautioned) {
             onChange(next)
         } else {
-            pending = costWarning(caution, row.isOneSession) to next
+            // The volume of the stop being moved *to*, not of the row as it
+            // stands: the dialog is the last moment before the cost is
+            // committed, and the figure it should carry is the one the user is
+            // about to pay. See `Loggable.volumes`.
+            val volume = loggableFor(row.name, row.turnip).volume(row.level)
+            pending = costWarning(caution, row.isOneSession, volume) to next
         }
     }
 
@@ -326,7 +331,15 @@ private fun InventoryRow(
         } else {
             null
         },
-        secondary = row.secondary,
+        // The volume rides on the secondary line rather than getting a column
+        // or a tone of its own. It belongs next to the description because it
+        // *is* part of the description — "every exception raised" and "191,000
+        // lines a session" are one fact about this stop, and separating them is
+        // how the second half stopped being read. Only present where a real
+        // number exists; see `Loggable.volumes`.
+        secondary = listOfNotNull(row.secondary, row.volume?.let { "Expect $it." })
+            .joinToString(" ")
+            .ifBlank { null },
         caution = row.caution,
         nameEditable = row.nameEditable,
         levelEditable = row.levelEditable,

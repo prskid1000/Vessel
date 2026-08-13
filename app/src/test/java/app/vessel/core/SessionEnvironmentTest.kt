@@ -764,7 +764,10 @@ class SessionEnvironmentTest {
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,
-                "FEX_SILENTLOG" to "0",
+                // Silent by default: FEX's debug tier was 99.9% of a 49 MB
+                // session log, a line pair per unaligned atomic. Add the
+                // diagnostics row at "0" to hear it for one session.
+                "FEX_SILENTLOG" to "1",
                 "FEX_OUTPUTLOG" to "stderr",
                 "FEX_TSOENABLED" to "1",
                 "FEX_HALFBARRIERTSOENABLED" to "0",

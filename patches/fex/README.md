@@ -72,3 +72,72 @@ DOS path arrives regardless. And it does not fix
 string concatenation and hands it to `NtOpenFile` — that one is worked around
 from Vessel's side by handing FEX a DOS path in the first place. See
 `docs/TODO.md`.
+
+## 0003-logging-a-level-ceiling-driven-by-vessel-trace.patch
+
+**FEX has two logging states and no level, and that is why Vessel ships it
+silent.**
+
+`Source/Windows/Common/Logging.cpp` is the entire Windows logging init.
+`MsgHandler` never compares `Level` against anything — it uses it only to pick a
+prefix character — and `FEX_SILENTLOG` decides, before `InstallHandler` runs,
+whether any handler exists at all. There is no level option to reach for: the
+`Logging` group of `FEXCore/Source/Interface/Config/Config.json.in:386-401` is
+`SilentLog`, `OutputLog`, `TelemetryDirectory` and `ProfileStats`, and nothing in
+the tree exposes a channel or a verbosity. `MSG_LEVEL` is
+`constexpr DebugLevels MSG_LEVEL = INFO` in
+`FEXCore/Include/FEXCore/Utils/LogManager.h:41`, the numeric maximum, so every
+`DFmt` guard is statically false and every one of them is compiled in.
+
+What that costs, measured on the device 2026-08-13: one Resident Evil Requiem
+session of about six minutes at `FEX_SILENTLOG=0` produced **49 MB and ~508,000
+lines**, of which 99.9% were a single pair per unaligned atomic —
+
+```
+TF Exception: Code: 80000002 Address: <pc>
+TF Handled unaligned atomic: new pc: <pc>
+```
+
+`LogMan::Msg::DFmt` at `Source/Windows/ARM64EC/Module.cpp:716`. Every other
+source in that session came to roughly 350 lines. So "let FEX speak" and "read
+anything else in this log" were mutually exclusive.
+
+**Silence hides the things worth hearing.** FEX's host-feature parser reports an
+unrecognised token with `EFmt` and nothing else
+(`Source/Common/HostFeatures.cpp:149`, `:180`), so with the shipped default a
+typo in `FEX_HOSTFEATURES` is completely invisible — the same shape of silent
+no-op `docs/LOGGING.md` catalogues for `WINEDEBUG`.
+
+The patch adds a ceiling to `MsgHandler`, defaulting to `ERROR`, read once in
+`Init()` from the `x86` topic of `VESSEL_TRACE`:
+
+| `VESSEL_TRACE` | ceiling | what survives |
+|---|---|---|
+| unset, or `x86:errors` / `x86:warnings` | `ERROR` | asserts, errors, host-feature complaints |
+| `x86:stubs` | `DEBUG` | the above plus the unaligned-atomic tier |
+| `x86:everything` | `INFO` | everything, i.e. today's `FEX_SILENTLOG=0` |
+| `x86:off` | `ASSERT` | assertions only |
+
+Three notes on the shape:
+
+- **The filter is before the format, not after.** The cost being removed is
+  508,000 `fextl::fmt::format` calls, and a filter that formatted first would
+  drop the output while keeping most of the expense.
+- **`FEX_SILENTLOG` still means silence** and is unchanged. This adds a middle
+  where there was none; it does not replace the switch.
+- **`VESSEL_TRACE` is read here rather than translated by the app** because
+  there is no FEX variable to translate it into. That is one of the two reasons
+  Vessel passes the raw spec string through to the guest; see `docs/TRACING.md`.
+
+`windef.h` and friends define `ERROR` (and sometimes `DEBUG`) as object-like
+macros in some header sets, which would turn `LogMan::DebugLevels::ERROR` into a
+syntax error rather than into anything diagnosable. The patch `#undef`s both
+after the Windows includes; nothing else in the file wants either name.
+
+**Not compiled.** Generated against the pinned tree and verified with
+`git apply --check`; no FEX build has been run against it.
+
+**Policy, again.** Not for upstream, for the reason stated at the top of this
+file — and pointedly so for this one, since the honest version of this change is
+a real config option in `Config.json.in` rather than a Vessel environment
+variable read from a Windows-only file.

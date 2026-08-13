@@ -210,6 +210,15 @@ private fun SessionListRow(row: SessionRow, onClick: () -> Unit, onDelete: (() -
             if (row.hasErrors && row.status == SessionExit.OK) {
                 Text("errors logged", style = Vessel.type.monoSmall, color = Vessel.colors.warn)
             }
+            // **`98% trace/fex`, and it belongs on this row rather than inside
+            // the log.** Both of the volume disasters this product has measured
+            // were single sources drowning everything else, and in both cases
+            // the fact was recovered by hand after the run rather than seen.
+            // Beside the size, because it is the sentence that explains the
+            // size: 49 MB means nothing until it says what filled it.
+            row.dominantSource?.let {
+                Text(it, style = Vessel.type.monoSmall, color = Vessel.colors.textMuted)
+            }
         }
     }
 }
@@ -242,7 +251,12 @@ private fun SessionLogsPreview() {
                 containerName = "Default",
                 rows = listOf(
                     SessionRow(3, "just now", "running", "412 KB", SessionExit.RUNNING, false),
-                    SessionRow(2, "12 minutes ago", "4 m 07 s", "2.1 MB", SessionExit.CRASHED, true),
+                    SessionRow(
+                        2, "12 minutes ago", "4 m 07 s", "2.1 MB", SessionExit.CRASHED, true,
+                        // The shape of the row that would have saved a session:
+                        // 49 MB, and one source is all of it.
+                        dominantSource = "99% trace/fex",
+                    ),
                     SessionRow(1, "2 hours ago", "41 s", "88 KB", SessionExit.OK, true),
                     SessionRow(0, "3 days ago", "1 h 12 m", "8.0 MB", SessionExit.OK, false),
                 ),

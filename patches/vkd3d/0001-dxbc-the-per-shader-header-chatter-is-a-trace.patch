@@ -1,0 +1,52 @@
+diff --git a/libs/vkd3d-shader/dxbc.c b/libs/vkd3d-shader/dxbc.c
+index 5c29b6f2..a467f9ba 100644
+--- a/libs/vkd3d-shader/dxbc.c
++++ b/libs/vkd3d-shader/dxbc.c
+@@ -63,16 +63,33 @@ static void read_float(const char **ptr, float *f)
+     read_dword(ptr, (DWORD *)f);
+ }
+ 
++/* Vessel: TRACE, not WARN.
++ *
++ * These fire on every DXBC blob that is parsed, on a healthy run, by design --
++ * the DWORDs being skipped are reserved fields the container format specifies,
++ * and skipping them is normal operation rather than a problem. At WARN they are
++ * the single largest source of output in a session: measured on the device
++ * 2026-08-13, one Resident Evil Requiem run logged 26,966 lines from this
++ * channel across 3,025 shaders, which was 98% of the whole session once FEX was
++ * silenced. Eight lines per shader -- a checksum line plus 1+4 here from
++ * parse_dxbc's skip_dword_unknown(&ptr, 4), plus 1+1 from the signature chunk --
++ * times 3,025 is 24,200, within 10% of what was counted.
++ *
++ * Nothing is lost. Vessel runs VKD3D_SHADER_DEBUG at `warn` deliberately, so
++ * that a shader that fails to translate says so; that tier is exactly what this
++ * noise was burying. TRACE keeps these reachable for anyone who wants them
++ * (VKD3D_SHADER_DEBUG=trace) and takes them out of the tier that has to stay
++ * readable. */
+ static void skip_dword_unknown(const char **ptr, unsigned int count)
+ {
+     unsigned int i;
+     DWORD d;
+ 
+-    WARN("Skipping %u unknown DWORDs:\n", count);
++    TRACE("Skipping %u unknown DWORDs:\n", count);
+     for (i = 0; i < count; ++i)
+     {
+         read_dword(ptr, &d);
+-        WARN("\t0x%08x\n", d);
++        TRACE("\t0x%08x\n", d);
+     }
+ }
+ 
+@@ -121,7 +138,10 @@ static int parse_dxbc(const char *data, size_t data_size,
+         return VKD3D_ERROR_INVALID_ARGUMENT;
+     }
+ 
+-    WARN("Ignoring DXBC checksum.\n");
++    /* Vessel: TRACE, not WARN -- see skip_dword_unknown. vkd3d ignores the DXBC
++     * checksum on every blob it has ever parsed; a message that is true of every
++     * call is not a warning about anything. */
++    TRACE("Ignoring DXBC checksum.\n");
+     skip_dword_unknown(&ptr, 4);
+ 
+     read_dword(&ptr, &version);
