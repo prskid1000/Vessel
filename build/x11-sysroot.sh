@@ -85,11 +85,18 @@ PACKAGES=(
   # --disable-openssl keeps it from linking a host OpenSSL for its test suite.
   "$GNU_BASE/nettle/nettle-$NETTLE_VERSION.tar.gz|nettle-$NETTLE_VERSION|--disable-openssl --disable-documentation --enable-static --disable-shared --with-include-path=$SYSROOT/usr/include --with-lib-path=$SYSROOT/usr/lib"
   "$GNU_BASE/libtasn1/libtasn1-$LIBTASN1_VERSION.tar.gz|libtasn1-$LIBTASN1_VERSION|--disable-doc --enable-static --disable-shared"
+  # ac_cv_func_nettle_rsa_oaep_sha256_encrypt=yes is not optional. GnuTLS
+  # decides whether to compile its own RSA-OAEP backport with AC_CHECK_FUNC,
+  # which cannot link-test in a cross build, so it always concludes the
+  # function is missing and compiles backport/rsa-sign-tr.c -- which defines
+  # nettle_rsa_compute_root_tr, a symbol nettle 3.10 already exports. The link
+  # then fails on the duplicate. Forcing the cache variable tells configure
+  # what is true of the nettle built two lines above.
   # GnuTLS itself, kept as small as it will go: no PKCS#11, no IDN, no docs,
   # no command line tools, no C++ binding, and its own bundled unistring so
   # the sysroot does not need a fifth package. Shared, because bcrypt dlopens
   # it by SONAME at runtime.
-  "$GNUTLS_BASE/v$GNUTLS_SERIES/gnutls-$GNUTLS_VERSION.tar.xz|gnutls-$GNUTLS_VERSION|--without-p11-kit --without-idn --without-tpm --without-tpm2 --disable-doc --disable-tools --disable-tests --disable-cxx --disable-nls --with-included-unistring --enable-shared"
+  "$GNUTLS_BASE/v$GNUTLS_SERIES/gnutls-$GNUTLS_VERSION.tar.xz|gnutls-$GNUTLS_VERSION|--without-p11-kit --without-idn --without-tpm --without-tpm2 --disable-doc --disable-tools --disable-tests --disable-cxx --disable-nls --with-included-unistring --enable-shared ac_cv_func_nettle_rsa_oaep_sha256_encrypt=yes"
 )
 
 # The stamp is the whole pin set, so changing any one component invalidates it.
