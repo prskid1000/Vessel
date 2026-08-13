@@ -202,10 +202,21 @@ class ComponentStore @Inject constructor(
      * one a user takes when they change the build by hand. The risk of the old
      * rule was neither bounded nor loud.
      *
-     * Identity is the payload digest, not the version code — see
-     * [WcpProfile.payloadSha256]. A rebuild that changes nothing produces the
-     * same digest and is not adopted, so this re-points on a real change
-     * rather than on every build number that happens to increment.
+     * **Adoption is by version code, and the payload digest works one layer
+     * down.** An earlier version of this comment claimed adoption itself was
+     * digest-keyed, which is not true and is worth stating plainly rather than
+     * quietly correcting: the store's directories *are* the version codes, so
+     * choosing between installed versions can only be a comparison of those.
+     *
+     * The digest ([WcpProfile.payloadSha256]) decides re-staging instead —
+     * `SessionRuntime.payloadIdentity` compares it to what a prefix was last
+     * given, so a rebuild that keeps its version code but changes its bytes is
+     * still copied into `system32` again. That is the case a version-code
+     * comparison cannot see, and it is covered, just not here.
+     *
+     * The two together are what make a component change visible: the code says
+     * *which* version a container uses, the digest says whether that version's
+     * bytes have moved underneath it.
      */
     suspend fun adoptLatest(containerId: String): Map<ComponentType, Int> =
         withContext(Dispatchers.IO) {

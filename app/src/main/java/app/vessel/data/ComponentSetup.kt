@@ -13,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -151,6 +152,15 @@ class ComponentSetup @Inject constructor(
     private var started = false
 
     /**
+     * Whether [start] has been called, set synchronously by it.
+     *
+     * Distinct from [started], which is the "run at most once" latch and is
+     * only touched inside the coroutine under [gate]. This one has to be
+     * readable by [awaitFinished] the instant [start] returns.
+     */
+    private val requested = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
      * Run the pass, at most once per process.
      *
      * Called from the Activity, which is recreated on every rotation and on every
@@ -161,6 +171,9 @@ class ComponentSetup @Inject constructor(
      * process would only produce the same message again.
      */
     fun start() {
+        // Set here, not inside the coroutine, so [awaitFinished] cannot observe
+        // a caller that has already asked for the pass as one that never did.
+        requested.set(true)
         scope.launch {
             gate.withLock {
                 if (started) return@withLock
@@ -168,6 +181,38 @@ class ComponentSetup @Inject constructor(
                 install()
             }
         }
+    }
+
+    /**
+     * Suspend until the bundle's packages are in the store.
+     *
+     * **A launch that does not wait for this runs the previous build.**
+     * [start] hands the work to a background scope, and a session's
+     * `adoptLatest` used to race it: on the first launch after an APK update
+     * the new `.wcp` was still being unpacked, so adoption saw only the old
+     * version and pinned the container to it. Observed on 2026-08-13 with
+     * FEXCore — 260803 installed, container referencing 260802, and only the
+     * *second* launch picked it up. That is the same class of failure as
+     * every stale-component bug before it, one layer further down: the store
+     * was right, adoption was right, and adoption simply ran too early.
+     *
+     * Returns as soon as the pass is finished, whichever way it finished.
+     * [SetupPhase.INCOMPLETE] is a finished pass — a package that ran out of
+     * space is not going to arrive by waiting longer, and a session that can
+     * still start with what did install should be allowed to.
+     *
+     * Gated on [requested] rather than on the phase being [SetupPhase.IDLE].
+     * Waiting for "not IDLE" would reintroduce the race it exists to close:
+     * [start] hands off to a coroutine, so a caller can arrive before that
+     * coroutine has moved the phase off IDLE, read IDLE, and carry on into
+     * exactly the early adoption this prevents. [requested] is set
+     * synchronously inside [start], so by the time any caller could observe
+     * the effects of [start] it is already true. A process that never calls
+     * [start] — every unit test — returns immediately.
+     */
+    suspend fun awaitFinished() {
+        if (!requested.get()) return
+        state.first { it.phase == SetupPhase.READY || it.phase == SetupPhase.INCOMPLETE }
     }
 
     private suspend fun install() {

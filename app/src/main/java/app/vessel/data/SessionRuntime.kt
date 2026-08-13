@@ -195,6 +195,7 @@ class SessionRuntime @Inject constructor(
     private val runner: WineProcessRunner,
     private val guest: GuestProcessTree,
     private val display: SessionDisplayServer,
+    private val setup: ComponentSetup,
     private val inputProfiles: InputProfileRepository,
     private val json: Json,
 ) : PrefixBootstrap {
@@ -675,6 +676,16 @@ class SessionRuntime @Inject constructor(
         val layout = paths.of(containerId)
 
         mark(STEP_COMPONENTS, ProvisionStatus.RUNNING)
+        // **Before adoption, not after.** The bundle's packages install on a
+        // background scope, and adoption used to race that: on the first launch
+        // after an APK update the new `.wcp` was still unpacking, so the newest
+        // version did not exist yet and the container was pinned to the previous
+        // one. Measured with FEXCore — 260803 installed, container on 260802,
+        // and only the second launch corrected it. Every stale-component bug on
+        // this project has ended in a session that ran an old build and was read
+        // as evidence about a new one; this is that bug with the store and the
+        // adoption both correct and only the ordering wrong.
+        setup.awaitFinished()
         val adopted = components.adoptLatest(containerId)
         // **Say it, every time, before anything else can be blamed for it.**
         //
@@ -689,9 +700,10 @@ class SessionRuntime @Inject constructor(
             log.line(
                 LogSource.VESSEL,
                 LogLevel.WARN,
-                "${type.label} is pinned at $referenced but $newest is installed — " +
-                    "a prefix keeps the ${type.label} it was booted against, so this " +
-                    "session runs $referenced. Create a new container to use $newest.",
+                "${type.label} is at $referenced but $newest is installed — this " +
+                    "session runs $referenced. Adoption is forward-only and ran " +
+                    "before this line, so a reference still behind here means the " +
+                    "newer version was not adoptable, not that it was skipped.",
             )
         }
         val wineDir = components.directoryFor(containerId, ComponentType.WINE)
