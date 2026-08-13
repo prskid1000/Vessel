@@ -99,6 +99,26 @@ const val WGL_DLL: String = "opengl32"
 const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
 
 /**
+ * `WINE_DISABLE_FULLSCREEN_HACK`, which Vessel always sets.
+ *
+ * Proton carries a fullscreen hack in `dlls/win32u/vulkan.c` that upstream Wine
+ * does not have, and it defaults to **on**: `:4252` reads this variable and
+ * enables the hack unless it is present and non-zero. Nothing set it here,
+ * because on 11.14 there was nothing to set.
+ *
+ * What it does is give the program a swapchain at its own resolution and then
+ * upscale into the real one, per frame, with a compute pipeline — sampler,
+ * descriptor set and a dispatch per image (`init_fs_hack_images`, `:2363`). It
+ * also forces the swapchain to `B8G8R8A8_UNORM` with `STORAGE_BIT` usage and
+ * turns on `shaderStorageImageWriteWithoutFormat` (`:926`) to do it.
+ *
+ * Vessel already scales every frame itself, in the compositor, with SGSR. So on
+ * this base each frame was being upscaled twice, and the second pass was the one
+ * nobody asked for: measured in Metro at 30 fps, GPU went from ~30% to 100%.
+ */
+const val WINE_DISABLE_FULLSCREEN_HACK_ENV: String = "WINE_DISABLE_FULLSCREEN_HACK"
+
+/**
  * The only variables `wineboot` and `regedit` are given while a prefix is being
  * built.
  *
@@ -305,6 +325,10 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "VKD3D_SHADER_DEBUG",
     "VKD3D_LOG_FILE",
     "TU_DEBUG",
+    // Proton's fullscreen hack, which Vessel must never run. Reserved rather
+    // than merely defaulted because leaving it switchable would let a container
+    // turn on a second, redundant upscale of every frame. See where it is set.
+    WINE_DISABLE_FULLSCREEN_HACK_ENV,
     // Composed from `display.fpsLimit` alongside the compositor's own pacing, so
     // that one setting caps the renderer and the blit together. Reserved because
     // a container able to write either of these directly could set a renderer cap
@@ -830,6 +854,17 @@ fun sessionEnvironment(
     //
     // Read `wineserver`'s startup lines for the mode it actually chose.
     environment["WINEFSYNC"] = "0"
+
+    // Off, always, and reserved so no container can put it back. Proton's
+    // fullscreen hack upscales every frame with a compute dispatch of its own,
+    // which on Vessel is the second such pass in the same frame — the
+    // compositor's SGSR is the first. See [WINE_DISABLE_FULLSCREEN_HACK_ENV].
+    //
+    // It is also a suspect for the vkCreateSwapchainKHR failure: with the hack
+    // on, swapchain creation runs init_fs_hack_images() and needs
+    // shaderStorageImageWriteWithoutFormat, neither of which is on the path a
+    // plain ICD was wired up for in patches/wine/0009.
+    environment[WINE_DISABLE_FULLSCREEN_HACK_ENV] = "1"
 
     // FEX's memory-ordering behaviour is fixed here, not offered as settings.
     //

@@ -365,6 +365,35 @@ class SessionEnvironmentTest {
     }
 
     @Test
+    fun `proton's fullscreen hack is off and cannot be switched back on`() {
+        assertEquals("1", env()["WINE_DISABLE_FULLSCREEN_HACK"])
+
+        // Reserved, so a manifest cannot re-enable it. The hack upscales every
+        // frame with its own compute dispatch, which on Vessel is the second
+        // such pass in a frame the compositor already scales with SGSR.
+        assertTrue("WINE_DISABLE_FULLSCREEN_HACK" in RESERVED_SESSION_ENV)
+
+        val tryToEnable = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "g", title = "G",
+                    params = listOf(
+                        ParamSpec(
+                            key = "wine.fshack",
+                            title = "Fullscreen hack",
+                            type = ParamType.ENUM,
+                            default = JsonPrimitive("0"),
+                            env = "WINE_DISABLE_FULLSCREEN_HACK",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertEquals("1", env(manifest = tryToEnable)["WINE_DISABLE_FULLSCREEN_HACK"])
+    }
+
+    @Test
     fun `a container can turn fsync on where the kernel allows futex_waitv`() {
         // The override that matters now runs the other way: the default is off,
         // and a device whose seccomp policy permits arm64 449 opts back in. This
@@ -764,6 +793,7 @@ class SessionEnvironmentTest {
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
                 "WINEFSYNC" to "0",
+                "WINE_DISABLE_FULLSCREEN_HACK" to "1",
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
@@ -809,7 +839,10 @@ class SessionEnvironmentTest {
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
                 "ADRENOTOOLS_DRIVER_NAME" to turnip.libraryName,
-                "FEX_SILENTLOG" to "0",
+                // Silent by default: FEX's debug tier was 99.9% of a 49 MB
+                // session log, a line pair per unaligned atomic. Add the
+                // diagnostics row at "0" to hear it for one session.
+                "FEX_SILENTLOG" to "1",
                 "FEX_OUTPUTLOG" to "stderr",
                 "FEX_TSOENABLED" to "1",
                 "FEX_HALFBARRIERTSOENABLED" to "0",

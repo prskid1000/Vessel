@@ -360,10 +360,14 @@ class ContainerDiagnosticsTest {
             mapOf("VKD3D_SHADER_DEBUG" to "fixme"),
             diagnosticEnvironment(row("VKD3D_SHADER_DEBUG", "fixme")),
         )
+        // "0" is the off-baseline stop now that silent is the default, so it is
+        // the one that has anything to write. A row at "1" contributes nothing,
+        // which is the point of Emit.Variable comparing against the baseline.
         assertEquals(
-            mapOf("FEX_SILENTLOG" to "1"),
-            diagnosticEnvironment(row("FEX_SILENTLOG", "1")),
+            mapOf("FEX_SILENTLOG" to "0"),
+            diagnosticEnvironment(row("FEX_SILENTLOG", "0")),
         )
+        assertEquals(emptyMap<String, String>(), diagnosticEnvironment(row("FEX_SILENTLOG", "1")))
         assertEquals(mapOf("MESA_LOG" to "file"), diagnosticEnvironment(row("MESA_LOG", "file")))
     }
 

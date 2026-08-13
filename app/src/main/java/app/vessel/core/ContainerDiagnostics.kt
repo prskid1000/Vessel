@@ -680,12 +680,17 @@ val LOGGABLES: List<Loggable> = listOf(
     Loggable(
         name = "FEX_SILENTLOG",
         emit = Emit.Variable("FEX_SILENTLOG", FIXED_FEX_SILENTLOG),
-        levels = listOf("0", "1"),
-        labels = mapOf("0" to "0  speaks", "1" to "1  silent"),
+        // Quietest first, as every other row here is ordered, so that moving
+        // right always means more output. That puts the default at the left.
+        levels = listOf("1", "0"),
+        labels = mapOf("1" to "1  silent", "0" to "0  speaks"),
         baseline = FIXED_FEX_SILENTLOG,
         secondary = "Whether the x86 translator may report. Silent hides its own " +
             "configuration mistakes as well as its crashes.",
-        addAt = "1",
+        caution = "Speaks is a firehose: it logs a pair of lines per unaligned atomic, " +
+            "which measured 49 MB in six minutes and drowns everything else in this log.",
+        addAt = "0",
+        oneSessionFrom = "0",
         levelIsMachine = true,
     ),
     Loggable(
@@ -999,7 +1004,33 @@ const val FIXED_DXVK_LOG_LEVEL: String = "info"
 const val FIXED_DXVK_LOG_PATH: String = "none"
 const val FIXED_VKD3D_DEBUG: String = "warn"
 const val FIXED_VKD3D_SHADER_DEBUG: String = "warn"
-const val FIXED_FEX_SILENTLOG: String = "0"
+/**
+ * Silent, because the translator's debug tier is not a diagnostic — it is the
+ * whole log.
+ *
+ * Measured on the device 2026-08-13, one Resident Evil Requiem session of about
+ * six minutes: 49 MB across the head and both tail files, ~508,000 lines, of
+ * which **99.9%** were a single pair repeated per instruction —
+ *
+ *     TF Exception: Code: 80000002 Address: <pc>
+ *     TF Handled unaligned atomic: new pc: <pc>
+ *
+ * every non-FEX source in the same session came to roughly 350 lines. It is
+ * `LogMan::Msg::DFmt` at `Source/Windows/ARM64EC/Module.cpp:716`, and `MSG_LEVEL`
+ * is a `constexpr = INFO` in `LogManager.h:41`, so the call is compiled in and
+ * cannot be built out. The rate limiter was dropping 9,000-18,000 lines at a
+ * time and still could not keep up.
+ *
+ * `SILENTLOG` is the only gate: `Source/Windows/Common/Logging.cpp:36-49`
+ * returns before `InstallHandler` when it is set, so nothing is formatted and
+ * nothing is written. Left as `0` the same file resolves `__wine_dbg_output`
+ * and writes into the pipe this app drains into the session log — so the cost
+ * is paid twice, once formatting and once draining.
+ *
+ * Set to `0` from the row to get it back for one session; that is the right
+ * move when FEX itself is the suspect, and only then.
+ */
+const val FIXED_FEX_SILENTLOG: String = "1"
 const val FIXED_FEX_OUTPUTLOG: String = "stderr"
 
 /** Unset: Mesa then picks its Android default, which is logcat. */
