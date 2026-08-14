@@ -1300,7 +1300,27 @@ fun sessionEnvironment(
     // itself against real present completion, and Vessel composites through the
     // Android surface anyway, so the timing they would report is not the timing
     // the user sees.
-    environment["VKD3D_DISABLE_EXTENSIONS"] = "VK_KHR_present_id2,VK_KHR_present_wait2"
+    // **The version 1 pair is here for the same reason, and it closes an
+    // unbounded wait.** Disabling only v2 left `chain->present.wait` true,
+    // because the v1 feature bit alone satisfies it (`swapchain.c:1497`), and
+    // the swapchain's wait thread then calls `vkWaitForPresentKHR` with a
+    // `UINT64_MAX` timeout (`swapchain.c:3699`). Only a WSI backend can retire
+    // a present id, and Mesa has no Android backend in `src/vulkan/wsi` at all,
+    // so that is an uninterruptible wait on a path nothing here implements.
+    // Disabling v1 costs exactly what disabling v2 costs, for the reason above:
+    // Vessel composites through the Android surface, so present timing does not
+    // describe the timing a user sees either way.
+    //
+    // **It was not what hung Requiem, and this is recorded so it is not
+    // re-tried as a fix.** With both pairs disabled -- `has_extension` logs all
+    // four names, so this does reach the guest -- Requiem hung in the same
+    // place, and that run is what finally named the cause: the lock-order
+    // inversion in `docs/TODO.md`. One trap for whoever tests this again:
+    // `dxgi_vk_swap_chain_init_sync_objects` prints `Ensure maximum latency of
+    // N frames with KHR_present_wait` *unconditionally*, so that line is not
+    // evidence that present wait is in use. The `has_extension` lines are.
+    environment["VKD3D_DISABLE_EXTENSIONS"] =
+        "VK_KHR_present_id,VK_KHR_present_wait,VK_KHR_present_id2,VK_KHR_present_wait2"
 
     environment["TU_DEBUG"] = tuDebugFlags(profile, manifest).joinToString(",")
 
