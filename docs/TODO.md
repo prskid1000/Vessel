@@ -430,6 +430,48 @@ others, and they landed on the morning the menu stopped. See the entry below.
 
 ---
 
+## Opened 2026-08-14, evening
+
+- [ ] **#52 — the game is told it has 15.6 GB of VRAM, because on a UMA part
+  that is what the device-local heap is.** `dxgi_adapter.cpp:440-480` sums the
+  Vulkan `DEVICE_LOCAL` heaps and reports the total as
+  `DedicatedVideoMemory`. Adreno shares memory with the CPU, so the sum is the
+  whole of system RAM, and the number Requiem sizes its streaming and texture
+  pools from is the same 15.6 GB that Android, FEX, wineserver and shader
+  compilation are living in. Measured alongside it: 330 MB free, `am_low_memory`
+  in logcat, and the game process at ~3.9 GB RSS.
+
+  This applies to D3D12 titles too — vkd3d-proton uses DXVK's DXGI, which is why
+  `DxgiFactory::QueryInterface` appears in a Requiem log at all.
+
+  **Not proven to have caused anything yet**, and that matters: no `lmkd` line
+  names the game, so nothing here is established as the cause of the exit 1.
+  What makes it worth ranking is the mechanism it would explain — an allocator
+  sizing itself to a number the device cannot honour, commits failing under
+  pressure, and a caller that does not check writing into the page it believed
+  it had. That is exactly the shape of #51.
+
+  DXVK already has the knob and Vessel already exposes it: `dxgi.maxDeviceMemory`
+  and `dxgi.maxSharedMemory`, in MB, through the `DXVK_CONFIG` diagnostics row.
+  *Done when:* a run with the report capped is compared against one without, on
+  RSS, on `am_low_memory`, and on whether #51 still reproduces. If it helps, this
+  stops being a diagnostics row and becomes a container parameter, because every
+  device will want a different number.
+
+- [ ] **#53 — `0030` prints `took it at 0` again, and this time it is the frame
+  walk.** A six-minute wait was reported six times: thread `0290` on the section
+  at `re9.exe +0xEAA17D0`, held by `028c`, with both the site and the caller
+  zero. #49 records that the *first* zero was a missing recording site in
+  `RtlTryEnterCriticalSection`, fixed; the rewrite then walked the `x29` chain to
+  find the first return address outside ntdll. This is the first time it has
+  fired since, and zero is what that walk stores when it finds nothing.
+
+  So the instrument has a blind spot exactly where it was rebuilt to see: an
+  acquisition whose frames do not leave ntdll in a form the walk understands.
+  *Done when:* the walk records *something* rather than zero — the entry thunk's
+  own return address is worth more than nothing, and the EC context's guest RIP
+  is worth more than that.
+
 ## Backlog
 
 Real work, none of it blocking a frame.
