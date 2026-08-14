@@ -155,7 +155,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 22
+    const val SEED_VERSION: Int = 23
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -648,6 +648,41 @@ object PrefixRegistry {
         values = listOf(RegistryValue("Graphics", "x11")),
     )
 
+    /**
+     * Wine's Bluetooth driver, marked disabled.
+     *
+     * Every session logged, at error level,
+     * `ntoskrnl:ZwLoadDriver failed to create driver L"…\Services\winebth": c00000e5`
+     * — `STATUS_INTERNAL_ERROR`, because `winebth.sys` talks to BlueZ over DBus
+     * and an Android app has neither a DBus session nor permission to reach the
+     * adapter.
+     *
+     * **This key on its own does nothing, and it was measured doing nothing.**
+     * It was added once before, shipped, and the driver still loaded: Wine's PnP
+     * path reaches `ZwLoadDriver` from the device node's `SPDRP_SERVICE` and
+     * never reads `Start` (`dlls/ntoskrnl.exe/pnp.c`, `load_function_driver`).
+     * So it was reverted rather than left as a key a future reader would assume
+     * worked. `patches/wine/0031` is the other half — it makes that path honour
+     * `SERVICE_DISABLED`, which is what Windows does — and only with both does
+     * the driver stop loading. Neither half is useful alone.
+     *
+     * Disabled rather than removed, because the service entry is Wine's own and
+     * `wineboot` recreates it: a deleted key would come back on the next prefix
+     * update with the failure back with it. `Start` is the value the loader
+     * reads, so setting it is the change that survives.
+     *
+     * Nothing here wants the driver. Gamepads arrive over the app's own bus
+     * (`patches/wine/0016`), not Bluetooth HID, so this turns off no path a user
+     * has — only an error line per session that never described anything they
+     * could act on.
+     *
+     * `4` is `SERVICE_DISABLED`, the value `sc config start= disabled` writes.
+     */
+    val bluetoothService: RegistryKey = RegistryKey(
+        path = """HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\winebth""",
+        values = listOf(RegistryValue.dword("Start", 4)),
+    )
+
     private val driveTypesReset = RegistryKey(
         path = """HKEY_LOCAL_MACHINE\Software\Wine\Drives""",
         remove = true,
@@ -849,6 +884,7 @@ object PrefixRegistry {
         windowsDarkMode,
         toolsPath,
         graphicsDriver,
+        bluetoothService,
         driveTypesReset,
         driveTypes(letters),
         consoleColours,

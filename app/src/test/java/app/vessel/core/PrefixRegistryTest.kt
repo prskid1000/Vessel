@@ -1,6 +1,7 @@
 package app.vessel.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -177,10 +178,28 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(22, PrefixRegistry.SEED_VERSION)
-        // Fourteen keys, the three the seed deletes, and the stamp `renderSeed`
+        assertEquals(23, PrefixRegistry.SEED_VERSION)
+        // Fifteen keys, the three the seed deletes, and the stamp `renderSeed`
         // appends — which is not in the list, its value being a hash of the rest.
-        assertEquals(17, PrefixRegistry.seed.size)
+        // Seed 23 added `bluetoothService`, which only does anything paired with
+        // patches/wine/0031.
+        assertEquals(18, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `the bluetooth service is disabled rather than deleted`() {
+        val rendered = PrefixRegistry.render(listOf(PrefixRegistry.bluetoothService))
+        assertTrue(
+            rendered.contains(
+                """[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\winebth]""",
+            ),
+        )
+        // 4 is SERVICE_DISABLED. Any other value and patches/wine/0031 lets the
+        // driver load exactly as before, which is what this pair exists to stop.
+        assertTrue(rendered.contains(""""Start"=dword:00000004"""))
+        // Disabled, not deleted: wineboot recreates the service, so a removed key
+        // would come back and bring the load failure with it.
+        assertFalse(rendered.contains("[-HKEY_LOCAL_MACHINE"))
     }
 
     @Test
