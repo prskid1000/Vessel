@@ -80,7 +80,33 @@ PACKAGES=(
   # machine's idea of the target and an Android aarch64 cross build is exactly
   # where that misfires. Slower big-integer maths, and nothing here is on a
   # frame path.
-  "$GMP_BASE/gmp-$GMP_VERSION.tar.xz|gmp-$GMP_VERSION|--disable-assembly --enable-static --disable-shared"
+  #
+  # **SHARED, and that is the whole point of this line.** gmp was built
+  # --enable-static --disable-shared, which produced a libgmp.a that GnuTLS
+  # absorbed happily -- and a Wine that logs, on every process:
+  #
+  #   winediag:gnutls_process_attach Compiled without DH support.
+  #
+  # dlls/bcrypt/gnutls.c gates Diffie-Hellman on `HAVE_GMP_H && SONAME_LIBGMP`,
+  # and SONAME_LIBGMP comes from WINE_CHECK_SONAME, which links a probe against
+  # -lgmp and then reads the NEEDED entries out of the result:
+  #
+  #   configure:16860: ... clang -o conftest ... -lgmp ... >&5
+  #   configure:16860: $? = 0
+  #   configure:16880: result: not found
+  #
+  # The link SUCCEEDED. There is no NEEDED entry to find because the archive was
+  # pulled in statically, so ac_cv_lib_soname_gmp is empty and the #else branch
+  # compiles in. HAVE_GMP_H was defined the whole time -- gmp.h is a compile
+  # test, which a cross build answers fine -- so only half the gate was ever
+  # satisfied, which is why the symptom looked like "gmp is missing" when gmp
+  # was built and installed correctly.
+  #
+  # Forcing ac_cv_lib_soname_gmp the way GnuTLS's RSA-OAEP check is forced would
+  # be a lie here: bcrypt dlopen()s SONAME_LIBGMP at runtime (gnutls.c:526), so
+  # a real libgmp.so has to exist and ship in the payload. Hence a shared build
+  # rather than a cache variable.
+  "$GMP_BASE/gmp-$GMP_VERSION.tar.xz|gmp-$GMP_VERSION|--disable-assembly --disable-static --enable-shared"
   # nettle: hogweed is the half GnuTLS uses and the half that needs gmp.
   # --disable-openssl keeps it from linking a host OpenSSL for its test suite.
   "$GNU_BASE/nettle/nettle-$NETTLE_VERSION.tar.gz|nettle-$NETTLE_VERSION|--disable-openssl --disable-documentation --enable-static --disable-shared --with-include-path=$SYSROOT/usr/include --with-lib-path=$SYSROOT/usr/lib"
@@ -276,10 +302,16 @@ for pc in xproto xau xcb x11 xext xrender xfixes xi xrandr xcursor xcomposite \
      Look for '$pc' in the log above."
 done
 
+# libgmp.so is listed for a reason the other entries do not need: gmp is the one
+# package here whose *linkage* is load-bearing rather than its mere presence. A
+# libgmp.a satisfies every link in this script and every check above, and the
+# only thing it breaks is a define in Wine's config.h an hour later. nettle and
+# libtasn1 are deliberately absent from this list — those two are static on
+# purpose, absorbed into libgnutls.so, and nothing dlopens them.
 for lib in libX11.so libXext.so libXrender.so libXfixes.so libXi.so \
            libXrandr.so libXcursor.so libXcomposite.so libXxf86vm.so \
            libXinerama.so libxcb.so libXau.so libxshmfence.so libfreetype.so \
-           libgnutls.so; do
+           libgnutls.so libgmp.so; do
   path="$SYSROOT/usr/lib/$lib"
   [ -e "$path" ] || die "the sysroot has no $lib"
   # A host build reads "x86-64" here, and Wine links against it happily right up

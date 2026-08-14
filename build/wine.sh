@@ -411,8 +411,25 @@ CONFIGURE_ARGS=(
 # deliberately NOT in the stamp: apply_patches works on the source tree without
 # moving HEAD, so adding one leaves the configured tree valid and make rebuilds
 # only what the patch touched. VESSEL_WINE_CLEAN=1 forces a wipe.
+#
+# **The sysroot stamp is in the id, and it has to be.** configure's answers are
+# a function of three things, not two: the arguments, the Wine source, and what
+# is sitting in $SYSROOT when it runs. Every library check above — X11, FreeType,
+# GnuTLS, gmp — reads that directory, and its results are frozen into
+# include/config.h. Change a package in build/x11-sysroot.sh and, without this,
+# the arguments and the source SHA are both unchanged, so the stale tree is
+# reused and the build reports success with none of the new answers in it.
+#
+# That is not hypothetical: it is exactly how a rebuilt sysroot carrying a shared
+# libgmp.so would have produced a Wine that still had `/* #undef SONAME_LIBGMP */`
+# in config.h and still logged "Compiled without DH support." — a build that
+# exits 0 with the change absent, the failure mode docs/DEBUGGING.md opens with.
+#
+# The stamp file is the sha256 of the whole PACKAGE list, written by
+# x11-sysroot.sh, so any pin or configure-flag change to any package moves it.
+SYSROOT_STAMP_ID="$(cat "$SYSROOT/.vessel-x11-sysroot" 2>/dev/null || echo none)"
 CONF_STAMP="$BUILD/.vessel-configure"
-CONF_ID="$(printf '%s\n' "${CONFIGURE_ARGS[@]}" "$SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+CONF_ID="$(printf '%s\n' "${CONFIGURE_ARGS[@]}" "$SOURCE_SHA" "$SYSROOT_STAMP_ID" | sha256sum | cut -d' ' -f1)"
 
 if [ -z "${VESSEL_WINE_CLEAN:-}" ] && [ -f "$BUILD/config.status" ] \
    && [ -f "$CONF_STAMP" ] && [ "$(cat "$CONF_STAMP")" = "$CONF_ID" ]; then
