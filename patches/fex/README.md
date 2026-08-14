@@ -948,3 +948,62 @@ at all** — a negative complete enough to write into the TODO.
 
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
+
+**Correction, and the reason the project rule exists.** The paragraph above said
+"not compiled", and it was committed on that basis. It did not compile: the
+inserted paragraph closed the block comment early with a stray `*/`, leaving the
+rest of the prose to be parsed as declarations — 20 errors in
+`WritePriorityMutex.h`, none of them in the patch's actual code. `git apply
+--check` proves a patch applies, never that the result builds. Fixed, and the
+build below is what verified it.
+
+## `0014-imagetracker-prepare-outside-the-code-mutex-publish-under-it`
+
+**The fix for the deadlock `0013` measured, and it works.** Watched on the
+device 2026-08-14 as `260816`: Requiem runs past the point where every previous
+run stopped, with no `WritePriorityMutex` line and no `main process heap
+section` timeout. The device counters are the cleanest evidence — a deadlocked
+run sat at 1-2% CPU and **0% GPU**; this one reports GPU mean 4.7% and peak
+**69%**, which is a process drawing rather than a process asleep.
+
+**What it changes.** `HandleImageMap` acquired `CodeInvalidationMutex` as its
+first statement and held it across relocation loading, the `MappedImages`
+insert, `fmt::format`, `std::filesystem::exists`/`create_directories`,
+`CodeMapWriter` construction, file I/O and `LoadAOTImages`. Several of those
+allocate from the **Win32 process heap** — the filesystem calls and the file
+open through kernelbase, and `LoadAOTImages`' `ScopedUnicodeString` via
+`RtlCreateUnicodeStringFromAsciiz` (`Common/Priv.h:41-43`). That is the edge:
+FEX held its own lock across the guest's.
+
+Three publications genuinely need the mutex and they are all that stays inside
+it now: `CTX.SetCodeMapWriter` (read by `CompileBlock` under a shared lock,
+`Core.cpp:938`), `CodeCache::EnableLoadedSection`, and
+`CTX.AddForceTSOInformation`, which asserts the mutex is held (`Core.cpp:1066`).
+`MappedImages` is guarded by `ImagesLock`, not by this mutex. In
+`LoadAOTImages`, only `RegisterMappedCodeBuffer` takes it.
+
+**Why narrowing cannot race an invalidation against the insert.** The whole
+function runs inside the guest's `NtMapViewOfSection`, before that call returns
+and therefore before any thread can hold an address in the new image, with the
+loader section held throughout; concurrent entry is prevented separately by
+`ThreadCreationMutex` (`ARM64EC/Module.cpp:961`), and the two `ProcessInit`
+calls run single-threaded. No block from the image can be compiled between the
+insert and the publication.
+
+**Why not `0004`'s shape.** That patch made a notification hook `try_lock` and
+proceed, which is safe there because nothing is skipped when the try fails.
+Here all three operations are unskippable — dropping ForceTSO registration
+silently mis-orders atomics in the new image, dropping `EnableLoadedSection`
+loses the cache. So the fix is to stop *holding* the lock over work that never
+needed it, not to stop blocking.
+
+**The other edge is still there, deliberately.** `patches/fex/0002` disables
+DEP, so an ordinary `PAGE_READWRITE` heap block still counts as executable and
+`InvalidateIntervalInternal` still takes this mutex from an allocation
+notification arriving under Wine's heap lock. Breaking either edge breaks the
+cycle, and this is the cheaper end: a cold, serialised path inside a call the
+guest cannot yet observe, against the SMC hot path whose last "obviously
+redundant" change killed Metro 2033.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.

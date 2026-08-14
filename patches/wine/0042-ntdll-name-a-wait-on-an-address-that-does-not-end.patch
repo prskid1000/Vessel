@@ -1,0 +1,107 @@
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index d218338..cc9ea3e 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -40,6 +40,7 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ WINE_DECLARE_DEBUG_CHANNEL(futexwho);
++WINE_DECLARE_DEBUG_CHANNEL(futexstuck);
+ 
+ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+ {
+@@ -1069,6 +1070,85 @@ static BOOL compare_addr( const void *addr, const void *cmp, SIZE_T size )
+     return FALSE;
+ }
+ 
++/* Vessel: name a wait on an address that does not end.
++ *
++ * **Why this exists.** `RtlpWaitForCriticalSection` reports a stuck wait and
++ * names the owning thread, which is what `patches/wine/0030` builds on. Nothing
++ * does that for a Win32 futex, so any lock built on `RtlWaitOnAddress` -- an SRW
++ * lock, a condition variable, or FEX's `WritePriorityMutex` -- can deadlock the
++ * process while every instrument in the stack stays silent. That happened:
++ * Requiem stalled with 78 threads asleep, `0030` said nothing because no
++ * critical section was involved, and the only honest reading of that run was
++ * "no lock is held anywhere", which was wrong. The next run reordered slightly
++ * and the same deadlock reported itself. A stall should not have to be lucky to
++ * be legible.
++ *
++ * **What it can and cannot say.** An address wait has no owner field, so this
++ * names the *waiter*, the address, and whatever frames survive above it. Never
++ * the holder. That is strictly weaker than `0030`'s line, and it is still the
++ * difference between a silent stall and knowing that a stall is a lock, on which
++ * address, so it can be crossed against an instrument that can name owners --
++ * `patches/fex/0013` for FEX's mutexes.
++ *
++ * **Why it is behind a channel rather than on by default.** An infinite wait is
++ * not an error. A thread pool parked on a condition variable, a worker waiting
++ * for its first job, an idle helper thread: all wait for minutes, correctly,
++ * with `timeout == NULL`. Reporting those by default would put steady noise into
++ * every session log and train the reader to skip past exactly the line that
++ * matters. Off, this costs one predicate on a path that is about to sleep.
++ *
++ * **Bounded waits are untouched**, and no wakeup can be lost. Only the
++ * `timeout == NULL` case changes, and only by splitting its first wait: sixty
++ * seconds, one report, then the untimed wait exactly as before. The alert flag
++ * `NtWaitForAlertByThreadId` consumes is per-thread and sticky, so an alert
++ * delivered while the report is being written is still pending for the second
++ * call.
++ */
++#define VESSEL_FUTEX_STUCK_MS 60000
++#define VESSEL_FUTEX_STUCK_REPORTS 16
++
++static void report_stuck_wait( const void *addr, ULONG waited_ms )
++{
++    static LONG report_count;
++    void *frames[8];
++    ULONG i, n;
++
++    /* Bounded process-wide. A deadlock needs describing once per thread caught
++     * in it, not once per retry, and a live-lock must not be able to fill the
++     * log with a line that is true every time it is printed. */
++    if (InterlockedIncrement( &report_count ) > VESSEL_FUTEX_STUCK_REPORTS) return;
++
++    ERR_(futexstuck)( "wait on addr %p has not ended in thread %04lx after %lu ms\n",
++                      addr, GetCurrentThreadId(), (unsigned long)waited_ms );
++
++    /* Best effort, and often empty here: these callers are usually guest x86-64
++     * under FEX, where the walk stops at an ARM64EC entry thunk. The address and
++     * the thread id are the parts that always survive. */
++    n = RtlCaptureStackBackTrace( 2, ARRAY_SIZE(frames), frames, NULL );
++    for (i = 0; i < n; i++)
++        ERR_(futexstuck)( "    frame %lu %p\n", (unsigned long)i, frames[i] );
++    if (!n) ERR_(futexstuck)( "    no frames (guest caller)\n" );
++}
++
++static NTSTATUS wait_for_alert_reporting_stalls( const void *addr, const LARGE_INTEGER *timeout )
++{
++    LARGE_INTEGER limit;
++    NTSTATUS ret;
++
++    if (timeout || !TRACE_ON(futexstuck))
++        return NtWaitForAlertByThreadId( NULL, timeout );
++
++    limit.QuadPart = -(LONGLONG)VESSEL_FUTEX_STUCK_MS * 10000;
++    ret = NtWaitForAlertByThreadId( NULL, &limit );
++    if (ret != STATUS_TIMEOUT) return ret;
++
++    report_stuck_wait( addr, VESSEL_FUTEX_STUCK_MS );
++
++    /* Reported once per acquisition, then waited for as long as it takes, so a
++     * thread that really is stuck costs no more than it did before this existed. */
++    return NtWaitForAlertByThreadId( NULL, NULL );
++}
++
+ /***********************************************************************
+  *           RtlWaitOnAddress   (NTDLL.@)
+  */
+@@ -1103,7 +1183,7 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
+ 
+     spin_unlock( &queue->lock );
+ 
+-    ret = NtWaitForAlertByThreadId( NULL, timeout );
++    ret = wait_for_alert_reporting_stalls( addr, timeout );
+ 
+     /* We may have already been removed by a call to RtlWakeAddressSingle() or RtlWakeAddressAll(). */
+     if (entry.addr)

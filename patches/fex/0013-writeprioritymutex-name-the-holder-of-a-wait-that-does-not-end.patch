@@ -159,7 +159,7 @@ index 84742f86a..6e1a41d10 100644
 +   * and could therefore only establish that nobody waited *exclusively* -- with
 +   * 26 threads in futex_wait unattributed, that is not the same as ruling the
 +   * mutex out. With lock_shared() instrumented too, silence means no thread
-+   * waited on this mutex at all, which is a negative worth writing down. */
++   * waited on this mutex at all, which is a negative worth writing down.
 +   *
 +   * **Cost, stated because it was asked for.** On acquisition: two relaxed
 +   * stores and one call to GetCurrentThreadId, which FEX's own WinAPI shim

@@ -1,0 +1,160 @@
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index c459c446f..6814e6562 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -124,8 +124,63 @@
+           .Relocations = std::move(Relocations)}
+   , SectionInfo {.FileInfo = Info, .FileStartVA = Address, .BeginVA = Address, .EndVA = Address + Nt->OptionalHeader.SizeOfImage} {}
+ 
++/* Vessel: prepare outside the code invalidation mutex, publish under it.
++ *
++ * **This function was one half of a measured deadlock.** With patches/fex/0013
++ * instrumenting the mutex, a Requiem run named the whole cycle:
++ *
++ *   thread 0188  holds the Win32 process heap section (a game allocation at
++ *                re9.exe+0x2533E6), and waits for CodeInvalidationMutex --
++ *                RtlAllocateHeap grows the heap under its own section, the
++ *                allocation notification reaches
++ *                HandleMemoryProtectionNotification, and with 0002's DisableDEP
++ *                a PAGE_READWRITE heap block counts as executable, so
++ *                InvalidateIntervalInternal takes the mutex.
++ *   thread 0284  holds CodeInvalidationMutex -- taken here, at this function's
++ *                first statement -- and the loader section, and waits for the
++ *                heap section.
++ *
++ * The second edge is this one. The mutex was acquired as the first statement
++ * and held across LoadImageRelocations, the MappedImages insert,
++ * GetBaseFilename, fmt::format, std::filesystem::exists/create_directories,
++ * CodeMapWriter construction and file I/O, and LoadAOTImages -- and several of
++ * those allocate from the *Win32 process heap*, not from rpmalloc.
++ * std::filesystem and the CodeMapWriter's file open go through kernelbase, and
++ * LoadAOTImages builds a ScopedUnicodeString, whose
++ * RtlCreateUnicodeStringFromAsciiz allocates from the process heap
++ * (Common/Priv.h:41-43). So FEX held its own lock across the guest's.
++ *
++ * **What actually needs the mutex here -- three publications, and nothing
++ * else:**
++ *   - CTX.SetCodeMapWriter, because CompileBlock reads CodeMapWriter under a
++ *     shared lock on the same mutex (Interface/Core/Core.cpp:938).
++ *   - CodeCache::EnableLoadedSection, which publishes translated code into the
++ *     lookup cache and marks guest ranges executable.
++ *   - CTX.AddForceTSOInformation, which asserts the mutex is held
++ *     (Interface/Core/Core.cpp:1066) and mutates the ForceTSO structures that
++ *     GenerateIR reads under the shared lock (Core.cpp:580-581).
++ * MappedImages is guarded by ImagesLock, not by this mutex, and the early
++ * !Inserted return needs neither -- its value is discarded at all three call
++ * sites (ARM64EC/Module.cpp:360, WOW64/Module.cpp:184,
++ * FEXOfflineCompiler/Main.cpp:345).
++ *
++ * **Why narrowing cannot race an invalidation against the insert.** The whole
++ * function runs inside the guest's NtMapViewOfSection, before that call returns
++ * and therefore before any thread can hold an address in the new image, with
++ * the loader section held throughout. Concurrent entry is prevented separately:
++ * the runtime caller takes ThreadCreationMutex around it
++ * (ARM64EC/Module.cpp:961), and the two ProcessInit calls (:701, :703) run
++ * single-threaded. So no block from this image can be compiled between the
++ * insert and the publication below.
++ *
++ * **Why not 0004's shape.** That patch fixed the same class of bug by making
++ * the notification hook try_lock and proceed, which is safe there because
++ * nothing is skipped when the try fails -- the interval map has its own lock.
++ * It does not transfer: the three operations above cannot be skipped. Dropping
++ * ForceTSO registration would silently mis-order atomics in the new image, and
++ * dropping EnableLoadedSection would lose the cache. So the fix here is to stop
++ * holding the lock over work that never needed it, not to stop blocking. */
+ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view Path, uint64_t Address, bool MainImage) {
+-  std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
+   const fextl::string ModuleName {BaseName(Path)};
+   const auto Module = reinterpret_cast<HMODULE>(Address);
+   auto* Nt = reinterpret_cast<ArchImageNtHeaders*>(RtlImageNtHeader(Module));
+@@ -151,7 +206,11 @@
+   auto ID = FEXCore::CodeMap::GetBaseFilename(ImageInfo->Info, false);
+   LogMan::Msg::DFmt("Load module {} ({}): {:X}", ModuleName, ID, Address);
+ 
+-  if (FEXCore::Config::Get_ENABLECODECACHINGWIP() && !IsGeneratingCache) {
++  // Vessel: built here, published under the mutex at the end of the function.
++  fextl::unique_ptr<FEXCore::CodeMapWriter> PendingCodeMapWriter;
++  const bool CodeCachingActive = FEXCore::Config::Get_ENABLECODECACHINGWIP() && !IsGeneratingCache;
++
++  if (CodeCachingActive) {
+     if (MainImage) {
+       LARGE_INTEGER Time;
+       NtQuerySystemTime(&Time);
+@@ -163,23 +222,17 @@
+       if (!ec) {
+         ActiveCodeMapPath = fmt::format("{}{}.{}.bin", CodeMapDir, ID, Time.QuadPart);
+ 
+-        auto Writer = fextl::make_unique<FEXCore::CodeMapWriter>(*this, false);
++        PendingCodeMapWriter = fextl::make_unique<FEXCore::CodeMapWriter>(*this, false);
+ #ifdef _M_ARM64EC
+-        Writer->AppendSetMainExecutable(ImageInfo->Info, true);
++        PendingCodeMapWriter->AppendSetMainExecutable(ImageInfo->Info, true);
+ #else
+-        Writer->AppendSetMainExecutable(ImageInfo->Info, false);
++        PendingCodeMapWriter->AppendSetMainExecutable(ImageInfo->Info, false);
+ #endif
+-        CTX.SetCodeMapWriter(std::move(Writer));
+       }
+     }
+     if (!ActiveCodeMapPath.empty()) {
+       LoadAOTImages(*ImageInfo);
+     }
+-
+-    auto AOTImage = AOTImages.find(ID);
+-    if (AOTImage != AOTImages.end() && AOTImage->second.CacheFile) {
+-      CTX.GetCodeCache().EnableLoadedSection(nullptr, *AOTImage->second.CacheFile, ImageInfo->SectionInfo);
+-    }
+   }
+ 
+   uint64_t EndAddress = Address + Nt->OptionalHeader.SizeOfImage;
+@@ -193,9 +246,27 @@
+     FEX::VolatileMetadata::ApplyFEXExtendedVolatileMetadata(It->second, VolatileInstructions, VolatileValidRanges, Address, EndAddress);
+   }
+ 
+-  if (!VolatileInstructions.empty() || !VolatileValidRanges.Empty()) {
+-    LogMan::Msg::DFmt("Loaded volatile metadata for {:X}: {} entries", Address, VolatileInstructions.size());
+-    CTX.AddForceTSOInformation(VolatileValidRanges, std::move(VolatileInstructions));
++  // Vessel: the only region that needs the code invalidation mutex. Nothing in
++  // here allocates from the Win32 process heap, which is what closes the edge
++  // described at the top of this function.
++  {
++    std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
++
++    if (PendingCodeMapWriter) {
++      CTX.SetCodeMapWriter(std::move(PendingCodeMapWriter));
++    }
++
++    if (CodeCachingActive) {
++      auto AOTImage = AOTImages.find(ID);
++      if (AOTImage != AOTImages.end() && AOTImage->second.CacheFile) {
++        CTX.GetCodeCache().EnableLoadedSection(nullptr, *AOTImage->second.CacheFile, ImageInfo->SectionInfo);
++      }
++    }
++
++    if (!VolatileInstructions.empty() || !VolatileValidRanges.Empty()) {
++      LogMan::Msg::DFmt("Loaded volatile metadata for {:X}: {} entries", Address, VolatileInstructions.size());
++      CTX.AddForceTSOInformation(VolatileValidRanges, std::move(VolatileInstructions));
++    }
+   }
+ 
+   return ImageInfo->SectionInfo;
+@@ -261,7 +332,18 @@
+         auto CacheSpan = std::span {static_cast<std::byte*>(LoadAddress), MappedSize};
+         auto MappedCache = CTX.GetCodeCache().LoadCache(CacheSpan, ImageInfo.Info, ImageInfo.SectionInfo.FileStartVA);
+         if (MappedCache) {
+-          CTX.GetCodeCache().RegisterMappedCodeBuffer(*MappedCache);
++          {
++            // Vessel: the one statement in this function that needs the code
++            // invalidation mutex -- it push_backs into MappedCodeBuffers, which
++            // IsAddressInMappedCodeBuffer iterates from compilation and from
++            // exception handling. Everything above it allocates: the
++            // ScopedUnicodeString above goes to the *Win32 process heap* via
++            // RtlCreateUnicodeStringFromAsciiz, so this function must not be
++            // called with that mutex already held. HandleImageMap no longer
++            // does; see the comment there for the deadlock that forced it.
++            std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
++            CTX.GetCodeCache().RegisterMappedCodeBuffer(*MappedCache);
++          }
+           AOTImages[ID] = {.CacheFile = std::move(MappedCache)};
+           LogMan::Msg::IFmt("Loaded cache: {}", ID);
+         } else {
