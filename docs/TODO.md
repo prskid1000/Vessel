@@ -213,6 +213,52 @@ avoid.
   on the way in"*; this looks like a second instance of that shape, and it is now
   the only thing between Requiem and its menu.
 
+  **The cycle is closed, measured on the device, 2026-08-14.** It is a two-thread
+  lock-order inversion between Wine's process heap and FEX's
+  `CodeInvalidationMutex`, and it took two instruments to see because neither
+  half is visible to the other: `patches/wine/0030` sees only
+  `RTL_CRITICAL_SECTION`s, and the code mutex is a `WritePriorityMutex` over
+  `RtlWaitOnAddress`. `patches/fex/0013` was written to name the other half, and
+  on the run that fired both:
+
+  | Thread | Holds | Waits for | At |
+  |---|---|---|---|
+  | `0188` | main process heap section, taken from `re9.exe +0x2533e6` | `CodeInvalidationMutex` | `InvalidationTracker::InvalidateIntervalInternal +0x54` |
+  | `0284` | `CodeInvalidationMutex`, and `loader_section` | main process heap section | `ImageTracker::HandleImageMap +0x60` |
+
+  `018c` and `01fc` queue on the heap behind `0188`; `0288` queues on
+  `loader_section` behind `0284`. Both FEX sites resolved against the `260815`
+  build's full symbol table with image base `0x180000000`, module base
+  `0000006FFC560000` from `loaddll`.
+
+  Read as two edges:
+
+  - **`0188` is ours.** `patches/fex/0002` turns DEP off, so
+    `HandleMemoryProtectionNotification` computes `EffectiveExec` from
+    readability alone and an ordinary `PAGE_READWRITE` heap block counts as
+    executable. Every growth of the heap therefore invalidates code, and the
+    notification arrives while `RtlAllocateHeap` holds the heap section across
+    `NtAllocateVirtualMemory` (`heap.c:826/998/1004`).
+  - **`0284` is upstream's.** `ImageTracker::HandleImageMap`
+    (`Source/Windows/Common/ImageTracker.cpp:128`) takes the code mutex as its
+    *first statement* and holds it across `LoadImageRelocations`,
+    `std::filesystem::exists`, `create_directories`, `fmt::format`,
+    `CodeMapWriter` construction and file I/O. FEXCore allocates from rpmalloc,
+    which is why reading FEXCore found no reverse edge — but this is Wine-side
+    glue and its allocations go to the Win32 process heap.
+
+  **A failed cache load does not avoid this**, and that was checked on the same
+  run: `re9.exe`'s cache was rejected by `patches/fex/0011` and the deadlock was
+  unchanged. Loading is not the path — `HandleImageMap` takes the lock before any
+  cache check, and with `ENABLECODECACHINGWIP` on, the codemap *writing* path
+  still runs under it.
+
+  *Now done when:* the inversion is broken — either by narrowing
+  `HandleImageMap`'s lock to what genuinely needs serialising against
+  invalidation, or by removing edge `0188` so a fresh commit of
+  never-translated memory does not invalidate — and Requiem passes the point
+  where all 78 threads currently sleep.
+
   *Originally done when:* the timeout ERR names a module and an offset, and that offset
   resolves to a function.
 

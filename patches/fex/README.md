@@ -816,3 +816,135 @@ braces, not one fix counted twice.
 
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
+
+## `0013-writeprioritymutex-name-the-holder-of-a-wait-that-does-not-end`
+
+**Diagnostic only. No path changes behaviour unless it is already stuck.** This
+ships instead of a fix, deliberately.
+
+**The state it is for.** Requiem now initialises fully — Denuvo, XeSS, Vulkan,
+swapchain, PSOs, Wwise — and then deadlocks with all 78 threads sleeping.
+`patches/wine/0030` names both critical sections and both holders, and both are
+the game's own code; thread 0190 is asleep *inside* `RtlAllocateHeap` at `+0x6bc`
+while holding the process heap section.
+
+**One edge is confirmed, the other is refuted.**
+
+*Heap → code mutex, confirmed by reading both halves.* `RtlAllocateHeap` takes
+`heap_lock` and calls `heap_allocate_block` under it, and growth goes
+`find_free_block` → `subheap_commit` (`heap.c:826`) or `create_subheap`
+(`:998`, `:1004`) → `NtAllocateVirtualMemory`, all inside the section. On the FEX
+side `NotifyMemoryAlloc(After=TRUE)` → `HandleMemoryProtectionNotification`, and
+with `0002`'s `DisableDEP` an ordinary `PAGE_READWRITE` heap block gives
+`EffectiveExec = true`, so `InvalidateIntervalInternal` takes
+`CodeInvalidationMutex` **exclusively** (`InvalidationTracker.cpp:502`). Without
+`DisableDEP` the same notification takes no lock at all.
+
+*Code mutex → heap, refuted.* `BTCpu64NotifyReadFile` does hold the mutex across
+the syscall (`Module.cpp:1021`), but only when `BeginUntrackedWriteLocked`
+returns true, and the syscall is served by Wine's **unix-side** `NtReadFile`,
+which allocates with libc `malloc` — the Win32 heap is not reachable from there.
+Every other exclusive holder (`ImageTracker.cpp:128/205`,
+`InvalidationTracker.cpp:177/341/462`) does work that either stays in FEXCore —
+which allocates from rpmalloc, not the process heap — or is another syscall.
+
+**So the cycle could not be closed by reading, and `0030` cannot close it
+either**: it sees `RTL_CRITICAL_SECTION`s, and this is a `WritePriorityMutex`
+over `RtlWaitOnAddress`. The missing fact is missing because nothing in the
+stack can currently observe it. That is what this adds.
+
+**What it does.** Records the acquiring return address and thread id on
+exclusive acquisition; on an exclusive wait that passes five seconds, emits one
+`EFmt` naming the mutex, both thread ids, the holder's site and the waiter's
+site, phrased to read beside `0030`'s output. Then falls back to the untimed
+wait for the rest of that acquisition, so a genuinely stuck thread costs no more
+than it did before.
+
+**Reading the outcomes — each is decisive.**
+
+| What appears | What it means |
+|---|---|
+| Holder inside `NotifyReadFile` or `HandleImageMap` | the cycle is real and that is the reverse edge; break the cheaper end |
+| Holder tid `0000` | held by **readers**, not an exclusive owner — `CompileBlock` takes it shared. A different cycle than either edge considered |
+| **Nothing, game still deadlocked** | the code mutex is **not in the cycle**; 0190 is asleep elsewhere inside `NtAllocateVirtualMemory` — Wine's `virtual_mutex` or the server. As valuable as the others, and the reason this is a diagnostic |
+
+**It fired, and the answer was the first row.** Watched on the device
+2026-08-14, `260815`:
+
+```
+WritePriorityMutex 0000007FE00B0100: wait timed out in thread 0188 after 5000 ms,
+  blocked by 0284; which took it at 0000006FFC6E727C,
+  and the waiter wants it at 0000006FFC6EAA18
+```
+
+Against the module base `0000006FFC560000` that `loaddll` prints, and this
+build's full symbol table at image base `0x180000000`:
+
+| Address | Symbol |
+|---|---|
+| `0000006FFC6E727C` — the **holder**, `0284` | `FEX::Windows::ImageTracker::HandleImageMap +0x60` |
+| `0000006FFC6EAA18` — the **waiter**, `0188` | `FEX::Windows::InvalidationTracker::InvalidateIntervalInternal +0x54` |
+
+Beside it, `0030` reported `0284` waiting on the *main process heap section*,
+held by `0188`. So the reverse edge is `HandleImageMap`, and the refutation
+above was right about FEXCore and wrong about the boundary: `ImageTracker` is
+Wine-side glue, and its `std::filesystem` and `fmt` work allocates from the
+Win32 process heap, not rpmalloc.
+
+Two notes for the next reader. **A rejected cache does not avoid this** — on
+that run `re9.exe`'s cache failed `0011`'s validation and the deadlock was
+identical, because the lock is taken before any cache check and codemap
+*writing* still runs under it. And **the run that fired it had
+`VK_KHR_present_wait` disabled**, which fixed nothing but changed the timing
+enough to make the inversion reproducible; the same stall with the extension
+enabled produced no line from either instrument.
+
+**Known gap.** Only *exclusive* waits are watched. A thread stuck in
+`lock_shared()` reports nothing, so "no line" means "nobody waited exclusively",
+not "nobody waited". Closing that is a small extension of the same shape — a
+stuck reader is by definition blocked by an exclusive holder, and `OwnerTID` and
+`OwnerSite` already name it.
+
+**Cost.** On acquisition: two relaxed stores and one `GetCurrentThreadId`, which
+FEX's own shim implements as two TEB loads (`Common/WinAPI/Sync.cpp:114`) — no
+syscall, no allocation, no stack walk. On release: two relaxed stores. On a wait
+that completes normally: nothing, because only the first wait is bounded. The
+site is `__builtin_return_address(0)`; after inlining that is the return address
+of the frame that took the lock, so resolve it as module+offset against
+`loaddll`, the same arithmetic `0030`'s sites need.
+
+**Deliberate omissions.** Windows only — the Linux path uses `FUTEX_WAIT_BITSET`,
+whose timeout is absolute rather than relative, and getting that wrong would
+change behaviour on a platform nobody is debugging. And no `thread_local`,
+because `0004` records that TLS is unusable on these paths for a BT-loaded
+module and that a first attempt using it faulted during emulator startup.
+
+### Extended to shared waits (revision 16)
+
+**The first revision shipped as 260815, ran, and never fired — and that was not
+conclusive.** `wine/0030` did not fire either, despite the stall running well
+past its 60 s threshold, and 26 of 78 threads sat in `futex_wait` unattributed.
+Exclusive-only instrumentation can therefore only establish *nobody waited
+exclusively*, which is not the same as ruling the mutex out.
+
+`lock_shared()` now carries the same instrument: same five-second first wait,
+same one-shot latch, same per-mutex budget. Readers deliberately record no
+owner — there can be many and none is the blocker — but a stuck reader is by
+definition waiting on an exclusive holder, so `OwnerTID`/`OwnerSite` name the
+blocker directly. That makes the shared report the *less* ambiguous of the two:
+the exclusive one can come back with tid `0000` meaning "held by readers", and
+the shared one cannot.
+
+The timed reader wait mirrors `FutexWaitForReadAvailable` exactly — `&Futex + 2`,
+16-bit width, expected value `Expected >> 16`. That pairing with
+`WakeByAddressAll` on the same offset address is the part that was audited clean
+in 2608, and a mismatch in address or width here would reintroduce precisely the
+class of bug that audit cleared.
+
+With both paths instrumented, **silence now means no thread waited on this mutex
+at all** — a negative complete enough to write into the TODO.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.

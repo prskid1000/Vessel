@@ -1,0 +1,308 @@
+diff --git a/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h b/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
+index 84742f86a..6e1a41d10 100644
+--- a/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
++++ b/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
+@@ -9,6 +9,12 @@
+ #include <unistd.h>
+ #else
+ #include <synchapi.h>
++// Vessel: for GetCurrentThreadId, used only by the stuck-wait diagnostic below.
++// A specific header rather than windows.h, in the spirit of the INFINITE note --
++// and this one is provided by FEX's own WinAPI shim (Common/WinAPI/Sync.cpp:114)
++// as two TEB loads, so it resolves in the -nostdlib modules and costs no call
++// into kernel32.
++#include <processthreadsapi.h>
+ // Don't pull in all WIN32 headers for INFINITE. Causes too many problems.
+ #ifndef INFINITE
+ #define INFINITE 0xffffffff
+@@ -45,16 +51,26 @@
+   Mutex& operator=(Mutex&&) = delete;
+ 
+   void lock() {
++    // Vessel: the site this lock was taken from, for the stuck-wait diagnostic.
++    // One register on entry, no call and no store unless we actually acquire.
++    [[maybe_unused]] void* const Site = __builtin_return_address(0);
++
+     // Try a non-blocking lock first.
+     if (try_lock()) {
++      // try_lock recorded the owner itself; after inlining its return address
++      // and Site are the same frame, so there is nothing to correct here.
+       return;
+     }
+ 
+     // Try a quick WFE write-lock.
+     if (Attempt_WFE_WriteLock()) {
++      RecordExclusiveOwner(Site);
+       return;
+     }
+ 
++    [[maybe_unused]] uint64_t StuckWaitedMS = 0;
++    [[maybe_unused]] bool StuckReported = false;
++
+     // Still couldn't get it. Start waiting.
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+ 
+@@ -104,6 +120,7 @@
+       if (!Sleep) {
+         // Acquired early.
+         LOGMAN_THROW_A_FMT((Desired & WRITE_OWNED_BIT) == WRITE_OWNED_BIT, "Somehow acquired a write-lock without it being set!");
++        RecordExclusiveOwner(Site);
+         return;
+       }
+ 
+@@ -115,13 +132,19 @@
+       // This thread already incremented `WRITE_WAITER_INCREMENT` before this loop.
+       // - Linux waits for the full 32-bits to change (With bitset wakeup).
+       // - Win32 also waits for the full 32-bits to change (with offset addr on the reader side to reduce stampeding).
+-      FutexWaitForWriteAvailable(Desired);
++      WaitForWriteAvailableWithDiagnostic(Desired, Site, StuckWaitedMS, StuckReported);
+ 
+       Expected = AtomicFutex.load(std::memory_order_relaxed);
+     }
+   }
+ 
+   void lock_shared() {
++    // Vessel: the waiter's site, for the stuck-wait diagnostic. Readers record
++    // no owner -- there can be many of them and none is the blocker. A reader
++    // stuck here is by definition waiting on an exclusive holder, and
++    // OwnerTID/OwnerSite already name that thread.
++    [[maybe_unused]] void* const Site = __builtin_return_address(0);
++
+     // Try an uncontended lock first.
+     if (try_lock_shared()) {
+       return;
+@@ -132,6 +155,9 @@
+       return;
+     }
+ 
++    [[maybe_unused]] uint64_t StuckWaitedMS = 0;
++    [[maybe_unused]] bool StuckReported = false;
++
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+ 
+     uint32_t Expected = AtomicFutex.load(std::memory_order_relaxed);
+@@ -165,13 +191,17 @@
+       // - Linux waits for full 32-bit futex.
+       // - Win32 waits for upper 16-bits to not match (Either zero writer owned, writer-wait is draining, and `READ_WAITER_BIT` changed).
+       // Can get some spurious wake-ups which will `or` the `READ_WAITER_BIT` again, which does nothing.
+-      FutexWaitForReadAvailable(Desired);
++      WaitForReadAvailableWithDiagnostic(Desired, Site, StuckWaitedMS, StuckReported);
+ 
+       Expected = AtomicFutex.load(std::memory_order_relaxed);
+     }
+   }
+ 
+   void unlock() {
++    // Vessel: cleared before the bit is released, so a waiter that wakes and
++    // reports can never name a thread that has already let go.
++    ClearExclusiveOwner();
++
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+ 
+     uint32_t Expected = AtomicFutex.load(std::memory_order_relaxed);
+@@ -239,7 +269,12 @@
+     uint32_t Desired = WRITE_OWNED_BIT;
+ 
+     // try to CAS immediately.
+-    return AtomicFutex.compare_exchange_strong(Expected, Desired, std::memory_order_acq_rel, std::memory_order_acquire);
++    if (!AtomicFutex.compare_exchange_strong(Expected, Desired, std::memory_order_acq_rel, std::memory_order_acquire)) {
++      return false;
++    }
++
++    RecordExclusiveOwner(__builtin_return_address(0));
++    return true;
+   }
+ 
+   // Can race with other threads trying to lock shared!
+@@ -269,6 +304,160 @@
+ #endif
+ 
+ private:
++  /* Vessel: name the holder when a wait does not end, exclusive or shared.
++   *
++   * **Why this cannot be seen any other way.** patches/wine/0030 names the
++   * holder of a stuck lock, and it worked -- it named both critical sections in
++   * the Requiem deadlock and both of their holders. But it can only see
++   * RTL_CRITICAL_SECTIONs, and CodeInvalidationMutex is one of these, a
++   * WritePriorityMutex over RtlWaitOnAddress. So the one fact the deadlock
++   * evidence is missing -- who holds the code mutex and where they took it --
++   * is missing precisely because nothing in the stack can currently observe it.
++   *
++   * **What it is for.** The suspected cycle is: RtlAllocateHeap holds the
++   * process heap section across NtAllocateVirtualMemory (heap.c: heap_lock ->
++   * heap_allocate_block -> find_free_block -> subheap_commit/create_subheap),
++   * the allocation notification reaches
++   * InvalidationTracker::HandleMemoryProtectionNotification, and with
++   * patches/fex/0002's DisableDEP an ordinary PAGE_READWRITE heap block counts
++   * as executable, so InvalidateIntervalInternal takes this mutex exclusively.
++   * That edge is confirmed by reading. The reverse edge is not: the only other
++   * exclusive holders are BTCpu64NotifyReadFile (which holds it across a
++   * syscall served by Wine's unix side, using libc malloc rather than the Win32
++   * heap) and ImageTracker::HandleImageMap, and FEXCore's own allocations go to
++   * rpmalloc. So the cycle could not be closed by reading, and this is what
++   * closes it by measurement instead.
++   *
++   * **How to read the outcomes.** Each is decisive:
++   *   - A line naming a holder inside NotifyReadFile or HandleImageMap: the
++   *     cycle is real and that is the reverse edge. Break the cheaper end.
++   *   - A line whose holder tid is 0000: the lock was held by *readers*, not an
++   *     exclusive owner -- CompileBlock takes it shared. That is a different
++   *     cycle than either edge considered, and a useful surprise.
++   *   - No line at all, with the game still deadlocked: **the code mutex is not
++   *     in the cycle**, and thread 0190 is asleep somewhere else inside
++   *     NtAllocateVirtualMemory -- Wine's virtual_mutex or the server. That
++   *     outcome is as valuable as the others and is the reason this is a
++   *     diagnostic rather than a fix.
++   *
++   * That last outcome is only trustworthy because both wait paths are covered.
++   * The first revision instrumented exclusive waits alone, came back silent,
++   * and could therefore only establish that nobody waited *exclusively* -- with
++   * 26 threads in futex_wait unattributed, that is not the same as ruling the
++   * mutex out. With lock_shared() instrumented too, silence means no thread
++   * waited on this mutex at all, which is a negative worth writing down. */
++   *
++   * **Cost, stated because it was asked for.** On acquisition: two relaxed
++   * stores and one call to GetCurrentThreadId, which FEX's own WinAPI shim
++   * implements as two TEB loads (Common/WinAPI/Sync.cpp:114) -- no syscall, no
++   * allocation, no stack walk. On release: two relaxed stores. On a wait that
++   * completes normally: nothing at all, because the first wait is bounded and
++   * every wait after the single report is untimed exactly as before. The site
++   * is __builtin_return_address(0); after inlining that is the return address
++   * of the frame that took the lock, so resolve it as module+offset against
++   * loaddll, the same arithmetic 0030's sites need.
++   *
++   * Windows only. The Linux path uses FUTEX_WAIT_BITSET, whose timeout is
++   * absolute rather than relative, and getting that wrong would change
++   * behaviour on a platform that is not being debugged. */
++  void RecordExclusiveOwner([[maybe_unused]] void* Site) {
++#ifdef _WIN32
++    std::atomic_ref<uint64_t>(OwnerSite).store(reinterpret_cast<uint64_t>(Site), std::memory_order_relaxed);
++    std::atomic_ref<uint32_t>(OwnerTID).store(GetCurrentThreadId(), std::memory_order_relaxed);
++#endif
++  }
++
++  void ClearExclusiveOwner() {
++#ifdef _WIN32
++    std::atomic_ref<uint32_t>(OwnerTID).store(0, std::memory_order_relaxed);
++    std::atomic_ref<uint64_t>(OwnerSite).store(0, std::memory_order_relaxed);
++#endif
++  }
++
++  void ReportStuckWait([[maybe_unused]] void* Site, [[maybe_unused]] uint64_t WaitedMS, [[maybe_unused]] bool Exclusive) {
++#ifdef _WIN32
++    // Bounded, per mutex. A lock this hot must not be able to flood the log,
++    // and a deadlock only needs to be described once.
++    auto Remaining = std::atomic_ref<uint32_t>(StuckReportsRemaining);
++    uint32_t Budget = Remaining.load(std::memory_order_relaxed);
++    do {
++      if (Budget == 0) {
++        return;
++      }
++    } while (!Remaining.compare_exchange_weak(Budget, Budget - 1, std::memory_order_relaxed, std::memory_order_relaxed));
++
++    const uint32_t HolderTID = std::atomic_ref<uint32_t>(OwnerTID).load(std::memory_order_relaxed);
++    const uint64_t HolderSite = std::atomic_ref<uint64_t>(OwnerSite).load(std::memory_order_relaxed);
++
++    // EFmt, not IFmt: patches/fex/0003 holds FEX to ERROR by default, and a
++    // diagnostic that the default ceiling hides is a wasted run.
++    LogMan::Msg::EFmt("WritePriorityMutex {:016X}: {} wait timed out in thread {:04X} after {} ms, blocked by {:04X}{}; "
++                      "which took it at {:016X}, and the waiter wants it at {:016X}",
++                      reinterpret_cast<uint64_t>(this), Exclusive ? "exclusive" : "shared", GetCurrentThreadId(), WaitedMS, HolderTID,
++                      HolderTID == 0 ? " (tid 0: held by readers, no exclusive owner)" : "", HolderSite,
++                      reinterpret_cast<uint64_t>(Site));
++#endif
++  }
++
++  void WaitForWriteAvailableWithDiagnostic(uint32_t Expected, [[maybe_unused]] void* Site, [[maybe_unused]] uint64_t& WaitedMS,
++                                           [[maybe_unused]] bool& Reported) {
++#ifdef _WIN32
++    if (!Reported) {
++      if (WaitOnAddress(&Futex, &Expected, sizeof(Futex), STUCK_WAIT_REPORT_MS)) {
++        // Woken (or spuriously woken) inside the window. Identical to before.
++        return;
++      }
++
++      // Timed out. Say so once, then fall back to the untimed wait for the rest
++      // of this acquisition, so a genuinely stuck thread costs no more than it
++      // did before this patch existed.
++      WaitedMS += STUCK_WAIT_REPORT_MS;
++      ReportStuckWait(Site, WaitedMS, true);
++      Reported = true;
++      return;
++    }
++#endif
++    FutexWaitForWriteAvailable(Expected);
++  }
++
++  /* Vessel: the reader half of the same instrument.
++   *
++   * As shipped in 260815 this only covered exclusive waits, and the run came
++   * back with nothing -- which only established that nobody waited *exclusively*
++   * for five seconds. 26 threads sat in futex_wait unattributed, so the negative
++   * was not yet complete enough to rule the mutex out.
++   *
++   * A stuck reader is the more informative case of the two, because it cannot
++   * be ambiguous: readers only block when an exclusive owner holds the lock or
++   * is queued ahead of them, so OwnerTID/OwnerSite name the blocker directly.
++   * The exclusive report can come back with tid 0 meaning "held by readers";
++   * the shared report cannot.
++   *
++   * The timed wait mirrors FutexWaitForReadAvailable exactly -- same address
++   * (&Futex + 2), same 16-bit width, same expected value derived as
++   * Expected >> 16. That pairing is load-bearing: readers are woken by
++   * WakeByAddressAll on that offset address, and a mismatch in address or width
++   * here would reintroduce the class of bug that was audited clean in 2608. */
++  void WaitForReadAvailableWithDiagnostic(uint32_t Expected, [[maybe_unused]] void* Site, [[maybe_unused]] uint64_t& WaitedMS,
++                                          [[maybe_unused]] bool& Reported) {
++#ifdef _WIN32
++    if (!Reported) {
++      auto ReadWaiterAddress = reinterpret_cast<uint8_t*>(&Futex) + 2;
++      uint16_t smol_Expected = Expected >> 16;
++
++      if (WaitOnAddress(ReadWaiterAddress, &smol_Expected, sizeof(smol_Expected), STUCK_WAIT_REPORT_MS)) {
++        // Woken (or spuriously woken) inside the window. Identical to before.
++        return;
++      }
++
++      WaitedMS += STUCK_WAIT_REPORT_MS;
++      ReportStuckWait(Site, WaitedMS, false);
++      Reported = true;
++      return;
++    }
++#endif
++    FutexWaitForReadAvailable(Expected);
++  }
+ 
+ #if !defined(_WIN32)
+   void FutexWaitForWriteAvailable(uint32_t Expected) {
+@@ -401,11 +590,30 @@
+   // Only spin on WFE for 0.01ms (10k ns).
+   constexpr static uint64_t CYCLECOUNT_DIVISOR = 1'000'000'000ULL / 10'000U;
+ 
++  // Vessel: how long an exclusive wait may run before it is named, and how many
++  // times one mutex may name it. Five seconds is far longer than any legitimate
++  // hold of this lock and far shorter than a person's patience with a hung
++  // game; eight is enough to describe a cycle and not enough to flood.
++  constexpr static uint32_t STUCK_WAIT_REPORT_MS = 5000;
++  constexpr static uint32_t MAX_STUCK_REPORTS = 8;
++
+   // Layout:
+   //    Bits[31]: Write-lock bit.
+   //    Bits[30]: Read-waiter bit.
+   // Bits[29:16]: Write-waiter count.
+   //  Bits[15:0]: Read-owner count.
+   uint32_t Futex {};
++
++#ifdef _WIN32
++  // Vessel: stuck-wait diagnostic state. Written only on exclusive acquire and
++  // release, read only when a wait has already exceeded STUCK_WAIT_REPORT_MS.
++  // Plain members accessed through atomic_ref, matching how Futex is handled
++  // above; deliberately not thread_local, because patches/fex/0004 records that
++  // TLS is not usable on these paths for a BT-loaded module and that a first
++  // attempt using it faulted during emulator startup.
++  uint64_t OwnerSite {};
++  uint32_t OwnerTID {};
++  uint32_t StuckReportsRemaining {MAX_STUCK_REPORTS};
++#endif
+ };
+ } // namespace FEXCore::Utils::WritePriorityMutex
