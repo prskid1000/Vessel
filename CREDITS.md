@@ -16,6 +16,9 @@ these components are moving weekly. This file exists so that is never unclear.
 | [DXVK](https://github.com/doitsujin/dxvk) | Philip Rebohle and contributors | Direct3D 9/10/11 → Vulkan. |
 | [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) | Hans-Kristian Arntzen and contributors | Direct3D 12 → Vulkan. |
 | [Proton](https://github.com/ValveSoftware/Proton) | Valve | Wine patches that make games work. |
+| [GStreamer](https://gstreamer.freedesktop.org/) | GStreamer developers | Wine's media stack. `winegstreamer.so` is the whole implementation behind Media Foundation, DirectShow and the decoder MFTs — Wine itself contains no demuxer and no codec. |
+| [FFmpeg](https://ffmpeg.org/) | FFmpeg developers | The decoders, reached through gst-libav, and the demuxer behind `winedmo.so`. |
+| [GLib](https://gitlab.gnome.org/GNOME/glib) | GNOME developers | GStreamer's object system, and therefore a hard dependency of the above. |
 
 ## Android integration lineage
 

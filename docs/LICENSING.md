@@ -236,6 +236,45 @@ and distributed as a `.wcp` package. Obligations still apply to distribution.
 before linking". It has been verified, it is BSD-2-Clause, and it is no longer a
 component — it ships inside the APK and is recorded above.
 
+### The libraries inside the Wine package
+
+The Wine `.wcp` is not only Wine. `build/wine.sh` copies every shared library
+out of the cross-built sysroot into the payload's `lib/`, because the NDK ships
+none of them and `winex11.so`, `bcrypt.so` and `winegstreamer.so` name them as
+`NEEDED`. They are built, unmodified, from the upstream release tarballs pinned
+in `native/pins.env` by `build/x11-sysroot.sh` and `build/gst-sysroot.sh`, and
+those two scripts are the corresponding source in the sense section 6 means it:
+they name the exact version, the exact URL and every configure flag.
+
+| Bundled in the Wine `.wcp` | License | Built by |
+|---|---|---|
+| libX11, libxcb, libXext, libXrender, libXfixes, libXi, libXrandr, libXcursor, libXcomposite, libXxf86vm, libXinerama, libXau, libxshmfence | MIT / X11 | `build/x11-sysroot.sh` |
+| FreeType | FTL or GPL-2.0 (dual); used under the FTL | `build/x11-sysroot.sh` |
+| GnuTLS | LGPL-2.1-or-later | `build/x11-sysroot.sh` |
+| GMP | LGPL-3.0-or-later or GPL-2.0-or-later (dual) | `build/x11-sysroot.sh` |
+| GLib (libglib, libgobject, libgio, libgmodule, libgthread) | LGPL-2.1-or-later | `build/gst-sysroot.sh` |
+| GStreamer core and the base/good/bad plugin sets, plus gst-libav | LGPL-2.1-or-later | `build/gst-sysroot.sh` |
+| FFmpeg (libavcodec, libavformat, libavutil, libavfilter, libswscale, libswresample) | LGPL-2.1-or-later | `build/gst-sysroot.sh` |
+| PCRE2 | BSD-3-Clause | `build/gst-sysroot.sh` |
+| libffi | MIT | `build/gst-sysroot.sh` |
+| proxy-libintl | LGPL-2.0-or-later | `build/gst-sysroot.sh` |
+
+Two of these choices are licence decisions rather than technical ones and are
+worth stating so they are not silently reversed:
+
+- **FFmpeg is built without `--enable-gpl` and without `--enable-nonfree`.**
+  Those switches pull GPL-licensed code (x264, x265, libpostproc, the `yadif`
+  deinterlacer) into libavcodec/libavfilter, and the resulting binary is GPL,
+  not LGPL — which would make the whole payload GPL alongside an LGPL Wine.
+  Nothing needed here is behind them: GStreamer does its own deinterlacing and
+  Vessel decodes rather than encodes.
+- **gst-plugins-bad is built with `-Dgpl=disabled`**, for the same reason: that
+  option is upstream's gate on the plugins in that module whose dependencies
+  are GPL.
+
+None of these libraries is modified. If one ever is, the change belongs in
+`patches/<name>/` like every other, and this section should say so.
+
 Two consequences worth being explicit about:
 
 - **Because Wine and vkd3d-proton are LGPL, our patches must stay public.**

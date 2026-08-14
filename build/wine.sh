@@ -186,15 +186,29 @@ if [ ! -x "$SRC/configure" ]; then
   ( cd "$SRC" && autoreconf -f -i ) || die "autoreconf failed; install autoconf/automake"
 fi
 
-# --- X11 and FreeType for Android ---------------------------------------------
+# --- X11, FreeType, GStreamer and FFmpeg for Android --------------------------
 # Before the tools pass, so a broken sysroot fails in seconds rather than after
 # Wine's host tools have built. No-op when the sysroot matches the pins.
-"$COMMON_SH_DIR/x11-sysroot.sh" \
-  || die "x11-sysroot.sh failed; Wine cannot be built with X11 support without it"
+#
+# gst-sysroot.sh runs x11-sysroot.sh itself — they share one directory and the
+# X11 script wipes it when its pins move — so calling the second one is calling
+# both, in the only order that is safe.
+"$COMMON_SH_DIR/gst-sysroot.sh" \
+  || die "gst-sysroot.sh failed; Wine cannot be built with X11 or GStreamer support without it"
 
-for pc in x11 xext freetype2; do
+# Exactly the modules Wine's configure.ac queries, restated here so a missing
+# one is named in seconds instead of turning into a silent
+# `--without-gstreamer` an hour later. configure asks for the five GStreamer
+# names in ONE pkg-config invocation (WINE_PACKAGE_FLAGS, configure.ac:1731):
+# if any single one fails, GSTREAMER_CFLAGS comes back empty, the whole
+# AC_CHECK_HEADER block is skipped, and winegstreamer is dropped with a notice
+# rather than an error.
+for pc in x11 xext freetype2 \
+          gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 \
+          gstreamer-tag-1.0 gstreamer-gl-1.0 \
+          libavutil libavformat libavcodec; do
   [ -f "$SYSROOT/usr/lib/pkgconfig/$pc.pc" ] \
-    || die "x11-sysroot.sh reported success but left no $pc.pc in $SYSROOT/usr/lib/pkgconfig"
+    || die "the sysroot scripts reported success but left no $pc.pc in $SYSROOT/usr/lib/pkgconfig"
 done
 
 # --- Pass 1: native build tools -----------------------------------------------
@@ -357,6 +371,76 @@ CONFIGURE_ARGS=(
   --x-includes="$SYSROOT/usr/include"
   --x-libraries="$SYSROOT/usr/lib"
 
+  # --- The media stack, and both halves of it are required ---------------------
+  #
+  # **Wine implements no codec and no demuxer.** mfplat, mfreadwrite, mf,
+  # mfsrcsnk, mfmediaengine and the DirectShow parsers are PE modules that do
+  # format negotiation; every byte of demuxing and decoding happens on the unix
+  # side in winedmo.so (FFmpeg) and winegstreamer.so (GStreamer). Built without
+  # either, ALL of those PE DLLs still install — so `ls lib/wine/aarch64-windows`
+  # shows a complete Media Foundation and every media open fails anyway.
+  #
+  # The failure is precise and was measured with Resident Evil Requiem:
+  #
+  #   Failed to create SourceReader with registered byte stream handler.
+  #   error(c00d36c4)                       MF_E_UNSUPPORTED_BYTESTREAM_TYPE
+  #   ole:com_get_class_object class {317df618-5e5a-468a-9f15-d827a9a08162}
+  #                                                             not registered
+  #
+  # and the mechanism is one function, mfsrcsnk/media_source.c:2094 —
+  #
+  #   if ((status = winedmo_demuxer_check("video/mp4")) || use_gst_byte_stream_handler())
+  #       return CoCreateInstance(&CLSID_GStreamerByteStreamHandler, ...);
+  #
+  # winedmo's check fails because its unix half was compiled with no FFmpeg, so
+  # it falls back to the GStreamer handler, which is not registered because
+  # winegstreamer was not built either. Two missing dependencies, one dialog.
+  #
+  # **Only the GStreamer half is built, and the reason is a version wall, not a
+  # preference.** This was tried with `--with-ffmpeg` against the FFmpeg 8.0.3
+  # in the sysroot and the build dies an hour in, in Valve's own code:
+  #
+  #   dlls/winedmo/libavcodec/pcm_byte_order_reverse_bsf.c:39:
+  #     error: no member named 'internal' in 'struct AVBSFContext'
+  #   :80:  error: no member named 'channels' in 'struct AVCodecParameters'
+  #   :152: error: field designator 'filter' does not refer to any field in
+  #         type 'const AVBitStreamFilter'
+  #
+  # That file hand-rolls an AVBitStreamFilter and reaches into FFmpeg's private
+  # state, and every one of those three fields was removed from the public
+  # headers years ago: `AVBSFContext.internal` after 4.4, the AVBitStreamFilter
+  # function pointers in 5.1 (moved to the private FFBitStreamFilter), and
+  # `AVCodecParameters.channels` in 7.0. It is not a portability bug — it is
+  # written against the FFmpeg Proton ships, and Proton's `ffmpeg` submodule on
+  # this very branch is a77521cd, which is **FFmpeg 4.3.3, from October 2021**.
+  #
+  # So the two consumers want incompatible FFmpegs. gst-libav 1.28 is built
+  # against the modern one and is where H.264 and AAC actually get decoded;
+  # winedmo wants 4.3, which no current GStreamer supports. One sysroot cannot
+  # hold both under one soname, and the choice between them is not close:
+  # winedmo only demuxes, and mfsrcsnk already has a complete, older, better
+  # tested path for exactly this case.
+  #
+  # That path is the fallback in media_source.c quoted above. With FFmpeg
+  # absent, `winedmo_demuxer_check` returns a failure status immediately and
+  # every byte stream plugin factory routes to
+  # CLSID_GStreamerByteStreamHandler — which is now registered and now has a
+  # real GStreamer behind it, which it did not before. The reported symptom is
+  # fixed by that branch being taken successfully rather than by never reaching
+  # it.
+  #
+  # Making winedmo work would mean porting that file to modern FFmpeg
+  # internals: a patch that mirrors FFBSFContext and FFBitStreamFilter by
+  # layout, i.e. one that silently corrupts memory if a future FFmpeg reorders
+  # a private struct. Not worth it for a second demuxer.
+  --without-ffmpeg
+
+  # `--with-`, not bare: WINE_NOTICE_WITH turns an explicit --with-foo whose
+  # probe failed into AC_MSG_ERROR, and leaves a plain notice otherwise. Given
+  # docs/DEBUGGING.md's opening — a build that exits 0 with the change absent —
+  # a configure that stops is exactly what is wanted here.
+  --with-gstreamer
+
   # Host libraries we do not ship. On `auto` each probes the build machine, and
   # the ones that "succeed" are the danger: a found host .so becomes a NEEDED
   # entry in an aarch64 binary.
@@ -365,10 +449,8 @@ CONFIGURE_ARGS=(
   --without-coreaudio
   --without-cups
   --without-dbus
-  --without-ffmpeg
   --without-gphoto
   --without-gssapi
-  --without-gstreamer
   --without-krb5
   --without-netapi
   --without-opencl
@@ -427,9 +509,18 @@ CONFIGURE_ARGS=(
 #
 # The stamp file is the sha256 of the whole PACKAGE list, written by
 # x11-sysroot.sh, so any pin or configure-flag change to any package moves it.
+#
+# **BOTH sysroot stamps, because there are two scripts filling one directory.**
+# gst-sysroot.sh writes its own, and it is folded in for exactly the reason
+# above: adding GStreamer to the sysroot changes no configure argument and no
+# Wine commit, so without this line the tree configured yesterday — the one
+# whose config.h says `/* #undef HAVE_GSTREAMER */` — is reused, make has
+# nothing to rebuild, and the run ends with `ok dist/wine-...wcp` and no
+# winegstreamer.so in it.
 SYSROOT_STAMP_ID="$(cat "$SYSROOT/.vessel-x11-sysroot" 2>/dev/null || echo none)"
+GST_STAMP_ID="$(cat "$SYSROOT/.vessel-gst-sysroot" 2>/dev/null || echo none)"
 CONF_STAMP="$BUILD/.vessel-configure"
-CONF_ID="$(printf '%s\n' "${CONFIGURE_ARGS[@]}" "$SOURCE_SHA" "$SYSROOT_STAMP_ID" | sha256sum | cut -d' ' -f1)"
+CONF_ID="$(printf '%s\n' "${CONFIGURE_ARGS[@]}" "$SOURCE_SHA" "$SYSROOT_STAMP_ID" "$GST_STAMP_ID" | sha256sum | cut -d' ' -f1)"
 
 if [ -z "${VESSEL_WINE_CLEAN:-}" ] && [ -f "$BUILD/config.status" ] \
    && [ -f "$CONF_STAMP" ] && [ "$(cat "$CONF_STAMP")" = "$CONF_ID" ]; then
@@ -456,6 +547,55 @@ if grep -q 'dlls/winex11\.drv' <<< "$DISABLED_LINE"; then
      Search $BUILD/config.log for 'checking for X' and for the X11 extension
      header checks that follow it."
 fi
+
+# The same shape for the media stack, and it needs its own check for a reason
+# --with-gstreamer does not cover. WINE_NOTICE_WITH turns a failed *pkg-config*
+# probe into an error, but configure.ac:1740 has a second path that does not go
+# through it:
+#
+#   ac_glib2_broken=yes
+#   enable_winegstreamer=${enable_winegstreamer:-no}
+#   WINE_NOTICE([glib-2.0 pkgconfig configuration is for the wrong architecture])
+#
+# That fires when gst/gst.h is found but its gint64 is not 64-bit — i.e. when a
+# HOST GLib answered the query — and it disables the module with a notice, not
+# an error. A sysroot leak would land there, so DISABLED_SUBDIRS is checked
+# directly rather than trusted.
+if grep -q 'dlls/winegstreamer' <<< "$DISABLED_LINE"; then
+  die "configure disabled dlls/winegstreamer despite --with-gstreamer.
+     Without it no byte stream handler is registered, MFCreateSourceReader*
+     returns MF_E_UNSUPPORTED_BYTESTREAM_TYPE (0xC00D36C4) for every file, and
+     the PE half of Media Foundation installs anyway so the tree looks fine.
+     Search $BUILD/config.log for 'gstreamer-1.0 gstreamer-video-1.0' — the
+     line after it prints the flags pkg-config returned — and for
+     'whether gint64 defined by gst/gst.h is indeed 64-bit'."
+fi
+
+# The inverse of the usual check, and it is here because the sysroot now
+# CONTAINS an FFmpeg that Wine must not find. `--without-ffmpeg` is in the
+# argument list above; if it is ever dropped, the probe succeeds, HAVE_FFMPEG
+# is defined, and the build dies an hour later inside
+# dlls/winedmo/libavcodec/pcm_byte_order_reverse_bsf.c against private FFmpeg
+# structures that stopped existing after 4.4. Failing in seconds, here, with
+# the reason attached, is worth four lines.
+if grep -q '^#define HAVE_FFMPEG 1' "$BUILD/include/config.h"; then
+  die "configure defined HAVE_FFMPEG. This tree cannot build winedmo against a
+     modern FFmpeg — see the --without-ffmpeg comment in this script — and the
+     failure is an hour away in pcm_byte_order_reverse_bsf.c. Restore
+     --without-ffmpeg, or pin FFmpeg back to the 4.3.3 Proton bundles and give
+     gst-libav an FFmpeg of its own."
+fi
+
+# And the positive form of the winegstreamer check, from the same file. The
+# DISABLED_SUBDIRS test above catches configure switching the module off;
+# this catches the case where it is on but compiled without the flags, which
+# would fail later and much less clearly.
+grep -q '^GSTREAMER_LIBS *=.*-lgstreamer-1\.0' "$BUILD/Makefile" \
+  || die "the generated Makefile has no GSTREAMER_LIBS naming -lgstreamer-1.0.
+     Search $BUILD/config.log for the line beginning
+     'gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 ... libs:'."
+
+info "configure: winegstreamer enabled, FFmpeg deliberately not used by Wine"
 
 log "building $COMPONENT — expect an hour or more"
 make -C "$BUILD" -j"$(build_jobs 1)" || die "wine build failed"
@@ -561,14 +701,59 @@ for lib in "${runtime_libs[@]}"; do
 done
 ok "$(( ${#runtime_libs[@]} )) runtime libraries"
 
+# --- Ship the GStreamer plugins ---------------------------------------------------
+# The loop above copies $SYSROOT/usr/lib/*.so, which is every library — GLib,
+# the GStreamer core libraries, FFmpeg — but NOT the plugins, which live one
+# directory down in lib/gstreamer-1.0 and are the entire point of shipping any
+# of it. libgstreamer-1.0.so with no plugin directory is a registry with zero
+# features: gst_init() succeeds, decodebin cannot be created, and every media
+# open fails exactly as it did before the build.
+#
+# **The directory has to be named at runtime and nothing does it by default.**
+# GStreamer compiles its plugin path from --libdir, so libgstreamer-1.0.so
+# looks in /usr/lib/gstreamer-1.0 — an absolute path that does not exist on
+# Android. app/src/main/java/app/vessel/core/WineLaunch.kt sets
+# GST_PLUGIN_SYSTEM_PATH to this directory for that reason; the two have to
+# agree, and this is the half that decides the layout.
+log "adding the GStreamer plugins"
+shopt -s nullglob
+gst_plugins=("$SYSROOT/usr/lib/gstreamer-1.0"/*.so)
+shopt -u nullglob
+[ "${#gst_plugins[@]}" -gt 0 ] \
+  || die "no plugins in $SYSROOT/usr/lib/gstreamer-1.0 — run ./build/gst-sysroot.sh first"
+install -d "$PAYLOAD/lib/gstreamer-1.0"
+for plug in "${gst_plugins[@]}"; do
+  install -m 0644 "$plug" "$PAYLOAD/lib/gstreamer-1.0/"
+  "$NDK_BIN/llvm-strip" --strip-unneeded "$PAYLOAD/lib/gstreamer-1.0/$(basename "$plug")" 2>/dev/null || true
+done
+ok "$(( ${#gst_plugins[@]} )) GStreamer plugins"
+
 # The check that would have caught the above. Every NEEDED entry of every ELF we
 # ship must resolve inside the package or be one Android already provides —
 # anything else is a library that exists only on the build machine.
 BIONIC_PROVIDED="libc.so libm.so libdl.so libz.so liblog.so libandroid.so
 libEGL.so libGLESv2.so libGLESv3.so libvulkan.so libnativewindow.so
 libsync.so libcamera2ndk.so libaaudio.so ld-android.so"
+
+# **The line breaks above are cosmetic and were very nearly a defect.** The test
+# below is `case " $BIONIC_PROVIDED " in *" $need "*`, which requires a SPACE on
+# both sides of the name — and a token sitting at the start or the end of a line
+# has a NEWLINE on one side instead. That silently excluded four entries that
+# are in the list and look present: libandroid.so, libEGL.so, libnativewindow.so
+# and libsync.so.
+#
+# It went unnoticed because nothing shipped had linked any of them. GStreamer's
+# libgstgl-1.0.so does — libEGL.so is a NEEDED entry of the EGL backend — and
+# the packaging step then refused to build over a library Android has always
+# shipped, naming it as one "the package depends on and does not ship". A list
+# that reads correctly and does not match is exactly the confidently-wrong
+# instrument docs/DEBUGGING.md is about, so the layout is collapsed away here
+# rather than the list being reflowed onto one unreadable line.
+BIONIC_PROVIDED="$(tr '\n' ' ' <<<"$BIONIC_PROVIDED")"
+
 missing=""
-for elf in "$PAYLOAD"/bin/* "$PAYLOAD"/lib/*.so "$PAYLOAD"/lib/wine/aarch64-unix/*.so; do
+for elf in "$PAYLOAD"/bin/* "$PAYLOAD"/lib/*.so "$PAYLOAD"/lib/gstreamer-1.0/*.so \
+           "$PAYLOAD"/lib/wine/aarch64-unix/*.so; do
   [ -f "$elf" ] || continue
   # llvm-readelf output is captured, never piped into grep: grep exits at its
   # first match, readelf takes SIGPIPE, and pipefail turns that into a failure.
@@ -599,16 +784,39 @@ ok "every NEEDED entry resolves inside the package"
 # module in lib/wine/aarch64-windows, and its unix half is named by UNIXLIB in
 # dlls/winex11.drv/Makefile.in. Checking for the .drv.so spelling passes over a
 # genuinely missing driver every time.
+#
+# winegstreamer.so and winedmo.so are in this list for the reason the whole
+# media block above exists: their PE halves install regardless, so the
+# aarch64-windows tree is identical whether or not the unix side was built and
+# the only place the difference shows is here. Absence is a FAILURE however the
+# build exited.
 for elf in bin/wineserver bin/wine lib/wine/aarch64-unix/ntdll.so \
            lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/winex11.so \
-           lib/wine/aarch64-unix/wineoss.so; do
+           lib/wine/aarch64-unix/wineoss.so lib/wine/aarch64-unix/winegstreamer.so \
+           lib/wine/aarch64-unix/winedmo.so; do
   path="$PAYLOAD/$elf"
   [ -f "$path" ] || die "missing unix binary $elf (expected $path).
      Without winex11.drv.so in particular, Wine has no way to put a window on
-     screen; check the 'checking for X' lines in $BUILD/config.log."
+     screen; check the 'checking for X' lines in $BUILD/config.log.
+     Without winegstreamer.so, no byte stream handler is registered and every
+     MFCreateSourceReader* call returns MF_E_UNSUPPORTED_BYTESTREAM_TYPE."
   file "$path" | grep -q 'ARM aarch64' \
     || die "$elf is not an aarch64 ELF: $(file -b "$path")"
 done
+
+# And that winegstreamer really did link the GStreamer it is supposed to use,
+# rather than compiling to a module that loads and can do nothing. A NEEDED
+# entry is the only evidence of that which survives into the shipped file.
+wg_dyn="$("$NDK_BIN/llvm-readelf" -d "$PAYLOAD/lib/wine/aarch64-unix/winegstreamer.so" 2>/dev/null || true)"
+for need in libgstreamer-1.0.so libgstvideo-1.0.so libgstaudio-1.0.so \
+            libgsttag-1.0.so libgstgl-1.0.so libglib-2.0.so; do
+  grep -q "NEEDED.*\[$need\]" <<<"$wg_dyn" \
+    || die "winegstreamer.so does not record $need as NEEDED.
+     It was built, but against something other than the sysroot's GStreamer.
+     Full NEEDED list:
+$(grep NEEDED <<<"$wg_dyn")"
+done
+ok "winegstreamer.so links the sysroot GStreamer"
 
 # THE PE TREES ARE NOT ONE PER --enable-archs VALUE. Wine builds arm64ec as
 # ARM64X — the arm64ec objects link *into* the aarch64 DLLs, installed to

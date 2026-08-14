@@ -1088,6 +1088,13 @@ class SessionEnvironmentTest {
         listOf(
             "WINEDLLPATH", "WINENLSDIR", "LD_LIBRARY_PATH", "PATH",
             "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEDEBUG", "WINEESYNC",
+            // `wineboot --init` registers winegstreamer.dll (loader/wine.inf.in
+            // line 765), which loads its unix half and runs gst_init(). Without
+            // the plugin path that scan finds nothing and caches an EMPTY
+            // registry in the container directory, which every later process
+            // then reuses — so omitting these does not merely leave the
+            // bootstrap without media, it poisons the session that follows.
+            "GST_PLUGIN_SYSTEM_PATH", "WINE_GST_REGISTRY_DIR", "GST_REGISTRY_FORK",
         ).forEach { assertTrue("$it is missing from the prefix bootstrap", bootstrap.containsKey(it)) }
     }
 }

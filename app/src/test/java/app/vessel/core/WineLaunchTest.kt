@@ -145,6 +145,30 @@ class WineLaunchTest {
     }
 
     @Test
+    fun `GStreamer is told where its plugins are, because it cannot work it out`() {
+        // libgstreamer-1.0.so has the build container's /usr/lib/gstreamer-1.0
+        // compiled into it and finds nothing there on a phone — and it does not
+        // fail: gst_init() succeeds with an empty registry, decodebin cannot be
+        // created, and every media open returns MF_E_UNSUPPORTED_BYTESTREAM_TYPE
+        // exactly as it does with no winegstreamer at all. build/wine.sh puts
+        // the plugins in lib/gstreamer-1.0; this is the half that says so.
+        val environment = wineLauncherEnvironment(tree, scratch)
+        assertEquals(
+            File(tree.root, "lib/gstreamer-1.0").absolutePath,
+            environment["GST_PLUGIN_SYSTEM_PATH"],
+        )
+        // Read by dlls/winegstreamer/unixlib.c, which appends
+        // "/registry.aarch64.bin" and re-exports it as GST_REGISTRY_1_0. The
+        // container's own directory: it exists, it is writable, and it is not
+        // cleared between launches the way TMPDIR is.
+        assertEquals(scratch.home.absolutePath, environment["WINE_GST_REGISTRY_DIR"])
+        // No gst-plugin-scanner ships, because an app at targetSdk 36 cannot
+        // exec a binary out of its own filesDir. In-process scanning is what
+        // would happen anyway; this removes the failed spawn.
+        assertEquals("no", environment["GST_REGISTRY_FORK"])
+    }
+
+    @Test
     fun `the driver directory joins LD_LIBRARY_PATH too, for the ICD's own libraries`() {
         // An ICD is dlopen'ed by absolute path with no loader in front of it
         // (patches/wine/0009), so nothing else puts its directory on the search

@@ -139,6 +139,18 @@ val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     "TMPDIR",
     "XDG_RUNTIME_DIR",
 
+    // Also the exec model, and they belong here for the same reason
+    // `WINEDLLPATH` does: they say where part of the Wine tree is, not what the
+    // session should report. `wineboot --init` registers the builtin DLLs, and
+    // that includes `winegstreamer` — which loads its unix half and calls
+    // `gst_init()`. With no plugin path that scan finds nothing and writes an
+    // empty registry into the container directory, and every later process
+    // reuses it. So the cost of omitting these is not "the bootstrap has no
+    // media", it is a poisoned cache. See `wineLauncherEnvironment`.
+    "GST_PLUGIN_SYSTEM_PATH",
+    "WINE_GST_REGISTRY_DIR",
+    "GST_REGISTRY_FORK",
+
     "WINEPREFIX",
     "WINEESYNC",
     "WINEDEBUG",

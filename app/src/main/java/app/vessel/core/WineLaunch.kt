@@ -82,6 +82,24 @@ data class WineTree(val root: File) {
     val peLib: File get() = File(dllPath, WINE_PE_ARCH)
 
     /**
+     * `lib/gstreamer-1.0` — the codec plugins, and a path GStreamer cannot guess.
+     *
+     * GStreamer compiles its plugin directory in from the `--libdir` it was
+     * configured with, so `libgstreamer-1.0.so` in this package looks for
+     * `/usr/lib/gstreamer-1.0` — a build-container path that does not exist on
+     * a phone. It does not fail when the directory is missing: `gst_init()`
+     * succeeds, the registry comes back with zero features, and the first
+     * `decodebin` cannot be created. That reads exactly like a Wine with no
+     * GStreamer at all, which is the bug this directory exists to fix, so the
+     * two are easy to confuse and one line apart.
+     *
+     * [wineLauncherEnvironment] therefore names it explicitly through
+     * `GST_PLUGIN_SYSTEM_PATH`. `build/wine.sh` is the other half of the
+     * agreement — it is what puts the plugins here rather than anywhere else.
+     */
+    val gstPlugins: File get() = File(lib, "gstreamer-1.0")
+
+    /**
      * Whether Wine ships this builtin program.
      *
      * [hasTool] cannot answer for these: `bin/` carries a symlink for `winefile`
@@ -229,6 +247,35 @@ fun wineLauncherEnvironment(
         "HOME" to scratch.home.absolutePath,
         "TMPDIR" to scratch.tmp.absolutePath,
         "XDG_RUNTIME_DIR" to scratch.tmp.absolutePath,
+
+        // — GStreamer, which is Wine's entire media stack -----------------------
+        //
+        // Three variables, and each of them is here because a default that is
+        // right on a desktop is wrong inside an app sandbox.
+        //
+        // `GST_PLUGIN_SYSTEM_PATH` replaces the compiled-in plugin directory.
+        // See [WineTree.gstPlugins]: without it the registry is empty, no
+        // `decodebin` can be built, and every media open fails in a way that
+        // looks identical to a Wine built without GStreamer.
+        //
+        // `WINE_GST_REGISTRY_DIR` is read by winegstreamer itself
+        // (`dlls/winegstreamer/unixlib.c`), which appends `registry.aarch64.bin`
+        // and exports the result as `GST_REGISTRY_1_0`. Pointed at the
+        // container's own directory, which already exists and is writable and
+        // survives between launches — the plugin scan is otherwise redone on
+        // every process that touches media. Not `TMPDIR`: that is cleared.
+        //
+        // `GST_REGISTRY_FORK=no` makes GStreamer load plugins in-process while
+        // building that registry. The default forks and execs
+        // `gst-plugin-scanner`, a helper this package deliberately does not
+        // ship: an app at targetSdk 36 cannot exec a binary out of its own
+        // `filesDir` (see [SYSTEM_LINKER]), so the spawn can only fail. It
+        // would fall back to in-process scanning anyway, so this changes no
+        // outcome — it removes a fork and an SELinux denial from the path a
+        // game takes to its first frame of video.
+        "GST_PLUGIN_SYSTEM_PATH" to tree.gstPlugins.absolutePath,
+        "WINE_GST_REGISTRY_DIR" to scratch.home.absolutePath,
+        "GST_REGISTRY_FORK" to "no",
     )
 
 private const val SYSTEM_BIN = "/system/bin"
