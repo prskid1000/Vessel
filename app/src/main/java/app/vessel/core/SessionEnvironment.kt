@@ -1482,8 +1482,7 @@ fun sessionEnvironment(
  * [manifestEnvironment] leaves it alone and this function is the only writer.
  */
 internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): String {
-    val base = D3D_DLL_OVERRIDES.joinToString(",") + "=n" +
-        ";" + STREAMLINE_DLL_OVERRIDES.joinToString(",") + "="
+    val base = D3D_DLL_OVERRIDES.joinToString(",") + "=n"
     val extra = manifest?.allParams.orEmpty()
         .firstOrNull { it.key == DLL_OVERRIDES_KEY }
         ?.let { spec -> profile.params[spec.key] ?: spec.defaultValue() }
@@ -1507,49 +1506,38 @@ internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): 
  */
 private const val DLL_OVERRIDES_KEY = "wine.dllOverrides"
 
-/**
- * NVIDIA Streamline, refused for every title.
+/*
+ * Do not add NVIDIA Streamline (`sl.interposer` and friends) back here. It was
+ * disabled as a default, it was measured, and it was wrong.
  *
- * **This is the thing that stopped Resident Evil Requiem, and it stops on
- * hardware, not on Vessel.** Wine reported
+ * The reasoning was: Wine printed
  * `RtlpWaitForCriticalSection section 00000000388A7E28 wait timed out in
- * thread 0184, blocked by 021c`. Those ids are 388 and 540 in decimal, and the
- * lines immediately above them are Streamline's own:
+ * thread 0184, blocked by 021c`, and 0x184/0x21c are 388/540 in decimal — the
+ * same two thread ids as the `[streamline][error][tid:388]` /
+ * `[tid:540]` lines directly above, which complain that Reflex and PCL have no
+ * context because there is no NVIDIA GPU. So Streamline was refused for every
+ * title with an empty override, on the grounds that a title would then take the
+ * path it takes on any machine without Streamline.
  *
- * ```
- * [streamline][error][tid:388] 'kFeaturePCL' context is missing
- * [streamline][error][tid:540] 'kFeatureReflex' context is missing
- * ```
+ * That last step is the error, and it is worth naming precisely: on a
+ * non-NVIDIA PC `sl.interposer.dll` **is present and loads fine** — it just
+ * reports no NVIDIA features. An empty override makes `LoadLibrary` *fail*,
+ * which is a different situation, and Resident Evil Requiem does not handle it.
+ * With the override in place the log shows
+ * `Failed to load module L"sl.interposer.dll"; status=c0000135` twice, followed
+ * by the signature-verification cluster and `CrashReport.exe`. The deadlock had
+ * been traded for a crash.
  *
- * The same two threads. Streamline cannot initialise Reflex or PCL because
- * there is no NVIDIA GPU here, and then deadlocks two of its own threads. Every
- * layer below it had already done its job — the swapchain was created at
- * 1920x1080 with three images and vkd3d was compiling pipelines.
+ * With Streamline allowed to load again the title gets **further than it ever
+ * had** — past `dstorage`, `steam_api64` and `voices38` — and the trace shows
+ * no `sl.*` load and no critical-section timeout at all. The thread-id
+ * correlation was real; the conclusion drawn from it was not.
  *
- * Blocked for everything rather than per title, because nothing Streamline
- * offers can work on an Adreno: DLSS, Reflex, frame generation and PCL are all
- * NVIDIA-hardware features, so the best case is a framework that loads, finds
- * nothing, and costs threads and startup time. There is no container this
- * should be on for, which is what makes it a default and not a setting.
- *
- * Empty value, not `=b`: an empty override is Wine's "disable this DLL
- * entirely", so `LoadLibrary` fails and a title takes the path it already has
- * for a machine without Streamline — the path every non-NVIDIA PC takes. `=b`
- * would ask Wine for a builtin it does not have.
- *
- * Named without the `.dll` suffix because that is the form `WINEDLLOVERRIDES`
- * matches on. `sl.interposer` is the entry point every other module is reached
- * through; the rest are listed so a title that loads one directly still finds
- * nothing.
+ * Wine's default for a DLL it has no builtin for is already native-first, so
+ * removing the entry restores stock behaviour; nothing replaces it. A user who
+ * wants Streamline gone for one title can still say so through
+ * `wine.dllOverrides`, which is appended after this and therefore wins.
  */
-val STREAMLINE_DLL_OVERRIDES: List<String> = listOf(
-    "sl.interposer",
-    "sl.common",
-    "sl.dlss",
-    "sl.dlss_g",
-    "sl.reflex",
-    "sl.pcl",
-)
 
 internal fun manifestEnvironment(
     profile: ContainerProfile,

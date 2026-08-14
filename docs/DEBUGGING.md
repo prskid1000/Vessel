@@ -62,6 +62,41 @@ printed.
 more instrumentation.** Hex thread ids, decimal tids, page-aligned addresses,
 version codes.
 
+## A correlation is not a mechanism
+
+The section above is still the right lesson, and the answer it produced was
+still wrong. Worth keeping both facts next to each other.
+
+The thread ids really did match: Wine's blocked pair and Streamline's two
+complaining threads were the same two threads. What did not follow was the fix.
+Streamline was disabled for every title with an empty `WINEDLLOVERRIDES` entry,
+on the reasoning that a title would then "take the path it takes on any machine
+without Streamline".
+
+That sentence is where it went wrong, and the flaw is only visible once it is
+stated plainly: on a non-NVIDIA PC `sl.interposer.dll` **is present and loads
+fine**, and merely reports no NVIDIA features. An empty override makes
+`LoadLibrary` *fail* — a situation that happens on no real machine, and one
+Resident Evil Requiem does not handle. The log then reads
+`Failed to load module L"sl.interposer.dll"; status=c0000135`, twice, followed
+by `CrashReport.exe`. A deadlock had been traded for a crash and counted as a
+fix.
+
+Allowing Streamline to load again took the title **further than it had ever
+got**, past `dstorage`, `steam_api64` and `voices38` — with no `sl.*` load in
+the trace and no critical-section timeout at all.
+
+Two habits come out of this:
+
+- **Say what the fix makes the machine look like, not what you want it to
+  achieve.** "Disable Streamline" hid the actual change, which was "make a DLL
+  the game ships with fail to load". The second phrasing is obviously wrong; the
+  first is not.
+- **A fix that changes the symptom is not a fix.** Deadlock became crash, and
+  the new symptom was read as new progress. The question to ask of any fix is
+  whether the thing got *further*, and progress needs a marker chosen in
+  advance — here, which DLLs load, not whether it still fails.
+
 ## Prefer an instrument that can return a negative
 
 `patches/fex/0006` counted RWX invalidations and reported **zero**. That killed a
