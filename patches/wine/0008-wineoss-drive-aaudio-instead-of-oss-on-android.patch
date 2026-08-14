@@ -333,7 +333,7 @@ index bcdcc72ba0..5d820903bc 100644
 +     * ERR so it survives a session log at its default level: a burst this
 +     * driver did not expect is the first thing to look at when audio is rough,
 +     * and it costs one line per stream. */
-+    ERR("aaudio: %s, burst %d, capacity %d, %d Hz x%d, format %d\n",
++    MESSAGE("aaudio: %s, burst %d, capacity %d, %d Hz x%d, format %d\n",
 +        AAudioStream_getSharingMode(aas) == AAUDIO_SHARING_MODE_EXCLUSIVE
 +            ? "exclusive (mmap)" : "shared",
 +        AAudioStream_getFramesPerBurst(aas),

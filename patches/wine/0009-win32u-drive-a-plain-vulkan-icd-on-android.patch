@@ -159,7 +159,7 @@ index ecb082b799..9dfcd71ef3 100644
 +    else
 +        version = 1;
 +
-+    ERR_(winediag)( "Vulkan: driving the ICD %s directly, loader interface version %u.\n",
++    MESSAGE( "Vulkan: driving the ICD %s directly, loader interface version %u.\n",
 +                    path, version );
 +    return handle;
 +}

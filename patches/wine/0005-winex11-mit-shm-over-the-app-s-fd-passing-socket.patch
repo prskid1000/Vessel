@@ -112,7 +112,7 @@ index ad3a863504..e2d2e1c509 100644
 +    {
 +        path = getenv( "WINE_SYSVSHM_SOCKET" );
 +        enabled = (path && path[0]);
-+        if (enabled) ERR_(winediag)( "vessel: MIT-SHM over %s\n", path );
++        if (enabled) MESSAGE( "vessel: MIT-SHM over %s\n", path );
 +        else TRACE( "vessel: WINE_SYSVSHM_SOCKET is unset, MIT-SHM stays off\n" );
 +    }
 +    return enabled;
@@ -259,7 +259,7 @@ index ad3a863504..e2d2e1c509 100644
 +                if (!reported)
 +                {
 +                    reported = TRUE;
-+                    ERR_(winediag)( "vessel: MIT-SHM is live, first segment %d of %d bytes\n",
++                    MESSAGE( "vessel: MIT-SHM is live, first segment %d of %d bytes\n",
 +                                    shminfo->shmid, image->bytes_per_line * height );
 +                }
 +            }

@@ -501,7 +501,7 @@ index 0000000000..7fa55639ca
 +    /* The one line kept at a level a session log shows. Everything else about
 +     * this bus is only worth reading once you know it connected at all, and
 +     * this is the line that says the app and the guest found each other. */
-+    ERR("vessel: pad bus connected to %s\n", path);
++    MESSAGE("vessel: pad bus connected to %s\n", path);
 +    return STATUS_SUCCESS;
 +}
 +
