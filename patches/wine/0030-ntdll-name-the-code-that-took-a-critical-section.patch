@@ -1,16 +1,73 @@
 diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
-index b430c0bb4fe..15f46d2796e 100644
+index b430c0bb4fe..d2183387905 100644
 --- a/dlls/ntdll/sync.c
 +++ b/dlls/ntdll/sync.c
-@@ -163,6 +163,50 @@ static const char *crit_section_get_name( const RTL_CRITICAL_SECTION *crit )
+@@ -163,6 +163,181 @@ static const char *crit_section_get_name( const RTL_CRITICAL_SECTION *crit )
      return "?";
  }
  
-+/* Vessel: where the current owner took the lock.
++/* Vessel: where the current owner took the lock, and which code called it.
 + *
 + * RtlpWaitForCriticalSection names the owning *thread* on a timeout, which says
-+ * who is holding a lock and nothing about why. Resolving the address below
-+ * against the module bases loaddll already prints names the DLL and offset.
++ * who is holding a lock and nothing about why. Resolving an address against the
++ * module bases loaddll already prints names the DLL and the offset.
++ *
++ * ONE ADDRESS WAS NOT ENOUGH, AND THE LOG SAID SO. Measured on a real deadlock:
++ *
++ *   sync:RtlpWaitForCriticalSection section 00000000388A7E28 "?" wait timed out
++ *   in thread 0184, blocked by 021c which took it at 0000006FFFF246B0,
++ *   retrying (60 sec)
++ *
++ * That address is ntdll+0xe46b0 in the exact ntdll that was running, and the
++ * nearest symbol is $ientry_thunk$cdecl$i8$i8 -- ntdll's own ARM64EC
++ * entry-thunk table. The lock had been taken by emulated x86-64 code calling in
++ * through a thunk, so the return address recorded was the thunk's own. Every
++ * x64-origin acquisition resolves to that same anonymous region however often
++ * it fires, which made the instrument useless for exactly the case it exists
++ * for.
++ *
++ * Hence the second address, and it is one frame-pointer hop rather than a stack
++ * walk. FEX pops the return address the guest's CALL pushed into lr and
++ * branches to the entry thunk (native/fex/Source/Windows/ARM64EC/Module.S,
++ * ExitFunctionSuspendResumePoint), and the thunk parks it in an ordinary
++ * AArch64 frame record. Disassembled out of the shipped ntdll rather than
++ * assumed:
++ *
++ *   $ientry_thunk$cdecl$i8$i8:
++ *     stp     q6, q7, [sp, #-0xb0]!
++ *     ...
++ *     stp     x29, x30, [sp, #0xa0]   <- x30 here is the GUEST return address
++ *     add     x29, sp, #0xa0
++ *     blr     x9                      <- calls RtlEnterCriticalSection
++ *
++ * So the first saved lr in the x29 chain that is not inside ntdll is the guest
++ * caller, in a module loaddll has already named. A native caller -- kernelbase,
++ * or anything that calls EnterCriticalSection directly -- falls out of the same
++ * walk one hop earlier, so one mechanism covers both and neither needs to be
++ * detected.
++ *
++ * One case does not yield the guest and is left alone rather than filtered: if
++ * the x64 caller left rsp only 8-byte aligned, FEX leaves the return address on
++ * the stack and hands the thunk lr = X64ReturnInstr instead (ret_sp_misaligned,
++ * same file). The walk then names libarm64ecfex, which is still a module, still
++ * resolvable, and still not a thunk.
++ *
++ * COST, because this is one of the hottest paths in the process: a bounded loop
++ * of at most CRIT_SITE_FRAMES iterations, two loads and three compares each,
++ * which stops on the first or second in both cases above. No unwind tables, no
++ * locks, no allocation, and nothing that can re-enter a critical section. That
++ * is why it is unconditional rather than gated on an environment variable: a
++ * gate would have to read the environment lazily from inside the process heap's
++ * own lock, which is a recursion hazard bought for less than it costs. The
++ * acquire this sits beside already executes ldaxr/stlxr and a `dmb ish` full
++ * barrier -- read out of the shipped RtlEnterCriticalSection, not assumed --
++ * and a handful of L1-hot loads will not be what dominates that.
++ *
++ * RtlCaptureStackBackTrace is rejected on both counts. It is an unwind-table
++ * lookup and a virtual unwind per frame, far too expensive to run on every
++ * acquisition, and patches/wine/0029 already measured that it does not answer
++ * this question anyway: for guest callers the captured frames stop at the entry
++ * thunk.
 + *
 + * A side table rather than the debug info, because there is no room in it:
 + * RTL_CRITICAL_SECTION_DEBUG.Spare is `DWORD_PTR Spare[8/sizeof(DWORD_PTR)]`
@@ -25,9 +82,11 @@ index b430c0bb4fe..15f46d2796e 100644
 + * below reads it.
 + */
 +#define CRIT_SITE_SLOTS 256
++#define CRIT_SITE_FRAMES 8
 +
 +static const RTL_CRITICAL_SECTION *crit_site_keys[CRIT_SITE_SLOTS];
 +static void *crit_site_addrs[CRIT_SITE_SLOTS];
++static void *crit_site_callers[CRIT_SITE_SLOTS];
 +
 +static inline unsigned int crit_site_slot( const RTL_CRITICAL_SECTION *crit )
 +{
@@ -36,36 +95,112 @@ index b430c0bb4fe..15f46d2796e 100644
 +    return (unsigned int)(((ULONG_PTR)crit >> 4) % CRIT_SITE_SLOTS);
 +}
 +
++#if defined(__aarch64__) || defined(__arm64ec__)
++
++/* Is an address inside ntdll's own image? __ImageBase is the linker's and
++ * SizeOfImage comes out of our own headers, so this needs no loader lock and no
++ * allocation -- RtlPcToFileHeader would take the loader lock and could not be
++ * called from here. The cached size is written identically by every thread that
++ * computes it, so the missing barrier cannot produce a value that was never
++ * valid. */
++static inline BOOL crit_site_in_ntdll( ULONG_PTR addr )
++{
++    extern IMAGE_DOS_HEADER __ImageBase;
++    static ULONG image_size;
++
++    if (!image_size)
++    {
++        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)&__ImageBase + __ImageBase.e_lfanew);
++        image_size = nt->OptionalHeader.SizeOfImage;
++    }
++    return addr - (ULONG_PTR)&__ImageBase < image_size;
++}
++
++/* The first return address outside ntdll, walked one frame record at a time.
++ *
++ * AArch64 only, because the {saved x29, saved x30} pair is what makes this two
++ * loads instead of an unwind. Every pointer is range-checked against this
++ * thread's own stack before it is dereferenced, so a frame that established no
++ * record -- this build omits frame pointers where it can -- can cost a wrong
++ * answer but never a fault.
++ *
++ * DECLSPEC_NOINLINE is not decoration, it is a measurement. Inlined, clang
++ * unrolls the loop into all three recording sites: RtlTryEnterCriticalSection
++ * alone went from 0x40 bytes in the shipped ntdll to more than 0x360 in the
++ * object file. Out of line it is 0xb8 and one bl, and the walk is one shared
++ * copy. Starting a frame deeper costs nothing, because every frame that adds is
++ * inside ntdll and the loop skips exactly those. */
++static DECLSPEC_NOINLINE void *crit_section_caller(void)
++{
++    ULONG_PTR low = (ULONG_PTR)NtCurrentTeb()->Tib.StackLimit;
++    ULONG_PTR high = (ULONG_PTR)NtCurrentTeb()->Tib.StackBase;
++    ULONG_PTR frame = (ULONG_PTR)__builtin_frame_address(0);
++    unsigned int i;
++
++    for (i = 0; i < CRIT_SITE_FRAMES; i++)
++    {
++        ULONG_PTR next, site;
++
++        if (frame & 15) break;
++        if (frame < low || frame + 2 * sizeof(ULONG_PTR) > high) break;
++        next = ((const ULONG_PTR *)frame)[0];
++        site = ((const ULONG_PTR *)frame)[1];
++        if (!site) break;
++        if (!crit_site_in_ntdll( site )) return (void *)site;
++        if (next <= frame) break;   /* the chain only ever grows upwards */
++        frame = next;
++    }
++    return NULL;
++}
++
++#else  /* the frame record above is AArch64's; elsewhere only the site is known */
++
++static void *crit_section_caller(void)
++{
++    return NULL;
++}
++
++#endif
++
 +static inline void crit_section_note_site( const RTL_CRITICAL_SECTION *crit, void *site )
 +{
 +    unsigned int slot = crit_site_slot( crit );
-+    crit_site_keys[slot] = crit;
++    /* the key last, so a reader that matches it has the best chance of seeing
++     * the two values that belong with it */
 +    crit_site_addrs[slot] = site;
++    crit_site_callers[slot] = crit_section_caller();
++    crit_site_keys[slot] = crit;
 +}
 +
-+static inline void *crit_section_get_site( const RTL_CRITICAL_SECTION *crit )
++static inline void *crit_section_get_site( const RTL_CRITICAL_SECTION *crit, void **caller )
 +{
 +    unsigned int slot = crit_site_slot( crit );
++    *caller = NULL;
 +    if (crit_site_keys[slot] != crit) return NULL;
++    *caller = crit_site_callers[slot];
 +    return crit_site_addrs[slot];
 +}
 +
  static inline HANDLE get_semaphore( RTL_CRITICAL_SECTION *crit )
  {
      if ((ULONG_PTR)crit->LockSemaphore > 1) return crit->LockSemaphore;
-@@ -318,8 +362,9 @@ NTSTATUS WINAPI RtlpWaitForCriticalSection( RTL_CRITICAL_SECTION *crit )
+@@ -318,8 +493,13 @@ NTSTATUS WINAPI RtlpWaitForCriticalSection( RTL_CRITICAL_SECTION *crit )
  
          timeout = (TRACE_ON(relay) ? 300 : 60);
  
 -        ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx, retrying (%u sec)\n",
 -             crit, debugstr_a(crit_section_get_name(crit)), GetCurrentThreadId(), HandleToULong(crit->OwningThread), timeout );
-+        ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx which took it at %p, retrying (%u sec)\n",
-+             crit, debugstr_a(crit_section_get_name(crit)), GetCurrentThreadId(), HandleToULong(crit->OwningThread),
-+             crit_section_get_site(crit), timeout );
++        {
++            void *caller, *site = crit_section_get_site( crit, &caller );
++
++            ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx which took it at %p, called from %p, retrying (%u sec)\n",
++                 crit, debugstr_a(crit_section_get_name(crit)), GetCurrentThreadId(),
++                 HandleToULong(crit->OwningThread), site, caller, timeout );
++        }
      }
      if (crit_section_has_debuginfo( crit )) crit->DebugInfo->ContentionCount++;
      return STATUS_SUCCESS;
-@@ -356,7 +401,11 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+@@ -356,7 +536,11 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
      {
          ULONG count;
  
@@ -78,7 +213,7 @@ index b430c0bb4fe..15f46d2796e 100644
          for (count = crit->SpinCount; count > 0; count--)
          {
              if (crit->LockCount > 0) break;  /* more than one waiter, don't bother spinning */
-@@ -384,6 +433,7 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+@@ -384,6 +568,7 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
  done:
      crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
      crit->RecursionCount = 1;
@@ -86,3 +221,26 @@ index b430c0bb4fe..15f46d2796e 100644
      return STATUS_SUCCESS;
  }
  
+@@ -398,12 +583,22 @@ BOOL WINAPI RtlTryEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+     {
+         crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+         crit->RecursionCount = 1;
++        /* Vessel: recorded here too, not only in RtlEnterCriticalSection.
++         *
++         * Both of the original recording sites were in RtlEnterCriticalSection,
++         * and a caller that takes the lock through this function directly --
++         * which is what ntdll's own heap does -- never reached either of them.
++         * Its slot stayed at the zero it was initialised with and the timeout
++         * ERR printed exactly that, `which took it at 0`, on every occurrence
++         * whose owner was the heap. */
++        crit_section_note_site( crit, __builtin_return_address(0) );
+         ret = TRUE;
+     }
+     else if (crit->OwningThread == ULongToHandle(GetCurrentThreadId()))
+     {
+         InterlockedIncrement( &crit->LockCount );
+         crit->RecursionCount++;
++        crit_section_note_site( crit, __builtin_return_address(0) );
+         ret = TRUE;
+     }
+     return ret;

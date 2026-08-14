@@ -1,0 +1,195 @@
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index d2a80bcaa..c6b9be134 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -23,7 +23,13 @@
+ class InvalidationTracker {
+ public:
+   InvalidationTracker(FEXCore::Context::Context& CTX, const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads);
+-  void HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot);
++  // Committed: whether the notified range actually has pages behind it. Only a
++  // MEM_RESERVE-without-MEM_COMMIT allocation can be false, and it must be, for
++  // the reason in the .cpp -- Prot on a reservation describes pages that do not
++  // exist yet. Defaulted so the NtProtectVirtualMemory notification and the
++  // internal callers, which by definition operate on committed pages, are
++  // unchanged.
++  void HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot, bool Committed = true);
+   void HandleProcessExecuteFlagsChange(ULONG Flags);
+   void HandleImageMap(std::string_view Name, uint64_t Address);
+   struct InvalidateContainingSectionResult {
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index c8d5e4a96..d9481ec61 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -62,7 +62,61 @@
+   return (Prot & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+ }
+ 
+-void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
++/* Vessel: a reservation has no pages in it, so it cannot contain code.
++ *
++ * **This is the root of the 13,864,960-resume loop, and the status code is what
++ * names it.** Measured on the device on a Metro 2033 session, FEX 260806:
++ *
++ *   RWX reprotect FAILED C000002D on page 7E5E616000 (fault 7E5E616608,
++ *   pc 140088F10, occurrence 13864960); the fault is being resumed unrepaired
++ *   Fault on page 7E5E616000 resumed 13864960 times running by
++ *   ResetToConsistentStateImpl
++ *
++ * C000002D is STATUS_NOT_COMMITTED (include/ntstatus.h:262), *not*
++ * STATUS_CONFLICTING_ADDRESSES, which is C0000018 (:241). That distinction is
++ * the whole diagnosis. Wine's NtProtectVirtualMemory has exactly three
++ * outcomes (dlls/ntdll/unix/virtual.c): no view -> STATUS_INVALID_PARAMETER,
++ * view found but get_committed_size() short -> STATUS_NOT_COMMITTED, otherwise
++ * success. So the view exists and the page is simply **reserved and not
++ * committed**. Nothing is crossing a boundary and no range is miscomputed --
++ * the reprotect is one page, TmpSize = 1 rounded up, inside a view that exists.
++ *
++ * How a reserved page got into RWXIntervals: this function classifies on Prot
++ * alone, and NotifyMemoryAlloc passed it the Prot of a MEM_RESERVE allocation.
++ * With DisableDEP on (patches/fex/0002, default true) every readable range is
++ * treated as executable and every writable one as SMC-capable, so a 272 MB
++ * MEM_RESERVE of PAGE_READWRITE was recorded as guest RWX code. It is the
++ * FEXOfflineCompiler's own LookupCache: LookupCache.cpp:41 reserves it with
++ * Commit = false and LookupCache.cpp:49 hands it to MarkOvercommitRange, which
++ * is the mechanism that is *supposed* to commit it lazily on first touch.
++ * pc 140088F10 is inside the compiler's own image, which loads at 140000000.
++ *
++ * So the fault was the overcommit design working exactly as intended, and DEP
++ * promotion was stealing it: HandleRWXAccessViolation claimed the address
++ * first, could not reprotect an uncommitted page, reported "handled" anyway,
++ * and resumed -- forever. Zero `Overcommit:` lines in that session is the
++ * corroboration, because the emulation module's OvercommitTracker is empty in
++ * a process with no guest thread; the tracker that owns this range is the
++ * compiler's own, and its handler is downstream of this one.
++ *
++ * **The two sweeps in this file already get this right** -- the constructor at
++ * the top and HandleProcessExecuteFlagsChange both test
++ * `Info.State == MEM_COMMIT` before promoting anything. Only the notification
++ * path did not, because Wine hands the allocation Type to NotifyMemoryAlloc and
++ * NotifyMemoryAlloc dropped it. Passing it through makes the three paths agree.
++ *
++ * This is a classification fix, not a decline: with the reservation kept out of
++ * the interval map the fault is never claimed here at all, and falls through to
++ * the handler that owns the memory and commits it. */
++void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot, bool Committed) {
++  if (!Committed) {
++    // Reserved address space only. Prot describes pages that do not exist yet,
++    // and no code can live in them until something commits them -- at which
++    // point NtAllocateVirtualMemory notifies again with MEM_COMMIT and the
++    // range is classified then, against protections that are real.
++    return;
++  }
++
+   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto AlignedSize = (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
+ 
+@@ -280,34 +334,53 @@
+       SIZE_T TmpSize = 1;
+       const NTSTATUS ProtStatus = NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+ 
+-      /* Vessel: diagnostic only -- this deliberately does NOT change what the
+-       * function returns.
++      /* Vessel: 0008 left this as a log line because the branch had not been
++       * shown to loop. It has now -- 13,864,960 consecutive resumes of one page
++       * -- so it becomes the decline that 0008 applied to the overcommit path,
++       * under the same rule: a fault that was not repaired must not be reported
++       * as repaired.
++       *
++       * **Unconditional on failure, not status-specific and not bounded**, and
++       * the reason is that the choice is not really between three policies. The
++       * only thing this function does to make the faulting instruction able to
++       * make progress is the reprotect immediately above. If it failed, the
++       * page is still not writable, so the very same store will fault again the
++       * instant it is resumed -- by construction, for any failure status,
++       * however many times it is retried. Declining after N attempts would
++       * merely make the loop finite; declining on one status would leave the
++       * next status looping. There is no failure mode in which resuming is the
++       * right answer, so there is nothing to condition on.
++       *
++       * **What this cannot regress, and it is worth being precise because the
++       * risk was real enough to defer the change once.** SMC faults on one page
++       * repeating is normal and stays normal: this only fires when the reprotect
++       * *failed*, and on the working path it succeeds. A guest that currently
++       * works cannot be depending on the old behaviour, because the old
++       * behaviour on this branch is an infinite loop rather than a slow path --
++       * "working" and "reached this line" are mutually exclusive today.
+        *
+-       * This is the other place in the ARM64EC fault path that can answer
+-       * "handled" without having changed anything: the reprotect result was
+-       * discarded, and on a page that is reserved rather than committed it
+-       * fails. The caller then resumes the faulting instruction, which faults
+-       * again, which is the same unbounded shape patch 0008 fixes in
+-       * OvercommitTracker.
++       * What it does change is the failure's shape: a fault that used to hang
++       * now becomes an ordinary access violation with an address in it. If some
++       * genuine SMC page is transiently unprotectable -- a race with another
++       * thread's decommit is the only candidate I can construct -- that would
++       * previously have spun until the other thread finished, and will now
++       * surface as a crash. That is a real behaviour change and the honest
++       * statement of the risk; it is accepted because a spin is not a recovery.
+        *
+-       * It is left as a log line rather than a behaviour change because this is
+-       * the hot SMC path that every working session runs through thousands of
+-       * times, and RWX faults on one page legitimately repeat -- so a breaker
+-       * here would risk a regression to fix a branch that has not yet been
+-       * shown to be the one looping. If it is, this line says so once and names
+-       * the page, and that is the fact needed to justify touching it.
++       * The invalidation above has already happened and is deliberately not
++       * undone. It costs a recompile and is correct either way.
+        *
+-       * IFmt would be filtered by 0003's default ERROR ceiling, which is the
+-       * mistake that made 0006's thrash counter invisible; this is EFmt so it
+-       * arrives without VESSEL_TRACE being set. */
++       * EFmt, not IFmt: 0003's default ceiling is ERROR, which is the mistake
++       * that kept 0006's thrash counter invisible. */
+       if (!NT_SUCCESS(ProtStatus)) {
+         static std::atomic<uint64_t> FailedReprotects {0};
+         const uint64_t Seen = FailedReprotects.fetch_add(1, std::memory_order_relaxed) + 1;
+         if (Seen == 1 || (Seen % 4096) == 0) {
+           LogMan::Msg::EFmt("RWX reprotect FAILED {:X} on page {:X} (fault {:X}, pc {:X}, occurrence {}); "
+-                            "the fault is being resumed unrepaired",
++                            "declining the fault instead of resuming it",
+                             static_cast<uint32_t>(ProtStatus), FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FaultAddress, HostPc, Seen);
+         }
++        return false;
+       }
+     }
+     DetectMonoBackpatcherBlock(Thread, HostPc);
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 19c8e86a3..363fe2b91 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -905,7 +905,12 @@
+   } else {
+     // MEM_RESET(_UNDO) ignores the passed permissions
+     if (!Status && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
+-      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot);
++      // Vessel: Type decides whether Prot describes anything real. A
++      // MEM_RESERVE without MEM_COMMIT names the protection of pages that do
++      // not exist yet, and classifying those as guest code is what produced the
++      // 13,864,960-resume loop -- see HandleMemoryProtectionNotification.
++      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot,
++                                                              !!(Type & MEM_COMMIT));
+     }
+     NotifyLockLeave(GetFrontendThreadData(GetCPUArea().ThreadState()));
+   }
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 515a553b7..725737714 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -970,7 +970,13 @@
+   } else {
+     // MEM_RESET(_UNDO) ignores the passed permissions
+     if (!Status && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
+-      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot);
++      // Vessel: see the ARM64EC twin of this line, and
++      // HandleMemoryProtectionNotification, for why Type has to come through.
++      // Applied here too even though the 32-bit compiler is the arm that works:
++      // it works because no EC emulator is loaded for it, not because its
++      // classification is any more correct, and the two should not drift.
++      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot,
++                                                              !!(Type & MEM_COMMIT));
+     }
+     ThreadCreationMutex.unlock();
+   }

@@ -1,0 +1,86 @@
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 31f9eddc0..2b8d10cbf 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -1282,24 +1282,73 @@
+       _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, ss_idx));
+       UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_SS_PREFIX);
+       break;
++    /* Vessel: in 64-bit mode, record the selector and leave the base alone.
++     *
++     * **What the old code cost.** Both 64-bit arms set DecodeFailure, and a
++     * decode failure is not a skipped instruction -- it is a block that can
++     * never run. In Core.cpp, a dispatch error with TotalInstructions == 0
++     * returns {std::nullopt, 0, 0, 0, 0} (Core.cpp:724-728) so no code is
++     * produced for the block at all; if instructions were decoded first, the
++     * block is ended early at the failing RIP (Core.cpp:730-735), which makes
++     * the next entry at that RIP a first-instruction failure and lands in the
++     * first case. Either way that RIP is permanently unexecutable, by any path.
++     * Resident Evil Requiem hits exactly four of these on GS and one on FS
++     * immediately after its Denuvo blob loads, and then dies with a guest stack
++     * overflow inside ARM64EC exception delivery.
++     *
++     * **Why writing only the selector is the right shape**, and it follows from
++     * the comment already at the top of this function: "AMD documentation is
++     * /wrong/ in this regard ... the instructions will /actually/ load 16bits
++     * in to the selector portion of the register! Tested on a Zen+ CPU, the
++     * selector is the portion that is modified! ... The loads here also load the
++     * selector, NOT the base." So the architectural effect of `mov gs, r/m16`
++     * is a selector write, and that is what is implemented.
++     *
++     * In 64-bit mode the FS and GS bases live in IA32_FS_BASE / IA32_GS_BASE,
++     * not in the descriptor, and are reachable only through WRFSBASE/WRGSBASE
++     * or MSR writes -- both of which FEX already routes elsewhere. A user-mode
++     * program cannot install a descriptor; it can only load a selector the OS
++     * put there. On Windows the GS base holds the TEB, and nothing about
++     * loading a selector is allowed to move it.
++     *
++     * **UpdatePrefixFromSegment is deliberately NOT called here, and that is a
++     * departure from the 32-bit arm above rather than an oversight.** That
++     * function walks the GDT for the selector and writes the descriptor's
++     * 32-bit base into gs_cached/fs_cached (see its body). In 64-bit mode that
++     * would replace the real 64-bit base -- the TEB pointer -- with a 32-bit
++     * value derived from a descriptor table the guest never set up. Calling it
++     * is precisely the thing that would break every subsequent GS-relative
++     * access, so the selector store stands alone.
++     *
++     * **Checked before writing this, because it decides whether the whole
++     * approach is sound:** 64-bit segment-prefixed addressing derives its
++     * address from the base and never from the selector index. GetSegment --
++     * the one place a prefix becomes an address component -- returns
++     * _LoadContextGPR(..., fs_cached) / gs_cached in its Is64BitMode branch and
++     * reads no *_idx at all, and the interpreted path does the same with
++     * State.fs_cached / State.gs_cached. Grepping *_idx across FEXCore and
++     * Source, the only readers are this function's own read side, the
++     * segment-register-as-operand path, and the Linux signal frame code. So
++     * storing gs_idx cannot perturb any address computation.
++     *
++     * **What this is a bet on, stated plainly rather than claimed as
++     * correctness:** that no guest reads the base back expecting a selector
++     * load to have changed it. That is true of the hardware being modelled and
++     * true of every Windows user-mode idiom, but it is an assumption and not a
++     * proof. What is no longer a bet is the alternative -- the block cannot be
++     * executed at all today, so the failure mode being traded away is total. */
+     case FEXCore::X86State::REG_RBP: // GS
+     case FEXCore::X86State::REG_R13: // GS
++      _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, gs_idx));
+       if (!Is64BitMode) {
+-        _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, gs_idx));
+         UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX);
+-      } else {
+-        LogMan::Msg::EFmt("We don't support modifying GS selector in 64bit mode!");
+-        DecodeFailure = true;
+       }
+       break;
+     case FEXCore::X86State::REG_RSP: // FS
+     case FEXCore::X86State::REG_R12: // FS
++      _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, fs_idx));
+       if (!Is64BitMode) {
+-        _StoreContextGPR(OpSize::i16Bit, Src, offsetof(FEXCore::Core::CPUState, fs_idx));
+         UpdatePrefixFromSegment(Src, FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX);
+-      } else {
+-        LogMan::Msg::EFmt("We don't support modifying FS selector in 64bit mode!");
+-        DecodeFailure = true;
+       }
+       break;
+     default: UnimplementedOp(Op); return;

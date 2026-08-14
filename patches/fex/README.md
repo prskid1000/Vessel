@@ -178,3 +178,288 @@ sitting on both sides of a lock order it does not own:
 **Not compiled.** Verified with `git apply --check` against the pinned tree.
 
 **Policy.** Not for upstream, for the reason at the top of this file.
+
+## `0007-logging-a-tool-that-cannot-speak-cannot-be-debugged`
+
+`FEXOfflineCompiler64.exe generate` prints `Compiling code...` and then never
+returns — 180 s, no file in `cache/`, killed by the timeout, and **not one
+diagnostic line**. `generateCodeCache`'s own note in `SessionRuntime.kt` records
+the same shape from `process-all`: "three and a half minutes of full-CPU work,
+an empty `cache/` directory, and no diagnostic". The same tool produced 25 cache
+files in 4897 ms on 2026-08-11.
+
+An earlier draft of this slot guessed at the hang itself. **This one does not.**
+It fixes the reason the guess could not be checked: the tool has never been able
+to emit a single `LogMan` message, on any entry point, under any environment.
+Until that is untrue, every hypothesis about the hang costs a rebuild to test
+and returns the same empty log.
+
+**Half one: `Logging::Init()` reads a config that is not there yet.**
+
+| Where | What |
+|---|---|
+| `Source/Windows/Common/Logging.cpp:140` | `FEX_CONFIG_OPT(SilentLog, SILENTLOG)`, then `if (SilentLog()) return;` |
+| `FEXCore/Source/Interface/Config/Config.json.in:387-389` | `SilentLog` default is **`true`** |
+| `Source/Tools/FEXOfflineCompiler/Main.cpp:856-857` | the tool calls `Config::Initialize()` (patch `0001`) then `Init()` — `Initialize()` creates the meta layer and loads nothing into it |
+| `Source/Tools/FEXOfflineCompiler/Main.cpp:615` | `FEX::Config::LoadConfig`, the first thing that loads a layer, runs *after* — and only on the `generate` path |
+| `Source/Windows/ARM64EC/Module.cpp:657`, `WOW64/Module.cpp:519` | the two modules have the same ordering from `ProcessInit` |
+
+So `SilentLog()` can only ever return the compiled-in `true`, `Init()` returns
+without installing a handler, and nothing calls `Init()` again — every `EFmt`,
+every `IFmt`, and the message half of every `ERROR_AND_DIE_FMT` is discarded for
+the life of the process. `FEX_SILENTLOG=0`, which `SessionRuntime.kt` sets for
+this process specifically and documents at length, has never done anything.
+
+**How that was established rather than assumed.** Run by hand under Wine, no
+guest, nothing else in the prefix, `FEX_SILENTLOG=0` in the environment: the two
+lines that appeared were `Parsed 26 codemap entries for …` and `Compiling
+code...`, which are `fmt::print` (`Main.cpp:596`, `:519`). The two `LogMan` lines
+the same twenty lines of code emit — `Relocated image {:X} -> {:X}` and `Mapped
+image: {} @ {:X}` (`Main.cpp:284`, `:342`) — did not appear. Two prints present
+and two logs absent from the same code path is the proof; nothing about the hang
+is claimed by it.
+
+The fix reads `FEX_SILENTLOG` from the environment directly, exactly as `0003`
+already reads `VESSEL_TRACE` two functions above, and lets it win over a config
+value that at that moment is only a default. The conversion is FEX's own —
+`strtoull(Value, nullptr, 0)` cast to `bool`
+(`FEXCore/Source/Common/StringConv.h:11-18`) — so the two cannot disagree, which
+also means **`FEX_SILENTLOG=true` parses as zero and asks for *not* silent**.
+It is hand-rolled rather than a call to `strtoull` because this file links into
+`libarm64ecfex.dll` against FEX's own minimal CRT, which has `getenv`
+(`CRT/Misc.cpp:58`) and no string-to-integer conversion at all (`CRT/String.cpp`).
+
+**Half two: `GenerateCache` installs an empty environment layer.**
+`Main.cpp:613` built the layer from `char* envp[] = {nullptr}`, and
+`EnvLoader::Load` iterates precisely the array it is handed
+(`Source/Common/Config.cpp:307`). So no `FEX_*` variable of any kind reached
+cache generation — not overridden, not warned about, never read. That is
+`FEX_MAXINST` and `FEX_MULTIBLOCK`, which decide how much of a block the
+compiler may see; `FEX_SMCCHECKS` and `FEX_DISABLEDEP`, which decide what it
+treats as code; and `FEX_HOSTFEATURES`, which decides what it compiles for. A
+cache is only useful if it holds the code the session would have generated, and
+this was generating it from a different configuration. `envp` now comes down
+from `main()`, matching `FEXGetConfig/Main.cpp:416` and fixing the Linux build of
+the same shared function; the modules use `_environ` because a DLL has no
+`main()` to take it from.
+
+**What this does not do.** It does not fix the hang, and it is not a guess about
+the hang. It makes the next run of the tool able to report where it is.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.
+
+## `0008-overcommit-a-fault-that-was-not-repaired-must-not-be-resumed`
+
+`0007` was written so the next run could report where it was. It did, and this
+is the answer.
+
+**The measurement, from a device session on 2026-08-14.**
+`fexofflinecompiler32.exe`: 33 modules parsed, 34 caches populated, zero
+failures. `fexofflinecompiler64.exe` on
+`\??\d:\games\resident evil requiem\amd_fidelityfx_loader_dx12.dll`
+(digest `0425782af0c68fb4`): 0 parsed, 0 populated, and **155,039 log lines that
+are all the same line** — `seh:RtlInitializeExtendedContext2 context
+000000000011E630` — with the identical context address every time, and
+**exactly one `dispatch_exception`** in the whole log. Same context pointer
+means the same stack frame, so it is one fault being prepared, "repaired",
+resumed and re-faulted, not a recursion. The same module and digest reproduces
+under a real session with full permissions, so it is not the `run-as`/`D:`
+permission artifact the harness warns about.
+
+**Where the loop closes, read out of Wine rather than guessed.**
+`prepare_exception_arm64ec` (`dlls/ntdll/signal_arm64ec.c:1343-1366`) calls
+`RtlInitializeExtendedContext`, then `pResetToConsistentState`, and only then
+returns to `KiUserExceptionDispatcher`, which calls `dispatch_exception` — where
+vectored handlers run. 155,039 context preparations against one
+`dispatch_exception` therefore proves the fault was resumed **before** vectored
+dispatch, inside the emulation module's `ResetToConsistentState`
+(`ARM64EC/Module.cpp:818`), and that the offline compiler's own vectored handler
+was never reached at all.
+
+That also explains the 32-vs-64 split exactly: `FEXOfflineCompiler32.exe` is a
+plain ARM64 PE, so Wine loads no EC emulator for it, `pResetToConsistentState`
+does not exist, and its faults go straight to `dispatch_exception` and the
+tool's own handler. `FEXOfflineCompiler64.exe` is an ARM64EC image and is
+intercepted first. Every game module is 64-bit, which is the `0 of 49
+binary(ies)` history.
+
+**The defect.** `OvercommitTracker::HandleAccessViolation` reported whether the
+address was *recognised*, not whether the fault was *repaired* — returning
+`true` on the interval query alone, having discarded `NtQueryVirtualMemory`'s
+`NTSTATUS`, read an uninitialised `MEMORY_BASIC_INFORMATION`, and discarded
+`VirtualAlloc`'s return. Both callers turn `true` into "resume the faulting
+instruction". A commit that did not happen therefore answered "fixed" forever.
+
+What changed: `Info` is initialised and the query's status *and* returned length
+are checked; `MEM_RESERVE` is required, so an already-committed page that still
+faults declines instead of spinning; the commit covers
+`Info.BaseAddress`/`Info.RegionSize` — the uncommitted run containing the fault
+— rather than `AllocationBase` up to the end of that run; and `VirtualAlloc`'s
+result is returned. The non-Wine branch gets the same treatment. Every failure
+path names itself at `ERROR`, which `0003`'s default ceiling passes and `0007`
+now makes reachable.
+
+**The bound is kept even though the `MEM_RESERVE` check already limits this to
+two attempts**, because the property worth having is not "this repair was
+fixed" but "a repair that does not take cannot spin", and that has to hold for
+whatever the next reason turns out to be. It is safe *in this function*
+specifically: a committed page does not fault again for want of committing, so
+a repeat is always a failure — unlike RWX/SMC faults, which legitimately repeat
+on one page and which `0006` counts.
+
+**Two additions that change no behaviour.** `HandleRWXAccessViolation` also
+discarded its `NtProtectVirtualMemory` status and can answer "handled" without
+having changed anything (a reprotect fails on a reserved page); it now says so
+at `ERROR`, rate-limited, but still returns what it returned — a breaker there
+would risk the hot SMC path to fix a branch not yet shown to be looping. And
+`ResetToConsistentState` now names which of its resume paths keeps returning to
+the same page, so the next run identifies the branch instead of needing another
+round of inference.
+
+**What is not claimed.** Nothing here explains *why* a commit would fail, if it
+does. It makes the failure survivable and nameable, which is the next fact
+needed.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.
+
+## `0009-opcodedispatcher-mov-to-fs-gs-selector-in-64bit-mode`
+
+`mov Sreg, r/m16` for FS and GS in 64-bit mode set `DecodeFailure = true` and
+logged "We don't support modifying GS/FS selector in 64bit mode!".
+
+**A decode failure is not a skipped instruction — it is a block that can never
+run.** `Core.cpp:724-728`: a dispatch error with `TotalInstructions == 0`
+returns `{std::nullopt, 0, 0, 0, 0}`, so no code is produced for the block at
+all. `Core.cpp:730-735`: if instructions were decoded first, the block is ended
+early at the failing RIP, which makes the next entry there a first-instruction
+failure and lands in the first case. Either way that RIP is permanently
+unexecutable by any path. Resident Evil Requiem hits four of these on GS and one
+on FS immediately after its Denuvo blob loads, then dies with a guest stack
+overflow inside ARM64EC exception delivery.
+
+**Selector only, base untouched**, which is what the function's own existing
+comment says the hardware does: "AMD documentation is /wrong/ in this regard …
+the instructions will /actually/ load 16bits in to the selector portion of the
+register! Tested on a Zen+ CPU, the selector is the portion that is modified! …
+The loads here also load the selector, NOT the base." In 64-bit mode the FS/GS
+bases live in `IA32_FS_BASE`/`IA32_GS_BASE`, reachable only through
+WRFSBASE/WRGSBASE or MSR writes; user mode cannot install a descriptor, only
+load a selector the OS already put there; and on Windows the GS base holds the
+TEB.
+
+**`UpdatePrefixFromSegment` is deliberately not called, and that is a departure
+from the 32-bit arm rather than an oversight.** That function walks the GDT for
+the selector and writes the descriptor's 32-bit base into `gs_cached`/
+`fs_cached`. In 64-bit mode that would replace the real 64-bit base — the TEB
+pointer — with a value derived from a descriptor table the guest never set up.
+Calling it is exactly what would break every subsequent GS-relative access.
+
+**Checked before writing, because it decides whether the approach is sound at
+all:** 64-bit segment-prefixed addressing derives from the base and never from
+the selector index. `GetSegment` (`OpcodeDispatcher.cpp:4052-4090`) — the one
+place a prefix becomes an address component — returns `fs_cached`/`gs_cached` in
+its `Is64BitMode` branch and reads no `*_idx`; the interpreted path does the
+same. Across FEXCore and Source the only readers of `fs_idx`/`gs_idx` are this
+function's read side, the segment-register-as-operand path, and the Linux signal
+frame code. Storing `gs_idx` cannot perturb any address computation.
+
+**The bet, stated as one.** That no guest reads the base back expecting a
+selector load to have changed it. True of the hardware being modelled and of
+every Windows user-mode idiom, but an assumption, not a proof. What is *not* a
+bet is the alternative: today the block cannot execute at all.
+
+**Known asymmetry, left alone deliberately.** The read side (`mov r/m16, Sreg`)
+still returns a constant `0` for FS/GS in 64-bit mode, so a guest that writes a
+selector and reads it back sees `0`. Fixing that changes what every existing
+guest observes from `mov r, gs`, which is a wider behaviour change than the one
+being made here, and the write side alone is what unblocks the block. It is the
+obvious follow-up if a save/restore idiom turns out to care.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.
+## `0010-invalidationtracker-a-reservation-is-not-code-and-a-failed-reprotect-is-not-a-repair`
+
+`0008` fixed the overcommit branch and left a diagnostic on the SMC branch,
+because that branch had not been *shown* to loop. On the next device run it was
+— a Metro 2033 session on FEX 260806:
+
+```
+RWX reprotect FAILED C000002D on page 7E5E616000 (fault 7E5E616608,
+  pc 140088F10, occurrence 13864960); the fault is being resumed unrepaired
+Fault on page 7E5E616000 resumed 13864960 times running by
+  ResetToConsistentStateImpl
+```
+
+13,864,960 resumes, same page, same fault address, same pc, and **zero
+`Overcommit:` lines in the whole session** — so `0008` was correct hardening and,
+as it said it might be, not the cure.
+
+**The status code is the diagnosis, and it was initially decoded wrongly.**
+`C000002D` is `STATUS_NOT_COMMITTED` (`include/ntstatus.h:262`), not
+`STATUS_CONFLICTING_ADDRESSES`, which is `C0000018` (`:241`). Wine's
+`NtProtectVirtualMemory` has exactly three outcomes
+(`dlls/ntdll/unix/virtual.c`): no view → `STATUS_INVALID_PARAMETER`; view found
+but `get_committed_size()` short → `STATUS_NOT_COMMITTED`; else success. So the
+view exists and the page is **reserved and not committed**. Nothing crosses a
+boundary and no range is miscomputed — the reprotect is a single page,
+`TmpSize = 1` rounded up, inside a view that exists. There was no range bug to
+fix.
+
+**What the page is.** `pc 140088F10` is inside the compiler's own image, which
+loads at `140000000`. The faulting range is `FEXOfflineCompiler64.exe`'s own
+`LookupCache`: reserved with `Commit = false` (`LookupCache.cpp:41`) and handed
+to `MarkOvercommitRange` (`:49`) — i.e. the region whose whole design is to
+fault on first touch and be committed by `OvercommitTracker`. The zero
+`Overcommit:` lines corroborate it: the emulation module's tracker is empty in a
+process with no guest thread, and the tracker that owns this range is the
+compiler's own, downstream of this handler.
+
+**The defect is classification, not the ignored failure.**
+`HandleMemoryProtectionNotification` classified on `Prot` alone, and
+`NotifyMemoryAlloc` dropped the allocation `Type`. With `DisableDEP` on
+(`0002`, default true) every readable range counts as executable and every
+writable one as SMC-capable, so a 272 MB `MEM_RESERVE` of `PAGE_READWRITE` was
+recorded as guest RWX code. `HandleRWXAccessViolation` then claimed the fault
+first, could not reprotect an uncommitted page, reported "handled", and resumed.
+**DEP promotion was stealing faults from the mechanism designed to receive
+them.**
+
+The two sweeps in the same file already get this right — the constructor and
+`HandleProcessExecuteFlagsChange` both test `Info.State == MEM_COMMIT` before
+promoting. Only the notification path did not. `Type` now comes through from
+both modules' notify hooks, so all three paths agree, and the reservation never
+enters the interval map: the fault is not claimed here at all and falls through
+to the handler that owns the memory.
+
+**The decline is unconditional on failure — not status-specific, not bounded —
+and the three options are not really distinct.** The only thing this function
+does to let the faulting instruction progress is the reprotect. If it failed the
+page is still not writable, so the same store faults again the instant it
+resumes, by construction, for any status and any number of retries. Bounding
+would make the loop finite; conditioning on one status would leave the next one
+looping.
+
+**What it cannot regress, and what it can.** SMC faults repeating on one page
+stay normal — this fires only when the reprotect *failed*, and on the working
+path it succeeds. No currently-working guest can depend on the old behaviour,
+because the old behaviour on this branch is an infinite loop: "working" and
+"reached this line" are mutually exclusive. What does change is the failure's
+shape — a hang becomes an access violation with an address. The one case I can
+construct where that is a real loss is a genuine SMC page transiently
+unprotectable through a race with another thread's decommit, which used to spin
+until the other thread finished and will now crash. Accepted, because a spin is
+not a recovery.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.
+

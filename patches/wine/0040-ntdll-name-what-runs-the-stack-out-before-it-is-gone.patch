@@ -1,0 +1,61 @@
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 8790f070948..7279a486ca9 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1307,9 +1307,56 @@ static void dispatch_syscall( ARM64_NT_CONTEXT *context )
+ }
+ 
+ 
++/* Vessel: how much stack is left, and how many more deliveries that is.
++ *
++ * KiUserExceptionDispatcher below opens with `sub sp, sp, #0xcd0` -- 3280 bytes
++ * of ARM64EC_NT_XCONTEXT per delivery, before this function has run at all. So a
++ * thread whose exceptions nest rather than unwind loses its stack at a fixed
++ * rate, and a 4 MB stack is gone after about 1280 of them.
++ *
++ * That is not hypothetical here. Resident Evil Requiem dies immediately after
++ * its Denuvo blob loads with
++ *
++ *   virtual_setup_exception stack overflow 1776 bytes addr 0x7ffff09bf0
++ *     stack 0x20910 (0x20000-0x21000-0x420000)
++ *
++ * byte-identical across runs and across two different Wine builds, and
++ * 0x7ffff09bf0 resolves to `prepare_exception_arm64ec` itself: the prologue had
++ * already moved sp into the guard page, so the first stack access in here
++ * faulted, and the fault could not be delivered because delivering it needs
++ * another 3280 bytes that do not exist. The log therefore records the moment the
++ * stack ran out and says nothing whatever about what consumed it.
++ *
++ * The window is chosen so this cannot be the thing that finishes the stack off:
++ * it starts logging with 256 KB left -- about 78 more deliveries -- and stops
++ * again at 16 KB, which leaves the formatting itself somewhere to run. Bounded
++ * at roughly 74 lines per dying thread, and silent on every healthy one, so it
++ * costs one compare per delivery in the normal case.
++ *
++ * What it answers: whether the same ExceptionCode from the same address repeats
++ * all the way down (a delivery that re-raises itself), or whether the codes vary
++ * (guest code recursing, with exceptions merely along for the ride). Those want
++ * completely different fixes and the overflow line cannot tell them apart. */
++#define VESSEL_EXC_STACK_WARN  (256 * 1024)
++#define VESSEL_EXC_STACK_FLOOR (16 * 1024)
++
+ static void * __attribute__((used)) prepare_exception_arm64ec( EXCEPTION_RECORD *rec, union ARM64EC_NT_XCONTEXT *context, ARM64_NT_CONTEXT *arm_ctx )
+ {
+     CONTEXT_EX *xctx;
++
++    {
++        ULONG_PTR here = (ULONG_PTR)&xctx;
++        ULONG_PTR floor = (ULONG_PTR)NtCurrentTeb()->DeallocationStack;
++        ULONG_PTR left = here > floor ? here - floor : 0;
++
++        if (left < VESSEL_EXC_STACK_WARN && left > VESSEL_EXC_STACK_FLOOR)
++            ERR( "exception delivery is running the stack out: %u bytes left, room for %u more, "
++                 "code %lx flags %lx at %p, info %Ix %Ix\n", (unsigned int)left, (unsigned int)(left / 0xcd0),
++                 rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress,
++                 rec->NumberParameters > 0 ? rec->ExceptionInformation[0] : 0,
++                 rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0 );
++    }
++
+     if (rec->ExceptionCode == STATUS_EMULATION_SYSCALL) dispatch_syscall( arm_ctx );
+     RtlInitializeExtendedContext( context, ctx_flags_arm_to_x64( arm_ctx->ContextFlags ), &xctx );
+     context_arm_to_x64( &context->context, arm_ctx );

@@ -1,0 +1,323 @@
+diff --git a/Source/Windows/Common/OvercommitTracker.h b/Source/Windows/Common/OvercommitTracker.h
+index ba521e8a8..89677eb15 100644
+--- a/Source/Windows/Common/OvercommitTracker.h
++++ b/Source/Windows/Common/OvercommitTracker.h
+@@ -2,6 +2,8 @@
+ #pragma once
+ 
+ #include <FEXCore/Utils/IntervalList.h>
++#include <FEXCore/Utils/LogManager.h>
++#include <atomic>
+ #include <thread>
+ #include <shared_mutex>
+ 
+@@ -16,6 +18,13 @@
+   FEXCore::IntervalList<uint64_t> OvercommitIntervals;
+   std::shared_mutex OvercommitIntervalsMutex;
+ 
++  // Vessel: circuit breaker state; see the comment on HandleAccessViolation.
++  // Atomic rather than under the mutex because it is a heuristic, not a
++  // consistency requirement, and HandleAccessViolation holds only a shared lock.
++  std::atomic<uint64_t> LastRepairedPage {~0ULL};
++  std::atomic<uint32_t> ConsecutiveRepairs {};
++  static constexpr uint32_t MaxConsecutiveRepairs = 16;
++
+ public:
+   OvercommitTracker(bool IsWine)
+     : IsWine {IsWine} {}
+@@ -30,23 +39,135 @@
+     OvercommitIntervals.Remove({Start, Start + Length});
+   }
+ 
++  /* Vessel: this reports whether the fault was REPAIRED, not whether the
++   * address was RECOGNISED. The difference is the whole of this comment.
++   *
++   * Both callers turn `true` into "resume the faulting instruction" --
++   * EXCEPTION_CONTINUE_EXECUTION from the offline compiler's vectored handler
++   * (FEXOfflineCompiler/Main.cpp:354), NtContinueNative from the ARM64EC
++   * module's ResetToConsistentState (ARM64EC/Module.cpp:826-830). The old body
++   * returned `true` on the interval query alone, having discarded
++   * NtQueryVirtualMemory's NTSTATUS, read a MEMORY_BASIC_INFORMATION it never
++   * initialised, and discarded VirtualAlloc's return. So a commit that did not
++   * happen still answered "fixed": the instruction re-ran, faulted at the same
++   * address, and the cycle closed with nothing in it that could ever end.
++   *
++   * **Measured on the device, 2026-08-14, with the 0007 logging in place.**
++   * `fexofflinecompiler64.exe` on
++   * `\??\d:\games\resident evil requiem\amd_fidelityfx_loader_dx12.dll`
++   * (digest 0425782af0c68fb4): 0 modules parsed, 0 caches populated, and
++   * **155,039 log lines that are all the same line** --
++   * `seh:RtlInitializeExtendedContext2 context 000000000011E630` -- with the
++   * *identical* context address every time and **exactly one**
++   * `dispatch_exception` in the whole log. Same context pointer means the same
++   * stack frame, so this is one fault being prepared, "repaired", continued and
++   * re-faulted, not a recursion. In the same session `fexofflinecompiler32.exe`
++   * parsed 33 modules and populated 34 caches with zero failures.
++   *
++   * That 32-vs-64 split is not incidental and it locates the loop precisely.
++   * Wine's prepare_exception_arm64ec (dlls/ntdll/signal_arm64ec.c:1343-1366)
++   * calls RtlInitializeExtendedContext, then pResetToConsistentState, and only
++   * then returns to KiUserExceptionDispatcher which calls dispatch_exception --
++   * where vectored handlers run. 155,039 context preparations against one
++   * dispatch_exception therefore proves the loop closes *before* vectored
++   * dispatch, inside the emulation module's ResetToConsistentState. The 32-bit
++   * compiler is a plain ARM64 PE, so no EC emulator is loaded for it,
++   * pResetToConsistentState does not exist, and its faults go straight to
++   * dispatch_exception and its own vectored handler -- which is why it works.
++   *
++   * What changed here, point by point:
++   *   - Info is initialised, and NtQueryVirtualMemory's status and returned
++   *     length are both checked. Nothing can be learned from a failed query, so
++   *     nothing can be committed on the strength of one.
++   *   - MEM_RESERVE is required. A page that is already committed and still
++   *     faulting is not an overcommit fault; retrying it is the live-lock, and
++   *     it is also the natural bound on this loop -- the first fault commits,
++   *     and a second at the same address now declines instead of spinning.
++   *   - The commit covers Info.BaseAddress/Info.RegionSize, the uncommitted run
++   *     that actually contains the fault, rather than AllocationBase up to the
++   *     end of that run. The old range re-committed pages that were already
++   *     committed, possibly at a different protection, and on a partially
++   *     committed reservation it was simply the wrong range.
++   *   - VirtualAlloc's result is returned. The non-Wine branch gets the same
++   *     treatment for the same reason.
++   *
++   * Declining is a strictly better outcome than looping. The caller passes the
++   * fault on, and it lands either on a handler that does own the memory or on
++   * an ordinary access violation with an address in it -- which is a bug report
++   * rather than a timeout.
++   *
++   * **This does not claim to know why the commit fails**, if it does. It makes
++   * the failure survivable and, through the EFmt below, nameable. */
+   bool HandleAccessViolation(uint64_t FaultAddress) {
+     std::shared_lock Lock {OvercommitIntervalsMutex};
+     auto Query = OvercommitIntervals.Query(FaultAddress);
+ 
+-    if (Query.Enclosed) {
++    if (!Query.Enclosed) {
++      return false;
++    }
++
++    const bool Repaired = [&]() {
+       if (IsWine) {
+-        MEMORY_BASIC_INFORMATION Info;
+-        NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(FaultAddress), MemoryBasicInformation, &Info, sizeof(Info), nullptr);
+-        const auto CommitSize = reinterpret_cast<SIZE_T>(Info.BaseAddress) + Info.RegionSize - reinterpret_cast<SIZE_T>(Info.AllocationBase);
+-        VirtualAlloc(reinterpret_cast<void*>(Info.AllocationBase), CommitSize, MEM_COMMIT, PAGE_READWRITE);
+-      } else {
+-        static constexpr size_t MaxFaultCommitSize = 1024 * 64;
+-        const auto AlignedFaultAddress = reinterpret_cast<void*>(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK);
+-        VirtualAlloc(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), MEM_COMMIT, PAGE_READWRITE);
++        MEMORY_BASIC_INFORMATION Info {};
++        SIZE_T ResultLength = 0;
++        const NTSTATUS Status = NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(FaultAddress),
++                                                     MemoryBasicInformation, &Info, sizeof(Info), &ResultLength);
++        if (!NT_SUCCESS(Status) || ResultLength < sizeof(Info)) {
++          LogMan::Msg::EFmt("Overcommit: NtQueryVirtualMemory({:X}) failed {:X}, cannot repair", FaultAddress, static_cast<uint32_t>(Status));
++          return false;
++        }
++
++        if (Info.State != MEM_RESERVE) {
++          // Already committed (or freed) and still faulting: not ours to fix.
++          LogMan::Msg::EFmt("Overcommit: {:X} faulted with State={:X} Protect={:X}, not an uncommitted page", FaultAddress,
++                            static_cast<uint32_t>(Info.State), static_cast<uint32_t>(Info.Protect));
++          return false;
++        }
++
++        if (!VirtualAlloc(Info.BaseAddress, Info.RegionSize, MEM_COMMIT, PAGE_READWRITE)) {
++          LogMan::Msg::EFmt("Overcommit: MEM_COMMIT of {:X}+{:X} for fault {:X} failed ({:X})", reinterpret_cast<uint64_t>(Info.BaseAddress),
++                            static_cast<uint64_t>(Info.RegionSize), FaultAddress, static_cast<uint32_t>(GetLastError()));
++          return false;
++        }
++        return true;
+       }
++
++      static constexpr size_t MaxFaultCommitSize = 1024 * 64;
++      const auto AlignedFaultAddress = reinterpret_cast<void*>(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK);
++      if (!VirtualAlloc(AlignedFaultAddress, std::min(Query.Size, MaxFaultCommitSize), MEM_COMMIT, PAGE_READWRITE)) {
++        LogMan::Msg::EFmt("Overcommit: MEM_COMMIT for fault {:X} failed ({:X})", FaultAddress, static_cast<uint32_t>(GetLastError()));
++        return false;
++      }
++      return true;
++    }();
++
++    if (!Repaired) {
++      return false;
++    }
++
++    /* Vessel: the bound, kept even though the MEM_RESERVE check above already
++     * limits this to two attempts. It is here because the property worth having
++     * is not "this particular repair was fixed" but "a repair that does not
++     * take cannot spin" -- which has to hold for whatever the next reason turns
++     * out to be. A committed page does not fault again for want of committing,
++     * so unlike SMC/RWX faults (which legitimately repeat on the same page,
++     * over and over, and which patch 0006 counts) a repeat here is always a
++     * failure. That asymmetry is why the counter is safe in this function and
++     * would not be safe in HandleRWXAccessViolation. */
++    const uint64_t Page = FaultAddress & FEXCore::Utils::FEX_PAGE_MASK;
++    if (LastRepairedPage.exchange(Page, std::memory_order_relaxed) != Page) {
++      ConsecutiveRepairs.store(1, std::memory_order_relaxed);
+       return true;
+     }
++
++    const uint32_t Count = ConsecutiveRepairs.fetch_add(1, std::memory_order_relaxed) + 1;
++    if (Count <= MaxConsecutiveRepairs) {
++      return true;
++    }
++
++    if (Count == MaxConsecutiveRepairs + 1) {
++      LogMan::Msg::EFmt("Overcommit: page {:X} reported repaired {} times running and keeps faulting; passing the fault on", Page, Count);
++    }
+     return false;
+   }
+ };
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index b0fa5f9f9..c8d5e4a96 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -278,7 +278,37 @@
+       ULONG TmpProt;
+       void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
+       SIZE_T TmpSize = 1;
+-      NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
++      const NTSTATUS ProtStatus = NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
++
++      /* Vessel: diagnostic only -- this deliberately does NOT change what the
++       * function returns.
++       *
++       * This is the other place in the ARM64EC fault path that can answer
++       * "handled" without having changed anything: the reprotect result was
++       * discarded, and on a page that is reserved rather than committed it
++       * fails. The caller then resumes the faulting instruction, which faults
++       * again, which is the same unbounded shape patch 0008 fixes in
++       * OvercommitTracker.
++       *
++       * It is left as a log line rather than a behaviour change because this is
++       * the hot SMC path that every working session runs through thousands of
++       * times, and RWX faults on one page legitimately repeat -- so a breaker
++       * here would risk a regression to fix a branch that has not yet been
++       * shown to be the one looping. If it is, this line says so once and names
++       * the page, and that is the fact needed to justify touching it.
++       *
++       * IFmt would be filtered by 0003's default ERROR ceiling, which is the
++       * mistake that made 0006's thrash counter invisible; this is EFmt so it
++       * arrives without VESSEL_TRACE being set. */
++      if (!NT_SUCCESS(ProtStatus)) {
++        static std::atomic<uint64_t> FailedReprotects {0};
++        const uint64_t Seen = FailedReprotects.fetch_add(1, std::memory_order_relaxed) + 1;
++        if (Seen == 1 || (Seen % 4096) == 0) {
++          LogMan::Msg::EFmt("RWX reprotect FAILED {:X} on page {:X} (fault {:X}, pc {:X}, occurrence {}); "
++                            "the fault is being resumed unrepaired",
++                            static_cast<uint32_t>(ProtStatus), FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FaultAddress, HostPc, Seen);
++        }
++      }
+     }
+     DetectMonoBackpatcherBlock(Thread, HostPc);
+     return true;
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 7a80e828b..19c8e86a3 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -815,6 +815,49 @@
+   }
+ }
+ 
++/* Vessel: name the branch that resumed a fault, when one page keeps coming back.
++ *
++ * Diagnostic only. Nothing here changes what is continued or when.
++ *
++ * This function is where the 2026-08-14 offline-compiler loop closes, and the
++ * measurement that says so is in the comment on
++ * OvercommitTracker::HandleAccessViolation: 155,039 identical
++ * `RtlInitializeExtendedContext2 context 000000000011E630` lines against
++ * exactly one `dispatch_exception`. Wine builds that context and calls
++ * pResetToConsistentState *before* it calls dispatch_exception
++ * (dlls/ntdll/signal_arm64ec.c:1343-1366), so a fault that never reaches
++ * vectored dispatch was resumed here, by one of the NtContinueNative calls
++ * below -- and the log could not say which, because none of them says anything.
++ *
++ * 0008 fixes the overcommit branch outright. The other three exits from
++ * ResetToConsistentStateImpl -- CallRetStack, the JIT guard page, and the RWX
++ * SMC handler -- can each resume a fault too, and only one of them is the one
++ * that was looping. This line is what makes the next run answer that instead of
++ * needing another round of inference.
++ *
++ * Page-granular and rate-limited, because on a healthy session the SMC branch
++ * legitimately resumes the same page many times: a run of them is normal, so
++ * this is tuned to be silent below 4096 and unmissable above it. */
++static void NoteFaultContinue(EXCEPTION_RECORD* Exception, const char* Site) {
++  if (Exception->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
++    return;
++  }
++
++  static std::atomic<uint64_t> LastPage {~0ULL};
++  static std::atomic<uint64_t> Repeats {0};
++
++  const uint64_t Page = static_cast<uint64_t>(Exception->ExceptionInformation[1]) & FEXCore::Utils::FEX_PAGE_MASK;
++  if (LastPage.exchange(Page, std::memory_order_relaxed) != Page) {
++    Repeats.store(0, std::memory_order_relaxed);
++    return;
++  }
++
++  const uint64_t Count = Repeats.fetch_add(1, std::memory_order_relaxed) + 1;
++  if ((Count % 4096) == 0) {
++    LogMan::Msg::EFmt("Fault on page {:X} resumed {} times running by {}", Page, Count, Site);
++  }
++}
++
+ NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestContext, ARM64_NT_CONTEXT* NativeContext) {
+   bool Cont {};
+   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+@@ -826,6 +869,7 @@
+         Cont = OvercommitTracker->HandleAccessViolation(FaultAddress);
+       }
+       if (Cont) {
++        NoteFaultContinue(Exception, "OvercommitTracker");
+         NtContinueNative(NativeContext, false);
+       }
+     }
+@@ -842,6 +886,7 @@
+   }
+ 
+   if (Cont) {
++    NoteFaultContinue(Exception, "ResetToConsistentStateImpl");
+     NtContinueNative(NativeContext, false);
+   }
+ 
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 66fbe0c3e..06f7f9220 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -351,9 +351,33 @@
+ static LONG ExceptionHandler(_EXCEPTION_POINTERS* ExceptionInfo) {
+   if (ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+     const auto FaultAddress = static_cast<uint64_t>(ExceptionInfo->ExceptionRecord->ExceptionInformation[1]);
++
++    /* Vessel: a second continue at the same address is not a repair.
++     *
++     * The bound that matters for the 64-bit compiler is in
++     * OvercommitTracker::HandleAccessViolation, because on an ARM64EC image the
++     * emulation module's ResetToConsistentState sees the fault first and this
++     * handler is never reached -- see that comment for the measurement. This
++     * one covers the path that *is* reached: the 32-bit compiler is a plain
++     * ARM64 PE with no EC emulator, so its faults arrive here, and it is the
++     * arm that currently works. Guarding the working arm the same way is the
++     * point -- the property is "a repair that did not take cannot spin", and it
++     * should not depend on which binary is running.
++     *
++     * One slot, and only for the overcommit branch: a committed page does not
++     * fault again for want of committing, so a repeat here is always a failed
++     * repair, never legitimate traffic. */
++    static uint64_t LastContinuedFault = ~0ULL;
+     if (OvercommitTracker->HandleAccessViolation(FaultAddress)) {
++      if (FaultAddress == LastContinuedFault) {
++        LogMan::Msg::EFmt("Overcommit repair did not take at {:X}; refusing to resume it again", FaultAddress);
++        LastContinuedFault = ~0ULL;
++        return EXCEPTION_CONTINUE_SEARCH;
++      }
++      LastContinuedFault = FaultAddress;
+       return EXCEPTION_CONTINUE_EXECUTION;
+     }
++    LastContinuedFault = ~0ULL;
+ 
+ #ifdef ARCHITECTURE_arm64ec
+     ARM64_NT_CONTEXT ArmContext {};

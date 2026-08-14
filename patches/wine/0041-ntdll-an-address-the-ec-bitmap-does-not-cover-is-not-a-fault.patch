@@ -1,0 +1,67 @@
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1455,10 +1455,63 @@
+ /**************************************************************************
+  *              RtlIsEcCode (NTDLL.@)
+  */
++/* Vessel: an address this bitmap does not cover is not EC code, it is not a
++ * fault.
++ *
++ * The map is one bit per page of the address space below `address_space_limit`
++ * -- `alloc_arm64ec_map` in unix/virtual.c sizes it exactly that way -- and
++ * neither this function nor its unix twin `is_ec_code` bounded the index. An
++ * address above the limit therefore read off the end of the allocation, which
++ * is a genuine access violation raised inside a query that has no business
++ * failing: every caller is asking a *question*, and the answer for an address
++ * that cannot be code is FALSE.
++ *
++ * That is not theoretical. FEX calls this on every guest branch target under
++ * ARM64EC (BranchTargetInMultiblockRange), so one bad target is enough, and
++ * Resident Evil Requiem died on it every run:
++ *
++ *   prepare_exception_arm64ec ... code c0000005 flags 0 at 0000007FFFF09F44
++ *
++ * repeated 34 times with the address identical each time, 7200 bytes of guest
++ * stack consumed per delivery, until a 4 MB stack was gone and the overflow was
++ * unrecoverable. 0000007FFFF09F44 is `RtlIsEcCode +0x10` -- the map load below.
++ * Something resumed the fault at the same instruction rather than repairing it,
++ * so it re-raised forever; bounding the read removes the fault that loop is
++ * built on, whoever is doing the resuming.
++ *
++ * The limit is cached on first use rather than queried per call because this is
++ * on the branch-target path of every block FEX compiles. NtQueryVirtualMemory
++ * gives the size of the reservation the loader made, which is the same number
++ * `alloc_arm64ec_map` computed, without this side needing to know
++ * `address_space_limit` at all. A query that fails leaves the cache at zero and
++ * every address reads as not-EC, which is the safe direction: a wrong FALSE
++ * makes FEX treat native code as emulated, a wrong fault kills the process.
++ *
++ * The unix twin is deliberately left alone. It has the identical shape and the
++ * identical hazard, but nothing has been observed faulting there, and it is an
++ * inline on a hot path reached by callers this change has not been measured
++ * against. One fix for the fault that was actually seen. */
+ BOOLEAN WINAPI RtlIsEcCode( ULONG_PTR ptr )
+ {
++    static ULONG_PTR map_pages;
+     const UINT64 *map = (const UINT64 *)NtCurrentTeb()->Peb->EcCodeBitMap;
+     ULONG_PTR page = ptr / page_size;
++
++    if (!map) return FALSE;
++
++    if (!map_pages)
++    {
++        MEMORY_BASIC_INFORMATION info;
++        SIZE_T len = 0;
++
++        if (!NtQueryVirtualMemory( GetCurrentProcess(), (void *)map, MemoryBasicInformation,
++                                   &info, sizeof(info), &len ) && len == sizeof(info))
++            map_pages = info.RegionSize * 8;
++        else
++            return FALSE;
++    }
++
++    if (page >= map_pages) return FALSE;
+     return (map[page / 64] >> (page & 63)) & 1;
+ }
+ 

@@ -1,0 +1,166 @@
+diff --git a/Source/Windows/Common/Logging.cpp b/Source/Windows/Common/Logging.cpp
+index 67433f924..0fecd2349 100644
+--- a/Source/Windows/Common/Logging.cpp
++++ b/Source/Windows/Common/Logging.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <cstdio>
+ #include <cstdlib>
++#include <optional>
+ #include <string_view>
+ #include <ntstatus.h>
+ #include <windef.h>
+@@ -110,6 +111,77 @@
+   return Found;
+ }
+ 
++/* Vessel: FEX_SILENTLOG, read from the environment instead of from the config.
++ *
++ * Init() runs before any config layer has been loaded, on every path that
++ * reaches it. The two Windows modules call it from ProcessInit ahead of
++ * FEX::Config::LoadConfig (ARM64EC/Module.cpp:657, WOW64/Module.cpp:519), and
++ * FEXOfflineCompiler calls it from the first two statements of main() with only
++ * FEXCore::Config::Initialize() done -- patches/fex/0001, which is there
++ * because without it this function faulted on a null MetaLayer. Initialize()
++ * creates that layer; it loads nothing into it. So the FEX_CONFIG_OPT below can
++ * only ever return the compiled-in default, and that default is *true*
++ * (FEXCore/Source/Interface/Config/Config.json.in:387-389).
++ *
++ * Which means Init() returns without installing a handler, and nothing calls
++ * Init() a second time, so every LogMan message in the process is discarded for
++ * the rest of its life -- EFmt included, and the message half of
++ * ERROR_AND_DIE_FMT included. FEX_SILENTLOG=0 has never been able to change
++ * that on any of the three entry points.
++ *
++ * How it was located rather than assumed, 2026-08-14: FEXOfflineCompiler64.exe
++ * was run under Wine with no guest process, nothing else in the prefix, and
++ * FEX_SILENTLOG=0 in its environment. It printed "Parsed 26 codemap entries for
++ * .../amd_fidelityfx_loader_dx12.dll" and "Compiling code..." -- which are
++ * fmt::print, not LogMan (FEXOfflineCompiler/Main.cpp:596 and :519) -- and then
++ * nothing at all for 180 s until the timeout killed it. The LogMan lines that
++ * path emits between those two prints, "Relocated image {:X} -> {:X}" and
++ * "Mapped image: {} @ {:X}" (Main.cpp:284 and :342), were absent. Two prints
++ * present and two logs missing from the same twenty lines of code is the whole
++ * proof; nothing about the hang itself is claimed here.
++ *
++ * The environment wins over the config value rather than merging with it,
++ * because at this point there is no config value -- only a default. A caller
++ * who wants the default keeps it by not setting the variable.
++ *
++ * The conversion matches what FEX's own config layer would do to the same
++ * string, so the two cannot disagree: a config bool is
++ * strtoull(Value, nullptr, 0) cast to bool (FEXCore/Source/Common/StringConv.h
++ * :11-18), i.e. "a non-zero integer is true". Worth knowing before writing one:
++ * FEX_SILENTLOG=true parses as zero and therefore means *not* silent.
++ *
++ * Hand-rolled rather than calling strtoull, because this file compiles into
++ * CommonWindows, which links into libarm64ecfex.dll against FEX's own minimal
++ * CRT -- and that CRT has getenv (CRT/Misc.cpp:58) but no string-to-integer
++ * conversion of any kind (CRT/String.cpp). getenv is already relied on two
++ * functions above for VESSEL_TRACE, so the mechanism is proven on this path;
++ * strtoull would be a new link dependency. The digit scan is decimal only: a
++ * hexadecimal FEX_SILENTLOG=0x1 would read as false here and as true through
++ * the config layer, and nobody writes one for a flag. */
++std::optional<bool> SilentFromEnvironment() {
++  const char* Value = getenv("FEX_SILENTLOG");
++  if (!Value) {
++    return std::nullopt;
++  }
++
++  std::string_view View {Value};
++  while (!View.empty() && (View.front() == ' ' || View.front() == '\t')) {
++    View.remove_prefix(1);
++  }
++  if (!View.empty() && (View.front() == '+' || View.front() == '-')) {
++    View.remove_prefix(1);
++  }
++
++  bool NonZero = false;
++  for (const char C : View) {
++    if (C < '0' || C > '9') {
++      break;
++    }
++    NonZero = NonZero || C != '0';
++  }
++  return NonZero;
++}
++
+ static void MsgHandler(LogMan::DebugLevels Level, const char* Message) {
+   // Before the format, not after: the flood this exists to stop is 508,000
+   // fextl::fmt::format calls, and a filter that formats first would remove the
+@@ -138,7 +210,10 @@
+ namespace FEX::Windows::Logging {
+ void Init() {
+   FEX_CONFIG_OPT(SilentLog, SILENTLOG);
+-  if (SilentLog()) {
++  // The environment first, because there is no config to read yet -- see
++  // SilentFromEnvironment above for why that is true on all three entry points
++  // and what it has been costing.
++  if (SilentFromEnvironment().value_or(SilentLog())) {
+     return;
+   }
+ 
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 6b782e0f8..66fbe0c3e 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -546,7 +546,7 @@
+ 
+ // Command handler that parses the given code map and generates a code cache for the selected x86 binary.
+ // If no binary is selected explicitly, it is inferred from the code map ExecutableFileId block.
+-static int GenerateCache(int argc, const char** argv) {
++static int GenerateCache(int argc, const char** argv, char** envp) {
+   optparse::OptionParser Parser {};
+   Parser.add_option("--outdir").set_default(FEX::Config::GetCacheDirectory() + "cache").help("Output directory for generated cache files");
+   Parser.add_option("--fileid").help("Select binary to generate cache for");
+@@ -610,7 +610,29 @@
+   std::filesystem::create_directories(OutDir);
+ 
+   const auto PortableInfo = FEX::ReadPortabilityInformation();
+-  char* envp[] = {nullptr};
++  // Vessel: the real environment, not an empty one.
++  //
++  // This used to be `char* envp[] = {nullptr}`, and EnvLoader::Load iterates
++  // exactly the array it is handed (Source/Common/Config.cpp:307), so the
++  // environment layer this call installs was guaranteed to be empty. Every
++  // FEX_* variable was therefore inert for cache generation -- not overridden,
++  // not warned about, simply never looked at: FEX_MAXINST and FEX_MULTIBLOCK,
++  // which decide how much of a block the compiler is even allowed to see;
++  // FEX_SMCCHECKS and FEX_DISABLEDEP, which decide what it treats as code; and
++  // FEX_HOSTFEATURES, which decides what it compiles for. Cache generation must
++  // produce the same code the session will run, and it was reading a different
++  // configuration to do it.
++  //
++  // The environment comes down from main() rather than from _environ so the
++  // same line works on the Linux build of this file, which shares this whole
++  // function and had the same empty array. FEXGetConfig/Main.cpp:416 takes it
++  // from main() for the same reason; the two Windows modules use _environ
++  // because they are DLLs and have no main() to take it from.
++  //
++  // Note that the Shutdown() below tears down the layers that main() set up, so
++  // this LoadConfig is the only chance the subprocess gets -- and process-all
++  // reaches GenerateCache only through _spawnv (Main.cpp:834), which passes the
++  // parent's environment on, so what arrives here is what the session set.
+   FEXCore::Config::Shutdown();
+   FEX::Config::LoadConfig("", envp, PortableInfo);
+ 
+@@ -842,7 +864,9 @@
+   return 0;
+ }
+ 
+-int main(int argc, char** argv) {
++// envp: taken from main so GenerateCache can install a real environment layer,
++// on both this and the Linux build. See the comment at its call site below.
++int main(int argc, char** argv, char** envp) {
+ #ifndef _WIN32
+   LogMan::Throw::InstallHandler(AssertHandler);
+   LogMan::Msg::InstallHandler(MsgHandler);
+@@ -864,7 +888,7 @@
+   }
+ 
+   if (argc >= 2 && argv[1] == std::string_view {"generate"}) {
+-    return GenerateCache(argc - 1, Args.data());
++    return GenerateCache(argc - 1, Args.data(), envp);
+   } else if (argc >= 2 && argv[1] == std::string_view {"process-all"}) {
+     return ProcessAll();
+   } else {
