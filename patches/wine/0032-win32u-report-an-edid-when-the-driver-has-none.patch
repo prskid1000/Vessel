@@ -1,0 +1,159 @@
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 49a376d547d..b0c700d43c4 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -2080,6 +2080,124 @@ static BOOL write_monitor_to_registry( struct monitor *monitor, const BYTE *edid
+     return TRUE;
+ }
+ 
++/* Vessel: an EDID for a monitor the driver gave us none for.
++ *
++ * DXVK reads the monitor's EDID out of the registry to work out colour space and
++ * HDR capability, and without one it logs, every session,
++ *   readMonitorEdidFromKey: Failed to get EDID reg key size
++ *   DXGI: Failed to parse display metadata + colorimetry info, using blank.
++ *
++ * Here rather than in a driver, because there are three sources of monitors and
++ * the one that matters is not the display driver's. In virtual-desktop mode
++ * update_display_devices() runs the driver's enumeration and THEN appends a
++ * second, virtual source (add_virtual_source), and it is that virtual desktop
++ * the guest actually draws into -- so an EDID supplied only by winex11 lands on
++ * the physical monitor while the game reads the virtual one. It was, and the
++ * hive showed exactly that: DISPLAY\VSL0001 carrying an EDID beside
++ * DISPLAY\Default_Monitor carrying an empty BAD_EDID. add_monitor is the one
++ * funnel all three reach, so one substitution here covers every source.
++ *
++ * Two monitors in virtual-desktop mode is upstream design, not a defect:
++ * add_virtual_source keeps the physical source and appends the virtual one. So
++ * this identifies both rather than trying to suppress either.
++ *
++ * The registry cannot be seeded with this instead. prepare_devices() calls
++ * reg_empty_key( enum_key, "DISPLAY" ) on every display initialisation, so
++ * anything written under Enum\DISPLAY by hand is deleted before Wine
++ * repopulates it -- tried, shipped, and measured to vanish.
++ *
++ * What the block claims is deliberately conservative: sRGB primaries, gamma 2.2,
++ * and NO CTA-861 extension block, which is the only place an EDID can advertise
++ * HDR static metadata. The session composites SDR, and telling DXGI otherwise
++ * would give washed-out output and a bug report pointing anywhere but here.
++ * Physical size is left undefined because Android decides the surface size;
++ * inventing one would give every guest program a wrong DPI.
++ *
++ * Built field by field with a computed checksum rather than pasted as bytes: an
++ * EDID whose last byte was not updated after an edit is rejected whole, and
++ * silently, which is the same failure this exists to remove.
++ *
++ * The static is written identically by any thread that reaches it, so the lack
++ * of a lock cannot produce a value that was never valid.
++ */
++static const unsigned char *vessel_default_edid( UINT *len )
++{
++    static unsigned char edid[128];
++    unsigned int i, sum = 0;
++
++    memset( edid, 0, sizeof(edid) );
++
++    /* Fixed header. A block without it is rejected before any field is read. */
++    for (i = 1; i <= 6; i++) edid[i] = 0xff;
++
++    /* Manufacturer "VSL", three letters packed five bits each, big-endian. Not
++     * a registered PNP id on purpose: this is a virtual display, and borrowing a
++     * real vendor's code would make it identify as hardware it is not. */
++    edid[8] = 0x5a;
++    edid[9] = 0x6c;
++    edid[10] = 0x01;                /* product code, little-endian */
++    /* 12-16 serial and week stay zero, meaning unspecified. */
++    edid[17] = 2024 - 1990;         /* year of manufacture */
++    edid[18] = 0x01;                /* EDID 1.4 */
++    edid[19] = 0x04;
++    edid[20] = 0x95;                /* digital, 8 bits per colour, DisplayPort */
++    /* 21-22 physical size in cm: zero is the spec's "undefined". */
++    edid[23] = 0x78;                /* gamma, (gamma * 100) - 100, so 2.2 */
++    edid[24] = 0x06;                /* sRGB default colour space; descriptor 1 is
++                                     * the preferred timing, which 1.4 requires
++                                     * to be a detailed timing */
++
++    /* Chromaticity: exactly sRGB. Red .640/.330, green .300/.600, blue
++     * .150/.060, white D65 .3127/.3290, ten bits each with the low two bits of
++     * all eight packed into the first two bytes. */
++    {
++        static const unsigned char chroma[10] =
++            { 0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54 };
++        memcpy( edid + 25, chroma, sizeof(chroma) );
++    }
++
++    /* 35-37 established timings: none claimed. The mode list a program sees
++     * comes from the settings handler, not from here. */
++
++    /* 38-53 standard timings: 0x01,0x01 is the spec's "unused". Zero is
++     * reserved and is not the same thing. */
++    for (i = 38; i <= 53; i++) edid[i] = 0x01;
++
++    /* 54-71 descriptor 1, the preferred detailed timing: 1920x1080 @ 60 Hz.
++     * 148.5 MHz in 10 kHz units, 1920 active + 280 blanking horizontally, 1080 +
++     * 45 vertically, sync offsets 88/44 and 4/5, no borders, digital separate
++     * sync with both polarities positive. Image size stays zero for the same
++     * reason bytes 21 and 22 do. Present because 1.4 requires this descriptor to
++     * be a detailed timing, not because it selects anything. */
++    {
++        static const unsigned char dtd[18] =
++            { 0x02, 0x3a, 0x80, 0x18, 0x71, 0x38, 0x2d, 0x40, 0x58,
++              0x2c, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1e };
++        memcpy( edid + 54, dtd, sizeof(dtd) );
++    }
++
++    /* 72-89 descriptor 2, the monitor name: thirteen bytes ended by 0x0a and
++     * padded with spaces, which is how a short name is written. */
++    edid[75] = 0xfc;
++    memcpy( edid + 77, "Vessel SDR\n  ", 13 );
++
++    /* 90-107 and 108-125, descriptors 3 and 4: unused. 0x10 is the spec's empty
++     * descriptor tag; left zero they would read as detailed timings with a zero
++     * pixel clock. */
++    edid[93] = 0x10;
++    edid[111] = 0x10;
++
++    /* 126 extension blocks: none. One that is counted and absent invalidates the
++     * whole EDID -- and a CTA-861 block is where HDR would be claimed. */
++
++    /* 127 checksum: the 128 bytes must sum to zero mod 256. */
++    for (i = 0; i < 127; i++) sum += edid[i];
++    edid[127] = (unsigned char)((256 - (sum & 0xff)) & 0xff);
++
++    *len = sizeof(edid);
++    return edid;
++}
++
+ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
+ {
+     struct device_manager_ctx *ctx = param;
+@@ -2087,6 +2205,11 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
+     struct source *source;
+     char buffer[MAX_PATH];
+     char monitor_id_string[16];
++    const unsigned char *edid = gdi_monitor->edid;
++    UINT edid_len = gdi_monitor->edid_len;
++
++    /* Only when the driver gave us nothing. A real EDID always wins. */
++    if (!edid || !edid_len) edid = vessel_default_edid( &edid_len );
+ 
+     assert( !list_empty( &sources ) );
+     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
+@@ -2101,7 +2224,7 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
+ 
+     TRACE( "%u %s %s\n", monitor->id, wine_dbgstr_rect(&gdi_monitor->rc_monitor), wine_dbgstr_rect(&gdi_monitor->rc_work) );
+ 
+-    get_monitor_info_from_edid( &monitor->edid_info, gdi_monitor->edid, gdi_monitor->edid_len );
++    get_monitor_info_from_edid( &monitor->edid_info, edid, edid_len );
+     if (monitor->edid_info.flags & MONITOR_INFO_HAS_MONITOR_ID)
+         strcpy( monitor_id_string, monitor->edid_info.monitor_id_string );
+     else
+@@ -2111,7 +2234,7 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
+     snprintf( monitor->path, sizeof(monitor->path), "DISPLAY\\%s\\%04X&%04X", monitor_id_string, source->id, monitor->id );
+     set_reg_ascii_value( source->key, buffer, monitor->path );
+ 
+-    if (!write_monitor_to_registry( monitor, gdi_monitor->edid, gdi_monitor->edid_len ))
++    if (!write_monitor_to_registry( monitor, edid, edid_len ))
+     {
+         WARN( "Failed to write monitor %p to registry\n", monitor );
+         monitor_release( monitor );
