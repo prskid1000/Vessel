@@ -1706,7 +1706,36 @@ class SessionRuntime @Inject constructor(
             // filter. Three and a half minutes of full-CPU work, an empty
             // `cache/` directory, and no diagnostic — which is the worst of the
             // three possible outcomes.
-            environment = current.environment + ("FEX_SILENTLOG" to "0"),
+            //
+            // **`FEX_DISABLEDEP` is overridden here for the same reason, and it
+            // is what makes this process finish at all.** `patches/fex/0002`
+            // turns DEP off for every guest because anti-tamper stubs build code
+            // at runtime and die on `NoExec instruction in entry block` without
+            // it. The cost, which that patch states, is that FEX's permission
+            // tracking then treats every readable page as executable — and this
+            // process reserves 272 MB for its own `LookupCache`, uncommitted, so
+            // that reservation gets classified as guest RWX code.
+            // `HandleRWXAccessViolation` then claims the first-touch fault that
+            // `OvercommitTracker` exists to receive, cannot reprotect a page that
+            // was never committed, reports the fault handled anyway, and resumes
+            // it. Measured on the device: `RWX reprotect FAILED C000002D on page
+            // 7E4EF44000 … occurrence 5668864`, 54 s of CPU with system time at
+            // twice user time, on `winmm.dll`'s two blocks.
+            //
+            // The compiler runs no anti-tamper code — it translates codemaps
+            // ahead of time and executes none of it — so it is the one process
+            // that never needed DEP off. Same container, same codemaps, same
+            // binary, one variable: with this set, 21 modules including that same
+            // `winmm.dll` compiled in 25 seconds and `RWX reprotect FAILED`
+            // stayed at zero.
+            //
+            // Here rather than in FEX because the distinction is *which process*,
+            // and FEX cannot see that from inside: an allocation FEXCore makes
+            // for itself and one a guest makes are indistinguishable by the time
+            // a notification arrives.
+            environment = current.environment +
+                ("FEX_SILENTLOG" to "0") +
+                ("FEX_DISABLEDEP" to "0"),
             workingDirectory = current.layout.base,
         )
         val outcome = runCatching {

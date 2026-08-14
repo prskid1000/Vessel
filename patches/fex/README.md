@@ -673,3 +673,84 @@ tracks exactly that in `RWXIntervals`, so a cache could record "this image had
 writable executable sections" and be refused on load. The second is cheaper and
 strictly conservative; it would also disable caching for the titles that most
 need it.
+
+## `0012-invalidationtracker-fex-own-memory-is-not-guest-code`
+
+The exclusion designed under the withdrawn `0011` and not written at the time.
+Two halves, and **the second one is what fixes the reported bug** — that is
+worth stating up front because the first is the one that was asked for.
+
+**The measurement that scoped it.** A run that drained 52 modules with zero
+`RWX reprotect FAILED` lines looked like generation was fixed. It had skipped
+the offender: `Cache up to date: winmm.dll-115ee75136dc2892`. On a fresh
+container winmm.dll is first in the queue and the loop returns —
+`RWX reprotect FAILED C000002D on page 7E4EF44000 (fault 7E4EF44B08,
+pc 140088F10, occurrence 5668864)` and climbing, 54 s of CPU with system time at
+twice user. `SessionRuntime.kt`'s long-standing comment names the same module
+independently. Reverting FEX to the 0001-0009 set did not stop it, so `0010`,
+`0011` and `wine/0041` are all exonerated: the variable was never the build.
+
+**winmm.dll is two blocks**, which kills the buffer-exhaustion story for *this*
+loop — 128 MB is nowhere near exhausted. (That story may still be right about
+re9.exe's relocation table; that is a different failure and is what `0011`
+validates against.) What is left is the classification: with `DisableDEP` on
+(`0002`, default true) the tool's own 272 MB `LookupCache` **reservation** is
+recorded as guest RWX code, so the SMC handler claims a fault on a page that was
+never committed, cannot reprotect it, reports it handled, and resumes forever.
+
+**Half one — the exclusion.** `MarkPrivateRange` records the range and removes
+it from `XIntervals`, `RWXIntervals` and `DEPPromotedIntervals`;
+`HandleMemoryProtectionNotification` then declines to put it back. Wired into
+`MarkOvercommitRange`/`UnmarkOvercommitRange` in both modules.
+
+Ownership is the right distinction and reserved-versus-committed was not. The
+withdrawn gate asked "is this committed?" and a real guest depended on
+reserve-time classification. This asks "is this ours?", and the answer is exact:
+`MarkOvercommitRange`'s only caller is `LookupCache.cpp:49`, on memory
+`LookupCache.cpp:41` just reserved for FEXCore itself. **No guest allocation
+ever reaches it**, so guest classification changes in exactly zero cases.
+Removal rather than prevention, because the allocation is notified at `:41` and
+marked at `:49` — by the time we are told it is private it has already been
+classified.
+
+**Half two — the decline, restored.** `HandleRWXAccessViolation` again returns
+false when `NtProtectVirtualMemory` fails. This was written once, withdrawn
+along with an unrelated change that shared its patch, and the loop came straight
+back. It is unconditional on failure because the alternatives are not really
+alternatives: the reprotect is the only thing that lets the faulting store
+progress, so if it failed the store faults again the instant it resumes — for
+any status, at any retry count. Bounding makes the loop finite; conditioning on
+one status leaves the next one spinning.
+
+**Why the exclusion alone is not enough, and why this is the half that matters.**
+In a session the `LookupCache` and the `InvalidationTracker` belong to the same
+module and the exclusion is exact and free. In `FEXOfflineCompiler` they do not:
+`MarkOvercommitRange` goes to the tool's own `OvercommitTracker`
+(`FEXOfflineCompiler/Main.cpp:131`) while the notification is delivered to the
+emulation module's `InvalidationTracker` — two FEXCore instances in one process
+with no channel between them. Nothing here crosses that boundary. The decline
+does not need to: it hands the fault back to Wine's dispatcher, which reaches
+the tool's own vectored handler and its own `OvercommitTracker` — the tracker
+that actually owns the reservation — where `0008`'s hardened repair commits the
+page.
+
+**The two channels considered, and what each would have cost.** Exporting a
+mark/unmark pair from `libarm64ecfex.dll` for the tool to resolve with
+`GetProcAddress` would work, but ARM64EC export tables carry `EXP+#` aliasing
+and fast-forward sequences, so a wrongly-resolved pointer is a plausible silent
+failure that cannot be checked without a device — a poor trade for a case the
+decline already covers. Reserving FEX-private regions `PAGE_NOACCESS` so
+`ProtIsReadable()` is false is a one-line change, but it only hides the
+*reserve* step: the moment `OvercommitTracker` commits a run as
+`PAGE_READWRITE`, DEP promotion reclassifies it and the lookup table goes back
+to being trapped and invalidated on every write. That converts a hang into a
+permanent tax and leaves the classification wrong, which is the actual defect.
+
+**Falsifiable on the next run:** winmm.dll compiles, `Successfully populated
+cache .../winmm.dll-...` appears, and `RWX reprotect FAILED` stays at zero for
+the whole session.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.

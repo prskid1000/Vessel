@@ -1,0 +1,201 @@
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index d2a80bcaa..b4b836930 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -35,6 +35,13 @@
+   void ReprotectRWXIntervals(uint64_t Address, uint64_t Size);
+   bool HandleRWXAccessViolation(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t FaultAddress);
+ 
++  // Vessel: emulator-private memory -- FEX's own bookkeeping, never guest code.
++  // Marking a range removes it from the executable/SMC maps and keeps later
++  // notifications from putting it back. See the .cpp for why this is the right
++  // distinction and reserved-vs-committed was not.
++  void MarkPrivateRange(uint64_t Address, uint64_t Size);
++  void UnmarkPrivateRange(uint64_t Address, uint64_t Size);
++
+   // Unprotects any RWX intervals in the input interval and invalidates code
+   // NOTE: CodeInvalidationMutex must be locked when calling this, and if true is returned, kept locked until the write ends.
+   bool BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size);
+@@ -66,6 +73,7 @@
+   bool SMCDetectionDisabled {false};                    // Protected by IntervalsLock
+   bool DEPDisabled {false};                             // Protected by IntervalsLock
+   FEXCore::IntervalList<uint64_t> DEPPromotedIntervals; // Protected by IntervalsLock
++  FEXCore::IntervalList<uint64_t> PrivateIntervals;     // Protected by IntervalsLock
+ 
+   bool MonoBackpatcherDetectionPending {false};
+   uint64_t MonoBase {0};
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index c8d5e4a96..2628bdbc3 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -62,7 +62,75 @@
+   return (Prot & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+ }
+ 
++/* Vessel: FEX's own bookkeeping memory is not guest code, and this is where the
++ * two get told apart.
++ *
++ * **The distinction, and why the withdrawn MEM_COMMIT gate was the wrong one.**
++ * That gate asked "is this range committed?" and a real guest turned out to
++ * depend on reserve-time classification, so it killed Metro 2033. The question
++ * that actually separates the two is ownership: a range handed to
++ * MarkOvercommitRange is FEXCore's own lookup table, and **no guest allocation
++ * ever reaches that call** -- its one caller is LookupCache.cpp:49, on memory
++ * LookupCache.cpp:41 just reserved for itself. So this touches guest
++ * classification in exactly zero cases, which is the property the gate lacked.
++ *
++ * **Removal, not just prevention.** The allocation is notified at
++ * LookupCache.cpp:41 and marked at :49, so by the time we are told it is
++ * private it has already been classified. MarkPrivateRange therefore removes it
++ * from XIntervals and RWXIntervals as well as recording it, and this function
++ * then declines to put it back.
++ *
++ * **What this fixes and what it cannot reach.** In a session the LookupCache and
++ * the InvalidationTracker are the same module's, so the exclusion is exact and
++ * free. In FEXOfflineCompiler they are not: MarkOvercommitRange goes to the
++ * tool's own OvercommitTracker (FEXOfflineCompiler/Main.cpp:131) while the
++ * notification is delivered to the emulation module's InvalidationTracker --
++ * two FEXCore instances in one process, with no channel between them. Nothing
++ * in this patch crosses that boundary, so the offline compiler is fixed by the
++ * decline in HandleRWXAccessViolation below instead, which needs no channel.
++ *
++ * A channel was considered and rejected: exporting a mark/unmark pair from
++ * libarm64ecfex.dll for the tool to resolve with GetProcAddress. It would work,
++ * but ARM64EC export tables carry EXP+# aliasing and fast-forward sequences, so
++ * a wrongly-resolved pointer is a plausible silent failure that cannot be
++ * checked without a device -- a poor trade for a case the decline already
++ * covers. The other candidate, reserving FEX-private regions PAGE_NOACCESS so
++ * ProtIsReadable() is false, was rejected because it only hides the *reserve*
++ * step: the moment OvercommitTracker commits a run as PAGE_READWRITE, DEP
++ * promotion reclassifies it and the lookup table goes back to being trapped and
++ * invalidated on every write. That converts a hang into a permanent tax and
++ * leaves the classification wrong, which is the actual defect. */
++void InvalidationTracker::MarkPrivateRange(uint64_t Address, uint64_t Size) {
++  const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
++  const auto AlignedSize = (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
++  const FEXCore::IntervalList<uint64_t>::Interval Range {AlignedBase, AlignedBase + AlignedSize};
++
++  std::unique_lock Lock(IntervalsLock);
++  PrivateIntervals.Insert(Range);
++  XIntervals.Remove(Range);
++  RWXIntervals.Remove(Range);
++  DEPPromotedIntervals.Remove(Range);
++}
++
++void InvalidationTracker::UnmarkPrivateRange(uint64_t Address, uint64_t Size) {
++  const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
++  const auto AlignedSize = (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
++
++  std::unique_lock Lock(IntervalsLock);
++  PrivateIntervals.Remove({AlignedBase, AlignedBase + AlignedSize});
++}
++
+ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
++  {
++    // Emulator-private memory is never guest code, whatever protection it was
++    // allocated with. Checked before anything else so a later commit of the
++    // same reservation cannot reclassify it.
++    std::shared_lock Lock(IntervalsLock);
++    if (PrivateIntervals.Query(Address).Enclosed) {
++      return;
++    }
++  }
++
+   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto AlignedSize = (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
+ 
+@@ -305,9 +373,42 @@
+         const uint64_t Seen = FailedReprotects.fetch_add(1, std::memory_order_relaxed) + 1;
+         if (Seen == 1 || (Seen % 4096) == 0) {
+           LogMan::Msg::EFmt("RWX reprotect FAILED {:X} on page {:X} (fault {:X}, pc {:X}, occurrence {}); "
+-                            "the fault is being resumed unrepaired",
++                            "declining the fault instead of resuming it",
+                             static_cast<uint32_t>(ProtStatus), FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FaultAddress, HostPc, Seen);
+         }
++
++        /* Vessel: a fault that was not repaired must not be reported as
++         * repaired. This is the same rule 0008 applied to OvercommitTracker;
++         * it was written once before, withdrawn along with an unrelated change
++         * that shared its patch, and the loop it prevents came straight back --
++         * 5,668,864 resumes of one page on winmm.dll, two blocks, on a fresh
++         * container.
++         *
++         * **It is unconditional on failure because the alternatives are not
++         * really alternatives.** The only thing this function does to let the
++         * faulting store make progress is the reprotect immediately above. If
++         * that failed the page is still not writable, so the same store faults
++         * again the instant it resumes -- for any status, at any retry count.
++         * Bounding would only make the loop finite; conditioning on one status
++         * would leave the next one spinning.
++         *
++         * **It is also what fixes the offline compiler**, which MarkPrivateRange
++         * cannot reach. Declining hands the fault back to Wine's dispatcher,
++         * which reaches the tool's own vectored handler and its own
++         * OvercommitTracker -- the tracker that actually owns that reservation
++         * -- and 0008's hardened repair commits the page. The module stops
++         * claiming a fault it was never able to fix.
++         *
++         * **What it cannot regress:** on the working SMC path the reprotect
++         * succeeds and this never runs, so a guest that works today cannot be
++         * depending on it -- reaching this line and working are mutually
++         * exclusive. What it does change is the shape of a genuine failure: a
++         * hang becomes an access violation with an address in it. The one loss
++         * I can construct is a real SMC page transiently unprotectable through a
++         * race with another thread's decommit, which used to spin until that
++         * thread finished and will now surface. Accepted: a spin is not a
++         * recovery. */
++        return false;
+       }
+     }
+     DetectMonoBackpatcherBlock(Thread, HostPc);
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 19c8e86a3..b64f4a663 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -619,10 +619,21 @@
+ 
+   void MarkOvercommitRange(uint64_t Start, uint64_t Length) override {
+     OvercommitTracker->MarkRange(Start, Length);
++    // Vessel: this range is FEXCore's own lookup table -- no guest allocation
++    // ever reaches MarkOvercommitRange, its one caller being LookupCache.cpp:49
++    // -- so take it out of the executable and SMC maps and keep later
++    // notifications from putting it back. In a session the LookupCache and this
++    // tracker belong to the same module, so the exclusion is exact and free.
++    if (InvalidationTracker) {
++      InvalidationTracker->MarkPrivateRange(Start, Length);
++    }
+   }
+ 
+   void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) override {
+     OvercommitTracker->UnmarkRange(Start, Length);
++    if (InvalidationTracker) {
++      InvalidationTracker->UnmarkPrivateRange(Start, Length);
++    }
+   }
+ 
+   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) override {
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 515a553b7..6094c4e92 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -498,10 +498,20 @@
+ 
+   void MarkOvercommitRange(uint64_t Start, uint64_t Length) override {
+     OvercommitTracker->MarkRange(Start, Length);
++    // Vessel: see the ARM64EC twin of this. The 32-bit side is not the arm that
++    // loops -- no EC emulator is loaded for a plain ARM64 image, so its faults
++    // never reach this tracker at all -- but the wiring is the same and the two
++    // should not drift.
++    if (InvalidationTracker) {
++      InvalidationTracker->MarkPrivateRange(Start, Length);
++    }
+   }
+ 
+   void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) override {
+     OvercommitTracker->UnmarkRange(Start, Length);
++    if (InvalidationTracker) {
++      InvalidationTracker->UnmarkPrivateRange(Start, Length);
++    }
+   }
+ 
+   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) override {
