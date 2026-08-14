@@ -1,0 +1,12 @@
+diff --git a/loader/wine.inf.in b/loader/wine.inf.in
+index 5ace722fd63..53bd038c93d 100644
+--- a/loader/wine.inf.in
++++ b/loader/wine.inf.in
+@@ -1285,7 +1285,6 @@ mouhid.inf,"@%12%\mouhid.sys,-1"
+ winebth.inf,"@%12%\winebth.sys,-1"
+ winebus.inf,"@%12%\winebus.sys,-1"
+ winehid.inf,"@%12%\winehid.sys,-1"
+-wineusb.inf,"@%12%\wineusb.sys,-1"
+ winexinput.inf,"@%12%\winexinput.sys,-1"
+ 
+ [NlsFiles]
