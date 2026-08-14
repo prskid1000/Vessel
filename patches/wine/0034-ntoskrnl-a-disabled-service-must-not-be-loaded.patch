@@ -1,0 +1,37 @@
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index b3f45751b99..698f63362c0 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -3826,6 +3826,32 @@ static NTSTATUS open_driver( const UNICODE_STRING *service_name, SC_HANDLE *serv
+         goto error;
+     }
+ 
++    /* Vessel: a service the registry says is disabled must not be loaded.
++     *
++     * Windows honours SERVICE_DISABLED for drivers and Wine did not -- nothing
++     * between here and IoCreateDriver ever read dwStartType, so marking a driver
++     * service disabled had no effect. Checked here because there are two callers
++     * and both reach ZwLoadDriver through this function: winedevice's
++     * device_handler on SERVICE_CONTROL_START, and pnp.c's load_function_driver
++     * from a device node's SPDRP_SERVICE. An earlier attempt guarded only the
++     * PnP path and the driver kept loading through the other one.
++     *
++     * The case that made it visible: winebth.sys is registered by wine.inf and
++     * given a root device node, so every session logged ZwLoadDriver failing to
++     * create it with c00000e5, STATUS_INTERNAL_ERROR out of its DriverEntry --
++     * winebth talks to BlueZ over DBus and an Android app has neither a DBus
++     * session nor permission to reach the adapter. Nothing here wants it:
++     * gamepads arrive over the app's own bus, not Bluetooth HID.
++     *
++     * TRACE rather than WARN: a service the machine was told to leave alone
++     * being left alone is the system working. */
++    if (service_config->dwStartType == SERVICE_DISABLED)
++    {
++        TRACE( "service %s is disabled
++", debugstr_us(service_name) );
++        goto error;
++    }
++
+     TRACE( "opened service for driver %s\n", debugstr_us(service_name) );
+     RtlFreeHeap( GetProcessHeap(), 0, service_config );
+     return STATUS_SUCCESS;
