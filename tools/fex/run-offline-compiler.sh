@@ -4,6 +4,13 @@
 #   ./tools/fex/run-offline-compiler.sh              # no arguments: prints usage
 #   ./tools/fex/run-offline-compiler.sh process-all  # what a session runs
 #
+#   VESSEL_WINE_DIR=files/components/Wine/1114 \
+#     ./tools/fex/run-offline-compiler.sh process-all   # the same run, on 11.14
+#
+# That last form is the Wine-version A/B: the container side otherwise takes the
+# newest installed Wine, so naming an older component runs the identical compile
+# against it. Install the other build from the Components screen first.
+#
 # The code cache has three failure modes that look identical from outside — the
 # compiler never ran, the compiler ran and crashed, the compiler ran and found
 # nothing to do — and a session log only distinguishes them if teardown was
@@ -46,4 +53,4 @@ in_app "cat /data/local/tmp/offline-compiler.sh > files/offline-compiler.sh"
 adb shell "rm -f /data/local/tmp/offline-compiler.sh" >/dev/null 2>&1 || true
 
 say "running FEXOfflineCompiler64.exe ${*:-<no arguments>}"
-in_app "sh files/offline-compiler.sh $CONTAINER $*"
+in_app "${VESSEL_WINE_DIR:+VESSEL_WINE_DIR=$VESSEL_WINE_DIR }sh files/offline-compiler.sh $CONTAINER $*"

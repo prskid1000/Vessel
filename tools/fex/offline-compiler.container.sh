@@ -22,8 +22,27 @@ set -u
 CONTAINER="$1"
 shift
 
-FEX_DIR=files/components/FEXCore/2608
-WINE_DIR=files/components/Wine/1114
+# **Both of these are version codes, and neither one is stable.** `2608` became
+# `260803` the moment FEX_REVISION existed, and the hardcoded pair silently
+# named directories that were not there any more -- the compiler then failed to
+# launch and the run read as a FEX fault. Newest installed of each instead.
+#
+# The Wine one is also the variable this script exists to change: the code cache
+# built in 4897 ms under Wine 11.14 and has never produced a file since the move
+# to Proton 11.0, so the question is which Wine, not which FEX. Name the other
+# arm with VESSEL_WINE_DIR and the two runs are the same script twice.
+newest_component() {
+  ls -1 "files/components/$1" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1
+}
+FEX_DIR=files/components/FEXCore/$(newest_component FEXCore)
+WINE_DIR=${VESSEL_WINE_DIR:-files/components/Wine/$(newest_component Wine)}
+# -f and not -x: a PE is data to the kernel here, and the installer ships it
+# 0600. Only the unix `wine` loader carries an exec bit.
+[ -f "$FEX_DIR/FEXOfflineCompiler64.exe" ] || {
+  echo "no FEXOfflineCompiler64.exe under $FEX_DIR" >&2; exit 1; }
+[ -x "$WINE_DIR/bin/wine" ] || { echo "no wine under $WINE_DIR" >&2; exit 1; }
+echo "fex: $FEX_DIR"
+echo "wine: $WINE_DIR"
 BASE=files/containers/$CONTAINER
 PREFIX=$BASE/prefix
 # Whichever cache key actually has codemaps waiting, falling back to a scratch
