@@ -476,3 +476,43 @@ private val MESA_PREFIX =
 private val DXVK_CHANNELS = setOf("dxvk", "d3d8", "d3d9", "d3d10", "d3d11", "dxgi")
 private val VKD3D_CHANNELS = setOf("d3d12", "vkd3d")
 private val DRIVER_CHANNELS = setOf("vulkan", "winevulkan", "turnip")
+
+/**
+ * Whether a line is a complaint that there is no display, from a phase that
+ * deliberately has none.
+ *
+ * **Not general log-tidying, and deliberately not applied to a whole session.**
+ * Building a prefix runs `wineboot`, `regedit`, `services.exe`, `rundll32` and
+ * `explorer` before any X server is listening, and it does so on purpose:
+ * [BOOTSTRAP_SESSION_ENV] withholds `DISPLAY` from those processes because
+ * handing them the session environment was measured to stop `wineboot --init`
+ * dead, two minutes in, with `drive_c` still empty. So `winex11.drv` fails
+ * `process_attach`, win32u falls back to the null driver, and each of these
+ * lines is emitted at error level — around ninety of them per provisioning
+ * pass, describing a condition Vessel created on purpose and nobody can act on.
+ *
+ * The caller gates this on the display server actually being up, so the moment
+ * one is listening the same text is an error again. That is the part that keeps
+ * it honest: a driver that fails *during a session* still shouts, because then
+ * the complaint is true.
+ *
+ * Matched on the diagnostic's own words rather than on the channel, because
+ * `system:`, `winediag:` and `ole:` all contribute to the same cluster.
+ */
+fun isDisplayAbsenceDiagnostic(text: String): Boolean =
+    DISPLAY_ABSENCE_MARKERS.any { it in text }
+
+/**
+ * The exact messages the null driver and its callers emit with no display.
+ *
+ * `win32u`'s `nodrv_CreateWindow` writes the first two, `lock_display_devices`
+ * the third, and `ole32` the fourth when it cannot make the apartment window
+ * every COM apartment needs. Substrings rather than whole lines: each arrives
+ * with a process tag and, in the `ole` case, a trailing error number.
+ */
+private val DISPLAY_ABSENCE_MARKERS = listOf(
+    "no driver could be loaded",
+    "The explorer process failed to start.",
+    "lock_display_devices Failed to read display config",
+    "apartment_createwindowifneeded CreateWindow failed",
+)

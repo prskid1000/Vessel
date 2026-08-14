@@ -34,6 +34,7 @@ import app.vessel.core.WINE_UNIX_ARCH
 import app.vessel.core.WineTree
 import app.vessel.core.desktopArgv
 import app.vessel.core.diagnoseSessionLine
+import app.vessel.core.isDisplayAbsenceDiagnostic
 import app.vessel.core.programArgv
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamValue
@@ -232,6 +233,16 @@ class SessionRuntime @Inject constructor(
      */
     @Volatile
     private var provisioning: String? = null
+
+    /**
+     * Whether an X server is listening yet.
+     *
+     * Read by [record] and nothing else. Prefix creation deliberately runs with
+     * no display — see `BOOTSTRAP_SESSION_ENV` — so the null driver's complaints
+     * are expected until this turns true, and errors again afterwards.
+     */
+    @Volatile
+    private var displayReady: Boolean = false
 
     @Volatile
     private var wineserver: Process? = null
@@ -909,6 +920,9 @@ class SessionRuntime @Inject constructor(
         when (val outcome = display.start(request)) {
             is DisplayOutcome.Started -> {
                 displayEnvironment = outcome.environment
+                // Only on Started. NotAvailable means the session genuinely has
+                // no display, and a complaint about that is worth hearing.
+                displayReady = true
                 log.line(
                     LogSource.VESSEL,
                     LogLevel.INFO,
@@ -1505,6 +1519,11 @@ class SessionRuntime @Inject constructor(
      * never meet again.
      */
     private suspend fun teardown(log: SessionLog) {
+        // The next session starts with no display of its own, and this object
+        // outlives one session. Left true, the session after this would treat a
+        // genuine driver failure during its own prefix work as routine.
+        displayReady = false
+
         val current = plan
         // **Say why the session is ending, in the session's own log.**
         //
@@ -1867,11 +1886,34 @@ class SessionRuntime @Inject constructor(
         // learned from the guest's own module-load lines.
         val owner = units.label(parsed.unit, parsed.text)
         val text = if (owner == null) parsed.text else "[$owner] ${parsed.text}"
-        log.line(parsed.source, parsed.level, text)
+
+        // **Before the display server answers, "there is no display" is not an
+        // error.** Prefix creation runs wineboot, regedit, services.exe,
+        // rundll32 and explorer with no X server on purpose, so winex11.drv
+        // fails process_attach and the null driver complains — about ninety
+        // error-level lines per provisioning pass, all describing a state
+        // Vessel arranged and nobody can act on. They crowded out the lines that
+        // explain real failures, which is the whole cost.
+        //
+        // Gated on the server being up rather than on a provisioning flag: the
+        // one that exists is set once and never cleared, so it would silence
+        // these for the entire session. This way the same text is an error again
+        // the moment a display exists, which is when the complaint becomes true.
+        val level = if (
+            !displayReady &&
+            parsed.level == LogLevel.ERROR &&
+            isDisplayAbsenceDiagnostic(parsed.text)
+        ) {
+            LogLevel.INFO
+        } else {
+            parsed.level
+        }
+
+        log.line(parsed.source, level, text)
         if (parsed.text.isBlank()) return
 
         val diagnosis = diagnoseSessionLine(raw)
-        val error = if (parsed.level == LogLevel.ERROR) parsed.text else null
+        val error = if (level == LogLevel.ERROR) parsed.text else null
 
         // Only the checklist states draw the running line, and a state update per
         // line at full rate is a recomposition per line. A diagnosis or an error

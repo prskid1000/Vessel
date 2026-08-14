@@ -2,6 +2,7 @@ package app.vessel.core
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -120,6 +121,47 @@ class SessionLogParserTest {
     fun `trailing newlines are stripped before anything else`() {
         assertEquals("heap:blocked", parseSessionLogLine("warn:heap:blocked\r\n").text)
     }
+
+    // — the display-absence cluster ------------------------------------------
+
+    @Test
+    fun `the four no-display diagnostics are recognised`() {
+        // Verbatim from a provisioning pass on the device. All four are ERR in
+        // Wine and all four describe a state prefix creation is meant to be in.
+        assertTrue(
+            isDisplayAbsenceDiagnostic(
+                "winediag:nodrv_CreateWindow Application tried to create a window, " +
+                    "but no driver could be loaded.",
+            ),
+        )
+        assertTrue(
+            isDisplayAbsenceDiagnostic(
+                "winediag:nodrv_CreateWindow L\"The explorer process failed to start.\"",
+            ),
+        )
+        assertTrue(
+            isDisplayAbsenceDiagnostic("system:lock_display_devices Failed to read display config."),
+        )
+        assertTrue(
+            isDisplayAbsenceDiagnostic(
+                "ole:apartment_createwindowifneeded CreateWindow failed with error 1400",
+            ),
+        )
+    }
+
+    @Test
+    fun `a real graphics failure is not mistaken for the absence of a display`() {
+        // The point of the list being four exact phrases rather than a keyword
+        // like "display" or "window": these all mean something is wrong, and
+        // demoting any of them would hide a defect rather than a design choice.
+        assertFalse(isDisplayAbsenceDiagnostic("winediag:load_libvulkan_icd Vulkan: no ICD found"))
+        assertFalse(
+            isDisplayAbsenceDiagnostic("module:process_attach Initialization of L\"winex11.drv\" failed"),
+        )
+        assertFalse(isDisplayAbsenceDiagnostic("vkd3d-proton: Failed to create swapchain"))
+        assertFalse(isDisplayAbsenceDiagnostic("x11drv: Could not open display"))
+        assertFalse(isDisplayAbsenceDiagnostic(""))
+    }
 }
 
 class SessionLogCodecTest {
@@ -168,4 +210,5 @@ class SessionLogCodecTest {
         assertEquals("… 40122 lines elided …", elidedLogMarker(40_122))
         assertEquals("… logging rate-limited, 8412 lines dropped …", rateLimitedLogMarker(8_412))
     }
+
 }
