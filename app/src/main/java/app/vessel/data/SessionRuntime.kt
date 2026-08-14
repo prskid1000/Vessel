@@ -989,12 +989,34 @@ class SessionRuntime @Inject constructor(
         // killed" and the container looked like it would not start at all. A
         // best-effort cache is never worth a launch, so it now runs beside the
         // desktop and teardown collects it.
-        // **Off by default, because it has never once finished.** Measured on
-        // 2026-08-13 across four sessions: the catch-up starts at line 16 of the
-        // log, runs 210 s, 230 s and 326 s, and is cancelled by teardown every
-        // time. `caches/fex/*/cache/` is empty and `codemap/ready/` holds 69
-        // entries, so nothing accumulates between runs either — each session
-        // redoes the same work and loses it.
+        // **It has never once finished, and now we know why: we kill it.**
+        // Measured on 2026-08-13 across four sessions — the catch-up starts at
+        // line 16 of the log, runs 210 s, 230 s and 326 s, and is cancelled by
+        // teardown every time. `caches/fex/*/cache/` is empty and
+        // `codemap/ready/` holds 69 entries, so nothing accumulates between runs
+        // either: each session redoes the same work and loses it.
+        //
+        // Re-measured 2026-08-14 on a fresh install, and the mechanism is no
+        // longer a guess. The session log reads, in this order:
+        //
+        //     IV session ending: phase=RUNNING exit=none requested=true
+        //     IV exec … wineserver -k
+        //     WV the FEX code cache compiler exited with 1 after 84830 ms
+        //
+        // `wineserver -k` ends every process in the prefix and the compiler is
+        // one of them, so the exit code is ours and the elapsed time is just how
+        // long the session happened to last. It is not a compiler that fails:
+        // `FEXOfflineCompiler`'s `ProcessAll` has exactly one `return`, and it
+        // returns 0 (`Source/Tools/FEXOfflineCompiler/Main.cpp:842`). The only
+        // path in that program that yields 1 is the usage message, which cannot
+        // take 84 seconds to print.
+        //
+        // So the work is sound and the lifetime is wrong. Started at session
+        // start it can only ever be interrupted, because the session outlives it
+        // by definition — and every run leaves `codemap/new` populated for the
+        // next one to restart from scratch. What it needs is a lifetime that is
+        // not the session's: run to completion after the guest exits and before
+        // the prefix is torn down, or outside a session altogether.
         //
         // What it does cost is real. `cpu %` sat at a steady 12.9 of a
         // hundred for the whole of a Requiem session, and with eight cores that
@@ -1008,8 +1030,20 @@ class SessionRuntime @Inject constructor(
         // but it cannot be paid for by every session while never delivering. It
         // needs a moment when nothing else wants the CPU and teardown is not
         // about to kill it, and there is no such moment inside a session.
+        // That lifetime now exists, in [teardown]: the compile runs after the
+        // guest is gone and before `wineserver -k`, which is the only window in
+        // a session where the codemap is complete, nothing competes, and nothing
+        // is about to kill it. So this catch-up is off — leaving it on would put
+        // a second compiler beside that one, merging the same reference set from
+        // two processes, which is the hazard the old teardown comment named.
+        //
+        // Kept rather than deleted because the *other* half of its reasoning
+        // still holds: a session that is killed rather than stopped never
+        // reaches teardown, and its codemaps sit in `codemap/new` until
+        // something picks them up. If that turns out to be common, this is where
+        // it gets picked up, and it needs the CPU-affinity work first.
         if (CODE_CACHE_DURING_SESSION) {
-            codeCacheJob = scope.launch { generateCodeCache(running, log) }
+            codeCacheJob = scope.launch { generateCodeCache(running, log, CODE_CACHE_TIMEOUT_MS) }
         }
 
         // Opened before the first guest process and read for the whole session,
@@ -1548,6 +1582,41 @@ class SessionRuntime @Inject constructor(
         // lets the drain coroutines finish instead of blocking on a read.
         launched.forEach { it.takeIf(Process::isAlive)?.destroy() }
 
+        // **The code cache is compiled here, and here is the only place it fits.**
+        //
+        // Three conditions have to hold at once, and this is the single point in
+        // a session's life where they do: the guest is gone, so its codemaps are
+        // complete and nothing competes for the CPU; `wineserver` is still up,
+        // so a Windows program can still run; and nothing is about to kill it,
+        // because the kill is the next statement rather than an arbitrary later
+        // one.
+        //
+        // Every other placement has been tried and is recorded above. At session
+        // start it is always interrupted -- the session outlives it by
+        // definition, and `wineserver -k` takes it down with everything else,
+        // which is where the "exited with 1" came from. Below the kill it cannot
+        // start at all: exit 127 in 17 ms, a Wine client with no server.
+        //
+        // The catch-up job is stopped first. Two compilers merging the same
+        // reference code maps from two processes is the hazard, and with
+        // CODE_CACHE_DURING_SESSION off there is normally nothing to stop.
+        //
+        // **Bounded by a teardown budget, not by CODE_CACHE_TIMEOUT_MS.** That
+        // one is fifteen minutes, which is fine for a job nobody waits on and
+        // absurd for one between the user pressing stop and the container list
+        // reappearing. The short budget is affordable because the work is
+        // resumable in a way the old arrangement never made use of:
+        // `ProcessAll` aggregates `codemap/new` into `codemap/ready` first, then
+        // spawns one child per binary (`Main.cpp:834`) and each child writes its
+        // own cache file before the next starts. A run cut short keeps every
+        // binary it completed; the next session starts from there. So the cache
+        // fills over several sessions instead of never.
+        codeCacheJob?.cancelAndJoin()
+        codeCacheJob = null
+        if (current != null && wineserver != null) {
+            generateCodeCache(current, log, CODE_CACHE_TEARDOWN_BUDGET_MS)
+        }
+
         if (current != null && wineserver != null) {
             val spec = ProcessSpec(
                 argv = current.tree.serverArgv(listOf("-k")),
@@ -1578,32 +1647,18 @@ class SessionRuntime @Inject constructor(
         guestOutput?.close()
         guestOutput = null
 
-        // The start-of-session catch-up may still be going; it is compiling the
-        // *previous* run's codemaps and a call here would want this run's, so
-        // two at once would have the compiler merging the same reference set
-        // from two processes. Cancelled rather than joined: the session is
-        // already over, the user is waiting, and whatever the catch-up does not
-        // finish is still in `codemap/new` for the next start.
-        codeCacheJob?.cancelAndJoin()
-        codeCacheJob = null
-
-        // **And nothing is compiled here.** This used to call generateCodeCache
-        // once more, on the theory that teardown is the quiet moment. It cannot
-        // work from this point: the compiler is a Windows program, every path
-        // above has already run `wineserver -k`, and a Wine client with no
-        // server to talk to exits immediately. The session log said so on every
-        // run that reached it —
+        // **Nothing is compiled from here down, and that is not a preference.**
+        // The compiler is a Windows program and `wineserver -k` has run, so a
+        // client started now has no server to talk to and exits immediately. The
+        // session log said exactly that on every run that reached this point —
         //
         //     IV exec .../bin/wineserver -k
         //     IV building the FEX code cache from 1 new codemap(s)
         //     WV the FEX code cache compiler exited with 127 after 17 ms
         //
         // — 127 being "could not start it at all", 17 ms being how long that
-        // takes to discover. Moving the call above the kill would fix the exit
-        // code and buy a teardown that blocks for as long as the compile takes,
-        // which is the reason it was made a background job in the first place.
-        // So the catch-up at session start is now the only place it happens,
-        // and `codemap/new` carries the work forward until then.
+        // takes to discover. The call is above the kill for that reason, and the
+        // teardown budget is what keeps it from being a wait nobody agreed to.
 
         runCatching { display.stop() }
         releaseWakeLock()
@@ -1667,7 +1722,7 @@ class SessionRuntime @Inject constructor(
      * resolves siblings from `GetModuleFileNameA`, which lands back in the same
      * directory.
      */
-    private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog) {
+    private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog, budgetMs: Long) {
         val compiler = current.offlineCompiler ?: return
         // The host directory, not `FEX_APP_CACHE_LOCATION` — that is now the DOS
         // path the guest sees (`C:\vessel\fexcache\`) and reading it back as a
@@ -1710,7 +1765,7 @@ class SessionRuntime @Inject constructor(
             workingDirectory = current.layout.base,
         )
         val outcome = runCatching {
-            withTimeoutOrNull(CODE_CACHE_TIMEOUT_MS) {
+            withTimeoutOrNull(budgetMs) {
                 runner.run(spec) { line -> record(log, line) }
             }
         }
@@ -1725,7 +1780,8 @@ class SessionRuntime @Inject constructor(
             result == null -> log.line(
                 LogSource.VESSEL,
                 LogLevel.WARN,
-                "the FEX code cache did not finish in ${CODE_CACHE_TIMEOUT_MS / 1000} s and was killed",
+                "the FEX code cache did not finish in ${budgetMs / 1000} s and was killed;" +
+                    " the binaries it did finish are kept and the rest resumes next time",
             )
             result is ProcessResult.NotStarted -> log.line(
                 LogSource.VESSEL,
@@ -2553,7 +2609,27 @@ class SessionRuntime @Inject constructor(
          * whether a killed session loses everything: it does not, because
          * `ready/` is per-module and already written.
          */
-        const val CODE_CACHE_DURING_SESSION: Boolean = true
+        /**
+         * The start-of-session catch-up compile. Off: the compile now happens in
+         * [teardown], where it cannot be interrupted by the session that started
+         * it. See the comment at the call site for why this is kept rather than
+         * deleted.
+         */
+        const val CODE_CACHE_DURING_SESSION: Boolean = false
+
+        /**
+         * How long [teardown] will wait for the code cache before killing it.
+         *
+         * Not [CODE_CACHE_TIMEOUT_MS], which is fifteen minutes and belongs to a
+         * job nobody is waiting on. This one sits between the user pressing stop
+         * and the container list coming back, so it is chosen as the longest
+         * pause that still reads as "putting things away" rather than "stuck".
+         *
+         * Affordable because the work resumes: `ProcessAll` writes one cache
+         * file per binary and a run cut short keeps every binary it finished, so
+         * successive sessions fill the cache rather than restarting it.
+         */
+        const val CODE_CACHE_TEARDOWN_BUDGET_MS = 45_000L
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
 
