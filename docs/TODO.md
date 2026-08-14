@@ -44,6 +44,25 @@ What is not true yet: the game does not get past that menu. Three faults sit in
 the way and are the whole of the next section. Behind them, six patches are
 written and have never been through a compiler.
 
+**Later the same day the menu stopped happening, and it is not the six patches.**
+They were compiled and shipped as Wine revision 10, every session since has
+failed, and the obvious reading — that one of the six did it — was tested and is
+wrong. Revision 8, the exact payload the menu was seen on, was rebuilt from
+`11bdc37`, installed over a wiped app, and pointed at the same game: it stalls
+*earlier* than revision 10 did, at `virtual_setup_exception stack overflow 1776
+bytes` immediately after the Denuvo `.v38` blobs, with no D3D12 device at all.
+Revision 10 at least reached a 1920x1080 swapchain, three images, a thousand
+PSOs and Wwise before showing nothing.
+
+So the ranking below is now wrong in one place and it matters: **#50 is the live
+blocker, not #51.** Nothing has reached the menu since, which means #51 cannot be
+worked on, and the fault that stops the run first is the stack overflow.
+
+The one variable that did change alongside it, and has not been separated:
+**the recreated container came back without `VESSEL_TRACE=loader,x86:errors`**
+while every other parameter was preserved. A comparison run is not honest until
+that is put back.
+
 ---
 
 ## The blockers, in order
