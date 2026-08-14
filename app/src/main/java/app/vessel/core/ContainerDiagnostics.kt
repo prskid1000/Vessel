@@ -658,15 +658,18 @@ val LOGGABLES: List<Loggable> = listOf(
         secondary = "What the program itself chose to print.",
         fixed = WineChannelLevel.EVERYTHING,
     ),
-    Loggable(
-        name = "DXVK_LOG_PATH",
-        emit = Emit.Fixed,
-        levels = listOf(FIXED_DXVK_LOG_PATH),
-        baseline = FIXED_DXVK_LOG_PATH,
-        fixedLevel = FIXED_DXVK_LOG_PATH,
-        secondary = "Keeps the Direct3D translator's output in this log instead of beside it.",
-        levelIsMachine = true,
-    ),
+    // **`DXVK_LOG_PATH=none` is still sent and is deliberately not a row.**
+    // `SessionEnvironment.kt:1158` sets it unconditionally from
+    // [FIXED_DXVK_LOG_PATH]; this list only decides what the screen shows, so
+    // removing the entry hides the row and changes no environment.
+    //
+    // Off the screen because it is not a thing anyone logs. It keeps the D3D
+    // translator's output in this log rather than writing `<exe>_dxgi.log` and
+    // `<exe>_d3d11.log` into the game's own folder, which is a decision about
+    // where a file goes, not a level anyone would raise or lower. A read-only
+    // row that can only ever read `none` spends a line of a small screen saying
+    // nothing the reader can act on, and every such line makes the rows that
+    // *are* actionable harder to find.
     Loggable(
         name = "FEX_OUTPUTLOG",
         emit = Emit.Fixed,
@@ -676,6 +679,11 @@ val LOGGABLES: List<Loggable> = listOf(
         // Source/Windows/Common/Logging.cpp:36-49 is the whole Windows logging
         // init and reads SILENTLOG and nothing else. Shown rather than hidden so
         // nobody re-adds it as a control.
+        //
+        // Re-checked 2026-08-14 against the patched tree and still true:
+        // `OutputLog` appears there only inside a comment, and `patches/fex/0007`
+        // changed where `Init()` reads `SilentLog` from without making
+        // `OutputLog` mean anything.
         secondary = "Set as a marker; it does nothing on this platform.",
         levelIsMachine = true,
     ),

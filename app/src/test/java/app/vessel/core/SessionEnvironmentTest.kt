@@ -414,8 +414,19 @@ class SessionEnvironmentTest {
         val environment = env()
         assertEquals("1", environment["FEX_TSOENABLED"])
         assertEquals("0", environment["FEX_HALFBARRIERTSOENABLED"])
-        assertEquals("0", environment["FEX_VECTORTSOENABLED"])
+        // The rest of the ordering surface follows STRICT_MEMORY_ORDERING, which
+        // is an experiment with a stated cost rather than a default. Asserting
+        // against the constant keeps this test honest on both sides of it while
+        // still failing if the wiring is dropped altogether.
+        assertEquals(strictOrRelaxed, environment["FEX_VECTORTSOENABLED"])
+        if (STRICT_MEMORY_ORDERING) {
+            assertEquals("1", environment["FEX_MEMCPYSETTSOENABLED"])
+            assertEquals("0", environment["FEX_VOLATILEMETADATA"])
+        }
     }
+
+    /** `"1"` while the strict-ordering experiment is on, `"0"` when it is not. */
+    private val strictOrRelaxed: String get() = if (STRICT_MEMORY_ORDERING) "1" else "0"
 
     @Test
     fun `a container cannot change the memory ordering flags`() {
@@ -425,7 +436,7 @@ class SessionEnvironmentTest {
         // honouring that would silently reintroduce a setting whose only effect
         // is to make the container much slower.
         val environment = env(params = mapOf("fex.VectorTSOEnabled" to ParamValue.Flag(true)))
-        assertEquals("0", environment["FEX_VECTORTSOENABLED"])
+        assertEquals(strictOrRelaxed, environment["FEX_VECTORTSOENABLED"])
         assertEquals("1", environment["FEX_TSOENABLED"])
     }
 
@@ -622,7 +633,7 @@ class SessionEnvironmentTest {
         // The FEX flags survive a missing manifest because they no longer come
         // from it — they are fixed in sessionEnvironment beside WINEESYNC.
         assertEquals("1", environment["FEX_TSOENABLED"])
-        assertEquals("0", environment["FEX_VECTORTSOENABLED"])
+        assertEquals(strictOrRelaxed, environment["FEX_VECTORTSOENABLED"])
     }
 
     // — TU_DEBUG composition --------------------------------------------------

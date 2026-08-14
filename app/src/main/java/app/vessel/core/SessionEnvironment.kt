@@ -99,6 +99,32 @@ const val WGL_DLL: String = "opengl32"
 const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
 
 /**
+ * Whether every memory-ordering knob FEX has is closed, not just the scalar one.
+ *
+ * **An experiment with a stated cost, not a setting.** See where it is read for
+ * what it turns on and why; the short version is that vector stores, memcpy and
+ * ARM64EC volatile metadata are all at FEX's relaxed default, so a value
+ * published by a 128-bit store need not be visible to another thread in program
+ * order — and a lost publication is indistinguishable from a deadlock when
+ * every thread is asleep, which is what Requiem does.
+ *
+ * Turn it off again once the run has answered. Leaving it on because a session
+ * looked fine would ship upstream's "HUGE" vector-TSO cost on the strength of
+ * one observation, which is the kind of trade this file records rather than
+ * makes by accident.
+ *
+ * **Run, and it answered no. 2026-08-14.** All three closed, verified present in
+ * the guest's own `/proc/<pid>/environ` rather than assumed, and Resident Evil
+ * Requiem stalled in exactly the same place: the same Streamline critical
+ * section `388A7E28`, the same acquire site `0x6FFFF246B0`, only the thread ids
+ * rotated. So the deadlock is not a lost publication, and this is off because it
+ * buys nothing here and costs frames. It is kept rather than deleted because
+ * "ordering was eliminated" is only worth anything if the next person can
+ * re-run the thing that eliminated it.
+ */
+const val STRICT_MEMORY_ORDERING: Boolean = false
+
+/**
  * The only variables `wineboot` and `regedit` are given while a prefix is being
  * built.
  *
@@ -160,6 +186,8 @@ val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     "FEX_TSOENABLED",
     "FEX_HALFBARRIERTSOENABLED",
     "FEX_VECTORTSOENABLED",
+    "FEX_MEMCPYSETTSOENABLED",
+    "FEX_VOLATILEMETADATA",
 )
 
 /**
@@ -391,6 +419,8 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "FEX_TSOENABLED",
     "FEX_HALFBARRIERTSOENABLED",
     "FEX_VECTORTSOENABLED",
+    "FEX_MEMCPYSETTSOENABLED",
+    "FEX_VOLATILEMETADATA",
     // The JIT lookup caches. Reserved for a different reason from the three
     // above: those are defaults kept visible, these are a deliberate
     // speed-for-memory trade, and a container that flipped one back would get
@@ -887,6 +917,13 @@ fun sessionEnvironment(
     // comment that used to sit above these two lines explained the log routing
     // in terms of `OUTPUTLOG` being `"server"` — the right conclusion reached
     // through a mechanism that does not exist on this platform.
+    //
+    // **Do not turn `FEX_OUTPUTLOG` into a control.** It is sent because it is
+    // the right value if FEX ever consults it, and for no other reason: nothing
+    // on this platform reads it, so a setting built on it would be a switch
+    // wired to nothing — which is worse than no switch, because it looks like it
+    // was tried. The Diagnostics screen keeps a read-only row saying the same
+    // thing; this says it where the control would actually be added.
     environment["FEX_SILENTLOG"] = FIXED_FEX_SILENTLOG
     environment["FEX_OUTPUTLOG"] = FIXED_FEX_OUTPUTLOG
 
@@ -924,7 +961,40 @@ fun sessionEnvironment(
      * comparison it makes is the one that can move.
      */
     environment["FEX_HALFBARRIERTSOENABLED"] = "0"
-    environment["FEX_VECTORTSOENABLED"] = "0"
+
+    /*
+     * **The rest of the ordering surface, and it is an experiment rather than a
+     * default.** `TSOENABLED=1` above makes scalar accesses ordered and
+     * `HALFBARRIERTSOENABLED` only chooses how; three knobs decide whether
+     * anything else is, and all three are at FEX's relaxed setting:
+     *
+     *   VectorTSOEnabled      false  vector load/stores are not made atomic
+     *   MemcpySetTSOEnabled   false  memcpy/memset are not made atomic
+     *   VolatileMetadata      true   ARM64EC PE metadata may relax individual
+     *                                instructions below the settings above
+     *
+     * So a value published by a 128-bit store, or by a memcpy, is not
+     * guaranteed visible to another thread in program order. That is the only
+     * unenforced ordering left in the session, and it produces exactly the
+     * failure being chased on 2026-08-14: every thread asleep, one holding a
+     * critical section it never releases, no CPU burning anywhere. A lost
+     * publication and a lock nobody wakes from look identical from outside.
+     *
+     * [STRICT_MEMORY_ORDERING] closes all three so that one run can say whether
+     * ordering is the cause. **It is not free** — upstream calls accurate vector
+     * TSO a "HUGE" performance cost, which is why FEX ships it off — so this
+     * does not become the default on the strength of one green run. If the
+     * stall survives it, ordering is eliminated and this goes back to `false`;
+     * if it clears, the next question is which of the three did it, one at a
+     * time, and what the frame cost of keeping that one is.
+     */
+    if (STRICT_MEMORY_ORDERING) {
+        environment["FEX_VECTORTSOENABLED"] = "1"
+        environment["FEX_MEMCPYSETTSOENABLED"] = "1"
+        environment["FEX_VOLATILEMETADATA"] = "0"
+    } else {
+        environment["FEX_VECTORTSOENABLED"] = "0"
+    }
 
     // **FEX's two JIT lookup caches, both turned back on.** Unlike the three
     // above these are *not* the defaults — they are the first FEX settings
