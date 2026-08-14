@@ -1,0 +1,41 @@
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index b0c700d43c4..9254634b4e4 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -3049,12 +3049,32 @@ static BOOL add_virtual_source( struct device_manager_ctx *ctx )
+     source->refcount = 1;
+     source->state_flags = DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_VGA_COMPATIBLE;
+ 
+-    if (ctx->has_primary && physical) physical->id = ctx->source_count;
+-    else
++    /* Vessel: in virtual-desktop mode the virtual source is the primary one.
++     *
++     * Upstream leaves the primary flag wherever the display driver put it and
++     * only promotes the virtual source when the driver named no primary at all.
++     * winex11 always names one, so the result was a desktop whose DISPLAY1 is
++     * the virtual source while the PRIMARY device is the physical screen behind
++     * it -- two different displays, and a program that asks for the primary
++     * monitor gets the one it is not drawing into. Sizes, DPI and fullscreen
++     * placement all follow the primary, so the mismatch is not cosmetic.
++     *
++     * That split cannot be right here. The guest only ever draws into the
++     * virtual desktop; the host screen behind it is an implementation detail of
++     * how the app composites, and Vessel always runs a virtual desktop. So the
++     * virtual source takes the primary flag and the physical one gives it up.
++     *
++     * The renumbering upstream does is kept: the physical source still moves to
++     * the end, which leaves the virtual source as DISPLAY1. This only moves the
++     * flag so that DISPLAY1 and the primary device are the same display again.
++     */
++    if (physical)
+     {
+-        source->state_flags |= DISPLAY_DEVICE_PRIMARY_DEVICE;
+-        ctx->has_primary = TRUE;
++        physical->state_flags &= ~DISPLAY_DEVICE_PRIMARY_DEVICE;
++        if (ctx->has_primary) physical->id = ctx->source_count;
+     }
++    source->state_flags |= DISPLAY_DEVICE_PRIMARY_DEVICE;
++    ctx->has_primary = TRUE;
+     source->gpu = gpu_acquire( gpu );
+ 
+     /* Wine specific config key where source settings will be held, symlinked with the logically indexed config key */

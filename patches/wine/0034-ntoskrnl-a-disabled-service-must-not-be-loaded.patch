@@ -2,7 +2,7 @@ diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
 index b3f45751b99..698f63362c0 100644
 --- a/dlls/ntoskrnl.exe/ntoskrnl.c
 +++ b/dlls/ntoskrnl.exe/ntoskrnl.c
-@@ -3826,6 +3826,32 @@ static NTSTATUS open_driver( const UNICODE_STRING *service_name, SC_HANDLE *serv
+@@ -3826,6 +3826,31 @@ static NTSTATUS open_driver( const UNICODE_STRING *service_name, SC_HANDLE *serv
          goto error;
      }
  
@@ -27,8 +27,7 @@ index b3f45751b99..698f63362c0 100644
 +     * being left alone is the system working. */
 +    if (service_config->dwStartType == SERVICE_DISABLED)
 +    {
-+        TRACE( "service %s is disabled
-+", debugstr_us(service_name) );
++        TRACE( "service %s is disabled\n", debugstr_us(service_name) );
 +        goto error;
 +    }
 +
