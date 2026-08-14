@@ -383,8 +383,50 @@ obvious follow-up if a save/restore idiom turns out to care.
 
 **Not compiled.** Verified with `git apply --check` against the pinned tree.
 
+**Watched on the device 2026-08-14.** The five lines went to zero and stayed
+there. It did **not** fix the crash it was found next to — Requiem died shortly
+afterwards at `LoadLibraryExW +0x6` — which is what `0010` addresses, and which
+only became reachable because this patch stopped those blocks failing to decode.
+
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
+
+## `0010-opcodedispatcher-push-and-pop-of-a-segment-must-not-touch-the-base`
+
+`push`/`pop` of a segment register touched the segment **base** in 64-bit mode,
+and on Windows that base is the TEB pointer.
+
+`POPSegmentOp` (`OpcodeDispatcher.cpp:463-495`) stored the selector correctly and
+then called `UpdatePrefixFromSegment` **unguarded**. That helper walks the GDT for
+the selector and stores the descriptor's **32-bit** base into `<seg>_cached`
+(`:4262-4282`) — and `gs_cached` is a `uint64_t` holding the TEB
+(`Source/Windows/ARM64EC/Module.cpp`: `State.gs_cached = TEB`). So one `pop gs`
+in a 64-bit guest overwrote the low half of the TEB pointer with a base derived
+from a table that has no meaning in 64-bit mode, where the base comes from the
+FS/GS MSRs. Every `gs:[…]` access afterwards read from a corrupted base.
+
+`PUSHSegmentOp` (`:373-428`) was the mirror image: its 64-bit arm loaded
+`<seg>_cached`, the base, where the hardware pushes a 16-bit selector. Together
+the ordinary save/restore idiom was destructive rather than merely wrong — it
+pushed half a TEB pointer and then fed it back through a GDT walk.
+
+**`MOVSegOp` already guards the same call**, which is what makes the omission
+visible once the three are read together. Upstream's own FEX-2302 notes say of
+segment push/pop that *"no one really uses that feature on 64-bit CPUs today"* —
+anti-tamper code does, and Requiem only reaches these instructions because `0009`
+stopped the blocks containing them failing to decode.
+
+The fix guards `UpdatePrefixFromSegment` on `!Is64BitMode` and loads `<seg>_idx`
+on both arms of the push. The selector store stays in both modes: that part is
+what the instruction actually does.
+
+**Watched on the device 2026-08-14.** The `LoadLibraryExW +0x6` fault it was
+written for did not recur, and Requiem now reaches Vulkan, a swapchain and PSO
+compilation on every run.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.
+
 ## WITHDRAWN — `invalidationtracker-a-reservation-is-not-code-and-a-failed-reprotect-is-not-a-repair`
 
 *Shipped as `0010`, then reverted and removed from the tree. The number `0010`
@@ -749,6 +791,26 @@ permanent tax and leaves the classification wrong, which is the actual defect.
 **Falsifiable on the next run:** winmm.dll compiles, `Successfully populated
 cache .../winmm.dll-...` appears, and `RWX reprotect FAILED` stays at zero for
 the whole session.
+
+**Watched on the device 2026-08-14, and it passed on its own terms.** A real
+session compiled **25 of 25** modules in 5,070 ms — `winmm.dll` among them — with
+`RWX reprotect FAILED` at **zero**, `declining` at **zero**, and `Overcommit:` at
+zero. The middle number is the one worth keeping: the exclusion did the work and
+the failed-reprotect decline never fired, so the half that carried regression
+risk was not exercised at all.
+
+**Directly observed, not inferred.** With `VESSEL_TRACE=x86:everything` the
+compiler's registered SMC intervals are 128 MB (the JIT code buffer, legitimately
+RWX) and two of 16 KB and 4 KB. **The 272 MB `LookupCache` reservation is absent
+from the list**, which is this patch working, seen from the guest's own logging
+rather than deduced from an absence of failures.
+
+**One caveat, recorded because it is easy to miss.** `SessionRuntime` also sets
+`FEX_DISABLEDEP=0` for the compiler process, which independently stops DEP
+promotion ever asking. Each was measured alone before both were kept — this patch
+with DEP promotion on (16 modules, zero failures), and the environment variable on
+FEX 260813 without this patch (21 modules, zero failures). They are belt and
+braces, not one fix counted twice.
 
 **Not compiled.** Verified with `git apply --check` against the pinned tree.
 

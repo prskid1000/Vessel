@@ -196,7 +196,24 @@ avoid.
   (10,493 symbols) rather than its exports, which is the difference between that
   answer and `tan +0x1a69c`.
 
-  *Done when:* the timeout ERR names a module and an offset, and that offset
+  **Both holders were named on 2026-08-14, and both are the game's own code.**
+  `0030`'s rewrite prints `called from`, and the two deadlocks Requiem alternates
+  between resolve to:
+
+  | Section | Holder took it at | Called from |
+  |---|---|---|
+  | `388A7E28` (unnamed; both threads are Streamline's) | `ntdll +0xe4d10` | **`re9.exe +0x11c18fc`** |
+  | `004500D0` (main process heap) | `RtlAllocateHeap +0x6bc` | **`re9.exe +0x2533e6`** |
+
+  So this entry's *done when* is satisfied. What replaces it: the heap holder is
+  **asleep inside `RtlAllocateHeap` while holding the heap lock**, and an
+  allocation that blocks means the heap is growing — `NtAllocateVirtualMemory`,
+  which on ARM64EC notifies the emulator, where FEX takes its own locks.
+  `patches/fex/0004` exists because *"an ARM64EC notification hook must not block
+  on the way in"*; this looks like a second instance of that shape, and it is now
+  the only thing between Requiem and its menu.
+
+  *Originally done when:* the timeout ERR names a module and an offset, and that offset
   resolves to a function.
 
 - [ ] **#42 — the PSO compatibility hash mismatch is a real defect, not
@@ -260,23 +277,47 @@ others, and they landed on the morning the menu stopped. See the entry below.
   each of the two display patches has been run with and without, on a prefix that
   has been through at least one prior session.
 
-- [ ] **Loading a FEX code cache crashes the emulator before the guest starts.**
-  Generation works now (see below); loading does not. A launch of Requiem with a
-  cache present dies at `libarm64ecfex.dll +0x9bb04` with only `re9.exe` and
-  `libarm64ecfex` loaded. Proven by moving the key's `cache/` aside and changing
-  nothing else: the same title then loaded 67 modules instead of 2, went past the
-  Denuvo blobs and into Vulkan. **Metro is the counter-example that narrows it** —
-  it ran normally with its own `metro.exe` cached, so this is not "loading is
-  broken", it is something about *that* image. The candidate is that Requiem
-  decrypts its own code at runtime, so a cache built from the decrypted bytes
-  describes code that is not there on the next run. If so the fix is a validity
-  check, not a repair. *Done when:* a title with a cache present starts, twice.
+- [x] **The FEX code cache works, end to end, and every stage was watched rather
+  than assumed.** Broken since 11 August; verified 2026-08-14 on the device.
 
-- [ ] **`CODE_CACHE_DURING_SESSION` is a live hazard while the above is open.**
-  It is `true`, generation works, so every session now writes a cache that can
-  kill the next launch of that title — and it will look like a random regression
-  to whoever hits it, including us. Either gate loading off or set the constant
-  false until the entry above is closed.
+  | Stage | Evidence |
+  |---|---|
+  | guest writes a codemap | `new/` fills while the title runs |
+  | compiler imports and compiles | **25 of 25** modules in 5,070 ms, `RWX reprotect FAILED` **0** |
+  | cache validated on load | Requiem's malformed table **rejected** with one line, no crash |
+  | blocks loaded and used | **62,902 blocks across 31 modules**; new-block discovery fell 1,592 → 110 |
+
+  What fixed it was not a clever patch. `patches/fex/0002` turns DEP off for every
+  guest so anti-tamper stubs survive, and the documented cost is that FEX then
+  treats every readable page as executable — so the compiler's own 272 MB
+  uncommitted `LookupCache` reservation was classified as guest RWX code,
+  `HandleRWXAccessViolation` claimed the first-touch fault that `OvercommitTracker`
+  exists to receive, could not reprotect a page that was never committed, reported
+  it handled, and resumed it. `RWX reprotect FAILED C000002D … occurrence 5668864`.
+
+  Two independent fixes, each measured alone before both were kept:
+  `SessionRuntime` sets `FEX_DISABLEDEP=0` for the compiler process only, and
+  `patches/fex/0012` stops the reservation being classified at all. With
+  `x86:everything` the compiler's SMC intervals are 128 MB (the JIT code buffer)
+  and two tiny ones — the 272 MB reservation is **absent**, which is the fix seen
+  directly.
+
+  **It was found by running the failing case with one variable changed — 25
+  seconds, no build — after hours of comparing whole builds against each other.**
+  Three wrong conclusions and two wasted rebuilds came out of the second method
+  and none out of the first.
+
+- [ ] **Requiem's own cache is malformed at generation.** Loading is safe now, but
+  `re9.exe`'s cache is rejected every time: `Code cache relocation 1918100 of
+  6905637 targets 0x63b2038, outside a 0x63b2000 byte code buffer` — 56 bytes past
+  the end. The mechanism is written up under `0011` in `patches/fex/README.md`:
+  when generation exhausts the 128 MB code buffer, `ClearCodeCache` installs a
+  fresh one (`NewCodeBuffer` defaults to `true`) and `LatestOffset` restarts at
+  zero, while relocations recorded earlier keep offsets into the old buffer and
+  `SaveData` writes them against a size computed from the new one. Only a module
+  large enough to exhaust the buffer reaches it, which is why Metro's 62,902 blocks
+  load fine and Requiem's 419,897 do not. *Done when:* `re9.exe`'s cache loads
+  instead of being rejected.
 
 - [ ] **`is_ec_code`, the unix twin of `RtlIsEcCode`, is still unbounded.**
   `dlls/ntdll/unix/unix_private.h:477` has the identical shape and the identical
