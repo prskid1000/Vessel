@@ -1,0 +1,66 @@
+diff --git a/dlls/ntoskrnl.exe/pnp.c b/dlls/ntoskrnl.exe/pnp.c
+index 11a578a7545..c3b7ee858b0 100644
+--- a/dlls/ntoskrnl.exe/pnp.c
++++ b/dlls/ntoskrnl.exe/pnp.c
+@@ -207,6 +207,47 @@ static NTSTATUS get_device_caps( DEVICE_OBJECT *device, DEVICE_CAPABILITIES *cap
+     return irp_status.Status;
+ }
+ 
++/* Vessel: a service the registry says is disabled must not be loaded.
++ *
++ * load_function_driver reaches ZwLoadDriver straight from the device node's
++ * SPDRP_SERVICE and never consults the service's Start value, so marking a
++ * service SERVICE_DISABLED has no effect on this path. On Windows the PnP
++ * manager does honour Start here -- the SCM is not the only thing that reads it
++ * -- so this is a conformance fix rather than a local preference.
++ *
++ * It is not academic on this port. winebth.sys is registered by wine.inf and
++ * given a root device node, so every session logs
++ *   ntoskrnl:ZwLoadDriver failed to create driver ...\Services\winebth: c00000e5
++ * (STATUS_INTERNAL_ERROR) because winebth wants a host Bluetooth stack over
++ * DBus, and an Android app has neither a DBus session nor permission to reach
++ * the adapter. Writing Start=SERVICE_DISABLED was tried first and measured to
++ * change nothing, which is what led here.
++ *
++ * Failing open is deliberate: if the key or the value is missing the driver
++ * loads exactly as before, so a service that never declared a Start is
++ * unaffected.
++ */
++static BOOL service_is_disabled( const WCHAR *name )
++{
++    /* SERVICE_DISABLED from winsvc.h, spelled out rather than pulling that
++     * header into a driver-side file for one constant. */
++    static const DWORD service_disabled = 4;
++    WCHAR path[MAX_SERVICE_NAME + 64];
++    DWORD start = 0, size = sizeof(start), type = 0;
++    BOOL disabled = FALSE;
++    HKEY key;
++
++    lstrcpyW( path, L"System\\CurrentControlSet\\Services\\" );
++    lstrcatW( path, name );
++
++    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, path, 0, KEY_QUERY_VALUE, &key )) return FALSE;
++    if (!RegQueryValueExW( key, L"Start", NULL, &type, (BYTE *)&start, &size )
++        && type == REG_DWORD && start == service_disabled)
++        disabled = TRUE;
++    RegCloseKey( key );
++    return disabled;
++}
++
+ static void load_function_driver( DEVICE_OBJECT *device, HDEVINFO set, SP_DEVINFO_DATA *sp_device )
+ {
+     static const WCHAR driverW[] = {'\\','D','r','i','v','e','r','\\',0};
+@@ -223,6 +264,13 @@ static void load_function_driver( DEVICE_OBJECT *device, HDEVINFO set, SP_DEVINF
+         return;
+     }
+ 
++    if (service_is_disabled( driver ))
++    {
++        TRACE("Service %s is disabled, not loading it for device %p.\n",
++              debugstr_w(driver), device);
++        return;
++    }
++
+     lstrcpyW( buffer, servicesW );
+     lstrcatW( buffer, driver );
+     RtlInitUnicodeString( &string, buffer );

@@ -1,0 +1,88 @@
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index b430c0bb4fe..15f46d2796e 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -163,6 +163,50 @@ static const char *crit_section_get_name( const RTL_CRITICAL_SECTION *crit )
+     return "?";
+ }
+ 
++/* Vessel: where the current owner took the lock.
++ *
++ * RtlpWaitForCriticalSection names the owning *thread* on a timeout, which says
++ * who is holding a lock and nothing about why. Resolving the address below
++ * against the module bases loaddll already prints names the DLL and offset.
++ *
++ * A side table rather than the debug info, because there is no room in it:
++ * RTL_CRITICAL_SECTION_DEBUG.Spare is `DWORD_PTR Spare[8/sizeof(DWORD_PTR)]`
++ * under __WINESRC__ (winnt.h:6254), which is a single element on 64-bit, and
++ * Wine already keeps the section's name there. Spare[1] does not exist here and
++ * writing it would corrupt whatever follows the struct.
++ *
++ * Deliberately lossy and lock-free: a fixed table that can never fail or
++ * allocate, indexed by the section's own address. A collision or a torn read
++ * costs one wrong diagnostic line, which is the right trade for a counter that
++ * every lock acquisition in the process runs through. Nothing outside the ERR
++ * below reads it.
++ */
++#define CRIT_SITE_SLOTS 256
++
++static const RTL_CRITICAL_SECTION *crit_site_keys[CRIT_SITE_SLOTS];
++static void *crit_site_addrs[CRIT_SITE_SLOTS];
++
++static inline unsigned int crit_site_slot( const RTL_CRITICAL_SECTION *crit )
++{
++    /* >> 4 because sections are allocated on at least 16-byte boundaries and
++     * the low bits are therefore always zero. */
++    return (unsigned int)(((ULONG_PTR)crit >> 4) % CRIT_SITE_SLOTS);
++}
++
++static inline void crit_section_note_site( const RTL_CRITICAL_SECTION *crit, void *site )
++{
++    unsigned int slot = crit_site_slot( crit );
++    crit_site_keys[slot] = crit;
++    crit_site_addrs[slot] = site;
++}
++
++static inline void *crit_section_get_site( const RTL_CRITICAL_SECTION *crit )
++{
++    unsigned int slot = crit_site_slot( crit );
++    if (crit_site_keys[slot] != crit) return NULL;
++    return crit_site_addrs[slot];
++}
++
+ static inline HANDLE get_semaphore( RTL_CRITICAL_SECTION *crit )
+ {
+     if ((ULONG_PTR)crit->LockSemaphore > 1) return crit->LockSemaphore;
+@@ -318,8 +362,9 @@ NTSTATUS WINAPI RtlpWaitForCriticalSection( RTL_CRITICAL_SECTION *crit )
+ 
+         timeout = (TRACE_ON(relay) ? 300 : 60);
+ 
+-        ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx, retrying (%u sec)\n",
+-             crit, debugstr_a(crit_section_get_name(crit)), GetCurrentThreadId(), HandleToULong(crit->OwningThread), timeout );
++        ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx which took it at %p, retrying (%u sec)\n",
++             crit, debugstr_a(crit_section_get_name(crit)), GetCurrentThreadId(), HandleToULong(crit->OwningThread),
++             crit_section_get_site(crit), timeout );
+     }
+     if (crit_section_has_debuginfo( crit )) crit->DebugInfo->ContentionCount++;
+     return STATUS_SUCCESS;
+@@ -356,7 +401,11 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+     {
+         ULONG count;
+ 
+-        if (RtlTryEnterCriticalSection( crit )) return STATUS_SUCCESS;
++        if (RtlTryEnterCriticalSection( crit ))
++        {
++            crit_section_note_site( crit, __builtin_return_address(0) );
++            return STATUS_SUCCESS;
++        }
+         for (count = crit->SpinCount; count > 0; count--)
+         {
+             if (crit->LockCount > 0) break;  /* more than one waiter, don't bother spinning */
+@@ -384,6 +433,7 @@ NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
+ done:
+     crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+     crit->RecursionCount = 1;
++    crit_section_note_site( crit, __builtin_return_address(0) );
+     return STATUS_SUCCESS;
+ }
+ 
