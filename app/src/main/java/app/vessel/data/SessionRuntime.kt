@@ -21,7 +21,6 @@ import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
 import app.vessel.core.FEX_CACHE_DOS_DIR
-import app.vessel.core.FEX_CACHE_DOS_PATH
 import app.vessel.core.fexCacheHost
 import app.vessel.core.fexCacheLink
 import app.vessel.core.vkd3dCacheLink
@@ -48,10 +47,8 @@ import app.vessel.core.toolArgv
 import app.vessel.core.wineLauncherEnvironment
 import app.vessel.core.deleteTree
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -992,34 +989,12 @@ class SessionRuntime @Inject constructor(
         // killed" and the container looked like it would not start at all. A
         // best-effort cache is never worth a launch, so it now runs beside the
         // desktop and teardown collects it.
-        // **It has never once finished, and now we know why: we kill it.**
-        // Measured on 2026-08-13 across four sessions — the catch-up starts at
-        // line 16 of the log, runs 210 s, 230 s and 326 s, and is cancelled by
-        // teardown every time. `caches/fex/*/cache/` is empty and
-        // `codemap/ready/` holds 69 entries, so nothing accumulates between runs
-        // either: each session redoes the same work and loses it.
-        //
-        // Re-measured 2026-08-14 on a fresh install, and the mechanism is no
-        // longer a guess. The session log reads, in this order:
-        //
-        //     IV session ending: phase=RUNNING exit=none requested=true
-        //     IV exec … wineserver -k
-        //     WV the FEX code cache compiler exited with 1 after 84830 ms
-        //
-        // `wineserver -k` ends every process in the prefix and the compiler is
-        // one of them, so the exit code is ours and the elapsed time is just how
-        // long the session happened to last. It is not a compiler that fails:
-        // `FEXOfflineCompiler`'s `ProcessAll` has exactly one `return`, and it
-        // returns 0 (`Source/Tools/FEXOfflineCompiler/Main.cpp:842`). The only
-        // path in that program that yields 1 is the usage message, which cannot
-        // take 84 seconds to print.
-        //
-        // So the work is sound and the lifetime is wrong. Started at session
-        // start it can only ever be interrupted, because the session outlives it
-        // by definition — and every run leaves `codemap/new` populated for the
-        // next one to restart from scratch. What it needs is a lifetime that is
-        // not the session's: run to completion after the guest exits and before
-        // the prefix is torn down, or outside a session altogether.
+        // **Off by default, because it has never once finished.** Measured on
+        // 2026-08-13 across four sessions: the catch-up starts at line 16 of the
+        // log, runs 210 s, 230 s and 326 s, and is cancelled by teardown every
+        // time. `caches/fex/*/cache/` is empty and `codemap/ready/` holds 69
+        // entries, so nothing accumulates between runs either — each session
+        // redoes the same work and loses it.
         //
         // What it does cost is real. `cpu %` sat at a steady 12.9 of a
         // hundred for the whole of a Requiem session, and with eight cores that
@@ -1033,20 +1008,8 @@ class SessionRuntime @Inject constructor(
         // but it cannot be paid for by every session while never delivering. It
         // needs a moment when nothing else wants the CPU and teardown is not
         // about to kill it, and there is no such moment inside a session.
-        // That lifetime now exists, in [teardown]: the compile runs after the
-        // guest is gone and before `wineserver -k`, which is the only window in
-        // a session where the codemap is complete, nothing competes, and nothing
-        // is about to kill it. So this catch-up is off — leaving it on would put
-        // a second compiler beside that one, merging the same reference set from
-        // two processes, which is the hazard the old teardown comment named.
-        //
-        // Kept rather than deleted because the *other* half of its reasoning
-        // still holds: a session that is killed rather than stopped never
-        // reaches teardown, and its codemaps sit in `codemap/new` until
-        // something picks them up. If that turns out to be common, this is where
-        // it gets picked up, and it needs the CPU-affinity work first.
         if (CODE_CACHE_DURING_SESSION) {
-            codeCacheJob = scope.launch { generateCodeCache(running, log, CODE_CACHE_TIMEOUT_MS) }
+            codeCacheJob = scope.launch { generateCodeCache(running, log) }
         }
 
         // Opened before the first guest process and read for the whole session,
@@ -1585,60 +1548,6 @@ class SessionRuntime @Inject constructor(
         // lets the drain coroutines finish instead of blocking on a read.
         launched.forEach { it.takeIf(Process::isAlive)?.destroy() }
 
-        // **The code cache is compiled here, and here is the only place it fits.**
-        //
-        // Three conditions have to hold at once, and this is the single point in
-        // a session's life where they do: the guest is gone, so its codemaps are
-        // complete and nothing competes for the CPU; `wineserver` is still up,
-        // so a Windows program can still run; and nothing is about to kill it,
-        // because the kill is the next statement rather than an arbitrary later
-        // one.
-        //
-        // Every other placement has been tried and is recorded above. At session
-        // start it is always interrupted -- the session outlives it by
-        // definition, and `wineserver -k` takes it down with everything else,
-        // which is where the "exited with 1" came from. Below the kill it cannot
-        // start at all: exit 127 in 17 ms, a Wine client with no server.
-        //
-        // The catch-up job is stopped first. Two compilers merging the same
-        // reference code maps from two processes is the hazard, and with
-        // CODE_CACHE_DURING_SESSION off there is normally nothing to stop.
-        //
-        // **Bounded by a teardown budget, not by CODE_CACHE_TIMEOUT_MS.** That
-        // one is fifteen minutes, which is fine for a job nobody waits on and
-        // absurd for one between the user pressing stop and the container list
-        // reappearing. The short budget is affordable because the work is
-        // resumable in a way the old arrangement never made use of:
-        // `ProcessAll` aggregates `codemap/new` into `codemap/ready` first, then
-        // spawns one child per binary (`Main.cpp:834`) and each child writes its
-        // own cache file before the next starts. A run cut short keeps every
-        // binary it completed; the next session starts from there. So the cache
-        // fills over several sessions instead of never.
-        // **And it is NOT awaited here, which cost an ANR to learn.**
-        //
-        // The window is right and the reasoning above stands, but teardown is on
-        // the path that stops the session, and Android gives that path five
-        // seconds. A 45 s budget is nine times over it:
-        //
-        //     ANR in app.vessel
-        //     Reason: Input dispatching timed out ... Waited 5000ms for
-        //             FocusEvent(hasFocus=false)
-        //     4.3% user + 0% kernel
-        //
-        // — 4.3% of one core, so nothing was busy; the stop was simply blocked.
-        // The comment this replaced said as much before it was written ("buy a
-        // teardown that blocks for as long as the compile takes, which is the
-        // reason it was made a background job in the first place"), and bounding
-        // it did not make it acceptable, only shorter.
-        //
-        // Compiling here at all needs the server to outlive teardown, which is a
-        // larger change than a budget: something has to own the prefix after the
-        // session has let go of it, and refuse the next session until it does.
-        // Until that exists, the start-of-session catch-up is the only placement
-        // that does not block the user, and this stays a cancel.
-        codeCacheJob?.cancelAndJoin()
-        codeCacheJob = null
-
         if (current != null && wineserver != null) {
             val spec = ProcessSpec(
                 argv = current.tree.serverArgv(listOf("-k")),
@@ -1669,18 +1578,32 @@ class SessionRuntime @Inject constructor(
         guestOutput?.close()
         guestOutput = null
 
-        // **Nothing is compiled from here down, and that is not a preference.**
-        // The compiler is a Windows program and `wineserver -k` has run, so a
-        // client started now has no server to talk to and exits immediately. The
-        // session log said exactly that on every run that reached this point —
+        // The start-of-session catch-up may still be going; it is compiling the
+        // *previous* run's codemaps and a call here would want this run's, so
+        // two at once would have the compiler merging the same reference set
+        // from two processes. Cancelled rather than joined: the session is
+        // already over, the user is waiting, and whatever the catch-up does not
+        // finish is still in `codemap/new` for the next start.
+        codeCacheJob?.cancelAndJoin()
+        codeCacheJob = null
+
+        // **And nothing is compiled here.** This used to call generateCodeCache
+        // once more, on the theory that teardown is the quiet moment. It cannot
+        // work from this point: the compiler is a Windows program, every path
+        // above has already run `wineserver -k`, and a Wine client with no
+        // server to talk to exits immediately. The session log said so on every
+        // run that reached it —
         //
         //     IV exec .../bin/wineserver -k
         //     IV building the FEX code cache from 1 new codemap(s)
         //     WV the FEX code cache compiler exited with 127 after 17 ms
         //
         // — 127 being "could not start it at all", 17 ms being how long that
-        // takes to discover. The call is above the kill for that reason, and the
-        // teardown budget is what keeps it from being a wait nobody agreed to.
+        // takes to discover. Moving the call above the kill would fix the exit
+        // code and buy a teardown that blocks for as long as the compile takes,
+        // which is the reason it was made a background job in the first place.
+        // So the catch-up at session start is now the only place it happens,
+        // and `codemap/new` carries the work forward until then.
 
         runCatching { display.stop() }
         releaseWakeLock()
@@ -1744,175 +1667,82 @@ class SessionRuntime @Inject constructor(
      * resolves siblings from `GetModuleFileNameA`, which lands back in the same
      * directory.
      */
-    private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog, budgetMs: Long) {
+    private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog) {
         val compiler = current.offlineCompiler ?: return
         // The host directory, not `FEX_APP_CACHE_LOCATION` — that is now the DOS
         // path the guest sees (`C:\vessel\fexcache\`) and reading it back as a
         // `File` would count codemaps in a directory named `C:` under the
         // process's cwd, find none, and return without ever saying so.
         val cache = current.fexCacheHost ?: return
-        // The DOS alias, not `compiler.absolutePath`. `ProcessAll` re-execs
-        // itself through `GetModuleFileNameA`, and from a unix path every child
-        // fails to spawn — see [linkFexCache], which maintains the alias.
-        val dosCompiler = FEX_CACHE_DOS_DIR + compiler.name
-
-        // **`FEX_SILENTLOG` is overridden here, and only here.**
-        //
-        // The session default is silent, because FEX's debug tier was 99.9% of a
-        // 49 MB log — a line pair per unaligned atomic, which is a cost of
-        // *executing* translated code. This process does not execute any: it
-        // reads codemaps and translates them ahead of time, so the flood that
-        // justified the default cannot happen here.
-        //
-        // What silence did cost was the ability to see this fail. The compiler
-        // exited 1 after 3m30s on two consecutive sessions and said nothing at
-        // all, because `FEX_SILENTLOG=1` means no message handler is installed
-        // and `patches/fex/0003`'s error ceiling has nothing to filter. Three and
-        // a half minutes of full-CPU work, an empty `cache/` directory, and no
-        // diagnostic — the worst of the three possible outcomes.
-        val environment = current.environment + ("FEX_SILENTLOG" to "0")
-        val codemaps = File(cache, "codemap")
-        val outDir = File(cache, "cache")
-
-        val newCount = withContext(Dispatchers.IO) {
-            runCatching { File(codemaps, "new").listFiles()?.size ?: 0 }.getOrDefault(0)
+        val pending = withContext(Dispatchers.IO) {
+            runCatching { File(File(cache, "codemap"), "new").listFiles()?.size ?: 0 }.getOrDefault(0)
         }
-        // **Cheapest first, and skip what is already current.**
-        //
-        // Codemap file size is the cost estimate, and it is a good one: a codemap
-        // is a list of block addresses, so bytes are blocks. It matters because
-        // the spread is three orders of magnitude — measured on Metro Redux,
-        // `winmm.dll` is 2 blocks and `metro.exe` is 9,745 — and `ProcessAll`
-        // walks them in FileId order, which is to say at random. Ordering by cost
-        // is what guarantees a short budget still finishes *something*.
-        //
-        // The cache filename is [FEXCore::CodeMap::GetBaseFilename] plus the
-        // config id, and the id is `0` upstream with a TODO beside it
-        // (`FEXOfflineCompiler/Main.cpp:795`). Vessel keys the whole cache
-        // directory on the FEX configuration instead — see [FEX_CACHE_KEY_IGNORED]
-        // — so a literal here matches what the compiler writes and the config is
-        // still accounted for, one level up.
-        val outstanding = withContext(Dispatchers.IO) {
-            runCatching {
-                (File(codemaps, "ready").listFiles() ?: emptyArray())
-                    .filter { it.isFile }
-                    .filter { codemap ->
-                        val built = File(outDir, "${codemap.name}-$FEX_CACHE_CONFIG_ID")
-                        !built.isFile || built.lastModified() <= codemap.lastModified()
-                    }
-                    .sortedBy { it.length() }
-            }.getOrDefault(emptyList())
-        }
-        if (newCount == 0 && outstanding.isEmpty()) return
+        if (pending == 0) return
 
         log.line(
             LogSource.VESSEL,
             LogLevel.INFO,
-            "building the FEX code cache: $newCount new codemap(s)," +
-                " ${outstanding.size} binary(ies) outstanding, in ${cache.path}",
+            "building the FEX code cache from $pending new codemap(s) in ${cache.path}",
         )
-
         val started = System.currentTimeMillis()
-        val deadline = started + budgetMs
-        fun remaining(): Long = deadline - System.currentTimeMillis()
-
-        suspend fun invoke(arguments: List<String>, what: String, timeoutMs: Long): Boolean {
-            val spec = ProcessSpec(
-                argv = current.tree.programArgv(dosCompiler, arguments),
-                environment = environment,
-                workingDirectory = current.layout.base,
-            )
-            val outcome = runCatching {
-                withTimeoutOrNull(timeoutMs) { runner.run(spec) { line -> record(log, line) } }
-            }
-            val result = outcome.getOrNull()
-            return when {
-                outcome.isFailure -> {
-                    log.line(LogSource.VESSEL, LogLevel.WARN, "$what: ${outcome.exceptionOrNull()?.message}")
-                    false
-                }
-                result == null -> false
-                result is ProcessResult.NotStarted -> {
-                    log.line(LogSource.VESSEL, LogLevel.WARN, "$what could not start: ${result.reason}")
-                    false
-                }
-                result is ProcessResult.Exited && result.code != 0 -> {
-                    log.line(LogSource.VESSEL, LogLevel.WARN, "$what exited with ${result.code}")
-                    false
-                }
-                else -> true
-            }
-        }
-
-        // **Phase one: aggregation, and nothing else if it can be helped.**
-        //
-        // There is no aggregate-only command, so this is `process-all` — which
-        // merges `codemap/new` into `codemap/ready` and then starts generating in
-        // its own order. Aggregation happens first and in full
-        // (`Main.cpp:765`, before the loop), and the compiler announces the
-        // handover by printing "Checking caches for executable". That line is the
-        // signal to stop it and take the ordering decision back.
-        //
-        // Cancelling mid-generation is safe: a cache file is written to `.new`
-        // and only renamed once complete (`Main.cpp:531-542`), so an interrupted
-        // child leaves a stray `.new` and no half-valid cache. Skipped entirely
-        // when there is nothing new, which is every session after one that
-        // already emptied `codemap/new`.
-        if (newCount > 0 && remaining() > 0) {
-            val aggregated = CompletableDeferred<Unit>()
-            val spec = ProcessSpec(
-                argv = current.tree.programArgv(dosCompiler, listOf("process-all")),
-                environment = environment,
-                workingDirectory = current.layout.base,
-            )
-            coroutineScope {
-                val job = launch {
-                    runCatching {
-                        runner.run(spec) { line ->
-                            record(log, line)
-                            if (FEX_AGGREGATION_DONE in line) aggregated.complete(Unit)
-                        }
-                    }
-                }
-                withTimeoutOrNull(remaining()) { aggregated.await() }
-                job.cancelAndJoin()
-            }
-        }
-
-        // **Phase two: one binary per child, cheapest first, until the budget is
-        // out.** Each child either writes its cache file or leaves nothing, so
-        // every binary that completes is permanent and the next session starts
-        // from what this one finished. Whatever the deadline cuts off is simply
-        // still outstanding, and is picked up in the same order next time.
-        var built = 0
-        for (codemap in outstanding) {
-            if (remaining() <= 0) break
-            val fileId = codemap.name.substringAfterLast('-')
-            val ok = invoke(
-                listOf(
-                    "generate",
-                    "--fileid", fileId,
-                    "--outdir", "${FEX_CACHE_DOS_PATH}cache",
-                    "${FEX_CACHE_DOS_PATH}codemap\\ready\\${codemap.name}",
-                ),
-                "the FEX code cache for ${codemap.name}",
-                remaining(),
-            )
-            if (ok) built++
-        }
-
-        val elapsed = System.currentTimeMillis() - started
-        val left = outstanding.size - built
-        log.line(
-            LogSource.VESSEL,
-            if (left == 0) LogLevel.INFO else LogLevel.WARN,
-            if (left == 0) {
-                "FEX code cache built in $elapsed ms: $built binary(ies), nothing outstanding"
-            } else {
-                "FEX code cache: $built of ${outstanding.size} binary(ies) in $elapsed ms;" +
-                    " $left still outstanding and resume next time"
-            },
+        // The DOS alias, not `compiler.absolutePath`. `ProcessAll` re-execs
+        // itself through `GetModuleFileNameA`, and from a unix path every child
+        // fails to spawn — see [linkFexCache], which maintains the alias.
+        val dosCompiler = FEX_CACHE_DOS_DIR + compiler.name
+        val spec = ProcessSpec(
+            argv = current.tree.programArgv(dosCompiler, listOf("process-all")),
+            // **`FEX_SILENTLOG` is overridden here, and only here.**
+            //
+            // The session default is silent, because FEX's debug tier was 99.9%
+            // of a 49 MB log — a line pair per unaligned atomic, which is a cost
+            // of *executing* translated code. This process does not execute any:
+            // it reads codemaps and translates them ahead of time, so the flood
+            // that justified the default cannot happen here.
+            //
+            // What silence did cost was the ability to see this fail. The
+            // compiler exited 1 after 3m30s on two consecutive sessions and said
+            // nothing at all, because `FEX_SILENTLOG=1` means no message handler
+            // is installed and `patches/fex/0003`'s error ceiling has nothing to
+            // filter. Three and a half minutes of full-CPU work, an empty
+            // `cache/` directory, and no diagnostic — which is the worst of the
+            // three possible outcomes.
+            environment = current.environment + ("FEX_SILENTLOG" to "0"),
+            workingDirectory = current.layout.base,
         )
+        val outcome = runCatching {
+            withTimeoutOrNull(CODE_CACHE_TIMEOUT_MS) {
+                runner.run(spec) { line -> record(log, line) }
+            }
+        }
+        val elapsed = System.currentTimeMillis() - started
+        val result = outcome.getOrNull()
+        when {
+            outcome.isFailure -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache was not built: ${outcome.exceptionOrNull()?.message}",
+            )
+            result == null -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache did not finish in ${CODE_CACHE_TIMEOUT_MS / 1000} s and was killed",
+            )
+            result is ProcessResult.NotStarted -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache compiler could not start: ${result.reason}",
+            )
+            result is ProcessResult.Exited && result.code != 0 -> log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "the FEX code cache compiler exited with ${result.code} after ${elapsed} ms",
+            )
+            else -> log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "FEX code cache built in ${elapsed} ms",
+            )
+        }
     }
 
     /**
@@ -2723,49 +2553,7 @@ class SessionRuntime @Inject constructor(
          * whether a killed session loses everything: it does not, because
          * `ready/` is per-module and already written.
          */
-        /**
-         * The start-of-session catch-up compile, in addition to the one in
-         * [teardown].
-         *
-         * **On by choice, against the evidence to hand, and that is worth
-         * recording rather than quietly having.** Three Requiem runs on
-         * 2026-08-14 line up exactly: the one run with no compiler beside it had
-         * no heap-lock wedge, and both runs with one had six timeouts each. The
-         * mechanism is not CPU — 12% of eight cores starves nothing — but a
-         * second Wine process shares the one `wineserver`, and heap work that
-         * needs a server round trip queues behind it.
-         *
-         * What makes it defensible is that the compile is now per binary and
-         * cheapest first, so the thing running beside the guest is a short child
-         * rather than one job holding the prefix for the whole session. If the
-         * wedge returns, this is the first thing to turn off.
-         */
         const val CODE_CACHE_DURING_SESSION: Boolean = true
-
-        /**
-         * The config id in a generated cache filename.
-         *
-         * `0`, because that is what the compiler writes: `CodeCacheConfigId` is a
-         * literal zero with a `TODO: Compute the cache config id from the active
-         * FEX configuration` beside it (`FEXOfflineCompiler/Main.cpp:794-795`).
-         * The configuration is accounted for one level up instead — Vessel keys
-         * the whole cache directory on it, see [FEX_CACHE_KEY_IGNORED] — so this
-         * being a constant is upstream's shape, not an assumption of ours.
-         */
-        const val FEX_CACHE_CONFIG_ID = "0000000000000000"
-
-        /**
-         * What `process-all` prints once aggregation is done and generation is
-         * about to start (`FEXOfflineCompiler/Main.cpp:792`). Used as the handover
-         * signal, not as a status: aggregation is the part only `process-all` can
-         * do, and generation is the part worth doing in our own order.
-         */
-        const val FEX_AGGREGATION_DONE = "Checking caches for executable"
-
-        // There is deliberately no teardown budget. One existed, at 45 s, and it
-        // ANR'd the stop path -- Android allows five seconds there, so no value
-        // large enough to compile anything is small enough to be allowed. See
-        // [teardown].
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
 
