@@ -105,10 +105,53 @@ avoid.
     below the address, for every address. A six-figure offset from `tan` is the
     method admitting it has no information, not a location.
 
-  *Done when:* the throw site is named by something that is not offset arithmetic
-  against an export — a `+relay` window around the last successful call, an
-  instrumented `__cxa_throw`, or an unwind trace of the kind that named the FEX
-  config assert (see the FEX reference at the end of this file).
+  **The stack arrived on its own, 2026-08-14, and it is not a fault.** With the
+  deadlock in #49 fixed, Requiem reaches its title screen and settings menu and
+  is interactive — and then the *game's own crash reporter* draws a dialog
+  listing every frame with module and offset. Pressing OK ends the process, so
+  this is fatal, not cosmetic. The system frames, resolved against the shipped
+  ARM64 `ntdll`, `kernelbase` and `kernel32` full symbol tables (10,502 / 16,158
+  / 6,481 symbols; image base `0x180000000`), in call order:
+
+  | Frame | Resolves to |
+  |---|---|
+  | `ntdll +0xcb2cc` | thread start |
+  | `kernel32 +0x541a8`, `+0x5f26c` | `BaseThreadInitThunk` region |
+  | `re9.exe +0x5777357` … `+0x5961ff9` | the game, eight frames |
+  | **`re9.exe +0x5963933`** | **the throw site** |
+  | `VCRUNTIME140 +0x114bb` | `_CxxThrowException` |
+  | `ntdll +0xc9ecc` | `KiUserExceptionDispatcher +0x3c` |
+  | `ntdll +0x958b0` | `dispatch_exception +0x940` |
+  | `ntdll +0xc9574` | `call_seh_handlers +0x280` |
+  | `ntdll +0xc9b90` | `call_seh_handlers +0x89c` |
+  | `ntdll +0x960f8` | **`call_unhandled_exception_filter +0x78`** |
+  | `kernelbase +0x8f568`, `+0xf146c` | `UnhandledExceptionFilter` path |
+  | `re9.exe +0x9e82ddd`, `+0x9e835ae` | the game's reporter, which drew the dialog |
+
+  So this is a **C++ `throw` that found no matching handler**: the unwinder ran,
+  every SEH handler declined, and the unhandled filter was reached. That is a
+  different problem from the one this entry assumed. It also explains the first
+  dead end above — `+seh` prints nothing useful because the interesting part is
+  not the raise, it is the *search* failing.
+
+  **The live hypothesis, and it is not yet tested.** `virtual_unwind`,
+  `dispatch_emulation` and `prepare_exception_arm64ec` all sit in the same
+  address region as the frames above, and the throwing code is emulated x86-64
+  under ARM64EC. If unwinding across the EC boundary cannot walk the guest's
+  frames, the game's `catch` is never offered the exception even though it
+  exists. *Next:* determine whether the search reaches the game's own handler at
+  all — an instrument in `call_seh_handlers` naming each handler it offers the
+  exception to, and what each returns, would settle it in one run.
+
+  *Done when:* it is known whether the handler search reaches the game's frames.
+  If it does, this is the game throwing legitimately and the throw's *cause* is
+  the question; if it does not, it is an ARM64EC unwind defect and that is the fix.
+
+  *Originally done when:* the throw site is named by something that is not offset
+  arithmetic against an export — a `+relay` window around the last successful call,
+  an instrumented `__cxa_throw`, or an unwind trace of the kind that named the FEX
+  config assert (see the FEX reference at the end of this file). **Satisfied**, by
+  the game's own reporter rather than by an instrument of ours.
 
 - [~] **#50 — a stack overflow, and it was never a recursion.** Two runs produced
   **byte-identical** traces, so this is reproducible on demand rather than a
@@ -153,8 +196,14 @@ avoid.
   *Done when:* a session runs with `0041` installed and produces neither the
   overflow nor the `running the stack out` lines. Built, not yet watched.
 
-- [~] **#49 — the main process heap's critical section deadlocks, and the
-  instrument that should name the holder prints a zero.** `patches/wine/0030`
+- [x] **#49 — the main process heap's critical section deadlocks, and the
+  instrument that should name the holder prints a zero.** **Fixed and watched,
+  2026-08-14**, by `patches/fex/0014` — `ImageTracker::HandleImageMap` no longer
+  holds `CodeInvalidationMutex` across work that allocates from the Win32 heap.
+  Requiem now runs past it to its title screen and settings menu, interactive,
+  with neither stuck-lock line and with the GPU actually busy (mean 4.7%, peak
+  69%, against 0% in every deadlocked run). The history below is kept because
+  three of its conclusions were wrong before they were right. `patches/wine/0030`
   records where a critical section was acquired and prints it on the wait
   timeout, so the log alone can name a DLL and offset once resolved against the
   module bases `loaddll` already prints. It fires. It prints
