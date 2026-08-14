@@ -240,10 +240,35 @@ tools_sfnt2fon_has_freetype() {
 #   config.status: error: could not create Makefile
 #
 # 11.14's configure passes makedep an option that 10.13's makedep never had.
+#
+# **THE PATCH SET IS IN THE STAMP, and unlike the configure stamp that is not a
+# refinement — it is the difference between a tools patch working and doing
+# nothing.** SOURCE_SHA is `git rev-parse HEAD` of the checkout, and
+# apply_patches deliberately never commits, so every patch in patches/wine/
+# leaves SOURCE_SHA exactly where it was. A patch to anything under tools/
+# therefore matched this stamp, the cached tree was reused, and the *previous*
+# build's host binaries generated the new build's output.
+#
+# That is not a hypothetical either. patches/wine/0038 changes tools/widl, and
+# the cross Makefile does list widl as a prerequisite of what it produces —
+#
+#   include/windows.networking.h include/windows.networking.winmd: \
+#       /work/wine-tools/tools/widl/widl ...
+#
+# so the rule would have fired correctly if widl had been rebuilt. It was not:
+# the stamp said the tools were current, `make` never ran in that tree, widl
+# kept its old mtime, every .winmd kept its old bytes, and the build would have
+# exited 0 with the fix absent. Exactly the failure docs/DEBUGGING.md opens
+# with, one directory over from where the last one was fixed.
+#
+# Hashing the patch files themselves rather than a count: a patch that is edited
+# in place — 0034 was, to repair a mangled escape — has to invalidate this too.
+PATCHSET_ID="$(cat "$PATCH_DIR/$COMPONENT"/*.patch 2>/dev/null | sha256sum | cut -d' ' -f1)"
 TOOLS_STAMP="$TOOLS/.vessel-source-sha"
+TOOLS_ID="$SOURCE_SHA $PATCHSET_ID"
 
 if [ -x "$TOOLS/tools/winebuild/winebuild" ] && [ -e "$TOOLS/nls/locale.nls" ] \
-   && [ "$(cat "$TOOLS_STAMP" 2>/dev/null)" = "$SOURCE_SHA" ] \
+   && [ "$(cat "$TOOLS_STAMP" 2>/dev/null)" = "$TOOLS_ID" ] \
    && tools_sfnt2fon_has_freetype; then
   info "reusing native tools in $TOOLS"
 else
@@ -277,7 +302,7 @@ else
      'docker build -t vessel-build .'. Look for 'checking for -lfreetype' in
      $TOOLS/config.log."
   # Stamped last, so an interrupted build is not mistaken for a finished one.
-  printf '%s' "$SOURCE_SHA" > "$TOOLS_STAMP"
+  printf '%s' "$TOOLS_ID" > "$TOOLS_STAMP"
   ok "native tools ready"
 fi
 
