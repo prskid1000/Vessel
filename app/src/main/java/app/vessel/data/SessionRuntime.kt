@@ -1614,11 +1614,30 @@ class SessionRuntime @Inject constructor(
         // own cache file before the next starts. A run cut short keeps every
         // binary it completed; the next session starts from there. So the cache
         // fills over several sessions instead of never.
+        // **And it is NOT awaited here, which cost an ANR to learn.**
+        //
+        // The window is right and the reasoning above stands, but teardown is on
+        // the path that stops the session, and Android gives that path five
+        // seconds. A 45 s budget is nine times over it:
+        //
+        //     ANR in app.vessel
+        //     Reason: Input dispatching timed out ... Waited 5000ms for
+        //             FocusEvent(hasFocus=false)
+        //     4.3% user + 0% kernel
+        //
+        // — 4.3% of one core, so nothing was busy; the stop was simply blocked.
+        // The comment this replaced said as much before it was written ("buy a
+        // teardown that blocks for as long as the compile takes, which is the
+        // reason it was made a background job in the first place"), and bounding
+        // it did not make it acceptable, only shorter.
+        //
+        // Compiling here at all needs the server to outlive teardown, which is a
+        // larger change than a budget: something has to own the prefix after the
+        // session has let go of it, and refuse the next session until it does.
+        // Until that exists, the start-of-session catch-up is the only placement
+        // that does not block the user, and this stays a cancel.
         codeCacheJob?.cancelAndJoin()
         codeCacheJob = null
-        if (current != null && wineserver != null) {
-            generateCodeCache(current, log, CODE_CACHE_TEARDOWN_BUDGET_MS)
-        }
 
         if (current != null && wineserver != null) {
             val spec = ProcessSpec(
@@ -2743,19 +2762,10 @@ class SessionRuntime @Inject constructor(
          */
         const val FEX_AGGREGATION_DONE = "Checking caches for executable"
 
-        /**
-         * How long [teardown] will wait for the code cache before killing it.
-         *
-         * Not [CODE_CACHE_TIMEOUT_MS], which is fifteen minutes and belongs to a
-         * job nobody is waiting on. This one sits between the user pressing stop
-         * and the container list coming back, so it is chosen as the longest
-         * pause that still reads as "putting things away" rather than "stuck".
-         *
-         * Affordable because the work resumes: `ProcessAll` writes one cache
-         * file per binary and a run cut short keeps every binary it finished, so
-         * successive sessions fill the cache rather than restarting it.
-         */
-        const val CODE_CACHE_TEARDOWN_BUDGET_MS = 45_000L
+        // There is deliberately no teardown budget. One existed, at 45 s, and it
+        // ANR'd the stop path -- Android allows five seconds there, so no value
+        // large enough to compile anything is small enough to be allowed. See
+        // [teardown].
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
 
