@@ -10,7 +10,11 @@ here before. Where an item is closed by evidence, the evidence is named; where a
 claim is inherited rather than re-checked, it says so in the sentence.
 
 Status: `[ ]` open · `[~]` in progress · `[x]` done, with evidence · `[-]` closed
-as won't-do, with the reason. Finished work moves to `docs/DONE.md`.
+as won't-do, with the reason. **Finished work is deleted rather than archived** —
+git history is the record, and a file that accumulates everything ever done stops
+being read. The cost is accepted knowingly: a decision closed as won't-do can be
+reopened by someone who never saw the reasoning, so anything that must survive
+belongs in a comment beside the code it constrains, not in a list.
 
 *Rewritten from scratch on 2026-08-14 (#18). Every claim below about the code was
 re-read against the tree that day; the previous file had drifted far enough that
@@ -63,6 +67,25 @@ The one variable that did change alongside it, and has not been separated:
 while every other parameter was preserved. A comparison run is not honest until
 that is put back.
 
+**By the end of that day #50 was root-caused, the FEX code cache produced a cache
+for the first time since 11 August, and two of our own patches had to be taken
+back out after breaking a game that worked.** The detail is in the entries below;
+what is worth saying at the top is the shape of it. Three of the four faults
+chased that day were the same defect wearing different clothes — *a handler
+answering "continue execution" for a fault it did not repair*, so the faulting
+instruction re-runs forever. It appeared in FEX's overcommit path, in FEX's RWX
+path, and in Wine's `RtlIsEcCode`. Once named, each was a small fix; before being
+named, each looked like a hang with no information in it.
+
+The other lesson is about method and cost us most of the afternoon. **Two
+components were installed in one step twice, and both times the wrong half was
+blamed.** Wine `0041` and FEX `0010` went to the device together, Metro broke, FEX
+was accused, reverted, and Metro stayed broken — the cause was `0041`. Then FEX
+`0010`'s decline half was installed and Metro hung before Vulkan, which only
+became attributable once Wine was held patch-identical across two runs. Neither
+mistake was a reasoning error; both were measurement errors, and both were free to
+avoid.
+
 ---
 
 ## The blockers, in order
@@ -87,14 +110,48 @@ that is put back.
   instrumented `__cxa_throw`, or an unwind trace of the kind that named the FEX
   config assert (see the FEX reference at the end of this file).
 
-- [ ] **#50 — a stack overflow, and it is deterministic.** Two runs produced
+- [~] **#50 — a stack overflow, and it was never a recursion.** Two runs produced
   **byte-identical** traces, so this is reproducible on demand rather than a
   race. It ends the run through `abort_thread`. Anything this file or its
   predecessor said about it being intermittent is wrong.
 
-  Deterministic is the useful half: a fault that reproduces byte for byte can be
-  bisected by instrumentation without needing luck. *Done when:* the recursion is
-  named — which function calls itself, and what makes it not terminate here.
+  **Named, 2026-08-14, and the answer was not the one this entry was looking
+  for.** `patches/wine/0040` logs the exception code and address for the last ~74
+  deliveries before a guest stack dies, and on its first run it returned 34 lines
+  that were all the same line:
+
+  ```
+  prepare_exception_arm64ec exception delivery is running the stack out:
+    261000 bytes left, room for 79 more, code c0000005 flags 0 at 0000007FFFF09F44
+  ```
+
+  One access violation, at one fixed address, re-raised until the stack was gone
+  — 7200 bytes per delivery, because `KiUserExceptionDispatcher` opens with
+  `sub sp, sp, #0xcd0` and nothing unwinds between deliveries. So there is no
+  recursing function to name: it is one fault being resumed at the same
+  instruction forever.
+
+  `0000007FFFF09F44` is `RtlIsEcCode +0x10`, resolved against the shipped ntdll's
+  full symbol table. That function indexes `Peb->EcCodeBitMap` by
+  `ptr / page_size` **with no bound**, while `alloc_arm64ec_map` sizes the map for
+  the address space below `address_space_limit` and no further — and FEX asks it
+  about every guest branch target under ARM64EC
+  (`BranchTargetInMultiblockRange`). One target above the limit reads off the end
+  of the allocation and raises an access violation inside a query whose honest
+  answer is `FALSE`.
+
+  `patches/wine/0041` bounds the read. **Two warnings for whoever reads this
+  next.** The first version derived the bound from `NtQueryVirtualMemory` at first
+  use, which answers with one region rather than the whole reservation — the bound
+  came out short, real EC addresses began reporting as not-EC, and Metro 2033 went
+  from working to dying in an unrepairable write fault. The bound now comes from
+  `HighestUserAddress`, which is the quantity that sized the map. And the fix
+  removes the *fault*, not the *loop*: something is still resuming unrepaired
+  faults in the guest process, which is the same defect as the two in
+  `patches/fex/` and is still open.
+
+  *Done when:* a session runs with `0041` installed and produces neither the
+  overflow nor the `running the stack out` lines. Built, not yet watched.
 
 - [~] **#49 — the main process heap's critical section deadlocks, and the
   instrument that should name the holder prints a zero.** `patches/wine/0030`
@@ -120,6 +177,24 @@ that is put back.
   it corrupts whatever follows the struct. 0030 uses a fixed 256-slot table
   indexed by the section's own address instead: deliberately lossy, never
   allocates, and a collision costs one wrong diagnostic line.
+
+  **The zero is fixed and the fix was not enough, 2026-08-14.** `0030` now
+  records in `RtlTryEnterCriticalSection` too, and the ERR duly printed a real
+  address — `which took it at 0000006FFFF246B0`. It resolved to `ntdll +0xe46b0`,
+  whose nearest symbol is `$ientry_thunk$cdecl$i8$i8`: **ntdll's own ARM64EC
+  entry-thunk table.** The lock had been taken by emulated x86-64 code calling in
+  through a thunk, so the recorded return address was the thunk's, and *every*
+  x64-origin acquisition resolves into that same anonymous region no matter how
+  often it fires. `0030` was rewritten again to walk the `x29` frame chain and
+  record the first return address outside ntdll, which for that path is the guest
+  caller in a module `loaddll` has named. **It has not fired since**, so the
+  rewrite is verified by construction and disassembly and not by a log line.
+
+  A second acquisition was named the same day, on the other section:
+  `RtlAllocateHeap +0x6bc` held the process heap while asleep, with the loader
+  section stacked behind it — resolved against ntdll's *full* symbol table
+  (10,493 symbols) rather than its exports, which is the difference between that
+  answer and `tan +0x1a69c`.
 
   *Done when:* the timeout ERR names a module and an offset, and that offset
   resolves to a function.
@@ -163,8 +238,59 @@ build finishes, treat everything in this section as unproven.
 | `0037` | Exports `DllCanUnloadNow` from ole32, always `S_FALSE` | `compobj.c` + `ole32.spec` |
 | `0038` | `SizeOfImage` must describe the virtual layout | `tools/widl/metadata.c` |
 
-**`0035` is on disk but untracked** — `git status` shows it as `??`, so unlike the
-other five it is not in a commit either. It is included in the 37 that apply.
+**All six were compiled and shipped as Wine revision 10 on 2026-08-14**, so this
+section is history. What it should have said, and did not, is that they went to
+the device **as a block**: not one of the six has ever been separated from the
+others, and they landed on the morning the menu stopped. See the entry below.
+
+---
+
+## Opened 2026-08-14
+
+- [ ] **The six revision-9/10 Wine patches have never been separated, and they
+  landed on the day the menu stopped.** `0032`, `0034`, `0035`, `0036`, `0037`,
+  `0038` were compiled together and installed together at 10:14. The menu was last
+  seen at roughly 09:00 on revision 8. Revision 8 was rebuilt and reinstalled the
+  same afternoon and did *not* bring it back — but that test ran on a wiped app
+  with a cold prefix and a cold PSO cache, so it separated the payload and nothing
+  else. **This is the loose thread most likely to explain the thing we care about
+  most.** Two of the six change what the guest believes about the display (`0032`
+  synthesizes an EDID for every monitor, `0036` moves the primary flag), which is
+  the shape of a game that initialises fully and then draws nothing. *Done when:*
+  each of the two display patches has been run with and without, on a prefix that
+  has been through at least one prior session.
+
+- [ ] **Loading a FEX code cache crashes the emulator before the guest starts.**
+  Generation works now (see below); loading does not. A launch of Requiem with a
+  cache present dies at `libarm64ecfex.dll +0x9bb04` with only `re9.exe` and
+  `libarm64ecfex` loaded. Proven by moving the key's `cache/` aside and changing
+  nothing else: the same title then loaded 67 modules instead of 2, went past the
+  Denuvo blobs and into Vulkan. **Metro is the counter-example that narrows it** —
+  it ran normally with its own `metro.exe` cached, so this is not "loading is
+  broken", it is something about *that* image. The candidate is that Requiem
+  decrypts its own code at runtime, so a cache built from the decrypted bytes
+  describes code that is not there on the next run. If so the fix is a validity
+  check, not a repair. *Done when:* a title with a cache present starts, twice.
+
+- [ ] **`CODE_CACHE_DURING_SESSION` is a live hazard while the above is open.**
+  It is `true`, generation works, so every session now writes a cache that can
+  kill the next launch of that title — and it will look like a random regression
+  to whoever hits it, including us. Either gate loading off or set the constant
+  false until the entry above is closed.
+
+- [ ] **`is_ec_code`, the unix twin of `RtlIsEcCode`, is still unbounded.**
+  `dlls/ntdll/unix/unix_private.h:477` has the identical shape and the identical
+  hazard as the function `patches/wine/0041` fixes. It was left alone deliberately
+  — nothing has been observed faulting there, and it is an inline on a hot path
+  the change has not been measured against — but it is the same bug.
+
+- [ ] **`DisableDEP` is a global default and should be per-title.**
+  `patches/fex/0002` defaults it to true for every guest, and its own description
+  names the cost: *"a genuinely wild jump is translated instead of faulting, so a
+  bug that would have been a clean access violation becomes silent corruption."*
+  It exists for anti-tamper stubs, which is a per-title need. Tested and exonerated
+  as the cause of Metro's regression on 2026-08-14, so this is hygiene rather than
+  a suspicion.
 
 ---
 
@@ -200,111 +326,13 @@ Real work, none of it blocking a frame.
   session runs with fsync selected and either beats esync on a measured workload
   or is written up as not worth it.
 
-- [ ] **#17 — `.msi` support.** From the launch-type matrix
-  (`docs/DONE.md`): `msiexec` loads `msi.dll`, `cabinet.dll`, `wintrust.dll` and
+- [ ] **#17 — `.msi` support.** From a launch-type matrix measured before
+  2026-08-14: `msiexec` loads `msi.dll`, `cabinet.dll`, `wintrust.dll` and
   `comctl32.dll` and gets as far as drawing a window, and the payload is not in
   `C:\Program Files` afterwards. So it reaches its UI and does not install.
   Whether the fault is the minimal test package or `msi.dll` has never been
   tested. *Done when:* an `.msi` installs a program that then launches from the
   app's own tile grid.
-
----
-
-## Closed this session
-
-- [x] **#46 — Media Foundation had no decoder backend at all, and that is what
-  stopped Requiem.** The game opens its intro video through `IMFSourceReader`,
-  Wine routes that to `CLSID_GStreamerByteStreamHandler`
-  `{317df618-5e5a-468a-9f15-d827a9a08162}`, and nothing was registered behind it
-  because winegstreamer's unix half was never built. Every open failed with
-  `MF_E_UNSUPPORTED_BYTESTREAM_TYPE` (`0xC00D36C4`), the game put up a modal
-  dialog and waited on it forever — which is why the session looked hung with the
-  CPU and the GPU both idle. Nothing was deadlocked; a message box was blocking
-  the main thread.
-
-  `build/gst-sysroot.sh` cross-builds the stack for aarch64 Android: libffi,
-  PCRE2, proxy-libintl, GLib, GStreamer 1.28.6 core/base/good/bad, FFmpeg 8.0.3
-  and gst-libav. LGPL only and decoders-and-demuxers only, because a GPL
-  component would relicense the whole payload; H.264 plus AAC in MP4 is covered
-  end to end. Three variables carry it —
-  `GST_PLUGIN_SYSTEM_PATH`, `WINE_GST_REGISTRY_DIR`, `GST_REGISTRY_FORK` — and
-  they are in `BOOTSTRAP_SESSION_ENV` as well as the launcher environment
-  (`SessionEnvironment.kt:132`, `:150-152`), because `wineboot --init` registers
-  `winegstreamer.dll` and therefore calls `gst_init()`. Omitting them there does
-  not mean "the bootstrap has no media", it means a poisoned empty registry that
-  every later process reuses.
-
-  *Evidence:* the menu, and zero Media Foundation failures in the session log.
-
-- [x] **#18 — rewrite this file.** Done 2026-08-14. The previous version was 2102
-  lines, of which the majority was finished work kept "as a record" and several
-  of the remaining conclusions were wrong. What was worth keeping is here; what
-  was finished is in `docs/DONE.md`; what was stale is gone rather than softened.
-
----
-
-## Decided against, with the reasoning
-
-These are decisions, not open work. Each is recorded so it is not reopened by
-someone reading a log line and assuming nobody looked.
-
-- [-] **`wevtsvc`'s missing `SvchostPushServiceGlobals` export — adding it would
-  be worse than its absence.** Wine's `@ stub` entries do not return a failure;
-  `__wine_spec_unimplemented_stub` is
-  `for (;;) RaiseException( EXCEPTION_WINE_STUB, EXCEPTION_NONCONTINUABLE, 2, args );`
-  (`native/wine/dlls/winecrt0/stub.c:32`). A caller that cannot *find* the entry
-  point takes its own error path; a caller that finds a stub takes a
-  non-continuable exception in an infinite loop. The missing export is the better
-  of the two behaviours.
-
-- [-] **Two monitors in virtual-desktop mode is upstream design, not a defect.**
-  `update_display_devices()` runs the display driver's enumeration and then, in
-  virtual-desktop mode, appends a second source
-  (`native/wine/dlls/win32u/sysparams.c:3129`); `add_virtual_source` (`:3034`)
-  *keeps* the physical source and adds the virtual one beside it. Suppressing one
-  to make a count look tidy is a much larger override than the thing that was
-  actually wrong — which was the primary flag, fixed by `0036`. Two BAD_EDID
-  entries were present in the hive before any Vessel patch existed, which is the
-  evidence that the second monitor was never ours to create.
-
-- [-] **Five vkd3d warnings that are correct behaviour or are the game's.** All
-  five appear every session and none of them is a defect here:
-  - `d3d12_device_QueryInterface` and `d3d12_command_queue_QueryInterface`
-    returning `E_NOINTERFACE` for vendor-extension GUIDs the game probes for.
-    That is what COM says to do for an interface you do not implement.
-  - `d3d12_pipeline_state_init_graphics_create_info: DSV format is
-    DXGI_FORMAT_UNKNOWN` (`native/vkd3d/libs/vkd3d/state.c:5130`) — a legal
-    description of a pipeline with no depth target.
-  - `has_extension: Extension ... is disabled` (`device.c:203`), 155 lines of it,
-    driven by configuration.
-  - `openxr_vulkan_extensions: wineopenxr.dll is missing required symbols`
-    (`libs/d3d12core/main.c:220`) — VR, which is not built.
-  - `dxil-spirv: There is no candidate for ladder merging`
-    (`subprojects/dxil-spirv/cfg_structurizer.cpp:6299`) — a shader-side
-    structurizer note about the game's own DXIL.
-
-- [~] **One vkd3d line is deferred rather than closed:
-  `d3d12_device_CheckFeatureSupport: Assuming device does not support tile based
-  rendering`.** Adreno *is* a tiler, so the value reported is factually wrong,
-  and correcting it is a one-line change at each of the two architecture feature
-  paths (`native/vkd3d/libs/vkd3d/device.c:5313-5314` and `:5531-5532`, both
-  `data->TileBasedRenderer = FALSE`). It is deferred anyway, and deliberately:
-  `TileBasedRenderer` is something a D3D12 title may branch its whole rendering
-  strategy on, and nothing about that branch can be measured while the game does
-  not run. This belongs after #51, not now.
-
-- [-] **Linux mode.** Closed as won't-do; `docs/LINUX-MODE.md` carries the study
-  and the Phase 0/0b measurements, and `docs/DONE.md` §8a keeps the numbers. The
-  short reason is that `execve` out of `app_data_file` is denied for a bionic ELF
-  exactly as for a glibc one, so every process in a distro container would need a
-  Vessel loader and a permanent `SIGSYS` supervisor.
-
-- [-] **Mesa's software-path present tuning (`patches/mesa/0003`).** Armed,
-  measured, and **not measurable with this harness in either direction** — the
-  run-to-run spread inside one build is larger than any gap between builds. It
-  stays in the tree because it removes a real wait from the application's thread
-  and `sw` is the fallback if DRI3 ever fails, but it is not an open item and no
-  further A/B of it is worth a device session.
 
 ---
 

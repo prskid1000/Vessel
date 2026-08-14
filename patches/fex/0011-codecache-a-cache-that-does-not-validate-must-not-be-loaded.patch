@@ -1,0 +1,227 @@
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 910f5b047..6fe8a01e7 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -505,13 +505,45 @@
+   LogMan::Msg::IFmt("            successfully validated cache");
+ }
+ 
++// Vessel: the largest number of bytes any single relocation can emit.
++// SelectCodeRangeToFinalize already assumes this exact bound, in its own words
++// "Upper bound for relocation size"; named here so the two cannot drift.
++static constexpr size_t MaxRelocationSize = 16;
++
+ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> Code,
+                                      std::span<const FEXCore::CPU::Relocation> EntryRelocations, uint32_t RelocationOffset, bool ForStorage) {
+   CPU::Arm64Emitter Emitter(&CTX, Code.data(), Code.size_bytes());
+   for (size_t j = 0; j < EntryRelocations.size(); ++j) {
+     const FEXCore::CPU::Relocation& Reloc = EntryRelocations[j];
+-    LOGMAN_THROW_A_FMT(Reloc.Header.Offset >= RelocationOffset, "Invalid relocation offset");
+-    LOGMAN_THROW_A_FMT(Reloc.Header.Offset - RelocationOffset < Code.size_bytes(), "Invalid relocation offset");
++    /* Vessel: these two were the only thing standing between a bad offset and a
++     * wild write, and LOGMAN_THROW_A_FMT compiles to nothing in the Release
++     * build this ships (ASSERTIONS_ENABLED is DEBUG-only, CMakeLists.txt:189).
++     * So SetCursorOffset put the emitter cursor outside the buffer and the
++     * dc64/LoadConstant below wrote through it.
++     *
++     * That is the crash, identified from the instruction rather than from a
++     * symbol: libarm64ecfex +0x9bb04 disassembles to
++     *
++     *   ldr  x12, [x0, #0x8]      ; emitter cursor
++     *   str  w10, [x12]           ; <-- c0000005
++     *   ldr  x10, [x0, #0x8]
++     *   add  x10, x10, #0x4       ; advance by one instruction
++     *
++     * which is the movz/movk emit loop inside Arm64Emitter::LoadConstant, and
++     * LoadConstant is reached from here by RELOC_GUEST_RIP_MOVE and
++     * RELOC_NAMED_THUNK_MOVE.
++     *
++     * Kept as a hard refusal rather than a skip: a relocation that is dropped
++     * leaves a wrong constant embedded in code that will still be executed,
++     * which is worse than not using the cache. LoadCache now rejects these
++     * before anything is mutated, so this should be unreachable -- it is the
++     * guard that makes "should" not matter. */
++    if (Reloc.Header.Offset < RelocationOffset ||
++        (Reloc.Header.Offset - RelocationOffset) + MaxRelocationSize > Code.size_bytes()) {
++      LogMan::Msg::EFmt("Code cache relocation {} offset {:#x} (base {:#x}) does not fit a {} byte buffer; refusing to apply", j,
++                        Reloc.Header.Offset, RelocationOffset, Code.size_bytes());
++      return false;
++    }
+     Emitter.SetCursorOffset(Reloc.Header.Offset - RelocationOffset);
+ 
+     switch (Reloc.Header.Type) {
+@@ -559,6 +591,62 @@
+ 
+   FEXCORE_PROFILE_SCOPED("LoadCache");
+ 
++  /* Vessel: everything below the header is validated before it is believed.
++   *
++   * **This function is the only place a cache can be refused for free.** It
++   * returns nullptr on every rejection path already, its one caller
++   * (ImageTracker::HandleImageMap) simply skips EnableLoadedSection when it
++   * does, and nothing has been mutated yet. By the time EnableLoadedSection has
++   * run there is no way back -- block mappings are inserted into the LookupCache
++   * *before* FinalizeCodePages relocates the code, and there is no rollback.
++   *
++   * **What went wrong.** Requiem died at libarm64ecfex +0x9bb04 with only
++   * re9.exe and libarm64ecfex loaded; moving cache/ aside made the same launch
++   * load 67 modules and reach Vulkan. That RVA disassembles to the movz/movk
++   * emit loop inside Arm64Emitter::LoadConstant -- `ldr x12, [x0, #8]` then
++   * `str w10, [x12]` -- i.e. a write through the emitter cursor, reached from
++   * ApplyCodeRelocations. Every bound on that path was a LOGMAN_THROW_A_FMT,
++   * which is compiled out of this Release build, so a relocation offset outside
++   * the code buffer became a wild write instead of a refusal.
++   *
++   * **Why re9.exe and not metro.exe**, which loaded from cache in the same
++   * session without incident: it is size, not content. When generation exhausts
++   * the 128 MB code buffer, JIT.cpp:1094-1096 calls ClearCodeCache, whose
++   * NewCodeBuffer parameter defaults to *true* (Context.h:220), so a fresh
++   * buffer is installed and LatestOffset restarts at zero. Relocations are
++   * deliberately not cleared while generating (Core.cpp:913-915), so every
++   * relocation recorded before that point keeps an offset into the old buffer.
++   * SaveData then writes all of them against a header.CodeBufferSize computed
++   * from the *new* LatestOffset. The result is a relocation table that is both
++   * out of range and out of order -- and LoadCache's page partitioning below
++   * uses std::upper_bound, which silently mispartitions unsorted input. A
++   * Denuvo-protected main executable is exactly the input large enough to reach
++   * that; Metro's is not. This is inferred, not observed: the corpus was
++   * cleared with the container. It is also why the checks below report which
++   * invariant failed -- one Metro run regenerates a cache and the log will say.
++   *
++   * **What this is not.** It was suggested that Requiem's runtime decryption
++   * makes a cache describe bytes that are no longer there. That is a real
++   * correctness problem and this does not address it -- but it cannot be this
++   * crash, because nothing on the load path reads the guest image at all.
++   * LoadCache, EnableLoadedSection, FinalizeCodePages and ApplyCodeRelocations
++   * touch only the cache file and the code buffer, so mismatched image content
++   * has nothing to fault on here; it would surface later, as wrong execution,
++   * with the loader long since finished. See patches/fex/README.md under 0011
++   * for what binding a cache to its source bytes would take -- the format has
++   * no such field today. */
++  const auto* const FileBegin = CacheFile.data();
++  const auto* const FileEnd = FileBegin + CacheFile.size_bytes();
++  const auto InFile = [FileBegin, FileEnd](const void* Ptr, size_t Length) {
++    const auto* Start = static_cast<const std::byte*>(Ptr);
++    return Start >= FileBegin && Start <= FileEnd && static_cast<size_t>(FileEnd - Start) >= Length;
++  };
++
++  if (CacheFile.size_bytes() < sizeof(CodeCacheHeader)) {
++    LogMan::Msg::EFmt("Code cache is {} bytes, too small for a header", CacheFile.size_bytes());
++    return nullptr;
++  }
++
+   // Read file header
+   CodeCacheHeader header {};
+   ::memcpy(&header, CacheFile.data(), sizeof(header));
+@@ -580,26 +668,111 @@
+     return nullptr;
+   }
+ 
++  if (header.CodeBufferSize == 0 || (header.CodeBufferSize % Utils::FEX_PAGE_SIZE) != 0) {
++    LogMan::Msg::EFmt("Code cache CodeBufferSize {:#x} is zero or not page aligned", header.CodeBufferSize);
++    return nullptr;
++  }
++
+   // Skip over BlockEntry data since it won't be used until EnableLoadedSection
+   // TODO: Store direct offset to relocations in the header
+   auto* BlockListStart = CacheFile.data() + sizeof(header);
+   auto* Cursor = BlockListStart;
+   for (uint32_t i = 0; i < header.NumBlocks; ++i) {
++    // Vessel: this walk had no bound of any kind. A wrong NumBlocks or
++    // NumGuestCodePages ran the cursor off the end of the mapped view and the
++    // memcpy below read whatever followed it.
++    if (!InFile(Cursor, 3 * sizeof(uint64_t))) {
++      LogMan::Msg::EFmt("Code cache block list runs past the end of the file at block {} of {}", i, header.NumBlocks);
++      return nullptr;
++    }
+     Cursor += sizeof(uint64_t); // guest address
++    // Vessel: EnableLoadedSection turns this into &Code.CodeBuffer[HostCode] and
++    // stores the result in the LookupCache as executable host code. Its only
++    // guard is a LOGMAN_THROW_A_FMT, so out of range meant a wild pointer that
++    // faults on first execution rather than here.
++    uint64_t HostCode;
++    ::memcpy(&HostCode, Cursor, sizeof(HostCode));
++    if (HostCode >= header.CodeBufferSize) {
++      LogMan::Msg::EFmt("Code cache block {} maps to host offset {:#x}, outside a {:#x} byte code buffer", i, HostCode, header.CodeBufferSize);
++      return nullptr;
++    }
+     Cursor += sizeof(uint64_t); // host code address
+     uint64_t NumGuestCodePages;
+     ::memcpy(&NumGuestCodePages, Cursor, sizeof(NumGuestCodePages));
+     Cursor += sizeof(NumGuestCodePages);
++    if (NumGuestCodePages > CacheFile.size_bytes() / sizeof(uint64_t) || !InFile(Cursor, NumGuestCodePages * sizeof(uint64_t))) {
++      LogMan::Msg::EFmt("Code cache block {} claims {} code pages, which does not fit the file", i, NumGuestCodePages);
++      return nullptr;
++    }
+     Cursor += NumGuestCodePages * sizeof(uint64_t);
+   }
+ 
++  if (header.NumRelocations > CacheFile.size_bytes() / sizeof(FEXCore::CPU::Relocation) ||
++      !InFile(Cursor, static_cast<size_t>(header.NumRelocations) * sizeof(FEXCore::CPU::Relocation))) {
++    LogMan::Msg::EFmt("Code cache relocation table ({} entries) does not fit the file", header.NumRelocations);
++    return nullptr;
++  }
++
+   auto Relocations = std::span {reinterpret_cast<const FEXCore::CPU::Relocation*>(Cursor), header.NumRelocations};
+   Cursor += Relocations.size_bytes();
+ 
++  /* Vessel: the relocation table has to be in range and in order.
++   *
++   * In range, because ApplyCodeRelocations sets the emitter cursor from
++   * Header.Offset and writes there. In order, because the page partitioning
++   * below walks the table once with std::upper_bound and assigns each page the
++   * next contiguous run -- on unsorted input that quietly hands a page
++   * relocations belonging somewhere else, which is a corruption that would
++   * survive every bounds check.
++   *
++   * Both are exactly what a mid-generation code buffer swap produces, so this
++   * is the check most likely to fire and the reason it names its numbers. */
++  uint64_t PreviousOffset = 0;
++  for (size_t i = 0; i < Relocations.size(); ++i) {
++    const uint64_t Offset = Relocations[i].Header.Offset;
++    if (Offset < PreviousOffset) {
++      LogMan::Msg::EFmt("Code cache relocation {} offset {:#x} is below its predecessor {:#x}; table is not sorted", i, Offset, PreviousOffset);
++      return nullptr;
++    }
++    if (Offset + MaxRelocationSize > header.CodeBufferSize) {
++      LogMan::Msg::EFmt("Code cache relocation {} of {} targets {:#x}, outside a {:#x} byte code buffer", i, Relocations.size(), Offset,
++                        header.CodeBufferSize);
++      return nullptr;
++    }
++    PreviousOffset = Offset;
++  }
++
+   // Pad to next page to get the code buffer data
+   Cursor = reinterpret_cast<std::byte*>(AlignUp(reinterpret_cast<uintptr_t>(Cursor), Utils::FEX_PAGE_SIZE));
++  if (!InFile(Cursor, header.CodeBufferSize)) {
++    LogMan::Msg::EFmt("Code cache code region ({:#x} bytes) runs past the end of the file", header.CodeBufferSize);
++    return nullptr;
++  }
+   auto CodeDataInFile = std::span {Cursor, header.CodeBufferSize};
+ 
++  /* Vessel: walk the code-page section too, for the same reason as the block
++   * list -- EnableLoadedSection reads it with a bare cursor and no bound, one
++   * entry per NumCodePages, immediately after the code region. Validating it
++   * here keeps every read that function performs inside the mapped view. */
++  {
++    const auto* PageCursor = CodeDataInFile.data() + CodeDataInFile.size_bytes();
++    for (uint32_t i = 0; i < header.NumCodePages; ++i) {
++      if (!InFile(PageCursor, 2 * sizeof(uint64_t))) {
++        LogMan::Msg::EFmt("Code cache code page list runs past the end of the file at entry {} of {}", i, header.NumCodePages);
++        return nullptr;
++      }
++      PageCursor += sizeof(uint64_t); // page address
++      uint64_t NumEntrypoints;
++      ::memcpy(&NumEntrypoints, PageCursor, sizeof(NumEntrypoints));
++      PageCursor += sizeof(NumEntrypoints);
++      if (NumEntrypoints > CacheFile.size_bytes() / sizeof(uint64_t) || !InFile(PageCursor, NumEntrypoints * sizeof(uint64_t))) {
++        LogMan::Msg::EFmt("Code cache code page {} claims {} entrypoints, which does not fit the file", i, NumEntrypoints);
++        return nullptr;
++      }
++      PageCursor += NumEntrypoints * sizeof(uint64_t);
++    }
++  }
++
+ #ifndef _WIN32
+   // Allocate target memory for post-relocation code. This is PROT_NONE until
+   // the first execution, so that contents can be lazily populated in a

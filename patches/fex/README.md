@@ -385,7 +385,13 @@ obvious follow-up if a save/restore idiom turns out to care.
 
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
-## `0010-invalidationtracker-a-reservation-is-not-code-and-a-failed-reprotect-is-not-a-repair`
+## WITHDRAWN — `invalidationtracker-a-reservation-is-not-code-and-a-failed-reprotect-is-not-a-repair`
+
+*Shipped as `0010`, then reverted and removed from the tree. The number `0010`
+now belongs to a different patch. Kept because the misclassification it aimed at
+is real and the reason it was wrong is not obvious — read this and the withdrawn
+entry below it before attempting the same fix again.*
+
 
 `0008` fixed the overcommit branch and left a diagnostic on the SMC branch,
 because that branch had not been *shown* to loop. On the next device run it was
@@ -464,7 +470,12 @@ not a recovery.
 is AI-authored in full.
 
 
-## `0011-invalidationtracker-take-back-the-mem-commit-gate-that-killed-a-guest`
+## WITHDRAWN — `invalidationtracker-take-back-the-mem-commit-gate-that-killed-a-guest`
+
+*The revert of the entry above. Both were removed from the tree together, so
+neither ships; `0011` now belongs to the code-cache validation patch below. The
+A/B measurement in this section is the reason the gate must not be reattempted.*
+
 
 **`0010` was half right and the wrong half shipped.** This takes back its
 classification change and keeps its decline. Written as a revert-on-top rather
@@ -551,3 +562,114 @@ Neither belongs in a revert. Both need their own measurement.
 
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
+
+## `0011-codecache-a-cache-that-does-not-validate-must-not-be-loaded`
+
+`0007` made generation diagnosable and generation now works — 52 modules, 51 s,
+72 entries. This is the other half: **loading** killed Resident Evil Requiem
+before the guest executed an instruction.
+
+```
+Loaded L"D:\Games\Resident Evil Requiem\re9.exe" at 0000000140000000: native
+Loaded L"C:\windows\system32\libarm64ecfex.dll" at 0000006FFC760000: builtin
+EW [re9.exe] seh:NtRaiseException Unhandled exception code c0000005 at 0x6ffc7fbb04
+```
+
+Two modules, then dead. Moving `cache/` aside made the identical launch load 67
+modules and reach Vulkan — single variable, clean result.
+
+**The site, derived from the instruction rather than from a symbol.** `+0x9bb04`
+against the shipped `libarm64ecfex.dll` (ImageBase `0x180000000`, so VMA
+`0x18009bb04`) disassembles to:
+
+```
+18009bafc: f940040c   ldr  x12, [x0, #0x8]     ; emitter cursor
+18009bb00: 2a02014a   orr  w10, w10, w2
+18009bb04: b900018a   str  w10, [x12]          ; <-- c0000005
+18009bb08: f940040a   ldr  x10, [x0, #0x8]
+18009bb0c: 9100114a   add  x10, x10, #0x4      ; advance one instruction
+```
+
+That is the `movz`/`movk` emit loop inside `Arm64Emitter::LoadConstant`, storing
+through the emitter's cursor — so the nearest-symbol guess was right, and the
+`+0x654` offset lands inside it. On the cache-load path `LoadConstant` is
+reached only from `ApplyCodeRelocations`, via `RELOC_GUEST_RIP_MOVE` or
+`RELOC_NAMED_THUNK_MOVE`. The cursor comes from `Reloc.Header.Offset`, and the
+only two things bounding it were `LOGMAN_THROW_A_FMT`, which compile to nothing
+in this Release build. A relocation offset outside the code buffer was therefore
+a wild write rather than a refusal.
+
+**Why `re9.exe` and not `metro.exe`, which loaded from cache in the same session
+without incident.** It is size, not content. When generation exhausts the 128 MB
+code buffer, `JIT.cpp:1094-1096` calls `ClearCodeCache`, whose `NewCodeBuffer`
+parameter **defaults to `true`** (`Context.h:220`), so a fresh buffer is
+installed and `LatestOffset` restarts at zero. Relocations are deliberately not
+cleared while generating (`Core.cpp:913-915`), so every relocation recorded
+before that point keeps an offset into the old buffer, and `SaveData` writes all
+of them against a `header.CodeBufferSize` computed from the *new* `LatestOffset`.
+The table ends up both out of range and out of order — and `LoadCache`'s page
+partitioning uses `std::upper_bound`, which silently mispartitions unsorted
+input. A Denuvo-protected AAA main executable is large enough to reach that;
+Metro's is not.
+
+**That last paragraph is inference, not observation** — the corpus was cleared
+with the container, so the offending file no longer exists. It is why every
+rejection below names the invariant and its numbers: one Metro run regenerates a
+cache and the log will say which check fires, or that none does.
+
+**The runtime-decryption theory is a real problem and is not this one.** It was
+suggested that Requiem decrypting its own code makes a cache describe bytes that
+are no longer there. That would be a genuine validity failure — but it cannot
+produce *this* crash, because **nothing on the load path reads the guest image**.
+`LoadCache`, `EnableLoadedSection`, `FinalizeCodePages` and
+`ApplyCodeRelocations` touch only the cache file and the code buffer, so
+mismatched image content has nothing to fault on there; it would surface later,
+as wrong execution, with the loader long since finished — not with two modules
+loaded.
+
+**Where the fix goes.** `LoadCache` is the only place a cache can be refused for
+free: it already returns `nullptr` on several paths, its one caller
+(`ImageTracker::HandleImageMap`) simply skips `EnableLoadedSection` when it does,
+and nothing has been mutated yet. By the time `EnableLoadedSection` has run there
+is no way back — block mappings are inserted into the `LookupCache` *before*
+`FinalizeCodePages` relocates the code, with no rollback. So validation happens
+there, and checks every structure the loader will later walk with a bare cursor:
+
+- the file is large enough for a header, and `CodeBufferSize` is non-zero and page aligned;
+- the block-list walk stays inside the mapped view (it previously had no bound at all);
+- each block's `HostCode` is inside the code buffer — `EnableLoadedSection` turns it into `&Code.CodeBuffer[HostCode]` and stores that as executable host code;
+- the relocation table fits the file, every offset admits `MaxRelocationSize`, and offsets are non-decreasing (the `upper_bound` partitioning requires it);
+- the code region and the code-page list both fit the file.
+
+`ApplyCodeRelocations` additionally refuses to write outside its buffer — a hard
+refusal rather than a skip, because a dropped relocation leaves a wrong constant
+in code that will still execute, which is worse than not using the cache. With
+validation in front of it that guard should be unreachable; it is what makes
+"should" not matter.
+
+**What this deliberately does not do.** It does not repair a bad cache and it
+does not fix generation. A cache that fails validation is skipped and the title
+runs cold, which is exactly what the `nullptr` return already meant — and
+strictly better than today, because generation is where the 13,864,960-resume
+loop lived and it is untouched here.
+
+### Binding a cache to the bytes it was built from — not implemented
+
+Worth recording because the decryption question will come back. **Nothing in the
+format ties a cache to the image contents.** `CodeCacheHeader` carries `Magic`,
+`FormatVersion`, `FEXVersion` (the FEX git hash), `NumBlocks`, `NumCodePages`,
+`CodeBufferSize`, `NumRelocations` and `SerializedBaseAddress` — no content hash,
+no source timestamp. The only identity is the filename's `FileId`, and
+`ComputeCodeMapId` (`ImageTracker.cpp:38-41`) hashes the lowercased basename
+XORed with `TimeDateStamp` and `SizeOfImage` from the PE header. For a packed
+binary all three are constant across runs while the mapped bytes are not, so the
+id cannot distinguish a decrypted image from a packed one.
+
+Two shapes would fix it, both needing their own measurement. Add a digest of the
+covered code ranges to the header, computed at save and re-checked at load —
+correct but it costs a hash of every cached range on every image load. Or decline
+to cache images FEX already knows rewrite themselves: the SMC/RWX machinery
+tracks exactly that in `RWXIntervals`, so a cache could record "this image had
+writable executable sections" and be refused on load. The second is cheaper and
+strictly conservative; it would also disable caching for the titles that most
+need it.
