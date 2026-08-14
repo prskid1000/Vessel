@@ -1,0 +1,76 @@
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -404,24 +404,36 @@
+     default: FEX_UNREACHABLE;
+     }
+   } else {
++    // Vessel: push the selector, not the base.
++    //
++    // This arm read <seg>_cached, which holds the segment BASE -- and in 64-bit
++    // mode on Windows gs_cached is the TEB pointer. So `push gs` pushed the low
++    // half of the TEB address where the hardware pushes a 16-bit selector, and
++    // paired with POPSegmentOp (which fed that value back through a GDT walk
++    // into the same field) the ordinary push/pop save-restore idiom was
++    // actively destructive rather than merely wrong.
++    //
++    // The 32-bit arm above already reads <seg>_idx, which is the selector and is
++    // what the instruction pushes in both modes. The arms are kept separate
++    // rather than merged so this stays a small diff against upstream.
+     switch (SegmentReg) {
+     case FEXCore::X86Tables::DecodeFlags::FLAG_ES_PREFIX:
+-      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, es_cached));
++      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, es_idx));
+       break;
+     case FEXCore::X86Tables::DecodeFlags::FLAG_CS_PREFIX:
+-      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, cs_cached));
++      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, cs_idx));
+       break;
+     case FEXCore::X86Tables::DecodeFlags::FLAG_SS_PREFIX:
+-      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, ss_cached));
++      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, ss_idx));
+       break;
+     case FEXCore::X86Tables::DecodeFlags::FLAG_DS_PREFIX:
+-      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, ds_cached));
++      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, ds_idx));
+       break;
+     case FEXCore::X86Tables::DecodeFlags::FLAG_FS_PREFIX:
+-      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, fs_cached));
++      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, fs_idx));
+       break;
+     case FEXCore::X86Tables::DecodeFlags::FLAG_GS_PREFIX:
+-      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, gs_cached));
++      Src = _LoadContextGPR(SrcSize, offsetof(FEXCore::Core::CPUState, gs_idx));
+       break;
+     default: FEX_UNREACHABLE;
+     }
+@@ -490,7 +502,28 @@
+   default: break; // Do nothing
+   }
+ 
+-  UpdatePrefixFromSegment(NewSegment, SegmentReg);
++  // Vessel: the base is not the selector's to touch in 64-bit mode.
++  //
++  // UpdatePrefixFromSegment walks the GDT for the selector and stores the
++  // descriptor's 32-bit base into <seg>_cached. In 64-bit mode gs_cached and
++  // fs_cached are uint64_t and hold the segment BASE -- and on Windows
++  // gs_cached is the TEB pointer itself (Source/Windows/ARM64EC/Module.cpp:
++  // `State.gs_cached = TEB`). So a single `pop gs` in a 64-bit guest wrote 32
++  // bits of a GDT-derived base over the low half of the TEB pointer, and every
++  // gs:[...] access after it read from a corrupted base.
++  //
++  // The GDT walk means nothing in 64-bit mode in the first place: the base
++  // comes from the FS/GS MSRs there, not from the descriptor, which is exactly
++  // why MOVSegOp guards the same call. This is the same guard for the pop path,
++  // which was left out because a 64-bit program popping a segment register is
++  // rare enough that upstream's own release notes say "no one really uses that
++  // feature on 64-bit CPUs today" (FEX-2302). Anti-tamper code does.
++  //
++  // The selector store above is kept in both modes -- that part is what the
++  // instruction actually does.
++  if (!Is64BitMode) {
++    UpdatePrefixFromSegment(NewSegment, SegmentReg);
++  }
+ }
+ 
+ void OpDispatchBuilder::LEAVEOp(OpcodeArgs) {

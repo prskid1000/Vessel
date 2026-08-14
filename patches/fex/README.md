@@ -463,3 +463,91 @@ not a recovery.
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
 
+
+## `0011-invalidationtracker-take-back-the-mem-commit-gate-that-killed-a-guest`
+
+**`0010` was half right and the wrong half shipped.** This takes back its
+classification change and keeps its decline. Written as a revert-on-top rather
+than an edit to `0010` so the series records what was tried and why it failed.
+
+**The A/B, same game, one component version apart, nothing else changed:**
+
+| | Metro 2033 game process | `RWX reprotect FAILED` |
+|---|---|---|
+| 260806 (`0008`+`0009`) | runs; **zero** `running the stack out` | 3,386 (in the compiler) |
+| 260807 (+`0010`) | **dies** — 27 `running the stack out`, then `virtual_setup_exception stack overflow 3616 bytes … (0x20000-0x21000-0x420000)` | **zero anywhere** |
+
+Zero reprotect failures on 260807 is the tell. The handler did not start
+failing; it stopped being asked. The faulting exception, from Wine patch
+`0040`'s telemetry:
+
+```
+[metro.exe] prepare_exception_arm64ec … code c0000005 flags 0
+            at 0000006FFC4311A2, info 1 6ffc2e5a3c
+```
+
+`info[0]=1` is a write — the C runtime storing into a page that had been
+write-protected for SMC detection. On 260806 `HandleRWXAccessViolation`
+unprotected it **successfully**, which is exactly why the game never logged a
+failure there. With `0010`'s gate the page was no longer tracked, nothing
+claimed the fault, nothing unprotected it, and the identical store re-faulted
+until a 4 MB guest stack was gone at ~7000 bytes per delivery.
+
+**Where the argument for the gate was wrong**, written out because the
+misclassification it aimed at is real and someone will try this again. It asked
+only whether a reserve notification could *remove* tracking — it cannot,
+`MEM_RESERVE` only succeeds over free address space — and never asked whether
+reserve notifications were *adding* tracking that mattered once the range was
+committed. They were. The assumption underneath, "when something commits them
+`NtAllocateVirtualMemory` notifies again with `MEM_COMMIT` over the same range",
+is not something this code can rely on: commits notify their own sub-range
+rather than the reservation, and Wine defers and replays some of these
+notifications (`dlls/ntdll/signal_arm64ec.c:989`), so neither coverage nor
+ordering is the 1:1 the gate assumed. This was named as the risk in `0010`'s own
+report — "SMC tracking would be lost … wrong behaviour rather than a crash,
+which is harder to spot" — and the consequence turned out to be worse than
+predicted: an unrepairable write fault, not stale code.
+
+**What is kept.** The failed-reprotect decline in `HandleRWXAccessViolation` is
+untouched. It did not cause this — on the working path the reprotect succeeds
+and the decline never runs — and it is what converts the compiler's
+13,864,960-iteration spin into a locatable fault.
+
+**What is still broken, and deliberately not fixed here.** The compiler's own
+272 MB `LookupCache` reservation is still classified as guest RWX code, so
+`FEXOfflineCompiler64.exe` will still fail — now by declining and reporting
+rather than by spinning. See the next section for the shape a correct fix needs.
+
+### The exclusion that would actually work, not implemented
+
+The distinction is not reserved-versus-committed. It is **FEX's own bookkeeping
+memory versus the guest's**, and `HandleMemoryProtectionNotification` cannot see
+it: by the time a notification arrives, an allocation FEXCore made for itself
+and one a guest made are indistinguishable.
+
+The range is already known to FEX — `LookupCache.cpp:49` hands it to
+`MarkOvercommitRange`, and no guest allocation ever reaches that call. So the
+natural exclusion is "never classify a range the OvercommitTracker owns", with
+`MarkRange` also removing the range from `XIntervals`/`RWXIntervals` (the
+allocation is notified at `LookupCache.cpp:41`, *before* it is marked at `:49`,
+so insertion has already happened and must be undone rather than prevented).
+
+**The obstacle, stated so nobody starts before reading it:** in the offline
+compiler the two live in different modules. `MarkOvercommitRange` goes to the
+*tool's* tracker (`FEXOfflineCompiler/Main.cpp:131`) while the notification is
+delivered to the *emulation module's* `InvalidationTracker`, and there is no
+channel between them today. In a normal session both are the module's own and
+the fix is local; for the tool it needs one. The two candidate shapes are a
+FEXCore-side registry of emulator-private ranges that the module's notify hook
+consults — `FEXCore::Allocator::VirtualName` already tags this exact allocation
+`"FEXMem_Lookup"` and would be the natural place to record it — or reserving
+FEX-internal regions `PAGE_NOACCESS` so `ProtIsReadable` is false and DEP
+promotion never picks them up, which is a one-line change but only covers the
+reserve step and still misclassifies each run once it is committed.
+
+Neither belongs in a revert. Both need their own measurement.
+
+**Not compiled.** Verified with `git apply --check` against the pinned tree.
+
+**Policy.** Not for upstream, for the reason at the top of this file. This one
+is AI-authored in full.

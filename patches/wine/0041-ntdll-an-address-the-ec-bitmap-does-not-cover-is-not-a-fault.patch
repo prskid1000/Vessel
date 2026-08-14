@@ -1,67 +1,63 @@
 diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
 --- a/dlls/ntdll/signal_arm64ec.c
 +++ b/dlls/ntdll/signal_arm64ec.c
-@@ -1455,10 +1455,63 @@
+@@ -1455,10 +1455,59 @@
  /**************************************************************************
   *              RtlIsEcCode (NTDLL.@)
   */
 +/* Vessel: an address this bitmap does not cover is not EC code, it is not a
 + * fault.
 + *
-+ * The map is one bit per page of the address space below `address_space_limit`
-+ * -- `alloc_arm64ec_map` in unix/virtual.c sizes it exactly that way -- and
-+ * neither this function nor its unix twin `is_ec_code` bounded the index. An
-+ * address above the limit therefore read off the end of the allocation, which
-+ * is a genuine access violation raised inside a query that has no business
-+ * failing: every caller is asking a *question*, and the answer for an address
-+ * that cannot be code is FALSE.
++ * `alloc_arm64ec_map` in unix/virtual.c sizes the map at one bit per page of the
++ * address space and no further, and neither this function nor its unix twin
++ * `is_ec_code` bounded the index. An address past the end therefore read off the
++ * end of the allocation -- an access violation raised inside a query that has no
++ * business failing, because every caller is asking a question and the answer for
++ * an address that cannot be code is FALSE.
 + *
-+ * That is not theoretical. FEX calls this on every guest branch target under
-+ * ARM64EC (BranchTargetInMultiblockRange), so one bad target is enough, and
-+ * Resident Evil Requiem died on it every run:
++ * FEX asks this about every guest branch target under ARM64EC
++ * (BranchTargetInMultiblockRange), so one bad target is enough. Resident Evil
++ * Requiem died on it every run: `code c0000005 at RtlIsEcCode +0x10` repeated 34
++ * times with the address identical each time, 7200 bytes of guest stack per
++ * delivery, until 4 MB was gone and the overflow was unrecoverable.
 + *
-+ *   prepare_exception_arm64ec ... code c0000005 flags 0 at 0000007FFFF09F44
++ * **The bound comes from HighestUserAddress, and the first version of this patch
++ * is why that matters.** It cached the map's extent from NtQueryVirtualMemory at
++ * first use, which answers with one region rather than the whole reservation --
++ * so the bound came out too small, real EC addresses started reporting as not-EC,
++ * and Metro 2033 went from working to dying in an unrepairable write fault. A
++ * wrong FALSE here is a bigger lie than the out-of-range read this prevents: it
++ * tells the emulator that native ARM64EC code is x86-64 to translate. Measured,
++ * both directions, on the device.
 + *
-+ * repeated 34 times with the address identical each time, 7200 bytes of guest
-+ * stack consumed per delivery, until a 4 MB stack was gone and the overflow was
-+ * unrecoverable. 0000007FFFF09F44 is `RtlIsEcCode +0x10` -- the map load below.
-+ * Something resumed the fault at the same instruction rather than repairing it,
-+ * so it re-raised forever; bounding the read removes the fault that loop is
-+ * built on, whoever is doing the resuming.
++ * HighestUserAddress cannot be wrong in that way. It is the same quantity that
++ * sized the map, it is a fixed property of the address space rather than of one
++ * allocation's layout, and an address above it is not user code by definition --
++ * so the conservative direction and the correct direction are the same one. The
++ * query is made once; a failure leaves the limit at zero and every address reads
++ * as not-EC, which is the old behaviour minus the fault.
 + *
-+ * The limit is cached on first use rather than queried per call because this is
-+ * on the branch-target path of every block FEX compiles. NtQueryVirtualMemory
-+ * gives the size of the reservation the loader made, which is the same number
-+ * `alloc_arm64ec_map` computed, without this side needing to know
-+ * `address_space_limit` at all. A query that fails leaves the cache at zero and
-+ * every address reads as not-EC, which is the safe direction: a wrong FALSE
-+ * makes FEX treat native code as emulated, a wrong fault kills the process.
-+ *
-+ * The unix twin is deliberately left alone. It has the identical shape and the
-+ * identical hazard, but nothing has been observed faulting there, and it is an
-+ * inline on a hot path reached by callers this change has not been measured
-+ * against. One fix for the fault that was actually seen. */
++ * The unix twin is deliberately left alone. Identical shape, identical hazard,
++ * but nothing has been observed faulting there and it is an inline on a hot path
++ * this change has not been measured against. One fix for the fault that was
++ * actually seen. */
  BOOLEAN WINAPI RtlIsEcCode( ULONG_PTR ptr )
  {
-+    static ULONG_PTR map_pages;
++    static ULONG_PTR user_limit;
      const UINT64 *map = (const UINT64 *)NtCurrentTeb()->Peb->EcCodeBitMap;
      ULONG_PTR page = ptr / page_size;
 +
 +    if (!map) return FALSE;
 +
-+    if (!map_pages)
++    if (!user_limit)
 +    {
-+        MEMORY_BASIC_INFORMATION info;
-+        SIZE_T len = 0;
++        SYSTEM_BASIC_INFORMATION sbi;
 +
-+        if (!NtQueryVirtualMemory( GetCurrentProcess(), (void *)map, MemoryBasicInformation,
-+                                   &info, sizeof(info), &len ) && len == sizeof(info))
-+            map_pages = info.RegionSize * 8;
-+        else
-+            return FALSE;
++        if (NtQuerySystemInformation( SystemBasicInformation, &sbi, sizeof(sbi), NULL )) return FALSE;
++        user_limit = (ULONG_PTR)sbi.HighestUserAddress;
 +    }
 +
-+    if (page >= map_pages) return FALSE;
++    if (ptr > user_limit) return FALSE;
      return (map[page / 64] >> (page & 63)) & 1;
  }
  
