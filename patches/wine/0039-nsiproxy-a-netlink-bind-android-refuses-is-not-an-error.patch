@@ -1,0 +1,54 @@
+--- a/dlls/nsiproxy.sys/nsi.c
++++ b/dlls/nsiproxy.sys/nsi.c
+@@ -196,9 +196,9 @@
+      * this fails on every call -- fifty identical ERR lines in one session log,
+      * for a facility whose absence is already handled. Returning
+      * STATUS_NOT_IMPLEMENTED means "no address-change notifications", and the
+-     * interface table is still read on demand. Failing once loudly and then
+-     * quietly is the honest shape; failing loudly for ever buries the lines
+-     * that matter. */
++     * interface table is still read on demand. Failing once and then quietly is
++     * the honest shape; saying it for ever buries the lines that matter. The
++     * *level* that one report is made at is settled further down. */
+     static int unavailable;
+     char buffer[PIPE_BUF];
+     struct nlmsghdr *nlh;
+@@ -222,10 +222,37 @@
+         addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
+         if (bind( netlink_fd, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
+         {
++            /* Vessel: read errno before close(), which is allowed to change it. */
++            int err = errno;
++
+             close( netlink_fd );
+             netlink_fd = -1;
+             unavailable = 1;
+-            ERR( "bind failed, errno %d; address-change notifications are off.\n", errno );
++
++            /* Vessel: a refusal here is Android's policy, not a fault of ours.
++             *
++             * An untrusted app may not bind a NETLINK_ROUTE socket -- the same
++             * restriction that stops apps reading interface hardware addresses
++             * -- so this returns EACCES on every device, in every session, and
++             * will keep doing so. The latch above already stops it repeating;
++             * what was left was a line claiming ERROR about a platform property
++             * that no change here can affect, and on the fresh install of
++             * 2026-08-14 it was the *only* ERROR in an otherwise clean game
++             * session.
++             *
++             * Any other errno still gets ERR, and that is the point. The aim is
++             * not to be quieter but to keep the loud tier for what is actually
++             * wrong: if this ever fails for a reason that is not policy, that
++             * is news and should read as news.
++             *
++             * Nothing is lost either way. STATUS_NOT_IMPLEMENTED already means
++             * "no address-change notifications", the interface tables are still
++             * read on demand, and the callers that care -- NotifyAddrChange and
++             * NotifyIpInterfaceChange -- simply never fire. */
++            if (err == EACCES || err == EPERM)
++                WARN( "bind refused, errno %d; address-change notifications are off.\n", err );
++            else
++                ERR( "bind failed, errno %d; address-change notifications are off.\n", err );
+             return STATUS_NOT_IMPLEMENTED;
+         }
+     }
