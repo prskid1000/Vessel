@@ -1,0 +1,419 @@
+diff --git a/dlls/dnsapi/Makefile.in b/dlls/dnsapi/Makefile.in
+index 6cf1a92205a..b5b06a1b6c1 100644
+--- a/dlls/dnsapi/Makefile.in
++++ b/dlls/dnsapi/Makefile.in
+@@ -2,9 +2,16 @@ MODULE    = dnsapi.dll
+ UNIXLIB   = dnsapi.so
+ IMPORTLIB = dnsapi
+ DELAYIMPORTS = netapi32
+-UNIX_LIBS    = $(RESOLV_LIBS)
++# -landroid unconditionally, because this tree is only ever built for Android.
++# It carries android_res_nquery/android_res_nresult, which android.c uses --
++# note libandroid.so and NOT libandroid_net.so, a library the NDK does not ship
++# under that name at all. $(RESOLV_LIBS) stays because it is empty here (the
++# HAVE_RESOLV probe cannot compile against bionic) and non-empty on a host
++# build, and the two backends are mutually exclusive rather than alternatives.
++UNIX_LIBS    = $(RESOLV_LIBS) -landroid
+ 
+ SOURCES = \
++	android.c \
+ 	libresolv.c \
+ 	main.c \
+ 	name.c \
+diff --git a/dlls/dnsapi/android.c b/dlls/dnsapi/android.c
+new file mode 100644
+index 00000000000..e2852dc04c8
+--- /dev/null
++++ b/dlls/dnsapi/android.c
+@@ -0,0 +1,391 @@
++/*
++ * Unix interface for Android's resolver
++ *
++ * Copyright 2026 the Vessel project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++/*
++ * WHY THIS FILE EXISTS, next to libresolv.c which does the same job.
++ *
++ * configure.ac gates the whole of dlls/dnsapi's unix half on HAVE_RESOLV, and
++ * decides it with a link test that opens:
++ *
++ *     if (!(_res.options & RES_INIT)) res_init();
++ *
++ * bionic has no `_res` and no RES_INIT, so that is a COMPILE error, the test
++ * never reaches the linker, HAVE_RESOLV stays undefined, and libresolv.c --
++ * which is `#ifdef HAVE_RESOLV` from its first line to its last -- compiles to
++ * an empty translation unit. dnsapi.so ships with no __wine_unix_call_funcs at
++ * all, DllMain logs "No libresolv support, expect problems", and every
++ * DnsQuery_W fails.
++ *
++ * Note what is and is not missing, because it is narrower than it looks and the
++ * obvious shortcut is wrong. bionic DOES export res_query, res_init, res_search,
++ * res_mkquery and dn_expand from libc (verified against the API 35 stub), so
++ * defining HAVE_RESOLV by hand would get past configure and libresolv.c would
++ * still not build: four of its five entry points read `_res` directly --
++ * _res.dnsrch for the search list, _res.nsaddr_list and _res.nscount for the
++ * server list, _res.nscount again to set it, _res.options in the query. The
++ * missing piece is the resolver STATE, not the query function, and there is no
++ * honest way to fake per-process resolver state that bionic does not keep.
++ *
++ * Android's supported interface is android_res_nquery/android_res_nresult from
++ * <android/multinetwork.h> (API 29+, in libandroid.so -- not libandroid_net.so,
++ * which the NDK does not ship at all). It is also the better answer: it is
++ * network-aware, so it follows a VPN or a per-process network binding, which
++ * bionic's legacy res_query does not.
++ *
++ * A SEPARATE FILE rather than #ifdefs inside libresolv.c, deliberately:
++ *
++ *   - The two backends share nothing. Every function body differs, because the
++ *     glibc one is written against a struct bionic does not have. Merging them
++ *     would put two disjoint implementations behind #ifdef __ANDROID__ in one
++ *     file and leave nothing common in the middle except the wow64 thunks.
++ *   - `#ifdef HAVE_RESOLV` is a CORRECT answer on Android. Leaving libresolv.c
++ *     byte-identical to upstream keeps this patch small and keeps it applying
++ *     when WINE_EXACT moves.
++ *   - Selection needs no configure change, and that matters more than it looks:
++ *     build/wine.sh only runs autoreconf when the tree ships no `configure`, and
++ *     this tree ships one. A new AC_ variable in configure.ac would therefore
++ *     never reach the generated script, and the build would exit 0 with this
++ *     backend silently absent. Instead the two files are mutually exclusive on
++ *     macros that already exist: libresolv.c needs HAVE_RESOLV (undefined here)
++ *     and this file needs __ANDROID__ (defined only by the NDK's clang), so
++ *     exactly one of them ever contributes a symbol.
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#ifdef __ANDROID__
++
++#include <stdarg.h>
++#include <string.h>
++#include <stdlib.h>
++#include <errno.h>
++#include <sys/types.h>
++
++#include <netinet/in.h>
++#include <arpa/nameser.h>
++#include <android/multinetwork.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#include "windef.h"
++#include "winternl.h"
++#include "winbase.h"
++#include "windns.h"
++#define USE_WS_PREFIX
++#include "ws2def.h"
++#include "ws2ipdef.h"
++
++#include "wine/debug.h"
++#include "dnsapi.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(dnsapi);
++
++/* Options that survive the trip. Android exposes three resolver flags and none
++ * of the transport controls Windows has, so most of this is the same honest
++ * FIXME list libresolv.c keeps -- an unmappable option is dropped rather than
++ * silently changing what the query means. */
++static uint32_t map_options( DWORD options )
++{
++    uint32_t ret = 0;
++
++    if (options == DNS_QUERY_STANDARD) return 0;
++
++    /* The one real mapping: Windows' "do not read the cache" is Android's
++     * NO_CACHE_LOOKUP. Note it does not imply NO_CACHE_STORE -- a bypassing
++     * query may still populate the cache, which matches Windows. */
++    if (options & DNS_QUERY_BYPASS_CACHE)
++        ret |= ANDROID_RESOLV_NO_CACHE_LOOKUP;
++
++    if (options & DNS_QUERY_USE_TCP_ONLY)
++        FIXME( "option DNS_QUERY_USE_TCP_ONLY not implemented\n" );
++    if (options & DNS_QUERY_NO_RECURSION)
++        FIXME( "option DNS_QUERY_NO_RECURSION not implemented\n" );
++    if (options & DNS_QUERY_NO_WIRE_QUERY)
++        FIXME( "option DNS_QUERY_NO_WIRE_QUERY not implemented\n" );
++    if (options & DNS_QUERY_ACCEPT_TRUNCATED_RESPONSE)
++        FIXME( "option DNS_QUERY_ACCEPT_TRUNCATED_RESPONSE not implemented\n" );
++    if (options & DNS_QUERY_DONT_RESET_TTL_VALUES)
++        FIXME( "option DNS_QUERY_DONT_RESET_TTL_VALUES not implemented\n" );
++    if (options & DNS_QUERY_RETURN_MESSAGE)
++        FIXME( "option DNS_QUERY_RETURN_MESSAGE not implemented\n" );
++    if (options & DNS_QUERY_RESERVED)
++        FIXME( "option DNS_QUERY_RESERVED not implemented\n" );
++
++    if (options & DNS_QUERY_NO_NETBT)
++        TRACE( "netbios query disabled\n" );
++
++    return ret;
++}
++
++/* android_res_* report transport failures as a NEGATED POSIX errno, not as an
++ * h_errno, so this replaces libresolv.c's map_h_errno rather than reusing it. */
++static DNS_STATUS map_errno( int err )
++{
++    switch (err)
++    {
++    case ETIMEDOUT:
++    case ECONNREFUSED:
++    case EHOSTUNREACH:
++    case ENETUNREACH:
++    case ENETDOWN:
++    case EIO:
++        return DNS_ERROR_RCODE_SERVER_FAILURE;
++    case EINVAL:
++        return DNS_ERROR_RCODE_FORMAT_ERROR;
++    case ENOMEM:
++        return ERROR_NOT_ENOUGH_MEMORY;
++    case EACCES:
++    case EPERM:
++        /* No INTERNET permission, or a network the process may not use. */
++        return DNS_ERROR_RCODE_REFUSED;
++    default:
++        WARN( "unmapped resolver error: %d\n", err );
++        return DNS_ERROR_RCODE_SERVER_FAILURE;
++    }
++}
++
++/* Only reached when the resolver reports a code but returns no parsable
++ * message; the normal path leaves the rcode in the wire header for query.c. */
++static DNS_STATUS map_rcode( int rcode )
++{
++    switch (rcode)
++    {
++    case ns_r_noerror:  return ERROR_SUCCESS;
++    case ns_r_formerr:  return DNS_ERROR_RCODE_FORMAT_ERROR;
++    case ns_r_servfail: return DNS_ERROR_RCODE_SERVER_FAILURE;
++    case ns_r_nxdomain: return DNS_ERROR_RCODE_NAME_ERROR;
++    case ns_r_notimpl:  return DNS_ERROR_RCODE_NOT_IMPLEMENTED;
++    case ns_r_refused:  return DNS_ERROR_RCODE_REFUSED;
++    case ns_r_yxdomain: return DNS_ERROR_RCODE_YXDOMAIN;
++    case ns_r_yxrrset:  return DNS_ERROR_RCODE_YXRRSET;
++    case ns_r_nxrrset:  return DNS_ERROR_RCODE_NXRRSET;
++    case ns_r_notauth:  return DNS_ERROR_RCODE_NOTAUTH;
++    case ns_r_notzone:  return DNS_ERROR_RCODE_NOTZONE;
++    default:
++        WARN( "unmapped rcode: %d\n", rcode );
++        return DNS_ERROR_RCODE_NOT_IMPLEMENTED;
++    }
++}
++
++/* Android keeps the search list inside netd and offers native code no way to
++ * read it. An EMPTY list is returned rather than an error: the caller
++ * (DnsQueryConfig(DnsConfigSearchList)) asked what the suffixes are, and "there
++ * are none I can see" is answerable, whereas failing would make callers that
++ * treat the config query as fatal give up entirely. Consequence to know about:
++ * an unqualified single-label name is not retried with a suffix, so callers
++ * must pass FQDNs -- which is what every game protocol does anyway. */
++static NTSTATUS android_dns_get_searchlist( void *args )
++{
++    const struct get_searchlist_params *params = args;
++    DWORD needed = sizeof(WCHAR); /* just the terminator */
++
++    if (!params->list || *params->len < needed)
++    {
++        *params->len = needed;
++        return !params->list ? ERROR_SUCCESS : ERROR_MORE_DATA;
++    }
++
++    *params->len = needed;
++    params->list[0] = 0;
++    return ERROR_SUCCESS;
++}
++
++/* There is no supported way for native code to enumerate Android's DNS servers:
++ * netd owns them, the net.dns1..4 system properties that used to expose them
++ * were removed in Android 8, and the only current source is
++ * ConnectivityManager/LinkProperties on the Java side.
++ *
++ * DNS_ERROR_NO_DNS_SERVERS is therefore the truthful answer and not a
++ * placeholder -- it is exactly what libresolv.c returns when the resolver
++ * reports none, so every caller already handles it, and patches/wine/0015
++ * already stops iphlpapi treating an adapter with no server list as a failure.
++ * Resolution itself is unaffected: queries go to netd, which knows the servers
++ * even though we cannot name them. */
++static NTSTATUS android_dns_get_serverlist( void *args )
++{
++    const struct get_serverlist_params *params = args;
++
++    TRACE( "family %u: Android does not expose its resolver's servers\n", params->family );
++    return DNS_ERROR_NO_DNS_SERVERS;
++}
++
++/* query.c calls this immediately before every query and RETURNS EARLY if it
++ * fails, so this must not report an error for the ordinary case of "no servers
++ * requested" or DnsQuery stops working altogether.
++ *
++ * When a caller does name servers we cannot honour them -- netd decides where a
++ * query goes -- so the request is warned about and dropped. Answering the query
++ * against the system resolver is strictly better than refusing it, and the WARN
++ * means the one program that cares leaves a trace instead of a mystery. */
++static NTSTATUS android_dns_set_serverlist( void *args )
++{
++    const IP4_ARRAY *addrs = args;
++
++    if (addrs && addrs->AddrCount)
++        WARN( "ignoring %u caller-supplied server(s); Android's resolver is owned by netd\n",
++              (UINT)addrs->AddrCount );
++    return ERROR_SUCCESS;
++}
++
++static NTSTATUS android_dns_query( void *args )
++{
++    const struct query_params *params = args;
++    int fd, len, rcode = 0;
++
++    /* Two things this one line gets wrong if copied from the PE side.
++     * debugstr_type() is defined in record.c, a PE-side source, so calling it
++     * from the unix half is an undefined symbol at link time. And DWORD is
++     * `unsigned int` here, not the `unsigned long` it is in a PE module, so the
++     * %#lx that Wine's own code uses for options everywhere else would read
++     * eight bytes of a four-byte argument -- on AArch64 varargs that is a
++     * garbage high half in the trace rather than a crash, which is worse. */
++    TRACE( "name %s, type %u, options %#x\n", debugstr_a(params->name),
++           params->type, (UINT)params->options );
++
++    fd = android_res_nquery( NETWORK_UNSPECIFIED, params->name, ns_c_in, params->type,
++                             map_options( params->options ) );
++    if (fd < 0)
++    {
++        WARN( "android_res_nquery failed: %d\n", fd );
++        return map_errno( -fd );
++    }
++
++    /* Closes fd itself, on success and on failure alike, so there is no
++     * android_res_cancel() path to add here. */
++    len = android_res_nresult( fd, &rcode, params->buf, *params->len );
++    if (len < 0)
++    {
++        WARN( "android_res_nresult failed: %d\n", len );
++        return map_errno( -len );
++    }
++
++    /* The unix half hands back the raw wire-format answer and nothing else:
++     * query.c reads the rcode straight out of the message header and
++     * DnsExtractRecordsFromMessage_UTF8 does all the parsing on the PE side.
++     * That is the same contract res_query() satisfies, which is why this
++     * backend is a transport swap and not a rewrite.
++     *
++     * A response too short to hold a header is the one case that contract
++     * cannot express -- query.c would call it DNS_ERROR_BAD_PACKET and lose the
++     * reason -- so the resolver's own rcode is reported instead. */
++    if (len < NS_HFIXEDSZ)
++    {
++        DNS_STATUS ret = map_rcode( rcode );
++
++        WARN( "answer of %d byte(s) is too short for a DNS header, rcode %d\n", len, rcode );
++        /* A zero rcode with no message is still a failure, just not one the
++         * resolver named. */
++        return ret ? ret : DNS_ERROR_RCODE_SERVER_FAILURE;
++    }
++
++    *params->len = len;
++    return ERROR_SUCCESS;
++}
++
++const unixlib_entry_t __wine_unix_call_funcs[] =
++{
++    android_dns_get_searchlist,
++    android_dns_get_serverlist,
++    android_dns_set_serverlist,
++    android_dns_query,
++};
++
++C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
++
++#ifdef _WIN64
++
++typedef ULONG PTR32;
++
++static NTSTATUS wow64_android_dns_get_searchlist( void *args )
++{
++    struct
++    {
++        PTR32  list;
++        PTR32  len;
++    } const *params32 = args;
++
++    struct get_searchlist_params params =
++    {
++        ULongToPtr(params32->list),
++        ULongToPtr(params32->len)
++    };
++
++    return android_dns_get_searchlist( &params );
++}
++
++static NTSTATUS wow64_android_dns_get_serverlist( void *args )
++{
++    struct
++    {
++        USHORT family;
++        PTR32  addrs;
++        PTR32  len;
++    } const *params32 = args;
++
++    struct get_serverlist_params params =
++    {
++        params32->family,
++        ULongToPtr(params32->addrs),
++        ULongToPtr(params32->len)
++    };
++
++    return android_dns_get_serverlist( &params );
++}
++
++static NTSTATUS wow64_android_dns_query( void *args )
++{
++    struct
++    {
++        PTR32  name;
++        WORD   type;
++        DWORD  options;
++        PTR32  buf;
++        PTR32  len;
++    } const *params32 = args;
++
++    struct query_params params =
++    {
++        ULongToPtr(params32->name),
++        params32->type,
++        params32->options,
++        ULongToPtr(params32->buf),
++        ULongToPtr(params32->len)
++    };
++
++    return android_dns_query( &params );
++}
++
++const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++{
++    wow64_android_dns_get_searchlist,
++    wow64_android_dns_get_serverlist,
++    android_dns_set_serverlist,
++    wow64_android_dns_query,
++};
++
++C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );
++
++#endif  /* _WIN64 */
++
++#endif /* __ANDROID__ */
