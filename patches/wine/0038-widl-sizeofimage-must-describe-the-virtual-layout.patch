@@ -1,0 +1,66 @@
+diff --git a/tools/widl/metadata.c b/tools/widl/metadata.c
+index 04b4f0853b1..6f0be20ba1a 100644
+--- a/tools/widl/metadata.c
++++ b/tools/widl/metadata.c
+@@ -133,7 +133,7 @@ streams[] =
+     { 0, 0, "#Blob", 16 }
+ };
+ 
+-static void write_headers( UINT image_size )
++static void write_headers( void )
+ {
+     static const BYTE pad[8];
+     UINT i, streams_size = 0;
+@@ -141,11 +141,6 @@ static void write_headers( UINT image_size )
+ 
+     put_data( &dos_header, sizeof(dos_header) );
+ 
+-    image_size += nt_header.OptionalHeader.SizeOfHeaders + sizeof(section_header);
+-    nt_header.OptionalHeader.SizeOfImage = (image_size + 0x1fff) & ~0x1fff;
+-
+-    put_data( &nt_header, sizeof(nt_header) );
+-
+     for (i = 0; i < WINMD_STREAM_MAX; i++)
+     {
+         if (!streams[i].data_size) continue;
+@@ -156,6 +151,31 @@ static void write_headers( UINT image_size )
+     section_header.PointerToRawData = FILE_ALIGNMENT;
+     section_header.VirtualAddress = SECTION_ALIGNMENT;
+     section_header.Misc.VirtualSize = sizeof(cor_header) + sizeof(metadata_header) + streams_size + 8;
++
++    /* SizeOfImage describes the VIRTUAL layout, not the file.
++     *
++     * It was computed from the file size rounded up to 0x2000, while the one
++     * section is placed at VirtualAddress = SECTION_ALIGNMENT (0x1000) and
++     * occupies VirtualSize rounded up to the same alignment. For every .winmd
++     * Wine generates the two disagree by a page: windows.networking.winmd has
++     * .text at 0x1000 with VirtualSize 0x1198, so the image ends at 0x3000 and
++     * the header claimed 0x2000.
++     *
++     * That is not cosmetic. ntdll's map_image_into_view sanity-checks each
++     * section against SizeOfImage and, when one overflows, does `goto done` --
++     * it stops mapping sections entirely rather than skipping the offending
++     * one. For a metadata-only file whose single section IS the metadata, the
++     * contents never get mapped, and every load logged
++     *   map_image_into_view ... section .text too large (1000+2000/2000)
++     *
++     * Computed from the section that was just laid out, so the two cannot drift
++     * apart again. The old file-derived rounding is dropped; image_size only
++     * ever reached this function to be rounded into a wrong answer.
++     */
++    nt_header.OptionalHeader.SizeOfImage = section_header.VirtualAddress +
++        ((section_header.Misc.VirtualSize + SECTION_ALIGNMENT - 1) & ~(SECTION_ALIGNMENT - 1));
++
++    put_data( &nt_header, sizeof(nt_header) );
+     section_header.SizeOfRawData = (section_header.Misc.VirtualSize + FILE_ALIGNMENT - 1) & ~(FILE_ALIGNMENT - 1);
+ 
+     put_data( &section_header, sizeof(section_header) );
+@@ -3681,7 +3701,7 @@ void write_metadata( const statement_list_t *stmts )
+ 
+     init_output_buffer();
+ 
+-    write_headers( image_size );
++    write_headers();
+     write_streams( );
+ 
+     file_size = (image_size + FILE_ALIGNMENT - 1) & ~(FILE_ALIGNMENT - 1);
