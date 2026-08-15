@@ -128,6 +128,43 @@ avoid.
   | `kernelbase +0x8f568`, `+0xf146c` | `UnhandledExceptionFilter` path |
   | `re9.exe +0x9e82ddd`, `+0x9e835ae` | the game's reporter, which drew the dialog |
 
+  **Third reproduction, and it is deterministic — 2026-08-15.** Same site, same
+  size, same offset into the page; only the region base moves:
+
+  | | first | third |
+  |---|---|---|
+  | site | `VCRUNTIME140 +0x114CC` | `VCRUNTIME140 +0x114CC` |
+  | destination (`rcx`) | `0x22EC2FA0` | `0x22EB2FA0` |
+  | size (`r8`/`r9`) | `0xE0` | `0xE0` |
+  | fault (`info[1]`) | `0x22EC3000` | `0x22EB3000` |
+
+  A 224-byte write starting `0xFA0` into a page runs `0x80` past its end, every
+  time. That rules out a wild pointer or corruption. `/proc/<pid>/maps`, read
+  while the process sat frozen behind its own dialog, is the same shape on both:
+
+  ```
+  000022eb0000-000022eb3000 rw-p    12 KB   committed
+  000022eb3000-000022ec0000 ---p    52 KB   reserved, never committed
+  ```
+
+  **And the allocation is the guest's own, not Wine's heap.** Wine rounds both
+  region and commit to `0x400 * sizeof(void*)` — 8 KB on 64-bit (`heap.c:993`) —
+  and this commits `0x3000`, which is not a multiple of that. The base is 64 KB
+  aligned, which is Windows' allocation granularity. So the shape is
+  `VirtualAlloc(MEM_RESERVE, 64K)` followed by `MEM_COMMIT` of three pages, done
+  by the game or its anti-tamper.
+
+  That leaves one question, and it decides whose bug this is: **did the guest ask
+  to commit four pages and get three?** If it asked for three and wrote into the
+  fourth, Windows would fault too and the game is relying on something else. The
+  `virtual` channel logs every `NtAllocateVirtualMemory`, so one run with it on,
+  grepped for this range, answers it. *Not yet run.*
+
+  **The dialog and the logged fault are one event**, not two: the dialog's frame
+  list matches the exception's module bases and offsets exactly, including
+  `VCRUNTIME140 +0x114cc`. Anything above that in the dialog is the game's own
+  reporter.
+
   So this is a **C++ `throw` that found no matching handler**: the unwinder ran,
   every SEH handler declined, and the unhandled filter was reached. That is a
   different problem from the one this entry assumed. It also explains the first

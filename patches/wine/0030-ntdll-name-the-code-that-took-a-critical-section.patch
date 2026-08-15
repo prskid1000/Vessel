@@ -2,7 +2,7 @@ diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
 index b430c0bb4fe..d2183387905 100644
 --- a/dlls/ntdll/sync.c
 +++ b/dlls/ntdll/sync.c
-@@ -163,6 +163,181 @@ static const char *crit_section_get_name( const RTL_CRITICAL_SECTION *crit )
+@@ -163,6 +163,228 @@ static const char *crit_section_get_name( const RTL_CRITICAL_SECTION *crit )
      return "?";
  }
  
@@ -81,8 +81,19 @@ index b430c0bb4fe..d2183387905 100644
 + * every lock acquisition in the process runs through. Nothing outside the ERR
 + * below reads it.
 + */
-+#define CRIT_SITE_SLOTS 256
++#define CRIT_SITE_SLOTS 1024
 +#define CRIT_SITE_FRAMES 8
++/* How far to look past a taken slot before giving up and evicting.
++ *
++ * **Measured, and the reason this exists.** With one slot per section and no
++ * probing, `took it at 0` was the common answer on a busy title: the key check
++ * below turns a collision into NULL, so any *other* section hashing to the same
++ * slot silently unnames a lock that is still held. A Requiem session reported
++ * one stuck section with a named holder and another with zero in the same
++ * minute, which is exactly what eviction looks like -- the named one had simply
++ * not been overwritten yet. Four probes and four times the slots make that
++ * rare; clearing on release, below, makes free slots the normal case. */
++#define CRIT_SITE_PROBES 4
 +
 +static const RTL_CRITICAL_SECTION *crit_site_keys[CRIT_SITE_SLOTS];
 +static void *crit_site_addrs[CRIT_SITE_SLOTS];
@@ -162,9 +173,26 @@ index b430c0bb4fe..d2183387905 100644
 +
 +#endif
 +
++/* This section's slot, or the first free one after it. Returns the base slot
++ * when neither exists, which is the eviction case and still bounded. */
++static inline unsigned int crit_site_find( const RTL_CRITICAL_SECTION *crit, int for_write )
++{
++    unsigned int base = crit_site_slot( crit );
++    unsigned int i;
++
++    for (i = 0; i < CRIT_SITE_PROBES; i++)
++    {
++        unsigned int slot = (base + i) % CRIT_SITE_SLOTS;
++
++        if (crit_site_keys[slot] == crit) return slot;
++        if (for_write && !crit_site_keys[slot]) return slot;
++    }
++    return base;
++}
++
 +static inline void crit_section_note_site( const RTL_CRITICAL_SECTION *crit, void *site )
 +{
-+    unsigned int slot = crit_site_slot( crit );
++    unsigned int slot = crit_site_find( crit, TRUE );
 +    /* the key last, so a reader that matches it has the best chance of seeing
 +     * the two values that belong with it */
 +    crit_site_addrs[slot] = site;
@@ -172,9 +200,28 @@ index b430c0bb4fe..d2183387905 100644
 +    crit_site_keys[slot] = crit;
 +}
 +
++/* Released, so the slot is free for the next section rather than held until
++ * something evicts it. This is what keeps probing cheap: a process with a few
++ * hundred live sections leaves most slots empty, so a colliding section finds
++ * space instead of unnaming whatever was there. */
++static inline void crit_section_forget_site( const RTL_CRITICAL_SECTION *crit )
++{
++    unsigned int base = crit_site_slot( crit );
++    unsigned int i;
++
++    for (i = 0; i < CRIT_SITE_PROBES; i++)
++    {
++        unsigned int slot = (base + i) % CRIT_SITE_SLOTS;
++
++        if (crit_site_keys[slot] != crit) continue;
++        crit_site_keys[slot] = NULL;
++        return;
++    }
++}
++
 +static inline void *crit_section_get_site( const RTL_CRITICAL_SECTION *crit, void **caller )
 +{
-+    unsigned int slot = crit_site_slot( crit );
++    unsigned int slot = crit_site_find( crit, FALSE );
 +    *caller = NULL;
 +    if (crit_site_keys[slot] != crit) return NULL;
 +    *caller = crit_site_callers[slot];
@@ -244,3 +291,11 @@ index b430c0bb4fe..d2183387905 100644
          ret = TRUE;
      }
      return ret;
+@@ -430,6 +630,7 @@ NTSTATUS WINAPI RtlLeaveCriticalSection( RTL_CRITICAL_SECTION *crit )
+     else
+     {
+         crit->OwningThread = 0;
++        crit_section_forget_site( crit );
+         if (InterlockedDecrement( &crit->LockCount ) >= 0)
+         {
+             /* someone is waiting */
