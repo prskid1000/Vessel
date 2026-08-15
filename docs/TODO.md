@@ -160,6 +160,30 @@ avoid.
   `virtual` channel logs every `NtAllocateVirtualMemory`, so one run with it on,
   grepped for this range, answers it. *Not yet run.*
 
+  **Run, 2026-08-15, and `+virtual` cannot answer it in the form it shipped in.**
+  The channel is unreadable on this stack, and the number says why: of the first
+  89,000 lines, **75,505 were `virtual:dump_view` — 85%.** That macro fires on
+  every view create, split and protection change, and FEX's JIT changes
+  protections continuously, so the 32 MB head budget was gone in 90 seconds and
+  1.87 million lines were dropped. The records the run was for —
+  `NtAllocateVirtualMemory` and its neighbours, 6% of the same sample — went into
+  the elision with everything else.
+
+  Two counts from that session are worth keeping because they look alarming and
+  are not: `virtual_setup_exception exception outside of stack limits` fired 1207
+  times, at ~1200 *distinct* addresses in one region with the stack pointer
+  constant. That is FEX taking signals while running on its own stack, which Wine
+  warns about and continues from — not a loop, and not the fault being chased.
+
+  **`patches/wine/0043` is the fix, in two halves.** The dump moves to its own
+  `virtual_views` channel, so `+virtual` becomes a channel that can be read;
+  nothing below it is silenced, because second place is 4.5% and everything under
+  that is what the channel exists to carry. And `virtual_handle_fault` now prints
+  the view a fault it *could not repair* landed in — base, size, bytes actually
+  committed, page protection — which answers the question above without a traced
+  session at all. Silent until it fires, and it only fires on a fault that is
+  already fatal.
+
   **The dialog and the logged fault are one event**, not two: the dialog's frame
   list matches the exception's module bases and offsets exactly, including
   `VCRUNTIME140 +0x114cc`. Anything above that in the dialog is the game's own
@@ -508,6 +532,38 @@ others, and they landed on the morning the menu stopped. See the entry below.
   *Done when:* the walk records *something* rather than zero — the entry thunk's
   own return address is worth more than nothing, and the EC context's guest RIP
   is worth more than that.
+
+  **Answered 2026-08-15, and the diagnosis above is wrong.** It was not the frame
+  walk. It was eviction: 256 slots, one entry each, and `crit_site_get_site`
+  returning NULL on a key mismatch — so a section that had simply been displaced
+  by another hashing to the same slot printed identically to one that was never
+  recorded. The tell was in the same minute of the same session: one stuck
+  section named its holder while another printed zero. `0030` now carries 1024
+  slots, four-way probing, and `crit_section_forget_site` on release, and Wine
+  revision 17's first run named a holder on the first try:
+
+  ```
+  section 0000006FFFF80E18 "/src/native/wine/dlls/ntdll/loader.c: loader_section"
+    wait timed out in thread 0160, blocked by 0154 which took it at 0000006FFFED20B8
+  ```
+
+  ntdll loaded at `0x6FFFE30000` that run, so the site is `ntdll+0xA20B8`, and
+  **the resolution checks itself** — two instructions earlier the same function
+  computes the very section the message names:
+
+  ```
+  1800a20ac:  add  x21, x21, #0xe18   ; 0x180150e18 -> runtime 0x6FFFF80E18
+  1800a20b0:  mov  x0, x21
+  1800a20b4:  bl   RtlEnterCriticalSection
+  1800a20b8:                          ; <- recorded site: loader_init +0x54
+  ```
+
+  `called from` is still zero, which is the frame walk and is the residue of this
+  entry rather than its subject. **Not closed on the strength of one line**: that
+  session ran under `+virtual` at roughly a hundred times normal cost, so the
+  60-second timeout it fired on says nothing about whether that hold was a real
+  stall. What is established is that the instrument works. *Done when:* a
+  timeout naming a holder is seen in a session that is not being traced.
 
 ## Backlog
 

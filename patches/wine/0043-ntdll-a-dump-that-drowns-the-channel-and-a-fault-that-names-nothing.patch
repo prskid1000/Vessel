@@ -1,0 +1,132 @@
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -105,6 +105,7 @@
+ WINE_DECLARE_DEBUG_CHANNEL(module);
+ WINE_DECLARE_DEBUG_CHANNEL(virtual_ranges);
+ WINE_DECLARE_DEBUG_CHANNEL(virtstat);
++WINE_DECLARE_DEBUG_CHANNEL(virtual_views);
+ 
+ /* Gdb integration, in loader/main.c */
+ static struct r_debug *wine_r_debug;
+@@ -342,7 +343,22 @@
+ #define ROUND_ADDR(addr,mask) ((void *)((UINT_PTR)(addr) & ~(UINT_PTR)(mask)))
+ #define ROUND_SIZE(addr,size,mask) (((SIZE_T)(size) + ((UINT_PTR)(addr) & (mask)) + (mask)) & ~(UINT_PTR)(mask))
+ 
+-#define VIRTUAL_DEBUG_DUMP_VIEW(view) do { if (TRACE_ON(virtual)) dump_view(view); } while (0)
++/* Vessel: the view dump is its own channel, because it drowned the one it
++ * shared.
++ *
++ * This fires on every view create, split and protection change, and under FEX
++ * the JIT changes protections constantly -- so `+virtual` on a real title is
++ * not a channel anyone can read. Measured on a Requiem session: 75,505 of the
++ * first 89,000 lines were this macro, 85% of the log, and it filled a 32 MB
++ * head budget in 90 seconds and dropped 1.87 million lines. The records that
++ * `+virtual` exists to carry -- NtAllocateVirtualMemory, NtProtectVirtualMemory,
++ * NtFreeVirtualMemory, 6% of the same sample -- went into the elision with it.
++ *
++ * Splitting rather than deleting: the dump is the right instrument for a
++ * layout question and the wrong one for every other question on the channel.
++ * `+virtual_views` still asks for it by name.
++ */
++#define VIRTUAL_DEBUG_DUMP_VIEW(view) do { if (TRACE_ON(virtual_views)) dump_view(view); } while (0)
+ #define VIRTUAL_DEBUG_DUMP_RANGES() do { if (TRACE_ON(virtual_ranges)) dump_free_ranges(); } while (0)
+ 
+ #ifndef MAP_NORESERVE
+@@ -1539,34 +1555,34 @@
+     char *addr = view->base;
+     BYTE prot = get_page_vprot( addr );
+ 
+-    TRACE( "View: %p - %p %s", addr, addr + view->size - 1, get_prot_str(view->protect) );
++    TRACE_(virtual_views)( "View: %p - %p %s", addr, addr + view->size - 1, get_prot_str(view->protect) );
+     if (view->protect & VPROT_NATIVE)
+-        TRACE(" (native)\n");
++        TRACE_(virtual_views)(" (native)\n");
+     else if (view->protect & VPROT_SYSTEM)
+-        TRACE( " (builtin image)\n" );
++        TRACE_(virtual_views)( " (builtin image)\n" );
+     else if (view->protect & VPROT_FREE_PLACEHOLDER)
+-        TRACE( " (placeholder)\n" );
++        TRACE_(virtual_views)( " (placeholder)\n" );
+     else if (view->protect & SEC_IMAGE)
+-        TRACE( " (image)\n" );
++        TRACE_(virtual_views)( " (image)\n" );
+     else if (view->protect & SEC_FILE)
+-        TRACE( " (file)\n" );
++        TRACE_(virtual_views)( " (file)\n" );
+     else if (view->protect & (SEC_RESERVE | SEC_COMMIT))
+-        TRACE( " (anonymous)\n" );
++        TRACE_(virtual_views)( " (anonymous)\n" );
+     else
+-        TRACE( " (valloc)\n");
++        TRACE_(virtual_views)( " (valloc)\n");
+ 
+     for (count = i = 1; i < view->size >> page_shift; i++, count++)
+     {
+         BYTE next = get_page_vprot( addr + (count << page_shift) );
+         if (next == prot) continue;
+-        TRACE( "      %p - %p %s\n",
++        TRACE_(virtual_views)( "      %p - %p %s\n",
+                  addr, addr + (count << page_shift) - 1, get_prot_str(prot) );
+         addr += (count << page_shift);
+         prot = next;
+         count = 0;
+     }
+     if (count)
+-        TRACE( "      %p - %p %s\n",
++        TRACE_(virtual_views)( "      %p - %p %s\n",
+                  addr, addr + (count << page_shift) - 1, get_prot_str(prot) );
+ }
+ 
+@@ -4957,6 +4973,51 @@
+                 ret = STATUS_SUCCESS;
+         }
+     }
++    /* Vessel: a fault we did not repair is worth one line about where it landed.
++     *
++     * Everything above this point either repairs the fault or decides it cannot,
++     * and the decision is invisible: the thread carries STATUS_ACCESS_VIOLATION
++     * out to the guest, which reports an address and nothing about the memory at
++     * it. Reading that back afterwards costs a full `+virtual` session -- and the
++     * dump this file's other Vessel change moved off the channel is exactly what
++     * made those sessions unreadable.
++     *
++     * Requiem, three times, faulted writing 224 bytes starting 0xFA0 into the
++     * third page of a 64 KB reservation with three pages committed, the write
++     * running 0x80 past the committed end. Same size, same offset, only the base
++     * moving -- so the question is what that region was asked to be, and this is
++     * the one place that can answer while the view tree is still held.
++     *
++     * Silent until it fires, and it fires on a fault that is already fatal, which
++     * is also why the walk over the view's pages is not bounded: the process is
++     * ending and an exact committed total is worth more than the microseconds.
++     */
++    if (ret == STATUS_ACCESS_VIOLATION)
++    {
++        struct file_view *view = find_view( addr, 0 );
++
++        if (!view) ERR( "unrepaired fault at %p, no view covers it\n", addr );
++        else
++        {
++            const char *how = (err == EXCEPTION_WRITE_FAULT) ? "write" :
++                              (err == EXCEPTION_EXECUTE_FAULT) ? "exec" : "read";
++            char *base = view->base;
++            SIZE_T i, pages = view->size >> page_shift, committed = 0;
++
++            for (i = 0; i < pages; i++)
++                if (get_page_vprot( base + (i << page_shift) ) & VPROT_COMMITTED)
++                    committed += (SIZE_T)1 << page_shift;
++
++            /* One get_prot_str per ERR, and that is not a style choice:
++             * it returns a *static* buffer, so two calls in one printf would
++             * both print whichever answer was computed second. */
++            ERR( "unrepaired %s fault at %p in view %p size %08lx, %08lx committed\n",
++                 how, addr, base, view->size, committed );
++            ERR( "  faulting page %p is %s\n", page, get_prot_str( get_host_page_vprot( page ) ) );
++            ERR( "  view protect %s\n", get_prot_str( view->protect ) );
++        }
++    }
++
+     mutex_unlock( &virtual_mutex );
+     rec->ExceptionCode = ret;
+     return ret;
