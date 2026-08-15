@@ -122,21 +122,55 @@ avoid.
   XIO: fatal IO error 2 (No such file or directory) on X server ":0"
   ```
 
-  and `exit CRASHED code 1`, after the game has been rendering. **Vessel's X
-  server is Java, inside the Android app process** (`com.winlator.xserver`), so
-  this says the *app* stopped serving — not that a container process died.
+  and `exit CRASHED code 1`, after the game has been rendering.
 
-  *Not yet established, and one dead end recorded so it is not walked twice:* I
-  attributed this to memory pressure on the strength of `ActivityManager …
-  cch+95 CEM` lines. Those are Android trimming **cached background** processes,
-  which it does routinely — not evidence of duress. RSS does scale with
-  granularity (4.6 → 6.0 → 7.5 GB) and the system sat at 11–12 GB of 15.2, so
-  pressure remains plausible; it is simply not shown.
+  **The app-side surface has now been examined, and it cleared every theory
+  this entry used to hold — including the memory one.** Measured on 2026-08-15
+  with a device-side sampler and a live `logcat`, at the moment `re9.exe` died:
 
-  *Done when:* the app-side surface is examined — an Android-level crash, ANR,
-  tombstone, or low-memory kill of `app.vessel` — which is the one layer this
-  investigation never looked at. `logcat` around the moment of death, and
-  `/data/tombstones` if reachable.
+  | check | result |
+  |---|---|
+  | `app.vessel` after the death | **still alive, same pid** — the app never died |
+  | `lmkd` / lowmemorykiller | nothing |
+  | tombstone, `SIGSEGV`, `SIGABRT`, ANR | nothing |
+  | MemAvailable / SwapFree | **3.3 GB / 8.6 GB** free |
+  | RSS over the last 15 s | **flat-to-falling** (5.48 → 5.46 GB) |
+  | teardown | ~4 s, orderly |
+
+  So memory is ruled out, not merely unproven, and the app is not what goes
+  away. Two further corrections fall out of that:
+
+  - **`exit code 1` is not the game's.** `SessionRuntime` waits on
+    `explorer /desktop=`, not on `re9.exe`. libX11's `_XIOError` calls
+    `exit(1)`, so *every* X client exits 1 the moment the connection drops —
+    the desktop included. The code is a consequence of the X death, not a
+    report about the game.
+  - **The game did not fault.** 3,942 lines contain no `err:seh:`, no unhandled
+    exception, no `CrashReport.exe`. Per `TraceSpec.kt`'s `exceptions` topic, an
+    unhandled exception prints *without* any channel enabled — so that absence
+    is already proof at full strength, and `+seh` would add nothing. (The
+    `unrepaired write fault at 0x100` entries are handled probes: they recur on
+    thread `0194` for 1,500 lines while the game keeps rendering.)
+
+  **The mechanism, found in Vessel's own X server and now fixed.**
+  `xconnector_epoll.c` had no `EINTR` handling anywhere — the string does not
+  appear in `app/src/main/cpp` at all — and `signal(7)` lists `poll`,
+  `epoll_wait` and `select` as never restarted after a signal *regardless of
+  `SA_RESTART`*. ART installs handlers on this process (SIGSEGV for implicit
+  null checks, SIGQUIT for thread dumps, SIGUSR1) and profilers use
+  `SIGRTMIN+n`. On the epoll thread `epoll_wait` returning `-1` fell through to
+  `break` and then `killAllConnections()`, dropping **every** X client at once —
+  which is exactly the observed three simultaneous `X connection broken` lines
+  with the app still running.
+
+  Both paths now retry on `EINTR`, the JNI upcalls check for pending
+  exceptions, and the Java side catches `RuntimeException` so one client's bad
+  request cannot reach native with an exception pending.
+
+  *Done when:* a session survives, **or** a session dies while `logcat -s
+  VesselXServer` stays silent — which rules this mechanism out in one run. The
+  log line is deliberately there so the fix can return a negative rather than
+  become a standing assumption.
 
 - [ ] **#51 (historical) — a relocated ntdll lies about its own base.**
   *(Titled "an unhandled C++ exception at the settings menu" until 2026-08-15;

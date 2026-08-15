@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <errno.h>
 #include <jni.h>
 #include <sys/epoll.h>
 #include <sys/poll.h>
@@ -125,6 +126,44 @@ static void removeFdFromEpoll(int epollFd, int fd) {
     epoll_ctl(epollFd, EPOLL_CTL_DEL, fd, NULL);
 }
 
+/* Vessel: a JNI upcall that left an exception pending must not be followed by
+ * another one.
+ *
+ * Nothing in this file used to check. ART aborts the process on the *next* JNI
+ * call while an exception is still pending ("JNI DETECTED ERROR IN
+ * APPLICATION: ... called with pending exception"), so one client's
+ * NullPointerException becomes a process kill several callbacks later, at a
+ * site with nothing to do with the cause.
+ *
+ * The Java side is the primary guard and now catches RuntimeException as well
+ * as IOException. This is the backstop for what it still cannot catch -- an
+ * Error, such as OutOfMemoryError from a malformed length field asking for a
+ * huge buffer, which must not be allowed to take the whole server down.
+ */
+static void clearPendingException(JNIEnv* env, const char* where) {
+    if (!(*env)->ExceptionCheck(env)) return;
+    (*env)->ExceptionDescribe(env);
+    (*env)->ExceptionClear(env);
+    __android_log_print(ANDROID_LOG_ERROR, "VesselXServer",
+                        "exception escaped %s, cleared", where);
+}
+
+/* Vessel: a signal is not a shutdown.
+ *
+ * poll(2) is one of the calls that is *never* restarted after a signal handler
+ * runs, regardless of SA_RESTART -- signal(7) lists poll, epoll_wait and
+ * select together as the exceptions to it. ART installs handlers on this
+ * process for its own purposes (SIGSEGV for implicit null checks, SIGQUIT for
+ * thread dumps, SIGUSR1) and heap profilers use SIGRTMIN+n, so EINTR here is
+ * an ordinary event rather than a rare one.
+ *
+ * Treating it as an error ended this client's poll thread and dropped the
+ * connection, which the guest sees as `X connection to :0 broken` and libX11
+ * turns into exit(1) from _XIOError. Retrying is the whole fix.
+ *
+ * `revents` is rewritten by every poll() call, so a retry cannot observe a
+ * stale one; and a genuine error still returns -1 below.
+ */
 static int waitForSocketRead(jint clientFd, jint shutdownFd) {
     struct pollfd pfds[2] = {0};
     pfds[0].fd = clientFd;
@@ -133,7 +172,12 @@ static int waitForSocketRead(jint clientFd, jint shutdownFd) {
     pfds[1].fd = shutdownFd;
     pfds[1].events = POLLIN;
 
-    int res = poll(pfds, 2, -1);
+    int res;
+    do {
+        res = poll(pfds, 2, -1);
+    }
+    while (res < 0 && errno == EINTR);
+
     if (res < 0 || (pfds[1].revents & POLLIN)) return -1;
     return (pfds[0].revents & POLLIN) ? 1 : 0;
 }
@@ -220,7 +264,10 @@ static void* pollThread(void* param) {
     int res;
     do {
         res = waitForSocketRead(client->fd, client->shutdownFd);
-        if (res == 1) (*jmethods->env)->CallVoidMethod(jmethods->env, jmethods->obj, jmethods->handleExistingConnection, client->tag);
+        if (res == 1) {
+            (*jmethods->env)->CallVoidMethod(jmethods->env, jmethods->obj, jmethods->handleExistingConnection, client->tag);
+            clearPendingException(jmethods->env, "handleExistingConnection (client thread)");
+        }
     }
     while (client->running && res >= 0);
 
@@ -258,7 +305,34 @@ static void* epollThread(void* param) {
 
     while (connector->running) {
         int numFds = epoll_wait(connector->epollFd, events, MAX_EVENTS, -1);
-        if (numFds < 0) break;
+        if (numFds < 0) {
+            /* Vessel: see waitForSocketRead for why EINTR arrives here at all.
+             * The cost is far higher on this thread: the `break` below falls
+             * straight into killAllConnections(), which drops *every* X client
+             * at once rather than one.
+             *
+             * That is the signature that was chased for days as an app crash
+             * and is not one -- three simultaneous `X connection broken`
+             * lines, the desktop exiting 1 through libX11's _XIOError (which
+             * is where Vessel's exit code 1 comes from; it waits on
+             * `explorer /desktop=`, not on the game), and app.vessel still
+             * alive afterwards with no tombstone, no lowmemorykiller entry and
+             * gigabytes of memory free.
+             *
+             * Logged rather than silently retried, because this has to be able
+             * to return a negative: a session that dies with nothing from this
+             * tag did not die this way, and that rules the mechanism out in
+             * one run instead of leaving it as a standing suspicion.
+             */
+            if (errno == EINTR) {
+                __android_log_print(ANDROID_LOG_WARN, "VesselXServer",
+                                    "epoll_wait interrupted by a signal, retrying");
+                continue;
+            }
+            __android_log_print(ANDROID_LOG_ERROR, "VesselXServer",
+                                "epoll_wait failed (errno %d), dropping every client", errno);
+            break;
+        }
         for (int i = 0; i < numFds; i++) {
             if (events[i].data.ptr == &connector->serverFd) {
                 int clientFd = accept(connector->serverFd, NULL, NULL);
@@ -268,6 +342,7 @@ static void* epollThread(void* param) {
                     (events[i].events & EPOLLIN)) {
                 ConnectedClient* client = events[i].data.ptr;
                 (*jmethods->env)->CallVoidMethod(jmethods->env, jmethods->obj, jmethods->handleExistingConnection, client->tag);
+                clearPendingException(jmethods->env, "handleExistingConnection (epoll thread)");
             }
         }
     }

@@ -167,8 +167,36 @@ private fun SessionLogContent(
         snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
             .collect { (scrolling, more) -> if (scrolling) following = !more }
     }
-    LaunchedEffect(state.entries.size, state.live, following) {
-        if (state.live && following && state.entries.isNotEmpty()) {
+    // **This used to be gated on `state.live`, and that was the wrong half.**
+    //
+    // A running session followed its tail; a finished one opened at line 1. But
+    // the reason anyone opens a finished log is that it ended badly, and what
+    // they want is the end of it — the last thing that printed, and the `EV …
+    // distinct errors …` digest, both of which are the final lines in the file.
+    // Landing at the top asked the reader to flick through several thousand
+    // lines of load records to reach the only part they came for.
+    //
+    // So the rule is now "open at the end, and stay there until the reader says
+    // otherwise", which is what every terminal does and is the same contract the
+    // `following` flag above already implements. Live and finished differ only
+    // in whether more lines are still arriving.
+    //
+    // **It reaches the true end by composing with the paging effect below rather
+    // than by seeking**, because the store has no tail-seek: `read` takes a
+    // forward byte cursor. Scrolling to the last loaded line puts the viewport
+    // inside the paging effect's trigger window, which asks for the next page,
+    // which grows `entries`, which re-runs this — so it walks to the real end a
+    // page at a time and stops on its own at `atEnd`. Scrolling up clears
+    // `following` and halts the walk immediately, so a reader who wants the top
+    // is never fighting it.
+    //
+    // The bound is pre-existing and worth knowing: a log past `MAX_VIEW_LINES`
+    // (50,000) sets `truncated` and stops paging, so on a log that large this
+    // lands at the truncation point rather than the end. Reaching the end of
+    // those needs tail-first reads in the store, which is a change to the cursor
+    // model and not to this screen.
+    LaunchedEffect(state.entries.size, following) {
+        if (following && state.entries.isNotEmpty()) {
             listState.scrollToItem(state.entries.lastIndex)
         }
     }

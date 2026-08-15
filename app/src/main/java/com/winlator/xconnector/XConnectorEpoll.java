@@ -1,5 +1,7 @@
 package com.winlator.xconnector;
 
+import android.util.Log;
+
 import androidx.annotation.Keep;
 
 import java.io.IOException;
@@ -84,6 +86,28 @@ public class XConnectorEpoll {
             else requestHandler.handleRequest(client);
         }
         catch (IOException e) {
+            killConnection(client);
+        }
+        // Vessel: a malformed request must cost one client, not the server.
+        //
+        // This method is called from native code (see xconnector_epoll.c), and
+        // only IOException was caught. Every request handler below this point
+        // indexes into a buffer using lengths the client chose, so a
+        // RuntimeException -- ArrayIndexOutOfBounds, NullPointerException,
+        // IllegalArgumentException from a bad enum ordinal -- is a reachable
+        // outcome rather than a hypothetical one. Escaping into JNI leaves an
+        // exception pending, and ART aborts the process on the *next* JNI call
+        // with "JNI DETECTED ERROR IN APPLICATION", at a site unrelated to the
+        // cause.
+        //
+        // Killing just this connection is the same response IOException already
+        // gets, and for the same reason: the client has stopped making sense,
+        // and no other client is implicated. Logged because a silently dropped
+        // connection is indistinguishable from the EINTR defect that
+        // xconnector_epoll.c documents, and telling those two apart is the
+        // whole point of instrumenting either.
+        catch (RuntimeException e) {
+            Log.e("VesselXServer", "request handler threw, dropping this client", e);
             killConnection(client);
         }
     }
