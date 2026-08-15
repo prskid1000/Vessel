@@ -576,10 +576,17 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
                         val wire = spec.options.firstOrNull { spec.label(it) == typed } ?: typed
                         onParam(spec.key, ParamValue.Text(wire))
                     },
-                    placeholder = "1280x720",
+                    // Both of these used to be `display.resolution`'s and were
+                    // applied to every enum-or-text param: the placeholder read
+                    // "1280x720" in the RAM field, and the validity test was that
+                    // param's own `WxH` regex — so `hardware.ram = 15` drew in the
+                    // danger colour for not being a screen size. See
+                    // [ParamSpec.pattern]. No pattern means anything typed is
+                    // accepted, which is what a free-text field should do.
+                    placeholder = spec.placeholder.orEmpty(),
                     isError = current.isNotBlank() &&
                         current !in spec.options &&
-                        !Regex("""^\s*\d{1,5}\s*[xX]\s*\d{1,5}\s*$""").matches(current),
+                        spec.pattern?.let { !Regex(it).matches(current) } == true,
                 )
             }
 

@@ -36,9 +36,23 @@ no view covers at all:
 
 See patches/wine/0044.
 
-One caveat for whoever reads its output next: "unrepaired by this layer" is not
-"fatal". FEX handles many of these itself -- one session logged 522 on re9.exe's
-own image from write-watch alone.
+THE FIRST VERSION OF THAT REPORT WAS ITSELF A FLOOD, which is worth recording
+because this patch's other half exists to fix exactly that mistake. It reported
+every unrepaired fault, at ERR, over three lines. But "unrepaired by this layer"
+is not "fatal" -- FEX handles most of them itself, one session taking 522 on
+re9.exe's own image from write-watch alone -- so a session ended with
+
+    EV … and 30042 further distinct errors, not listed …
+
+the error digest useless, and Vessel's session-stopped banner quoting `view
+protect --rw-`, the third line of a three-line report, which says nothing on its
+own. The real exit-code-1 cause was buried underneath it.
+
+So the report is now split by what the fault means, and is one line either way:
+an address no view covers is *always* wrong -- a pointer into nothing, which no
+handler can repair -- and stays an ERR; a fault inside a view is ordinary
+emulator business and drops to WARN on `virtual`, off unless asked for, with the
+page walk inside the WARN_ON test so an unasked-for channel costs nothing.
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
@@ -51,7 +65,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
  
  /* Gdb integration, in loader/main.c */
  static struct r_debug *wine_r_debug;
-@@ -342,7 +343,22 @@
+@@ -342,7 +343,23 @@
  #define ROUND_ADDR(addr,mask) ((void *)((UINT_PTR)(addr) & ~(UINT_PTR)(mask)))
  #define ROUND_SIZE(addr,size,mask) (((SIZE_T)(size) + ((UINT_PTR)(addr) & (mask)) + (mask)) & ~(UINT_PTR)(mask))
  
@@ -62,10 +76,11 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 + * This fires on every view create, split and protection change, and under FEX
 + * the JIT changes protections constantly -- so `+virtual` on a real title is
 + * not a channel anyone can read. Measured on a Requiem session: 75,505 of the
-+ * first 89,000 lines were this macro, 85% of the log, and it filled a 32 MB
-+ * head budget in 90 seconds and dropped 1.87 million lines. The records that
-+ * `+virtual` exists to carry -- NtAllocateVirtualMemory, NtProtectVirtualMemory,
-+ * NtFreeVirtualMemory, 6% of the same sample -- went into the elision with it.
++ * first 89,000 lines were this macro, 85% of the log. It filled a 32 MB head
++ * budget in 90 seconds and dropped 1.87 million lines, taking the records the
++ * channel exists for -- NtAllocateVirtualMemory and its neighbours, 6% of the
++ * same sample -- into the elision with it. After the split the same 8 MB held
++ * 9,208 allocation records instead of 1,239.
 + *
 + * Splitting rather than deleting: the dump is the right instrument for a
 + * layout question and the wrong one for every other question on the channel.
@@ -75,7 +90,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
  #define VIRTUAL_DEBUG_DUMP_RANGES() do { if (TRACE_ON(virtual_ranges)) dump_free_ranges(); } while (0)
  
  #ifndef MAP_NORESERVE
-@@ -1539,34 +1555,34 @@
+@@ -1539,34 +1556,34 @@
      char *addr = view->base;
      BYTE prot = get_page_vprot( addr );
  
@@ -120,52 +135,64 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
                   addr, addr + (count << page_shift) - 1, get_prot_str(prot) );
  }
  
-@@ -4957,6 +4973,51 @@
+@@ -4957,6 +4974,63 @@
                  ret = STATUS_SUCCESS;
          }
      }
 +    /* Vessel: a fault we did not repair is worth one line about where it landed.
 +     *
-+     * Everything above this point either repairs the fault or decides it cannot,
-+     * and the decision is invisible: the thread carries STATUS_ACCESS_VIOLATION
-+     * out to the guest, which reports an address and nothing about the memory at
-+     * it. Reading that back afterwards costs a full `+virtual` session -- and the
-+     * dump this file's other Vessel change moved off the channel is exactly what
-+     * made those sessions unreadable.
++     * Everything above either repairs the fault or decides it cannot, and the
++     * decision was invisible: the thread carried STATUS_ACCESS_VIOLATION out to
++     * the guest, which reports an address and nothing about the memory at it.
 +     *
-+     * Requiem, three times, faulted writing 224 bytes starting 0xFA0 into the
-+     * third page of a 64 KB reservation with three pages committed, the write
-+     * running 0x80 past the committed end. Same size, same offset, only the base
-+     * moving -- so the question is what that region was asked to be, and this is
-+     * the one place that can answer while the view tree is still held.
++     * THE SPLIT BETWEEN ERR AND WARN IS THE WHOLE DESIGN, and the first version
++     * of this got it wrong in a way worth recording. It reported every unrepaired
++     * fault, at ERR, over three lines. But "unrepaired by this layer" is not
++     * "fatal" -- FEX handles most of these itself, one Requiem session taking 522
++     * on the game's own image from write-watch alone -- so a single session ended
++     * with `30042 further distinct errors, not listed`, the digest useless, and
++     * the session-stopped banner quoting `view protect --rw-`, which was line
++     * three of three and says nothing on its own. An instrument that buries the
++     * failure it was built to find is the exact defect the channel split above
++     * exists to fix.
 +     *
-+     * Silent until it fires, and it fires on a fault that is already fatal, which
-+     * is also why the walk over the view's pages is not bounded: the process is
-+     * ending and an exact committed total is worth more than the microseconds.
++     * So: an address that no view covers is *always* wrong -- a pointer into
++     * nothing, which no handler can repair and which nothing legitimate produces
++     * -- and that is the ERR. A fault inside a view is ordinary emulator business
++     * and drops to WARN on `virtual`, off unless asked for. One line either way,
++     * because a multi-line report gets quoted by its last line.
++     *
++     * This is what named the cause of the Requiem crash, in the ERR branch:
++     *
++     *   unrepaired read fault at 0x6fffe3003c, no view covers it
++     *
++     * -- ntdll's stale base plus 0x3c, the DOS header of a module that had been
++     * relocated out from under the pointer. See patches/wine/0044.
++     *
++     * The page walk sits inside the WARN_ON test so that a channel nobody asked
++     * for costs nothing, and get_prot_str is copied once because it returns a
++     * static buffer: two calls in one printf would both print the second answer.
 +     */
 +    if (ret == STATUS_ACCESS_VIOLATION)
 +    {
 +        struct file_view *view = find_view( addr, 0 );
++        const char *how = (err == EXCEPTION_WRITE_FAULT) ? "write" :
++                          (err == EXCEPTION_EXECUTE_FAULT) ? "exec" : "read";
 +
-+        if (!view) ERR( "unrepaired fault at %p, no view covers it\n", addr );
-+        else
++        if (!view) ERR( "unrepaired %s fault at %p, no view covers it\n", how, addr );
++        else if (WARN_ON(virtual))
 +        {
-+            const char *how = (err == EXCEPTION_WRITE_FAULT) ? "write" :
-+                              (err == EXCEPTION_EXECUTE_FAULT) ? "exec" : "read";
-+            char *base = view->base;
++            char *view_base = view->base;
 +            SIZE_T i, pages = view->size >> page_shift, committed = 0;
++            char page_prot[8];
 +
 +            for (i = 0; i < pages; i++)
-+                if (get_page_vprot( base + (i << page_shift) ) & VPROT_COMMITTED)
++                if (get_page_vprot( view_base + (i << page_shift) ) & VPROT_COMMITTED)
 +                    committed += (SIZE_T)1 << page_shift;
 +
-+            /* One get_prot_str per ERR, and that is not a style choice:
-+             * it returns a *static* buffer, so two calls in one printf would
-+             * both print whichever answer was computed second. */
-+            ERR( "unrepaired %s fault at %p in view %p size %08lx, %08lx committed\n",
-+                 how, addr, base, view->size, committed );
-+            ERR( "  faulting page %p is %s\n", page, get_prot_str( get_host_page_vprot( page ) ) );
-+            ERR( "  view protect %s\n", get_prot_str( view->protect ) );
++            strcpy( page_prot, get_prot_str( get_host_page_vprot( page )));
++            WARN( "unrepaired %s fault at %p in view %p size %08lx, %08lx committed, page %s, view %s\n",
++                  how, addr, view_base, view->size, committed, page_prot, get_prot_str( view->protect ));
 +        }
 +    }
 +

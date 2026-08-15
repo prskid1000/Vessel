@@ -174,6 +174,22 @@ data class ParamSpec(
      */
     val placeholder: String? = null,
 
+    /**
+     * [ParamType.ENUM_OR_TEXT]: what a *typed* value must look like to be
+     * accepted, as a regular expression. Null means anything is accepted, which
+     * is the honest default for a field whose whole purpose is to take a value
+     * the option list does not contain.
+     *
+     * **This exists because one param's syntax was applied to all of them.** The
+     * editor tested every enum-or-text field against `^\s*\d{1,5}\s*[xX]\s*\d{1,5}\s*$`
+     * — the `WxH` of `display.resolution`, the param it was written for — and
+     * showed anything else in the danger colour. So `hardware.ram = 15` was drawn
+     * as an error for not being `1280x720`, on a device with 15 GB of RAM, while
+     * being a value the setting handles perfectly well. Same defect as the
+     * hardcoded placeholder described above and the same fix: the rule belongs to
+     * the param, not to the control that happens to draw it.
+     */
+    val pattern: String? = null,
 
     /** [ParamType.COMPONENT]: which `.wcp` type the selector resolves against. */
     val componentType: String? = null,

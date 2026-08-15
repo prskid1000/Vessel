@@ -1,0 +1,96 @@
+state: blending on an integer target is a pipeline to fix, not one to refuse.
+
+vkd3d validates what D3D12 documents -- blending on an integer-format render
+target is invalid -- and, when the shader writes that target, fails pipeline
+creation with E_INVALIDARG. No shipping D3D12 driver enforces it that way. There
+is nothing sensible to blend on an integer attachment, so drivers ignore the
+blend state; the case most often arrives from a logic-op pipeline where those
+fields are dead. Other implementations under the same pressure reached the same
+answer: Ryujinx forces blend off on integer attachments, and MoltenVK has to
+because Metal asserts otherwise.
+
+So the check is correct about the specification and wrong about the world, and
+the application pays: it asked for a pipeline that works on every real driver and
+got back a failure it has no handling for.
+
+MEASURED, Resident Evil Requiem, 2026-08-15. Thirteen CreateGraphicsPipelineState
+calls rejected in a single session:
+
+    vkd3d-proton:d3d12_pipeline_state_validate_blend_state: Enabling blending on
+    RT 5 with format DXGI_FORMAT_R32G32B32A32_UINT, but using integer format is
+    not supported.
+
+The game stops progressing at the point it compiles shaders and ends in its own
+crash reporter.
+
+This disables blending for that attachment instead, which is what the hardware
+would have done. Both cases stay WARN and stay distinguishable, because a
+pipeline whose blend state was altered underneath it is worth knowing about.
+
+diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
+--- a/libs/vkd3d/state.c
++++ b/libs/vkd3d/state.c
+@@ -4402,20 +4402,52 @@
+          * in this case. If there is an output, fail pipeline compilation. */
+         if (format && (format->type == VKD3D_FORMAT_TYPE_SINT || format->type == VKD3D_FORMAT_TYPE_UINT))
+         {
++            /* Vessel: disable the blending rather than refuse the pipeline.
++             *
++             * Upstream splits on whether the shader writes the target: if it
++             * does not, blending is nop-ed out and the pipeline passes; if it
++             * does, this returned E_INVALIDARG. The D3D12 runtime does document
++             * blending on an integer target as invalid, so the check is not
++             * wrong -- but no shipping driver enforces it that way, blending is
++             * ignored on an integer attachment because there is nothing sensible
++             * to blend, and the case usually arrives from a logic-op state where
++             * the blend fields are dead anyway. Other implementations arrived at
++             * the same answer from the same pressure: Ryujinx forces blend off on
++             * integer attachments, and MoltenVK must because Metal asserts.
++             *
++             * The cost of being right about the spec is paid by the application,
++             * which asked for a pipeline that works everywhere else and got a
++             * failure it has no path for. A game that does not check the HRESULT
++             * then uses a NULL ID3D12PipelineState.
++             *
++             * MEASURED, Resident Evil Requiem, 2026-08-15: thirteen
++             * CreateGraphicsPipelineState calls rejected in one session --
++             *
++             *   d3d12_pipeline_state_validate_blend_state: Enabling blending on
++             *   RT 5 with format DXGI_FORMAT_R32G32B32A32_UINT, but using
++             *   integer format is not supported.
++             *
++             * -- after which the game stops progressing at the point it compiles
++             * shaders, and ends in its own crash reporter.
++             *
++             * Kept as a WARN and not silenced: a pipeline whose blend state was
++             * changed underneath it is worth knowing about, and the two cases are
++             * still distinguished so the log says which one happened.
++             */
+             for (j = 0; j < sig->element_count; j++)
+-            {
+                 if (sig->elements[j].register_index == i)
+-                {
+-                    ERR("Enabling blending on RT %u with format %s, but using integer format is not supported.\n", i,
+-                            debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
+-                    return E_INVALIDARG;
+-                }
+-            }
++                    break;
++
++            if (j < sig->element_count)
++                WARN("Enabling blending on RT %u with format %s, but using integer format is not supported. "
++                     "The output is written, but no driver blends an integer target, so disabling blending "
++                     "rather than failing the pipeline.\n",
++                        i, debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
++            else
++                WARN("Enabling blending on RT %u with format %s, but using integer format is not supported. "
++                     "The output is not written, so nop-ing out blending.\n",
++                        i, debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
+ 
+-            /* The output does not exist, but we have to pass the pipeline. Just nop out any invalid blend state. */
+-            WARN("Enabling blending on RT %u with format %s, but using integer format is not supported. "
+-                 "The output is not written, so nop-ing out blending.\n",
+-                    i, debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
+             state->graphics.blend_attachments[i].blendEnable = VK_FALSE;
+         }
+     }

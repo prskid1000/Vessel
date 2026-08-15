@@ -62,6 +62,42 @@ printed.
 more instrumentation.** Hex thread ids, decimal tids, page-aligned addresses,
 version codes.
 
+## The line you have already decided is noise
+
+The section above is about a log nobody read. This one is worse, because the log
+*was* read.
+
+Requiem's crash was chased for days through a stale `ImageBase`, an ARM64EC
+unwind theory, an ARM64X relocation theory and a `memcpy` overrun. All of that
+time this sat in the error census, third by count:
+
+```
+12  vkd3d-proton:d3d12_pipeline_state_validate_blend_state: Enabling blending on
+    RT 5 with format DXGI_FORMAT_R32G32B32A32_UINT, but using integer format is
+    not supported.
+```
+
+It was printed at **ERR**, it appeared in the digest, and it was in output that
+had already been read aloud — and it was skipped every time, because the theory
+under investigation was about memory and this line was about pipelines. It is
+`return E_INVALIDARG` from `CreateGraphicsPipelineState`: thirteen pipelines the
+game asked for and did not get, which is why it stopped moving right after
+compiling shaders.
+
+**A hypothesis makes some evidence invisible, and the evidence it hides is
+exactly the evidence that would kill it.** Two habits are cheap enough to be
+worth doing every time:
+
+- **Census the errors before forming the hypothesis, and read every distinct
+  line once, out loud, including the ones from a layer you are not thinking
+  about.** `grep '^E' | sed 's/0x[0-9a-f]*/A/g' | sort | uniq -c | sort -rn` is
+  the whole technique. Distinct-and-rare matters more than frequent.
+- **Say what each error would mean if it were the cause**, before deciding it is
+  not. "vkd3d refused a pipeline" survives that question in one sentence. The
+  ones that do not survive it are the ones safe to set aside.
+
+The instrument was never missing here. The attention was.
+
 ## A correlation is not a mechanism
 
 The section above is still the right lesson, and the answer it produced was
