@@ -1,0 +1,122 @@
+ntdll: an image that has moved must say so in its own header.
+
+Two paths relocate a PE image and they do not do the same amount of work.
+`map_image_view`'s "relocate to dynamic base" block (unix/virtual.c:3486) writes
+`OptionalHeader.ImageBase` and then applies the base relocations.
+`virtual_relocate_module` (unix/virtual.c:4199), which `load_ntdll` and
+`load_ntdll_wow64` call when a builtin cannot have the address it was mapped at,
+applies the relocations and stops.
+
+So ntdll can end up at a new address while its own header still names the old
+one. `ImageBase` is the documented way to find a loaded module's base from its
+headers, which makes reading it an ordinary thing for a program to do -- and on
+Windows it is always right, because the loader keeps it right.
+
+ROOT CAUSE OF A CRASH THAT LOOKED LIKE FOUR DIFFERENT BUGS. Resident Evil
+Requiem died at its title screen for days. In the session that named it:
+
+    virtual:virtual_relocate_module 0x6fffe30000 -> 0x7fffe30000
+    ...
+    virtual:virtual_handle_fault unrepaired fault at 0x6fffe3003c, no view covers it
+    seh:dispatch_exception code=c0000005 info[1]=0000006FFFE3003C  rbx=0000006fffe3003c
+
+0x6fffe30000 + 0x3c is `e_lfanew` in the DOS header of a module that had moved to
+0x7fffe30000. The game's protection walked ntdll's headers, believed
+`ImageBase`, and read from where ntdll used to be.
+
+What followed is why this was hard, and it is worth writing down because none of
+it points at the cause. The faulting code is protection-generated: no module, no
+unwind data. An x86-64 frame with no function entry is unwound as a leaf -- pop a
+qword off the stack, call it a return address -- so the handler search cannot
+fail, it can only wander. It walked roughly 180 frames of stack *data* (visibly
+IEEE-754 doubles), never once reporting "exception data not found", and ended at
+
+    seh:call_seh_handlers invalid frame 54005e (0000000000022000-0000000000420000)
+    seh:NtRaiseException Exception frame is not in stack limits => unable to dispatch
+
+0x54005e fails `is_valid_arm64ec_frame` on its first test, alignment. Nothing was
+ever offered the exception, so the game drew an unhandled-exception dialog whose
+stack said nothing about a bad pointer. Every earlier theory came from reading
+that stack.
+
+WHY THIS PLATFORM. Windows randomises ntdll's base once per boot and maps it at
+that address in every process, so a cached base is always valid there.
+patches/wine/0002 forces PE images into anonymous memory on Android, because
+SELinux refuses execmod on a dirtied file mapping, and that patch's own notes
+record ntdll being relocated as the normal case here. This is the common path,
+not a corner.
+
+The header page is protected separately: SizeOfHeaders covers the DOS stub, the
+NT headers and the section table, none of which is inside a section, so the
+loop that unprotects sections does not cover it.
+
+A THEORY THIS REPLACES, disproved by measurement rather than by argument: that
+ARM64X `VALUE` fixups leave stale absolute addresses behind after a rebase. The
+shipped ntdll's dynamic relocation table holds 11 VALUE fixups, none of them
+8 bytes and none writing an address inside the image, while all 886 .reloc
+entries are DIR64. Nothing stale can come from there.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4245,6 +4245,60 @@
+     while (rel && rel < end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
+         rel = process_relocation_block( (char *)module + rel->VirtualAddress, rel, delta );
+ 
++    /* Vessel: an image that has moved must say so in its own header.
++     *
++     * The map-time relocation above in map_image_view does exactly two things
++     * when it moves an image -- it writes OptionalHeader.ImageBase and then
++     * applies the base relocations. This path did only the second, so a module
++     * relocated here kept a header claiming the address it no longer occupies,
++     * and every reader of that field got a pointer into nothing.
++     *
++     * Windows has no such state: the in-memory ImageBase always equals the load
++     * address, which is what makes reading it a normal thing for a program to
++     * do. It is also *the* documented way to find a module's base from its
++     * headers, so the field being wrong is not a detail -- it is a lie told to
++     * anything that walks a loaded image.
++     *
++     * MEASURED, and it is what killed Resident Evil Requiem. ntdll is placed at
++     * 0x6ffe30000 in most processes; in the game's process that address was
++     * taken, so it came through here and moved to 0x7fffe30000 while its header
++     * still read 0x6fffe30000. The game's protection walks ntdll's headers, took
++     * that base, and read e_lfanew from it:
++     *
++     *   unrepaired fault at 0x6fffe3003c, no view covers it
++     *
++     * -- 0x6fffe30000 + 0x3c, the DOS header of a module that is not there. What
++     * followed looked like a different bug entirely and cost days: the faulting
++     * code is protection-generated and has no unwind data, so the handler search
++     * treated it as a leaf, walked stack *data* for ~180 frames, produced a
++     * misaligned establisher frame, and gave up --
++     *
++     *   invalid frame 54005e (0000000000022000-0000000000420000)
++     *   Exception frame is not in stack limits => unable to dispatch exception
++     *
++     * -- an unhandled exception dialog whose stack said nothing about the cause.
++     *
++     * The header page is protected separately because it is not one of the
++     * sections the loop above unprotects: SizeOfHeaders covers the DOS stub, the
++     * NT headers and the section table, and none of it is inside a section.
++     */
++    {
++        void *addr = module;
++        SIZE_T size = nt->OptionalHeader.SizeOfHeaders;
++        ULONG old_prot;
++
++        if (!NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, PAGE_READWRITE, &old_prot ))
++        {
++            if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
++                ((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase = (ULONG_PTR)module;
++            else
++                ((IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase = (ULONG_PTR)module;
++            NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, old_prot, &old_prot );
++        }
++        else ERR( "could not make the headers of %p writable; its ImageBase still reads %p\n",
++                  module, (void *)image_base );
++    }
++
+     for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+     {
+         void *addr = (char *)module + sec[i].VirtualAddress;

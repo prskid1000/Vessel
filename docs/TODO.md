@@ -90,7 +90,9 @@ avoid.
 
 ## The blockers, in order
 
-- [ ] **#51 — an unhandled C++ exception at the settings menu.** The live
+- [ ] **#51 — a relocated ntdll lies about its own base, and the game reads it.**
+  *(Titled "an unhandled C++ exception at the settings menu" until 2026-08-15;
+  that was the symptom. The root cause is at the bottom of this entry.)* The live
   blocker, and the only one whose fix is on the critical path to a frame of
   gameplay. Two dead ends are recorded here so that neither is walked a second
   time:
@@ -175,8 +177,67 @@ avoid.
   constant. That is FEX taking signals while running on its own stack, which Wine
   warns about and continues from — not a loop, and not the fault being chased.
 
-  **`patches/wine/0043` is the fix, in two halves.** The dump moves to its own
-  `virtual_views` channel, so `+virtual` becomes a channel that can be read;
+  ---
+
+  **ROOT CAUSE, 2026-08-15. A relocated ntdll keeps a header that says where it
+  used to be, and `patches/wine/0044` is one assignment.**
+
+  `virtual_relocate_module` (`unix/virtual.c:4199`) applies the base relocations
+  and stops. The map-time path that does the same job — "relocate to dynamic
+  base", `virtual.c:3486` — writes `OptionalHeader.ImageBase` **and then**
+  relocates. Two paths, one job, one of them doing less; that is the whole
+  defect. An image that comes through the second one is at a new address while
+  its own header still names the old one, and `ImageBase` is the documented way
+  to find a loaded module's base, so the field being wrong is not cosmetic. It is
+  a lie told to anything that walks a loaded image.
+
+  The chain, measured end to end in one session:
+
+  | step | evidence |
+  |---|---|
+  | ntdll cannot have `0x6FFFE30000` and is moved to `0x7FFFE30000` | `virtual_relocate_module 0x6fffe30000 -> 0x7fffe30000` |
+  | its header still reads the old base | the assignment above is absent |
+  | the game reads that base's `e_lfanew` | guest `rbx = 0x6fffe3003c` = base + `0x3C` |
+  | nothing is mapped there | `unrepaired fault at 0x6fffe3003c, no view covers it` |
+  | the fault becomes `c0000005` | `dispatch_exception code=c0000005 info[1]=0000006FFFE3003C` |
+  | the handler search walks stack *data* | ~180 frames of IEEE-754 doubles, **zero** "exception data not found" |
+  | it gives up | `invalid frame 54005e (0000000000022000-0000000000420000)` |
+  | nothing is ever offered the exception | `Exception frame is not in stack limits => unable to dispatch` |
+
+  **Everything from row 6 down is the symptom this entry spent days on.** The
+  faulting code is protection-generated, has no unwind data, and is therefore
+  unwound as a leaf — pop a qword off the stack and call it a return address —
+  so the walk cannot fail, it can only wander. That is why `+seh` "produced zero
+  lines for it", why the frames resolved to nonsense, and why the crash looked
+  like a broken stack rather than a bad pointer.
+
+  **Why this platform and not Windows.** Windows randomises ntdll's base once per
+  boot and maps it at that address in *every* process, so a cached base is always
+  valid. Here `patches/wine/0002` forces PE images into anonymous memory (SELinux
+  refuses `execmod` on a dirtied file mapping), and that patch's own notes record
+  ntdll being relocated as the normal case. So the defect is not a corner on this
+  stack — it is the common path.
+
+  **Two theories this replaces, both recorded so neither is walked again:**
+
+  - *"ARM64X value fixups leave stale absolute addresses after a rebase."*
+    **Disproved by measurement,** not by argument. The shipped ntdll's dynamic
+    relocation table holds 11 `VALUE` fixups, **none** of them 8 bytes and none
+    writing an address inside the image; every one of the 886 `.reloc` entries is
+    `DIR64`. Nothing stale can come from there. (`tools/`-style throwaway parser;
+    the numbers are what matter.)
+  - *"the fault is a 224-byte `memcpy` running 0x80 past a 3-page commit."* That
+    was read off earlier sessions and is a **different** event; no fault of that
+    shape appeared in the sessions that produced the root cause above, and no
+    faulted view had `committed < size` except thread-stack guard pages.
+
+  *Done when:* Requiem is run on a build carrying `0044` and either reaches
+  gameplay or dies somewhere new. **Not yet run** — revision 19 is building.
+
+  ---
+
+  **`patches/wine/0043` is the fix for the instrument, in two halves.** The dump
+  moves to its own `virtual_views` channel, so `+virtual` becomes readable;
   nothing below it is silenced, because second place is 4.5% and everything under
   that is what the channel exists to carry. And `virtual_handle_fault` now prints
   the view a fault it *could not repair* landed in — base, size, bytes actually

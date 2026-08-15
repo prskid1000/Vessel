@@ -1,3 +1,45 @@
+ntdll: a dump that drowns the channel, and a fault that names nothing.
+
+Two changes to the `virtual` channel, both about being able to read it.
+
+FIRST, the view dump gets its own channel. `VIRTUAL_DEBUG_DUMP_VIEW` fires on
+every view create, split and protection change, and under FEX the JIT changes
+protections continuously, so `+virtual` on a real title is not a channel anyone
+can read. Measured on a Requiem session: 75,505 of the first 89,000 lines were
+this macro -- 85% of the log. It filled a 32 MB head budget in 90 seconds and
+dropped 1.87 million lines, taking the records `+virtual` exists to carry
+(NtAllocateVirtualMemory and its neighbours, 6% of the same sample) into the
+elision with it.
+
+Splitting rather than deleting, because the dump is the right instrument for a
+layout question and the wrong one for every other question on the channel;
+`+virtual_views` still asks for it by name. dump_view's own TRACEs move with it,
+since gating the call while leaving them on the default channel would make
+`+virtual_views` alone print nothing. Nothing below it is silenced: second place
+in that census is 4.5%, and quieting more would hide the record rather than
+reveal it.
+
+SECOND, a fault that could not be repaired says where it landed.
+`virtual_handle_fault` either repairs a fault or decides it cannot, and the
+decision was invisible -- the thread carried STATUS_ACCESS_VIOLATION out to the
+guest, which reports an address and nothing about the memory at it. Reading that
+back afterwards cost a full `+virtual` session, which the change above exists
+because of.
+
+It is silent until it fires, and it fires on a fault that is already fatal,
+which is also why the walk over the view's pages is not bounded.
+
+This is what named the cause of #51 one run later, in the branch for an address
+no view covers at all:
+
+    virtual_handle_fault unrepaired fault at 0x6fffe3003c, no view covers it
+
+See patches/wine/0044.
+
+One caveat for whoever reads its output next: "unrepaired by this layer" is not
+"fatal". FEX handles many of these itself -- one session logged 522 on re9.exe's
+own image from write-watch alone.
+
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
