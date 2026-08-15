@@ -7,6 +7,7 @@ import app.vessel.core.encodeLogLine
 import app.vessel.core.errorDigestElided
 import app.vessel.core.errorDigestHeading
 import app.vessel.core.errorDigestLine
+import app.vessel.core.isRoutineError
 import app.vessel.core.logPrefixKey
 import app.vessel.core.logPrefixLegend
 import app.vessel.core.overflowLogMarker
@@ -609,9 +610,26 @@ internal class SessionLogWriter(
         )
     }
 
-    /** The digest, loudest first. Shared by the file trailer and the sidecar. */
+    /**
+     * The digest: what matters first, then loudest first.
+     *
+     * **Count alone was the wrong order, and a session proved it.** Requiem died
+     * with eight distinct errors, and the three loudest were Wine announcing a
+     * setting Vessel had asked for, a COM proxy that does not exist, and
+     * Kerberos being absent. The line that described the failure — a critical
+     * section held for two minutes, immediately before the process vanished —
+     * was fourth, at a count of two. Sorting by frequency put three things
+     * nobody can act on above the one thing to look at.
+     *
+     * So [isRoutineError] sinks the expected ones and count orders the rest.
+     * They are still listed, still counted: this changes which line is read
+     * first, not which lines exist.
+     */
     private fun digestEntries(): List<Map.Entry<String, ErrorTally>> =
-        errorDigest.entries.sortedByDescending { it.value.count }
+        errorDigest.entries.sortedWith(
+            compareBy<Map.Entry<String, ErrorTally>> { isRoutineError(it.key) }
+                .thenByDescending { it.value.count },
+        )
 
     private fun appendMarker(text: String, level: LogLevel = LogLevel.WARN) =
         appendMarkers(listOf(text), level)

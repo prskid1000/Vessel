@@ -1,0 +1,32 @@
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 06f7f92..5ddc17b 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -856,6 +856,27 @@ static int ProcessAll() {
+         continue;
+       }
+ 
++      /* Vessel: an image the code map has no path for cannot be compiled ahead
++       * of time, and saying so is better than failing.
++       *
++       * The runtime records an image under whatever NtQuerySection gives for
++       * its backing file, and for a manually mapped section that is the empty
++       * string. Generation then spawns a child, the child calls CreateFileA(""),
++       * and the run ends with two lines that name nothing:
++       *
++       *   ERROR: Couldn't find image:
++       *   ERROR: Cache generation failed for -1b95a19fe798bdda
++       *
++       * Neither says which module, that it has no name, or that the rest of the
++       * cache is fine — so it reads as the cache being broken when one nameless
++       * module is simply not cacheable. Skipped here rather than in the child,
++       * because this is where it costs nothing: no process is spawned and the
++       * remaining dependencies still generate. */
++      if (Contents.Filename.empty()) {
++        fmt::println("  Skipping {}: the code map has no file path for this image", BinaryName);
++        continue;
++      }
++
+       if (std::filesystem::last_write_time(GetCacheFilename(File), ec) > LastCodeMapUpdate && !ec) {
+         fmt::println("  Cache up to date: {}", BinaryName);
+         continue;

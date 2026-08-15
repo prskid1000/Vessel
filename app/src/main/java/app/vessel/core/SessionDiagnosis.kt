@@ -119,3 +119,48 @@ fun diagnoseSessionLine(line: String): SessionDiagnosis? =
  */
 fun diagnoseSession(lines: Iterable<String>): SessionDiagnosis? =
     lines.firstNotNullOfOrNull(::diagnoseSessionLine)
+
+/**
+ * Errors that are expected on this platform, and should not lead the digest.
+ *
+ * **The digest ranks by count, and count is not importance.** Measured on a
+ * Requiem session that died: the run produced eight distinct errors, and the
+ * three loudest were Wine announcing a setting Vessel had asked for, a COM
+ * proxy that does not exist, and Kerberos being absent. The one line that
+ * described the failure — a critical section held for two minutes — sat fourth,
+ * with a count of two. A summary that puts the harmless first every time is one
+ * people learn to skim.
+ *
+ * **Nothing is hidden.** These still appear, still with their counts; they sort
+ * after everything else. Suppressing a Wine ERR would be worse than a bad
+ * ordering, because the next person to hit a *real* Kerberos problem would find
+ * a log that had decided for them that it did not matter.
+ *
+ * The bar for adding one: it must be *expected on this device*, unrelated to
+ * whether a session works, and something we are not going to fix. Not "we have
+ * seen it before" and not "it is noisy" — a noisy error that matters is exactly
+ * what the volume note on `Loggable` exists for.
+ */
+private val ROUTINE_ERRORS: List<String> = listOf(
+    // Proton's own announcement of WINE_RAM_REPORTING_BIAS, at ERR level, once
+    // per process. It is Vessel's Hardware setting being applied, so a container
+    // that reports six gigabytes prints this fifteen times and none of them is a
+    // problem. See HardwareLimits.
+    "HACK: ram_reporting_bias",
+    // Wine's Kerberos SSP finding no krb5 on Android. Nothing in a game needs
+    // it, and there is no krb5 to ship.
+    "kerberos_LsaApInitializePackage",
+    // COM marshalling for an interface with no proxy/stub in the prefix —
+    // E_NOINTERFACE from IPSFactory. The caller handles it; writing the proxies
+    // is a Wine project.
+    "marshal_object Failed to create an IRpcStubBuffer",
+)
+
+/**
+ * True when [text] is one of the expected errors above.
+ *
+ * Matched on `contains` rather than equality because a digest key has already
+ * had its addresses and thread ids normalised away, but the surrounding format
+ * — channel prefixes, a trailing count — still varies.
+ */
+fun isRoutineError(text: String): Boolean = ROUTINE_ERRORS.any { text.contains(it) }

@@ -405,6 +405,52 @@ class SessionLogWriterTest {
     }
 
     /** Drive one writer to completion and hand back the sidecar it left. */
+
+    /**
+     * The ordering rule that matters when a session actually dies, and the
+     * reason it is not "most frequent first" any more.
+     *
+     * Taken from a real Requiem log: fifteen copies of Wine announcing the RAM
+     * cap Vessel had asked for, four of a COM proxy that does not exist, one of
+     * Kerberos being absent — and two of the critical section that was held for
+     * two minutes immediately before the process vanished. Sorted by count, the
+     * only line worth reading was fourth.
+     */
+    @Test
+    fun `expected errors sink, and are still all there with their counts`() {
+        val directory = temporary.newFolder("routine")
+        val meta = write(directory, startedAt = 1_000L) { log ->
+            repeat(15) { log.line(LogSource.WINE, LogLevel.ERROR, "module:hacks_init HACK: ram_reporting_bias 9096MB.") }
+            repeat(4) { log.line(LogSource.WINE, LogLevel.ERROR, "ole:marshal_object Failed to create an IRpcStubBuffer") }
+            log.line(LogSource.WINE, LogLevel.ERROR, "kerberos:kerberos_LsaApInitializePackage no Kerberos support")
+            repeat(2) { log.line(LogSource.WINE, LogLevel.ERROR, "sync:RtlpWaitForCriticalSection section 14EAA17D0 wait timed out") }
+        }
+
+        // The one to act on leads, at a count of two, over one with fifteen.
+        assertTrue(
+            "the actionable error must lead the digest",
+            meta.errorDigest[0].text.contains("RtlpWaitForCriticalSection"),
+        )
+
+        // And nothing was hidden to achieve that: every distinct error is still
+        // present, and every count is intact. Sinking a line is an ordering
+        // decision; dropping one would be a claim that it did not happen.
+        assertEquals(4, meta.errorDigest.size)
+        val byText = meta.errorDigest.associate { it.text to it.count }
+        assertEquals(15, byText.entries.first { it.key.contains("ram_reporting_bias") }.value)
+        assertEquals(4, byText.entries.first { it.key.contains("IRpcStubBuffer") }.value)
+        assertEquals(1, byText.entries.first { it.key.contains("Kerberos") }.value)
+        assertEquals(2, byText.entries.first { it.key.contains("RtlpWaitForCriticalSection") }.value)
+
+        // The trailer in the file agrees with the sidecar, because they are the
+        // same list — a digest that ordered them differently would send two
+        // readers to two different conclusions.
+        val trailer = trailer(directory, 1_000L).map { it.text }
+        assertEquals(errorDigestHeading(distinct = 4, total = 22), trailer.first())
+        assertTrue(trailer[1].contains("RtlpWaitForCriticalSection"))
+        assertTrue(trailer.any { it.contains("ram_reporting_bias") })
+    }
+
     private fun write(
         directory: File,
         startedAt: Long,
