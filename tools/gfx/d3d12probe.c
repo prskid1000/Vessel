@@ -95,6 +95,7 @@ static void buffer_desc(D3D12_RESOURCE_DESC *rd, UINT64 size)
 
 int main(void)
 {
+    gfx_report_machine(API);
     HMODULE d3d12_dll = NULL, dxgi_dll = NULL, compiler = NULL;
     PFN_D3D12_CREATE_DEVICE_T create_device;
     PFN_D3D12_SERIALIZE_ROOT_SIGNATURE_T serialize_rs;
@@ -172,11 +173,22 @@ int main(void)
     } else {
         DXGI_ADAPTER_DESC1 desc;
         char name[512];
-        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(adapter, &desc)))
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(adapter, &desc))) {
             gfx_info(API, "adapter=\"%s\" vendor=0x%04x device=0x%04x software=%d",
                      gfx_narrow(desc.Description, name, sizeof(name)),
                      desc.VendorId, desc.DeviceId,
                      (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ? 1 : 0);
+            /* The number a D3D12 title sizes its heaps from. vkd3d has no DXGI
+             * of its own — this comes from DXVK's, which sums the driver's
+             * device-local heaps — so this line and the Vulkan probe's should
+             * agree, and if they do not the break is in DXGI rather than in the
+             * driver. */
+            printf("VESSEL-HW api=%s bits=%d vram_mib=%llu shared_mib=%llu\n",
+                   API, gfx_bits(),
+                   (unsigned long long)(desc.DedicatedVideoMemory >> 20),
+                   (unsigned long long)(desc.SharedSystemMemory >> 20));
+            gfx_flush();
+        }
     }
 
     hr = create_device((IUnknown *)adapter, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void **)&device);

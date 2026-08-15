@@ -1,22 +1,23 @@
 package app.vessel.ui.screens
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -26,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -35,12 +37,13 @@ import app.vessel.core.params.ParamType
 import app.vessel.core.params.ParamValue
 import app.vessel.core.params.ResolvedParam
 import app.vessel.ui.components.VButton
-import app.vessel.ui.components.VCaution
 import app.vessel.ui.components.VButtonStyle
+import app.vessel.ui.components.VCaution
+import app.vessel.ui.components.VCheckChip
 import app.vessel.ui.components.VCheckRow
+import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VComponentReadout
 import app.vessel.ui.components.VConfirmSheet
-import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VDropdownField
 import app.vessel.ui.components.VExpander
 import app.vessel.ui.components.VIconAction
@@ -494,6 +497,9 @@ private fun EditorParam.pairs(): Boolean =
  * time they get here — see [EditorParam] — so each branch is the control and the
  * value it writes back, and nothing else.
  */
+// FlowRow, for the `multi` branch. Still experimental at this Compose BOM and
+// already used the same way in VMetricGraph and InputEditor.
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Unit) {
     val spec = param.resolved.spec
@@ -599,9 +605,22 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
 
             ParamType.MULTI -> {
                 val chosen = (value as? ParamValue.Choices)?.values.orEmpty()
-                Column {
+                // **Chips that wrap, not a row per option.** The one `multi`
+                // param today is the core list, where every label is two
+                // characters and the question is which *combination* is ticked.
+                // Eight full-width rows answer that question with a column
+                // taller than the screen; eight chips wrap into two short rows
+                // and the pattern is visible at a glance. A future `multi` whose
+                // options are sentences would want rows back — that is a reason
+                // to give the manifest a hint, not to keep the worse layout for
+                // the params that exist.
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+                    verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+                ) {
                     spec.options.forEach { option ->
-                        VCheckRow(
+                        VCheckChip(
                             label = spec.label(option),
                             checked = option in chosen,
                             onToggle = {

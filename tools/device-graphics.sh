@@ -258,7 +258,27 @@ DXVK_LOG_PATH=none \
 VKD3D_DEBUG=warn \
 VKD3D_SHADER_DEBUG=warn \
 TU_DEBUG=startup \
-DISPLAY=:0"
+DISPLAY=:0${VESSEL_EXTRA_ENV:+ $VESSEL_EXTRA_ENV}"
+
+# `VESSEL_EXTRA_ENV` exists for one question this script is the right tool for
+# and could not otherwise answer: whether every graphics layer honours the
+# container's Hardware settings, or only the ones that have been looked at.
+#
+# Those settings are applied to the quantity each layer *derives* its answer
+# from — the CPU count and memory size come from Wine, and video memory comes
+# from the driver's heap, which DXVK sums for DXGI, vkd3d reports through DXVK's
+# DXGI, and Zink sums again for GL. That is a chain, and a chain is exactly the
+# kind of thing that is right in three places and quietly wrong in the fourth.
+# Every probe prints a `VESSEL-HW` line, so one run with this set produces the
+# whole matrix:
+#
+#   VESSEL_EXTRA_ENV="WINE_CPU_TOPOLOGY=4:0,1,2,3 \
+#     WINE_RAM_REPORTING_BIAS=11144 heap_memory_percent=0.134" \
+#     ./tools/device-graphics.sh
+#
+# Deliberately a raw string rather than three named options: this script builds
+# its own prefix and does not read a container, so it has no business knowing
+# what Vessel's settings are called. It passes through what it is given.
 
 WINE="/system/bin/linker64 \$PWD/bin"
 

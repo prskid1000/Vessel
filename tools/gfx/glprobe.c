@@ -37,6 +37,7 @@ typedef HGLRC(WINAPI *PFN_wglCreateContext)(HDC);
 typedef BOOL(WINAPI *PFN_wglMakeCurrent)(HDC, HGLRC);
 typedef BOOL(WINAPI *PFN_wglDeleteContext)(HGLRC);
 typedef const GLubyte *(WINAPI *PFN_glGetString)(GLenum);
+typedef void(WINAPI *PFN_glGetIntegerv)(GLenum, GLint *);
 typedef void(WINAPI *PFN_glViewport)(GLint, GLint, GLsizei, GLsizei);
 typedef void(WINAPI *PFN_glClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
 typedef void(WINAPI *PFN_glClear)(GLbitfield);
@@ -68,6 +69,7 @@ static PFN_glReadBuffer p_glReadBuffer;
 static PFN_glPixelStorei p_glPixelStorei;
 static PFN_glReadPixels p_glReadPixels;
 static PFN_glGetError p_glGetError;
+static PFN_glGetIntegerv p_glGetIntegerv;
 
 static int bind_all(HMODULE gl)
 {
@@ -76,6 +78,7 @@ static int bind_all(HMODULE gl)
         { "wglMakeCurrent",   (void **)&p_wglMakeCurrent },
         { "wglDeleteContext", (void **)&p_wglDeleteContext },
         { "glGetString",      (void **)&p_glGetString },
+        { "glGetIntegerv",    (void **)&p_glGetIntegerv },
         { "glViewport",       (void **)&p_glViewport },
         { "glClearColor",     (void **)&p_glClearColor },
         { "glClear",          (void **)&p_glClear },
@@ -110,6 +113,7 @@ static const char *gl_string(GLenum name)
 
 int main(void)
 {
+    gfx_report_machine(API);
     HMODULE gl = NULL;
     HWND hwnd = NULL;
     HDC dc = NULL;
@@ -165,6 +169,37 @@ int main(void)
         verdict = gfx_fail(API, "wglmakecurrent", (HRESULT)(DWORD_PTR)GetLastError(),
                            "wglMakeCurrent failed");
         goto out;
+    }
+
+    /* What GL was told about video memory.
+     *
+     * Two extensions say it and neither is guaranteed: GL_NVX_gpu_memory_info
+     * reports dedicated VRAM in KiB, GL_ATI_meminfo reports free VBO memory.
+     * Mesa exposes them from Gallium's query_memory_info, which Zink implements
+     * by summing the same device-local Vulkan heaps DXVK sums for DXGI -- so
+     * this figure and the Vulkan probe's should agree, and this is the line
+     * that proves the container's VRAM setting reaches OpenGL rather than only
+     * the D3D layers. Absent is reported as absent, not as zero. */
+    {
+        /* GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX / VBO_FREE_MEMORY_ATI */
+        enum { NVX_DEDICATED = 0x9047, ATI_VBO_FREE = 0x87FB };
+        const GLubyte *ext = p_glGetString(GL_EXTENSIONS);
+        const char *exts = ext ? (const char *)ext : "";
+        GLint kib = -1;
+
+        if (p_glGetIntegerv && strstr(exts, "GL_NVX_gpu_memory_info")) {
+            p_glGetIntegerv(NVX_DEDICATED, &kib);
+        } else if (p_glGetIntegerv && strstr(exts, "GL_ATI_meminfo")) {
+            GLint four[4] = { -1, -1, -1, -1 };
+            p_glGetIntegerv(ATI_VBO_FREE, four);
+            kib = four[0];
+        }
+        if (kib >= 0)
+            printf("VESSEL-HW api=%s bits=%d vram_mib=%d\n", API, gfx_bits(), (int)(kib / 1024));
+        else
+            printf("VESSEL-HW api=%s bits=%d vram_mib=absent\n", API, gfx_bits());
+        gfx_flush();
+        while (p_glGetError && p_glGetError() != 0) { }
     }
 
     /* GL_RENDERER is the whole reason for these three lines: it is the only

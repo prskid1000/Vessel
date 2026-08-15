@@ -620,6 +620,59 @@ private fun VSlider(
 }
 
 /**
+ * One option of a `multi` control as a chip, for lists that read as a *set of
+ * short things* rather than as a list of sentences.
+ *
+ * **Why this exists beside [VCheckRow].** A row per option is right when each
+ * option is a phrase the user reads once and decides about. It is wrong when
+ * there are eight of them, each two characters long, and the question is which
+ * *combination* is ticked — eight full-width rows turn "four of eight cores" into
+ * a column that does not fit on screen and cannot be taken in at a glance. Laid
+ * out as chips in a [FlowRow] they wrap into two short rows and the pattern is
+ * the thing you see.
+ *
+ * The tick is dropped deliberately: at this size the fill and the ring already
+ * carry selected-ness, and a glyph inside a chip this small reads as noise. The
+ * touch target is kept at the same minimum as a row, because the chip being
+ * visually smaller is not a reason for it to be harder to hit.
+ */
+@Composable
+fun VCheckChip(
+    label: String,
+    checked: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val shape = Vessel.metrics.shapeSm
+    val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
+    fun Color.dim() = copy(alpha = this.alpha * alpha)
+
+    Box(
+        modifier
+            .clickable(enabled = enabled, onClick = onToggle)
+            .heightIn(min = Vessel.metrics.touchTarget)
+            .background(
+                if (checked) Vessel.colors.accentSoft.dim() else Color.Transparent,
+                shape,
+            )
+            .vRing(
+                if (checked) Vessel.colors.accent.dim() else Vessel.colors.divider.dim(),
+                shape,
+            )
+            .padding(horizontal = Vessel.metrics.s11, vertical = Vessel.metrics.s6),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            style = Vessel.type.body,
+            color = (if (checked) Vessel.colors.textPrimary else Vessel.colors.textLabel).dim(),
+            maxLines = 1,
+        )
+    }
+}
+
+/**
  * One line of the `multi` control: a box, a tick, and the option's label.
  *
  * [hint] and [help] are for the second caller this grew: a switch whose *variable

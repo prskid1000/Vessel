@@ -37,6 +37,7 @@ struct vtx {
 
 int main(void)
 {
+    gfx_report_machine(API);
     HMODULE d3d9_dll = NULL;
     PFN_DIRECT3DCREATE9 create9;
     IDirect3D9 *d3d = NULL;

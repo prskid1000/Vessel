@@ -78,6 +78,7 @@ static ID3DBlob *compile(PFN_D3DCOMPILE d3d_compile, const char *src, size_t len
 
 int main(void)
 {
+    gfx_report_machine(API);
     HMODULE d3d11 = NULL, compiler = NULL;
     PFN_D3D11_CREATE_DEVICE create_device;
     PFN_D3DCOMPILE d3d_compile;

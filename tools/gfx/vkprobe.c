@@ -103,6 +103,32 @@ typedef struct VkExtensionProperties {
     unsigned int specVersion;
 } VkExtensionProperties;
 
+/* The memory properties, spelled out for the same reason as everything above:
+ * this file declares what it uses rather than including the Vulkan headers, so
+ * the probe builds against three toolchains with nothing installed. The counts
+ * and the array sizes are the spec's fixed maxima, so the struct is exact
+ * rather than generous — a short buffer here would be read by the driver. */
+#define VK_MAX_MEMORY_TYPES 32
+#define VK_MAX_MEMORY_HEAPS 16
+#define VK_MEMORY_HEAP_DEVICE_LOCAL_BIT 0x00000001u
+
+typedef struct VkMemoryType {
+    unsigned int propertyFlags;
+    unsigned int heapIndex;
+} VkMemoryType;
+
+typedef struct VkMemoryHeap {
+    unsigned long long size;
+    unsigned int flags;
+} VkMemoryHeap;
+
+typedef struct VkPhysicalDeviceMemoryProperties {
+    unsigned int memoryTypeCount;
+    VkMemoryType memoryTypes[VK_MAX_MEMORY_TYPES];
+    unsigned int memoryHeapCount;
+    VkMemoryHeap memoryHeaps[VK_MAX_MEMORY_HEAPS];
+} VkPhysicalDeviceMemoryProperties;
+
 typedef void *(__stdcall *PFN_vkGetInstanceProcAddr)(VkInstance, const char *);
 typedef VkResult(__stdcall *PFN_vkEnumerateInstanceExtensionProperties)(const char *, unsigned int *,
                                                                         VkExtensionProperties *);
@@ -111,6 +137,7 @@ typedef void(__stdcall *PFN_vkDestroyInstance)(VkInstance, const void *);
 typedef VkResult(__stdcall *PFN_vkEnumeratePhysicalDevices)(VkInstance, unsigned int *, VkPhysicalDevice *);
 typedef void(__stdcall *PFN_vkGetPhysicalDeviceProperties)(VkPhysicalDevice, VkPhysicalDeviceProperties *);
 typedef void(__stdcall *PFN_vkGetPhysicalDeviceProperties2)(VkPhysicalDevice, VkPhysicalDeviceProperties2 *);
+typedef void(__stdcall *PFN_vkGetPhysicalDeviceMemoryProperties)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties *);
 typedef VkResult(__stdcall *PFN_vkEnumerateInstanceVersion)(unsigned int *);
 
 /*
@@ -144,6 +171,7 @@ static const char *device_type_name(unsigned int t)
 
 int main(void)
 {
+    gfx_report_machine(API);
     HMODULE vk;
     PFN_vkGetInstanceProcAddr gipa;
     PFN_vkCreateInstance create_instance;
@@ -151,6 +179,7 @@ int main(void)
     PFN_vkEnumeratePhysicalDevices enum_devices;
     PFN_vkGetPhysicalDeviceProperties get_props;
     PFN_vkGetPhysicalDeviceProperties2 get_props2;
+    PFN_vkGetPhysicalDeviceMemoryProperties get_mem_props;
     PFN_vkEnumerateInstanceVersion enum_version;
     VkApplicationInfo app;
     VkInstanceCreateInfo ci;
@@ -232,6 +261,7 @@ int main(void)
     enum_devices = (PFN_vkEnumeratePhysicalDevices)gipa(instance, "vkEnumeratePhysicalDevices");
     get_props = (PFN_vkGetPhysicalDeviceProperties)gipa(instance, "vkGetPhysicalDeviceProperties");
     get_props2 = (PFN_vkGetPhysicalDeviceProperties2)gipa(instance, "vkGetPhysicalDeviceProperties2");
+    get_mem_props = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(instance, "vkGetPhysicalDeviceMemoryProperties");
     if (!get_props2)
         get_props2 = (PFN_vkGetPhysicalDeviceProperties2)gipa(instance, "vkGetPhysicalDeviceProperties2KHR");
 
@@ -253,6 +283,25 @@ int main(void)
     for (i = 0; i < count; i++) {
         VkPhysicalDeviceProperties props;
         memset(&props, 0, sizeof(props));
+
+        /* The heap the container's VRAM setting moves. Printed per GPU because
+         * this is the figure DXVK sums for DedicatedVideoMemory and Zink sums
+         * for GL, so a mismatch between this line and the D3D or GL probe's
+         * line localises the break to one layer rather than to "graphics". */
+        if (get_mem_props) {
+            VkPhysicalDeviceMemoryProperties mem;
+            unsigned int h;
+            unsigned long long local_bytes = 0;
+
+            memset(&mem, 0, sizeof(mem));
+            get_mem_props(devices[i], &mem);
+            for (h = 0; h < mem.memoryHeapCount; h++)
+                if (mem.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                    local_bytes += (unsigned long long)mem.memoryHeaps[h].size;
+            printf("VESSEL-HW api=%s bits=%d gpu=%u heaps=%u vram_mib=%llu\n",
+                   API, gfx_bits(), i, mem.memoryHeapCount, local_bytes >> 20);
+            gfx_flush();
+        }
 
         if (get_props2) {
             VkPhysicalDeviceDriverProperties driver;

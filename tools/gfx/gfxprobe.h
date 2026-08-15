@@ -117,6 +117,40 @@ GFX_HELPER int gfx_bits(void)
     return (int)(sizeof(void *) * 8);
 }
 
+/* What this process was told the machine is.
+ *
+ * **Why every probe prints it rather than one of them.** The container's
+ * Hardware settings are applied at the layer each number is *derived from* —
+ * the CPU count and the memory size come from Wine, and video memory comes from
+ * the driver's heap, which DXVK sums for DXGI, vkd3d reports through DXVK's
+ * DXGI, and Zink sums again for GL. That is a chain of derivations, and a chain
+ * is exactly the kind of thing that is true in three places and quietly false
+ * in the fourth. So each API's probe says what *it* sees, in one grep-able
+ * line, and a run of tools/device-graphics.sh produces the whole matrix.
+ *
+ * The two numbers here are the ones every probe can answer without an API:
+ * the per-API video memory figure is printed by whichever probe has one, beside
+ * this line. `dwNumberOfProcessors` is what a game reads to size a thread pool,
+ * and `ullTotalPhys` is what it reads to size a streaming budget. */
+GFX_HELPER void gfx_report_machine(const char *api)
+{
+    SYSTEM_INFO si;
+    MEMORYSTATUSEX ms;
+
+    memset(&si, 0, sizeof(si));
+    GetSystemInfo(&si);
+
+    memset(&ms, 0, sizeof(ms));
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms))
+        ms.ullTotalPhys = 0;
+
+    printf("VESSEL-HW api=%s bits=%d cpus=%lu ram_mib=%llu\n",
+           api, gfx_bits(), (unsigned long)si.dwNumberOfProcessors,
+           (unsigned long long)(ms.ullTotalPhys >> 20));
+    gfx_flush();
+}
+
 /* PASS only if all three pixels are exactly right. "Exactly" is on purpose:
  * these are UNORM8 clears and a flat-shaded triangle, so there is no filtering,
  * no blending and no gamma in the path. A value that is close but not equal
