@@ -195,9 +195,9 @@ int main(void)
             kib = four[0];
         }
         if (kib >= 0)
-            printf("VESSEL-HW api=%s bits=%d vram_mib=%d\n", API, gfx_bits(), (int)(kib / 1024));
+            gfx_emit("VESSEL-HW api=%s bits=%d vram_mib=%d", API, gfx_bits(), (int)(kib / 1024));
         else
-            printf("VESSEL-HW api=%s bits=%d vram_mib=absent\n", API, gfx_bits());
+            gfx_emit("VESSEL-HW api=%s bits=%d vram_mib=absent", API, gfx_bits());
         gfx_flush();
         while (p_glGetError && p_glGetError() != 0) { }
     }

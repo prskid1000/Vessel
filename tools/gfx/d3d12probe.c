@@ -183,7 +183,7 @@ int main(void)
              * device-local heaps — so this line and the Vulkan probe's should
              * agree, and if they do not the break is in DXGI rather than in the
              * driver. */
-            printf("VESSEL-HW api=%s bits=%d vram_mib=%llu shared_mib=%llu\n",
+            gfx_emit("VESSEL-HW api=%s bits=%d vram_mib=%llu shared_mib=%llu",
                    API, gfx_bits(),
                    (unsigned long long)(desc.DedicatedVideoMemory >> 20),
                    (unsigned long long)(desc.SharedSystemMemory >> 20));

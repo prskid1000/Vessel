@@ -298,7 +298,7 @@ int main(void)
             for (h = 0; h < mem.memoryHeapCount; h++)
                 if (mem.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
                     local_bytes += (unsigned long long)mem.memoryHeaps[h].size;
-            printf("VESSEL-HW api=%s bits=%d gpu=%u heaps=%u vram_mib=%llu\n",
+            gfx_emit("VESSEL-HW api=%s bits=%d gpu=%u heaps=%u vram_mib=%llu",
                    API, gfx_bits(), i, mem.memoryHeapCount, local_bytes >> 20);
             gfx_flush();
         }

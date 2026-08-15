@@ -117,6 +117,34 @@ GFX_HELPER int gfx_bits(void)
     return (int)(sizeof(void *) * 8);
 }
 
+/* Say something twice: once on stdout, once through OutputDebugString.
+ *
+ * **Because where a probe runs decides which one is heard.** Run from
+ * tools/device-graphics.sh the probe owns its stdout and the harness reads it.
+ * Run *inside a container* — which is the only way to see the settings a
+ * container actually applies — it is a child of `wine explorer`, and Vessel's
+ * session log carries Wine's debug stream rather than a child's console, so
+ * stdout goes nowhere at all. That was measured, not assumed: the probe loaded,
+ * enumerated and exited, and the log recorded every module it loaded and not one
+ * line it printed.
+ *
+ * OutputDebugString reaches the log as `debugstr:OutputDebugStringA`, the same
+ * way a game's own logging does. Both, rather than one or the other, so the same
+ * binary answers in both harnesses. */
+GFX_HELPER void gfx_emit(const char *fmt, ...)
+{
+    char line[512];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    printf("%s\n", line);
+    gfx_flush();
+    OutputDebugStringA(line);
+}
+
 /* What this process was told the machine is.
  *
  * **Why every probe prints it rather than one of them.** The container's
@@ -145,7 +173,7 @@ GFX_HELPER void gfx_report_machine(const char *api)
     if (!GlobalMemoryStatusEx(&ms))
         ms.ullTotalPhys = 0;
 
-    printf("VESSEL-HW api=%s bits=%d cpus=%lu ram_mib=%llu\n",
+    gfx_emit("VESSEL-HW api=%s bits=%d cpus=%lu ram_mib=%llu",
            api, gfx_bits(), (unsigned long)si.dwNumberOfProcessors,
            (unsigned long long)(ms.ullTotalPhys >> 20));
     gfx_flush();
