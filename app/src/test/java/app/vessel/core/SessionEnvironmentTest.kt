@@ -404,6 +404,11 @@ class SessionEnvironmentTest {
                         title = "Extra DLL overrides",
                         type = ParamType.TEXT,
                         default = JsonPrimitive(""),
+                        // The key stopped being magic: the composer used to look
+                        // this one up by name, and now a param says for itself
+                        // which variable it contributes to. A spec without this
+                        // contributes nothing, which is the point.
+                        appendTo = "WINEDLLOVERRIDES",
                     ),
                 )
             }
@@ -1178,6 +1183,69 @@ class SessionEnvironmentTest {
         // guess would report a machine that does not exist.
         assertEquals(null, HardwareLimits(ramMb = 4096, deviceRamMb = 0).ramBiasMb)
         assertEquals(null, HardwareLimits(vramMb = 4096, deviceRamMb = 0).heapMemoryPercent)
+    }
+
+
+    // — appendTo, the schema feature that replaced a hardcoded key ------------
+
+    private fun overrideManifest(vararg specs: ParamSpec) = ParamManifest(
+        schemaVersion = 1,
+        groups = listOf(ParamGroup(id = "c", title = "C", params = specs.toList())),
+    )
+
+    private val zinkSpec = ParamSpec(
+        key = "wine.openglZink", title = "Zink", type = ParamType.BOOL,
+        default = JsonPrimitive(false),
+        appendTo = "WINEDLLOVERRIDES", appendValue = "opengl32=n",
+    )
+
+    private val extraSpec = ParamSpec(
+        key = "wine.dllOverrides", title = "Extra", type = ParamType.TEXT,
+        default = JsonPrimitive(""), appendTo = "WINEDLLOVERRIDES",
+    )
+
+    @Test
+    fun `a container that appends nothing gets exactly the required overrides`() {
+        val value = env(manifest = overrideManifest(zinkSpec, extraSpec))["WINEDLLOVERRIDES"]
+        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n", value)
+    }
+
+    @Test
+    fun `the zink toggle appends its term and nothing else`() {
+        val value = env(
+            params = mapOf("wine.openglZink" to ParamValue.Flag(true)),
+            manifest = overrideManifest(zinkSpec, extraSpec),
+        )["WINEDLLOVERRIDES"]
+        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;opengl32=n", value)
+    }
+
+    @Test
+    fun `a typed override wins over the toggle, because it is the more specific instruction`() {
+        // Wine reads the list left to right and a later term wins, so manifest
+        // order is the precedence rule: the free-text field sits after the named
+        // control, and a user who types opengl32=b gets Wine's builtin even with
+        // the toggle on.
+        val value = env(
+            params = mapOf(
+                "wine.openglZink" to ParamValue.Flag(true),
+                "wine.dllOverrides" to ParamValue.Text("opengl32=b"),
+            ),
+            manifest = overrideManifest(zinkSpec, extraSpec),
+        )["WINEDLLOVERRIDES"]
+        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;opengl32=n;opengl32=b", value)
+    }
+
+    @Test
+    fun `the required overrides cannot be deleted by a container`() {
+        // The base is not the user's to lose: whatever is appended, the D3D list
+        // is still first, and Wine's left-to-right rule means a container can
+        // override one entry without dropping the rest.
+        val value = env(
+            params = mapOf("wine.dllOverrides" to ParamValue.Text("  ;d3d9=b;  ")),
+            manifest = overrideManifest(zinkSpec, extraSpec),
+        )["WINEDLLOVERRIDES"]!!
+        assertTrue(value.startsWith("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;"))
+        assertTrue(value.endsWith("d3d9=b"))
     }
 
 }

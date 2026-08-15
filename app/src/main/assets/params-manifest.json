@@ -195,17 +195,7 @@
             "3",
             "4",
             "5"
-          ],
-          "optionLabels": {
-            "0": "Core 0",
-            "1": "Core 1",
-            "2": "Core 2",
-            "3": "Core 3",
-            "4": "Core 4",
-            "5": "Core 5",
-            "6": "Core 6",
-            "7": "Core 7"
-          }
+          ]
         },
         {
           "key": "hardware.ram",
@@ -269,12 +259,22 @@
       "help": "One escape hatch for a single misbehaving program.",
       "params": [
         {
+          "key": "wine.openglZink",
+          "title": "Use Zink for OpenGL",
+          "help": "Sends OpenGL through the bundled Mesa driver instead of Wine's. Off is correct for almost everything, including Direct3D games -- one of them loads the OpenGL stack without ever calling it, and died on this. Turn it on only for a game that actually uses OpenGL.",
+          "type": "bool",
+          "default": false,
+          "appendTo": "WINEDLLOVERRIDES",
+          "appendValue": "opengl32=n"
+        },
+        {
           "key": "wine.dllOverrides",
           "title": "Extra DLL overrides",
           "help": "Wine's WINEDLLOVERRIDES. Leave empty unless following specific advice.",
           "type": "text",
           "default": "",
-          "placeholder": "name=native,builtin"
+          "placeholder": "name=native,builtin",
+          "appendTo": "WINEDLLOVERRIDES"
         }
       ],
       "_fixedNote": "Thread synchronisation is NOT a setting. It is fixed to esync, the only mode that works here, and the session launcher must set it unconditionally. ntsync needs a kernel driver Android does not ship on any branch and sepolicy would block anyway. fsync is worse than unavailable: Proton probes it with the futex_waitv syscall, which is absent from Android's seccomp allowlist, and the default action is SECCOMP_RET_TRAP — so the probe SIGSYS-kills the process instead of failing gracefully. Offering fsync in the UI would have shipped a crash. See README, Known limitations.",

@@ -135,6 +135,36 @@ data class ParamSpec(
     val env: String? = null,
 
     /**
+     * The environment variable this param *appends a term to*, rather than
+     * becoming.
+     *
+     * **Why the schema has this rather than the composer having a second
+     * constant.** [env] copies a value into a variable, which is the whole
+     * design: adding a knob is a data change. `WINEDLLOVERRIDES` never fitted,
+     * because its value is built — a fixed list Vessel requires, then whatever
+     * the container adds — so it was composed in code against a hardcoded key,
+     * and the note beside that code said the schema would need the feature if a
+     * second such param ever appeared. The OpenGL driver toggle is the second,
+     * so this is the feature rather than the second constant.
+     *
+     * Terms are appended in manifest order, after whatever the composer starts
+     * with, and joined by [appendSeparator]. Order is precedence for
+     * `WINEDLLOVERRIDES` — Wine reads it left to right and a later term wins —
+     * so a specific instruction placed after a general one is how a user
+     * overrides a default rather than a way to break it.
+     *
+     * For a [ParamType.BOOL] the term is [appendValue] when the flag is set and
+     * nothing when it is not; for a text param the term is the value itself.
+     */
+    val appendTo: String? = null,
+
+    /** [ParamType.BOOL] with [appendTo]: the term contributed when true. */
+    val appendValue: String? = null,
+
+    /** What joins terms in [appendTo]. Semicolon, as `WINEDLLOVERRIDES` wants. */
+    val appendSeparator: String = ";",
+
+    /**
      * [ParamType.TEXT]: the greyed example shown in an empty field.
      *
      * Was hardcoded to `name=native,builtin` in the editor, which is the shape of

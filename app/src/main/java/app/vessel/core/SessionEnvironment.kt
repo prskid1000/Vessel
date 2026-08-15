@@ -1624,30 +1624,69 @@ fun sessionEnvironment(
  * `wine.dllOverrides` carries no `env` in the manifest precisely so that
  * [manifestEnvironment] leaves it alone and this function is the only writer.
  */
-internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): String {
-    val base = D3D_DLL_OVERRIDES.joinToString(",") + "=n"
-    val extra = manifest?.allParams.orEmpty()
-        .firstOrNull { it.key == DLL_OVERRIDES_KEY }
-        ?.let { spec -> profile.params[spec.key] ?: spec.defaultValue() }
-        ?.let { it as? ParamValue.Text }
-        ?.value
-        .orEmpty()
-        .trim()
-        .trim(';')
-    return if (extra.isEmpty()) base else "$base;$extra"
-}
+internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): String =
+    appendedTo(WINEDLLOVERRIDES_ENV, D3D_DLL_OVERRIDES.joinToString(",") + "=n", profile, manifest)
 
 /**
- * The one key this file looks up by name.
+ * [variable]'s value: what Vessel requires, then every manifest term for it.
  *
- * Everywhere else the manifest drives the environment through `env`, and a
- * `when (key)` is exactly what that design forbids. This is the exception
- * because the value is *composed* with a built-in list rather than copied, and
- * there is no way to express "append to this variable" in the manifest schema.
- * If a second one of these ever appears, the schema needs the feature, not
- * another constant here.
+ * **This is the general form of what used to be a hardcoded key.** One param
+ * declaring `appendTo` is a data change; the previous shape — a `when`-free
+ * function that nonetheless looked up one key by name — was a special case with
+ * a note admitting it would not survive a second one. It did not: the OpenGL
+ * driver toggle is a second thing that contributes to `WINEDLLOVERRIDES`.
+ *
+ * [base] goes first because it is not the user's to lose, and appending is the
+ * point: Wine reads the list left to right and a later term wins, so a container
+ * can override a default for one program without being able to delete it for
+ * everything. Manifest order decides the rest, which makes a named control lose
+ * to the free-text field below it — correct, because typing an override is the
+ * more specific instruction.
+ *
+ * Empty terms are dropped rather than joined, so an untouched container produces
+ * exactly [base] and the golden environment is unchanged.
  */
-private const val DLL_OVERRIDES_KEY = "wine.dllOverrides"
+internal fun appendedTo(
+    variable: String,
+    base: String,
+    profile: ContainerProfile,
+    manifest: ParamManifest?,
+): String {
+    val terms = manifest?.allParams.orEmpty()
+        .filter { it.appendTo == variable }
+        .mapNotNull { spec ->
+            when (val value = profile.params[spec.key] ?: spec.defaultValue()) {
+                is ParamValue.Flag -> spec.appendValue?.takeIf { value.value }
+                is ParamValue.Text -> value.value
+                else -> null
+            }
+        }
+        .map { it.trim().trim(';') }
+        .filter { it.isNotEmpty() }
+
+    val separator = manifest?.allParams.orEmpty()
+        .firstOrNull { it.appendTo == variable }
+        ?.appendSeparator
+        ?: ";"
+
+    return (listOf(base) + terms).filter { it.isNotEmpty() }.joinToString(separator)
+}
+
+/*
+ * The key this file used to look up by name is gone, and the note that stood
+ * here is worth keeping as a record of why.
+ *
+ * It read: "Everywhere else the manifest drives the environment through `env`,
+ * and a `when (key)` is exactly what that design forbids. This is the exception
+ * because the value is *composed* with a built-in list rather than copied, and
+ * there is no way to express 'append to this variable' in the manifest schema.
+ * If a second one of these ever appears, the schema needs the feature, not
+ * another constant here."
+ *
+ * A second one appeared — the OpenGL driver toggle — so the schema got the
+ * feature: `appendTo` on ParamSpec, composed by [appendedTo]. Both params are
+ * now data, and this file names neither.
+ */
 
 /*
  * Do not add NVIDIA Streamline (`sl.interposer` and friends) back here. It was
