@@ -90,9 +90,58 @@ avoid.
 
 ## The blockers, in order
 
-- [ ] **#51 — a relocated ntdll lies about its own base, and the game reads it.**
+- [x] **#51 — RESOLVED 2026-08-15. Requiem renders.** The `memmove` fault is gone
+  and the game reached **56 fps**, from a crash dialogue at the title screen that
+  morning. `patches/wine/0046` is what fixed it: the guest commits `0x3000` and
+  writes 16 bytes past it, which faults on this 4 KB-page kernel and is silently
+  absorbed on the 16 KB-page phones the game is validated against, so Wine now
+  rounds commits to a chosen granularity. `WINE_COMMIT_GRANULARITY_KB` overrides
+  it without a rebuild.
+
+  **The cost is real and measured**, and it is why the setting exists:
+
+  | granularity | peak session RSS | peak fps | how the session ended |
+  |---|---|---|---|
+  | grow-on-fault quirk (1 page, on demand) | 4.6 GB | — | `VK_ERROR_DEVICE_LOST` |
+  | 8 KB | 6.0 GB | 40 | X server died |
+  | 16 KB | 7.5 GB | **56** | X server died |
+
+  Two things that cost a build each and should not be repeated. The first
+  version rounded only the *commit-into-an-existing-reservation* path, and its
+  own guard — never grow past the end of the owning view — then declined to
+  round whenever the reservation was itself `0x3000`. Two correct-looking pieces
+  composing into a no-op. And the notice went in at **ERR**, putting 156
+  identical lines into one digest and burying the real entries, which is exactly
+  what `0043` exists to prevent.
+
+- [ ] **#54 — the session ends when the X server goes away.** The live blocker,
+  and it is not a Wine or FEX fault. Every run now ends with
+
+  ```
+  X connection to :0 broken (explicit kill or server shutdown)
+  XIO: fatal IO error 2 (No such file or directory) on X server ":0"
+  ```
+
+  and `exit CRASHED code 1`, after the game has been rendering. **Vessel's X
+  server is Java, inside the Android app process** (`com.winlator.xserver`), so
+  this says the *app* stopped serving — not that a container process died.
+
+  *Not yet established, and one dead end recorded so it is not walked twice:* I
+  attributed this to memory pressure on the strength of `ActivityManager …
+  cch+95 CEM` lines. Those are Android trimming **cached background** processes,
+  which it does routinely — not evidence of duress. RSS does scale with
+  granularity (4.6 → 6.0 → 7.5 GB) and the system sat at 11–12 GB of 15.2, so
+  pressure remains plausible; it is simply not shown.
+
+  *Done when:* the app-side surface is examined — an Android-level crash, ANR,
+  tombstone, or low-memory kill of `app.vessel` — which is the one layer this
+  investigation never looked at. `logcat` around the moment of death, and
+  `/data/tombstones` if reachable.
+
+- [ ] **#51 (historical) — a relocated ntdll lies about its own base.**
   *(Titled "an unhandled C++ exception at the settings menu" until 2026-08-15;
-  that was the symptom. The root cause is at the bottom of this entry.)* The live
+  that was the symptom, and `0044` below was a real fix but not this crash's
+  cause. Kept for the reasoning trail.)* The live
   blocker, and the only one whose fix is on the critical path to a frame of
   gameplay. Two dead ends are recorded here so that neither is walked a second
   time:
