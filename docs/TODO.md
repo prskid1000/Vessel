@@ -219,12 +219,51 @@ avoid.
      marshalling, which is outside `virtual.c` and outside what the audit covered
   3. the **destination pointer**, not the size, is the environment-dependent part
 
-  *Done when:* `patches/wine/0045` (one line per successful allocation, on its own
-  `virtualres` channel) names the size of the request that returned `0x22F40000`.
-  Entry-side tracing cannot answer it: `NtAllocateVirtualMemory` TRACEs its
-  arguments on entry, so a `VirtualAlloc(NULL, …)` logs its address as `0x0` and
-  the address chosen is never recorded — which is why a day of `+virtual` sessions
-  could not join a request to a region.
+  **ANSWERED 2026-08-15 by `patches/wine/0045`, and hypotheses 1 and 2 are both
+  dead.** The commit and the fault are the same thread:
+
+  ```
+  [0414] virtualres: returned 0x22f40000 size 00001000 type 3000 prot 04
+  [0414] virtualres: returned 0x22f40000 size 00003000 type 1000 prot 04
+  [0414] virtual_handle_fault unrepaired write fault at 0x22f43000, no view covers it
+  ```
+
+  **The guest asked for `0x3000` and received `0x3000`.** Wine shorted nothing;
+  FEX passed the size through intact. Nothing below the guest is implicated.
+
+  The region is an arena — a 4 MB reservation at `0x22b70000` (`size 0x400000`,
+  ending `0x22f70000`) with pages committed on demand — so `0x22f43000` is
+  reserved and merely not committed yet. That also explains the `---p` in
+  `/proc/maps` and why no view covers it.
+
+  What is left is one piece of arithmetic, entirely on the guest's side:
+
+  ```
+  destination 0x22F42F20, offset 0x2F20 into the block
+  0x2F20 + 0xE0 = 0x3000   exactly what the game committed
+  0x2F20 + 0xF0 = 0x3010   what memmove writes
+  ```
+
+  **The game committed exactly enough for a 224-byte object at that offset and
+  then copied 240.** `0xE0` is also the size recorded for the first reproduction
+  at the top of this entry, so the two figures have been visible all along
+  without being put side by side. The allocation and the copy disagree by
+  sixteen bytes.
+
+  *Done when:* the source of those two figures is identified. Every layer below
+  the guest is now cleared by measurement, so this needs guest-level work — the
+  call site that computes the commit high-water mark versus the one that computes
+  the `memmove` length. Note the address is **identical across configuration
+  changes** (RAM 6 and 8 GB, 1280×720 and 640×360), which argues against the
+  remaining "environment-dependent" explanations and toward a fixed divergence.
+
+  A note on method that this cost a day to learn: entry-side tracing could never
+  have answered it. `NtAllocateVirtualMemory` TRACEs its arguments on entry, so a
+  `VirtualAlloc(NULL, …)` logs its address as `0x0` and the address chosen is
+  never recorded — which is why a day of `+virtual` sessions could see a request
+  and see a region and never join the two. The fix was one line at the *exit*, on
+  a channel of its own: 230,713 lines with **elided 0, dropped 0**, where
+  `+virtual` elided 74% of a comparable session.
 
   ---
 
