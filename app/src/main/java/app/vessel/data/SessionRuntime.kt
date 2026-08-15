@@ -1753,12 +1753,38 @@ class SessionRuntime @Inject constructor(
                         name.endsWith(".new") -> if (file.delete()) discarded++
                     }
                 }
-                if (promoted > 0 || discarded > 0) {
-                    log.line(
-                        LogSource.VESSEL, LogLevel.INFO,
-                        "FEX code cache: published $promoted, discarded $discarded incomplete",
-                    )
-                }
+                // **The inventory is logged every session, and it is what makes
+                // "did the cache load?" answerable at all.**
+                //
+                // FEX reports the two outcomes at different levels:
+                // `Failed to load cache:` is EFmt and `Loaded cache:` is IFmt
+                // (`ImageTracker.cpp`), and `patches/fex/0003` puts the default
+                // ceiling at ERROR — so a failure is always visible and a success
+                // never is. Worse, a cache that simply *is not there* logs
+                // nothing, so "no cache existed" and "every cache loaded" are the
+                // same silence.
+                //
+                // Raising the FEX side is not the answer twice over: the only
+                // stop above ERROR is `stubs`, which is DEBUG, which is the
+                // 85,000-lines-a-minute unaligned-atomic flood — and promoting an
+                // informational line to ERROR is the mistake this project already
+                // paid for once, when a commit-granularity notice at ERR put 156
+                // non-errors in the digest (see docs/DEBUGGING.md).
+                //
+                // So the count comes from this side instead, and the reasoning is
+                // by subtraction: if N caches are on disk and FEX logs no
+                // `Failed to load cache:` line, then N loaded. One bounded line a
+                // session, and it stays honest when the answer is zero — which is
+                // the case that used to be invisible.
+                val present = dir.listFiles()?.filter { it.isFile && !it.name.endsWith(".ready") }.orEmpty()
+                val megabytes = present.sumOf { it.length() } / (1024.0 * 1024.0)
+                log.line(
+                    LogSource.VESSEL, LogLevel.INFO,
+                    "FEX code cache: ${present.size} cached binaries, %.1f MB".format(megabytes) +
+                        (if (promoted > 0) ", published $promoted" else "") +
+                        (if (discarded > 0) ", discarded $discarded incomplete" else "") +
+                        " — any that fail to load will say so at error level",
+                )
             }.onFailure {
                 log.line(
                     LogSource.VESSEL, LogLevel.WARN,

@@ -1,0 +1,108 @@
+cache: node mask 0 and 1 are the same device everywhere except in the cache key.
+
+`0002` made a PSO rejection say what mismatched. This is what it found, and the
+answer was in the arithmetic rather than in any one line of the log.
+
+Every rejection in a Requiem session looked like this, and there were about fifty
+per launch, permanently:
+
+    d3d12_cached_pipeline_state_validate: PSO compatibility hash mismatch:
+      expected 473303cf86190c27, blob has 473302cf86190a74, shaders identical
+    d3d12_pipeline_state_create: Rejected blob was validated against 1 RTV(s),
+      DSV 0, 1x0 samples, topology 3, flags 0
+
+`shaders identical`, so it is not the shaders. And in *every* observed case the
+two hashes differed by exactly `0x100000001b3` — the FNV-1 64-bit prime.
+
+THAT DIFFERENCE NAMES THE FIELD, which is the part worth keeping. The hash is
+`h = (h * P) ^ v` iterated over the descriptor, and the last two inputs are
+`node_mask` then `flags`. The rejection line reports `flags 0`, so the final XOR
+contributes nothing and the last step is a pure multiply by P — which makes a
+whole-prime difference mean the *penultimate* input differed by one in bit 0.
+Nothing else can produce that signature: a `flags` differing by one gives a
+difference of one, and any earlier field is multiplied by P again on the way out
+and emerges unrecognisable. So it is `node_mask`, and it is 0 against 1.
+
+**vkd3d already agrees those are the same device, in its own code.**
+`debug_ignored_node_mask` only complains when `mask && mask != 1`, so zero and
+one are indistinguishable to it; and every entry point that takes a NodeMask
+discards it after that check — `CreateRootSignature`, `GetCustomHeapProperties`,
+`GetResourceAllocationInfo3`, `CreateCommandList`. Pipeline creation never reads
+it at all; `state.c` only copies it out of the D3D12 descriptor. D3D12 itself
+treats 0 and 1 as equivalent on a single-adapter device.
+
+Then the raw value went into the cache compatibility key. An engine that passes 0
+down one path and 1 down another — both correct, both equivalent — writes a blob
+under one and is refused under the other. The same pair matches on Windows.
+
+**This is not a stale cache and not an unstable hash**, and both were checked
+before this patch was written. A blob whose build differs is rejected earlier, by
+`vkd3d_build`, with a different error (`D3D12_ERROR_DRIVER_VERSION_MISMATCH`, not
+`E_INVALIDARG`) — so anything that reaches this comparison was written by this
+binary on this GPU. `VKD3D_REVISION` is Vessel's packaging number and is not part
+of `vkd3d_build`, so bumping it cannot cause this either. And the hash is a pure
+function of the descriptor.
+
+**Normalised rather than removed.** Dropping the field would be defensible, since
+nothing acts on it — but it would change the hash of every existing blob and
+invalidate caches that are currently valid. Mapping 0 to 1 changes only the
+descriptors that were being refused wrongly, and a mask of 1 hashes exactly as it
+did before.
+
+**What it costs, stated at its real size.** A refused blob returns `E_INVALIDARG`
+and the engine recompiles that pipeline, so this is compile time and not
+correctness. `docs/TODO.md` records 45 mismatches in one run and 50 in the next —
+roughly 1.5% of 3,025 shaders, not all of them. The log reads far worse than that
+because each event prints four to six lines: the mismatch, the summary, and one
+`RTV n format` line per render target. Fifty events is about 250 lines.
+
+Answers the *Done when* on `docs/TODO.md` #42, which asked for the mismatching
+field to be named.
+
+diff --git a/libs/vkd3d/cache.c b/libs/vkd3d/cache.c
+index a93689ad..982cf3b2 100644
+--- a/libs/vkd3d/cache.c
++++ b/libs/vkd3d/cache.c
+@@ -2773,7 +2773,41 @@ void vkd3d_pipeline_cache_compat_from_state_desc(struct vkd3d_pipeline_cache_com
+         }
+         H32(desc->view_instancing_desc.Flags);
+     }
+-    H32(desc->node_mask);
++    /* Vessel: node mask 0 and 1 are the same device everywhere except here.
++     *
++     * vkd3d states this itself. `debug_ignored_node_mask` only complains when
++     * `mask && mask != 1`, so 0 and 1 are already the same value to it, and
++     * every API entry point that takes a NodeMask discards it after that check
++     * -- CreateRootSignature, GetCustomHeapProperties, GetResourceAllocationInfo3,
++     * CreateCommandList. Nothing in pipeline creation reads it either; state.c
++     * only ever copies it out of the D3D12 desc.
++     *
++     * Then it went into the cache compatibility key raw. An engine that passes
++     * 0 down one path and 1 down another -- both correct on a single-adapter
++     * device, and D3D12 treats them as equivalent -- gets a blob written under
++     * one and rejected under the other. On Windows the same pair matches.
++     *
++     * FOUND FROM THE ARITHMETIC, WHICH IS WORTH RECORDING BECAUSE IT NAMES THE
++     * FIELD RATHER THAN GUESSING IT. Every mismatch in a Requiem session had
++     * `expected - blob == +/-0x100000001b3`, exactly the FNV-1 64-bit prime, and
++     * every one reported `flags 0`. This hash is `h = (h * P) ^ v`, so with the
++     * final `flags` value zero the last step is a pure multiply -- which makes a
++     * difference of exactly one prime mean the *penultimate* input differed by
++     * one in bit 0. That is this line, and nothing else in the descriptor can
++     * produce that signature: a differing `flags` gives a difference of 1, and
++     * anything earlier is multiplied by P again and comes out unrecognisable.
++     *
++     * Normalised rather than removed. Dropping the field would be defensible --
++     * nothing acts on it -- but it would silently change the hash of every
++     * existing blob, invalidating caches that are currently valid. Mapping 0 to
++     * 1 changes only the descriptors that were being rejected wrongly, and
++     * leaves a mask of 1 hashing exactly as it did before.
++     *
++     * The cost this removes is compile time, not correctness: a rejected blob
++     * returns E_INVALIDARG and the engine recompiles, so the symptom was ~50
++     * pipelines rebuilt on every launch, permanently. See docs/TODO.md #42,
++     * which asked for this field to be named. */
++    H32(desc->node_mask ? desc->node_mask : 1);
+     H32(desc->flags);
+ #undef H8
+ #undef H32

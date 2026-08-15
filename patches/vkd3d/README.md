@@ -135,3 +135,46 @@ Generated against the pinned tree. Verified both directions: `git apply --check
 `git archive HEAD` extraction. No vkd3d build has been run against it — and
 `0034` in `patches/wine/` is this session's reminder that applying is not
 compiling.
+
+## `0004-cache-node-mask-0-and-1-are-the-same-device`
+
+`0002` made a PSO rejection say what mismatched. This is what it found, and the
+answer came out of the arithmetic rather than out of any one line.
+
+Every rejection in a Requiem session — about fifty per launch, permanently —
+reported `shaders identical`, and in **every** observed case the two hashes
+differed by exactly `0x100000001b3`, the FNV-1 64-bit prime.
+
+That difference names the field. The hash is `h = (h * P) ^ v` and the last two
+inputs are `node_mask` then `flags`; the rejection line reports `flags 0`, so the
+final XOR contributes nothing and the last step is a pure multiply by P — which
+makes a whole-prime difference mean the *penultimate* input differed by one in
+bit 0. Nothing else produces that signature: a differing `flags` gives a
+difference of one, and any earlier field is multiplied by P again on the way out.
+
+**vkd3d already agrees 0 and 1 are the same device, in its own code.**
+`debug_ignored_node_mask` only complains when `mask && mask != 1`, and every entry
+point that takes a NodeMask discards it after that check. Pipeline creation never
+reads it; `state.c` only copies it. D3D12 treats them as equivalent on a
+single-adapter device. Then the raw value went into the cache compatibility key,
+so an engine passing 0 down one path and 1 down another is refused here and
+matches on Windows.
+
+Checked and ruled out before writing this: it is **not** a stale cache — a blob
+with a different `vkd3d_build` is rejected earlier with
+`D3D12_ERROR_DRIVER_VERSION_MISMATCH` rather than `E_INVALIDARG`, so anything
+reaching this comparison was written by this binary on this GPU, and
+`VKD3D_REVISION` is Vessel packaging that is not part of `vkd3d_build`. And it is
+not an unstable hash: the function is pure in the descriptor.
+
+Normalised rather than removed, because dropping the field would change the hash
+of every existing blob and invalidate caches that are currently valid; mapping 0
+to 1 touches only the descriptors that were being refused wrongly.
+
+The cost removed is compile time, not correctness — `docs/TODO.md` #42 records 45
+and 50 mismatches across two runs, roughly 1.5% of 3,025 shaders. The log reads
+worse than that because each event prints four to six lines.
+
+**Policy.** Vessel's patch on Vessel's build. Defensible upstream as written,
+since it is a plain inconsistency in vkd3d's own treatment of the field.
+AI-authored in full.
