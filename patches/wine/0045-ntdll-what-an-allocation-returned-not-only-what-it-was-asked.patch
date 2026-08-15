@@ -38,9 +38,9 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
  
  /* Gdb integration, in loader/main.c */
  static struct r_debug *wine_r_debug;
-@@ -3725,6 +3726,30 @@
-         if (is_builtin && !offset) add_builtin_module( view->base, NULL );
-         *addr_ptr = view->base;
+@@ -5688,6 +5689,29 @@
+     {
+         *ret = base;
          *size_ptr = size;
 +
 +        /* Vessel: what the allocation *returned*, on a channel of its own.
@@ -53,19 +53,18 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +         * join the two.
 +         *
 +         * It cost a day on Requiem. A 240-byte memmove faults 16 bytes past a
-+         * three-page allocation at 0x22F40000, deterministically, and the one
-+         * question that decides whose defect it is -- did the guest ask for more
-+         * than three pages? -- could not be answered from the log, because the
-+         * request that produced 0x22F40000 logged its address as zero.
++         * three-page allocation, deterministically, and the one question that
++         * decides whose defect it is -- did the guest ask for more than three
++         * pages? -- could not be answered from the log, because the request that
++         * produced that address logged its address as zero. It had not.
 +         *
 +         * Its own channel rather than `virtual`, for the reason 0043 exists:
 +         * `virtual` at TRACE is 85% view dumps and elided three quarters of a
 +         * session, so the one line that answers a question does not survive in
-+         * it. `+virtualres` is one line per successful allocation and can be
-+         * read on its own.
++         * it. `+virtualres` is one line per successful allocation.
 +         */
 +        TRACE_(virtualres)( "returned %p size %08lx type %x prot %08x\n",
 +                            base, size, type, protect );
-         VIRTUAL_DEBUG_DUMP_VIEW( view );
      }
-     else delete_view( view );
+     else if (status == STATUS_NO_MEMORY)
+         ERR( "out of memory for allocation, base %p size %08lx\n", base, size );

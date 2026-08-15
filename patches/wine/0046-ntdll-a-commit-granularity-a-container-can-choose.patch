@@ -1,0 +1,133 @@
+ntdll: a commit granularity a container can choose.
+
+Replaces the grow-on-fault quirk with the quantity that actually differs
+between the machines this game works on and the one it does not.
+
+The guest always sees 4 KB pages; the Windows ABI on ARM64 requires it. This is
+a different number: how much Wine commits when the guest commits inside a region
+it already reserved. Wine tracks protection in a 4 KB bitmap but must mprotect
+at host page granularity, so on a phone with 16 KB host pages -- which Android
+15 and later ship, and which this device's firmware says it can boot
+(ro.product.cpu.pagesize.max = 16384) -- committing three 4 KB pages
+unavoidably makes the whole 16 KB host page accessible. A program that writes a
+little past its commit cannot fault there and never learns it was wrong.
+
+Resident Evil Requiem is exactly that program. It commits 0x3000 and then copies
+240 bytes where only 224 fit, running 16 bytes into the next page. 0045 measured
+the allocation: the guest asked for 0x3000 and received 0x3000, so nothing below
+it shorted anything. On a 16 KB-page host that overrun lands in mapped memory;
+on this 4 KB kernel it is a real access violation.
+
+So whether the game runs is a property of which kernel the phone booted with,
+and a container can now say which of those two machines it wants to look like.
+
+Defaults to 16 KB -- matching the phones this class of game is validated on,
+rather than the kernel this one happens to boot. WINE_COMMIT_GRANULARITY_KB=4
+restores exact Windows behaviour without a rebuild. Rounding up commits memory the guest did not ask for, up to three extra
+pages per commit at 16 KB, and NtQueryVirtualMemory will report those pages as
+committed where an allocator probing for free space can see them. That price is
+paid by every container, which is the argument for the override.
+
+The rounding never crosses the end of the view the commit belongs to. Growing
+past it would turn a legal commit into STATUS_NOT_MAPPED_VIEW, which is the one
+way this could break a program that is doing nothing wrong.
+
+MEASURED, and stated here because it is the reason to expect little from this:
+with the earlier fault-based version of this change the access violation
+disappeared and fired exactly once in a session -- one call site, not a systemic
+overrun -- and the game still did not proceed. It now reaches
+VK_ERROR_DEVICE_LOST instead. This removes one obstacle; it is not known to be
+the last one.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5571,6 +5571,65 @@
+  *
+  * NtAllocateVirtualMemory[Ex] implementation.
+  */
++/* Vessel: the granularity a commit is rounded up to, chosen per container.
++ *
++ * The guest always sees 4 KB pages -- the Windows ABI on ARM64 requires it, and
++ * Wine says so. This is a separate quantity: how much Wine actually commits when
++ * the guest asks for a commit inside a region it already reserved.
++ *
++ * WHY IT IS A SETTING AND NOT A CONSTANT. Wine tracks protections in a 4 KB
++ * bitmap but must mprotect at *host* page granularity. On a phone with 16 KB
++ * host pages -- which Android 15 and later ship, and which this device's own
++ * firmware reports it can boot (ro.product.cpu.pagesize.max = 16384) -- a guest
++ * committing three 4 KB pages unavoidably makes the whole 16 KB host page
++ * accessible. A program that writes a little past what it committed therefore
++ * cannot fault there, and never learns it was wrong.
++ *
++ * That is not hypothetical. Resident Evil Requiem commits 0x3000 and then copies
++ * 240 bytes to an offset where only 224 fit, running 16 bytes into the next
++ * page. Measured through patches/wine/0045, the guest asked for 0x3000 and got
++ * exactly 0x3000 -- nothing below it shorted the allocation. On a 16 KB-page
++ * host the overrun lands in memory that is already mapped and the game runs; on
++ * this 4 KB-page kernel it is a genuine access violation.
++ *
++ * So the difference between "this game works" and "this game does not" is a
++ * property of the kernel the phone happens to be booted with. A container can
++ * now say which of those two machines it wants to look like.
++ *
++ * DEFAULTS TO 16 KB, matching the phones this class of game is validated on
++ * rather than the kernel this one happens to boot. Setting
++ * WINE_COMMIT_GRANULARITY_KB=4 restores exact Windows behaviour without a
++ * rebuild, which is the escape hatch if some other title dislikes it.
++ * Rounding up commits memory the guest did not ask for -- up to
++ * three extra pages per commit at 16 KB -- and NtQueryVirtualMemory will report
++ * those pages as committed, which an allocator probing for free space can see.
++ * That is a real cost, paid on every commit in every container, and it is why
++ * the override exists and why this comment names the price.
++ */
++static SIZE_T commit_granularity_mask(void)
++{
++    static SIZE_T mask = ~(SIZE_T)0;
++
++    if (mask == ~(SIZE_T)0)
++    {
++        const char *e = getenv( "WINE_COMMIT_GRANULARITY_KB" );
++        unsigned int kb = e ? atoi( e ) : 16;   /* 16 KB unless told otherwise */
++
++        /* A power of two, at least one page, and not so large that a small
++         * commit turns into a megabyte. Anything else falls back to the page
++         * size, which is what Windows does. */
++        if (kb < 4 || kb > 64 || (kb & (kb - 1))) mask = page_mask;
++        else
++        {
++            mask = (SIZE_T)kb * 1024 - 1;
++            if (mask != page_mask)
++                ERR( "commit granularity is %u KB, not the page size; commits will be rounded up\n", kb );
++        }
++    }
++    return mask;
++}
++
++
+ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
+                                          ULONG_PTR limit_low, ULONG_PTR limit_high,
+                                          ULONG_PTR align, ULONG attributes )
+@@ -5655,6 +5714,22 @@
+     }
+     else  /* commit the pages */
+     {
++        /* Vessel: round the commit up to the container's granularity, but never
++         * past the end of the view it belongs to -- growing beyond that would
++         * turn a legal commit into STATUS_NOT_MAPPED_VIEW, which is the one way
++         * this could break a program that is doing nothing wrong. */
++        SIZE_T gran = commit_granularity_mask();
++
++        if (gran != page_mask)
++        {
++            struct file_view *whole = find_view( base, size );
++            SIZE_T grown = ROUND_SIZE( base, size, gran );
++
++            if (whole && grown > size &&
++                (char *)base + grown <= (char *)whole->base + whole->size)
++                size = grown;
++        }
++
+         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
+         else if (view->protect & SEC_FILE) status = STATUS_ALREADY_COMMITTED;
+         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
