@@ -42,7 +42,7 @@ the last one.
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5571,6 +5571,65 @@
+@@ -5571,6 +5571,71 @@
   *
   * NtAllocateVirtualMemory[Ex] implementation.
   */
@@ -98,7 +98,13 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +        {
 +            mask = (SIZE_T)kb * 1024 - 1;
 +            if (mask != page_mask)
-+                ERR( "commit granularity is %u KB, not the page size; commits will be rounded up\n", kb );
++            /* WARN, not ERR. This is a statement of configuration, not a failure,
++             * and it is emitted once per process -- of which a session has many.
++             * At ERR it put 156 identical lines into one session's error digest
++             * and buried the entries that mattered, which is the exact defect
++             * patches/wine/0043 exists to prevent. Enable warn+virtual to confirm
++             * the setting took effect. */
++                WARN( "commit granularity is %u KB, not the page size; commits will be rounded up\n", kb );
 +        }
 +    }
 +    return mask;
@@ -108,7 +114,23 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
  static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
                                           ULONG_PTR limit_low, ULONG_PTR limit_high,
                                           ULONG_PTR align, ULONG attributes )
-@@ -5655,6 +5714,22 @@
+@@ -5629,6 +5694,15 @@
+ 
+     if ((type & MEM_RESERVE) || !base)
+     {
++        /* Vessel: a 16 KB host page rounds the *reservation* too, not only a
++         * later commit into it. Reserving and committing in one call is the
++         * common case, and rounding only the commit path left exactly that case
++         * faulting -- measured, after the first version of this patch shipped.
++         * Only when MEM_COMMIT is set: a pure reservation costs address space
++         * and commits nothing, so there is nothing to round. */
++        if ((type & MEM_COMMIT) && commit_granularity_mask() != page_mask)
++            size = ROUND_SIZE( base, size, commit_granularity_mask() );
++
+         if (!(status = get_vprot_flags( protect, &vprot, FALSE )))
+         {
+             if (type & MEM_COMMIT) vprot |= VPROT_COMMITTED;
+@@ -5655,6 +5729,22 @@
      }
      else  /* commit the pages */
      {
