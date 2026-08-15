@@ -1,0 +1,147 @@
+offlinecompiler: a cache that cannot be published must not abort the compiler.
+
+`0016` stopped an unwritable cache being published. This is the failure one step
+later: a cache that was written correctly and *cannot be renamed into place*.
+
+On Requiem it happened on every launch after the first:
+
+    libc++abi: terminating due to uncaught exception of type
+    std::__1::__fs::filesystem::filesystem_error: filesystem error: in rename:
+    Access denied.
+    ["C:\vessel\fexcache\cache/re9.exe-a7b10b28eeac3098-….new"]
+    ["C:\vessel\fexcache\cache/re9.exe-a7b10b28eeac3098-…"]
+
+`std::filesystem::rename`'s throwing overload, never caught -- not here, not in
+`GenerateCache`, not in `main`. So `std::terminate` aborted the child and the
+parent printed only `Cache generation failed for {}`, discarding every other
+diagnostic that child still had to give. The 339 MB it had just spent minutes
+producing went with it.
+
+WHY THE RENAME IS DENIED IS A RULE IN OUR OWN WINE, and naming it is what makes
+the fix below correct rather than hopeful. `server/fd.c:set_fd_name` refuses to
+replace a destination that any fd still has open:
+
+    /* can't replace an opened file */
+    if ((inode = get_inode( st.st_dev, st.st_ino, -1 )))
+    {
+        int is_empty = list_empty( &inode->open );
+        …
+        if (!is_empty) set_error( STATUS_ACCESS_DENIED );
+
+It never consults share modes at all, and a *mapped view* keeps such an fd alive
+long after every handle is closed -- `server/mapping.c` grabs the mapping's fd
+for the lifetime of the view. `ImageTracker::LoadAOTImages` maps the previous
+cache at image load and never unmaps it, so from that moment the name cannot be
+replaced by anything inside the prefix. This is why `FILE_SHARE_DELETE` is not
+the fix, and why closing handles earlier is not either: they are closed already.
+
+So publication moves out of the guest instead of being retried inside it. The
+finished cache is renamed to `<final>.ready` -- a name nothing ever opens or
+maps, so that rename always succeeds -- and Vessel promotes it on the host
+before the next session starts anything, where a plain Linux `rename(2)`
+replaces a mapped file without complaint because wineserver is not involved.
+See `fexCachePromote` in `SessionRuntime.kt`.
+
+`.ready` rather than simply leaving `.new` behind, because the two states must be
+told apart. `.new` is also what a compiler killed mid-write leaves, and promoting
+one of those would publish a truncated cache. Only `.ready` is ever promoted, and
+only the line after `SaveData` returned true can create one.
+
+The unchecked `open` beside it is fixed in the same hunk because it produces the
+same misleading error: on failure `fd` is -1, `SaveData`'s writes all fail and it
+still returns true, and the rename is then attempted on a source that does not
+exist -- so the message names the rename rather than the open that actually
+failed. `O_TRUNC` is added for the neighbouring reason: without it a longer
+leftover `.new` is shortened only by `SaveData`'s own `ftruncate`, which puts a
+correctness guarantee in the wrong file.
+
+**This does not make the cache complete.** `0017` still stops at the code buffer
+ceiling, so re9.exe's cache covers roughly a quarter of its blocks, chosen in
+address order rather than by how often they run. What changes is that the quarter
+now survives to be loaded instead of being discarded and recompiled every launch.
+
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 894a561b9..4530c6322 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -595,7 +595,20 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+ 
+     auto Filename = fmt::format("{}{}-{:016x}", OutDir, FEXCore::CodeMap::GetBaseFilename(Binary, false), CodeCacheConfigId);
+     auto FilenameNew = Filename + ".new";
+-    int fd = open(FilenameNew.c_str(), O_CREAT | O_WRONLY | O_BINARY, 0644);
++    /* Vessel: a file that did not open is not a file to write to.
++     *
++     * The return value was dropped. On failure `fd` is -1, SaveData's ::write
++     * calls all fail, and it still returns true -- so the rename below is then
++     * attempted on a source that does not exist, and the error names the
++     * rename rather than the open that actually failed. O_TRUNC is added for
++     * the neighbouring reason: without it a longer leftover .new is only
++     * shortened by SaveData's own ftruncate, which is a correctness guarantee
++     * living in the wrong file. */
++    int fd = open(FilenameNew.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_BINARY, 0644);
++    if (fd < 0) {
++      LogMan::Msg::EFmt("Not publishing {}: could not open {} for writing", Filename, FilenameNew);
++      return {};
++    }
+     bool Saved;
+     {
+       auto Entry = SyscallHandler->LookupExecutableFileSection(Thread, SyscallHandler->VAFileStart).value();
+@@ -631,7 +644,57 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+       return {};
+     }
+ 
+-    std::filesystem::rename(FilenameNew.c_str(), Filename.c_str());
++    /* Vessel: a cache that cannot be published now must not kill the compiler.
++     *
++     * This was the throwing overload, and the throw was never caught -- not
++     * here, not in GenerateCache, not in main. So one unpublishable file
++     * reached std::terminate, libc++abi aborted the child, and the parent
++     * reported only `Cache generation failed for {}`, losing every diagnostic
++     * the child had left to print. On Requiem that happened on every single
++     * launch after the first.
++     *
++     * WHY THE RENAME IS DENIED IS NOT A FILE-IN-USE HEURISTIC, it is a rule in
++     * our own Wine, and knowing which one is what makes the fix below correct
++     * rather than hopeful. `server/fd.c:set_fd_name` refuses to replace a
++     * destination that any fd still has open -- `list_empty(&inode->open)` --
++     * and it never consults share modes at all. A mapped view keeps such an fd
++     * alive even after every handle is closed, because `server/mapping.c` grabs
++     * the mapping's fd for the lifetime of the view. ImageTracker maps the
++     * previous cache at image load and never unmaps it, so from that moment the
++     * name cannot be replaced by anything inside the prefix. Adding
++     * FILE_SHARE_DELETE would change nothing; neither would closing handles
++     * earlier, because they are closed already.
++     *
++     * So publication moves out of the guest rather than being retried in it.
++     * The finished cache is renamed to `<final>.ready`, a name nothing ever
++     * opens or maps, so that rename always succeeds -- and the host promotes it
++     * before the next session starts anything, where a plain Linux rename(2)
++     * replaces a mapped file without complaint because wineserver is not
++     * involved. See fexCachePromote in SessionRuntime.kt.
++     *
++     * `.ready` rather than leaving `.new` in place, because the two states must
++     * be told apart: `.new` is also what a compiler killed mid-write leaves
++     * behind, and promoting one of those would publish a truncated cache. Only
++     * `.ready` is ever promoted, and only this line -- after SaveData returned
++     * true -- can create one. */
++    std::error_code RenameError;
++    std::filesystem::rename(FilenameNew.c_str(), Filename.c_str(), RenameError);
++    if (!RenameError) {
++      return Filename;
++    }
++
++    auto FilenameReady = Filename + ".ready";
++    std::error_code HandoffError;
++    std::filesystem::rename(FilenameNew.c_str(), FilenameReady.c_str(), HandoffError);
++    if (HandoffError) {
++      LogMan::Msg::EFmt("Could not publish {} ({}) and could not hand it off ({}); discarding", Filename,
++                        RenameError.message(), HandoffError.message());
++      std::error_code Ignored;
++      std::filesystem::remove(FilenameNew.c_str(), Ignored);
++      return {};
++    }
++
++    LogMan::Msg::IFmt("{} is in use, so {} was written instead and will be published next launch", Filename, FilenameReady);
+     return Filename;
+   }
+ }

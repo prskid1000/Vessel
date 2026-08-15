@@ -1025,6 +1025,12 @@ class SessionRuntime @Inject constructor(
         // but it cannot be paid for by every session while never delivering. It
         // needs a moment when nothing else wants the CPU and teardown is not
         // about to kill it, and there is no such moment inside a session.
+        // **Publish last session's caches before anything can map one.** This has
+        // to happen here — ahead of both the compiler below and the first guest
+        // process — and the ordering is the entire mechanism. See
+        // [promoteReadyCaches].
+        promoteReadyCaches(running, log)
+
         if (CODE_CACHE_DURING_SESSION) {
             codeCacheJob = scope.launch { generateCodeCache(running, log) }
         }
@@ -1684,6 +1690,84 @@ class SessionRuntime @Inject constructor(
      * resolves siblings from `GetModuleFileNameA`, which lands back in the same
      * directory.
      */
+    /**
+     * Publish the caches the last session finished but could not rename.
+     *
+     * **The guest cannot do this, and the reason is a rule in our own Wine
+     * rather than a quirk of timing.** `server/fd.c:set_fd_name` refuses to
+     * replace a destination that any fd still has open — `list_empty(
+     * &inode->open)` — and it never consults share modes. A *mapped view* keeps
+     * such an fd alive long after every handle is closed, because
+     * `server/mapping.c` grabs the mapping's fd for the life of the view. FEX's
+     * `ImageTracker` maps a cache at image load and never unmaps it, so from
+     * that instant the name cannot be replaced from inside the prefix by
+     * anything, at any time, for the rest of the session.
+     *
+     * Measured on Requiem: `Access denied` on the rename, every launch after the
+     * first, an uncaught `filesystem_error` aborting the compiler, and 339 MB of
+     * finished cache thrown away each time.
+     *
+     * So `patches/fex/0018` has the compiler write `<final>.ready` when it
+     * cannot publish, and this promotes it — **on the host, where wineserver is
+     * not involved and a plain `rename(2)` replaces a mapped file without
+     * complaint.**
+     *
+     * **Ordering is the mechanism, not a detail.** This runs before
+     * `generateCodeCache` and before the first guest process, which is the only
+     * window in which nothing has mapped a cache yet. Moved after either one and
+     * it becomes the same denied rename, in a different language.
+     *
+     * **Only `.ready`, never `.new`.** `.new` is also what a compiler killed
+     * mid-write leaves behind — teardown cancels that job — and promoting one of
+     * those would publish a truncated cache over a good one. `0018` creates
+     * `.ready` only after `SaveData` returned true, so the suffix is what carries
+     * "this file is complete". Stale `.new` files are deleted rather than left,
+     * because a leftover beside a real cache is one more thing to explain later;
+     * seven of them had accumulated before this existed.
+     *
+     * Failures are logged and never fatal. A cache that does not get promoted
+     * costs recompilation, which is the situation this whole feature exists to
+     * improve on — it is not a reason to refuse to start a session.
+     */
+    private suspend fun promoteReadyCaches(current: LaunchPlan, log: SessionLog) {
+        val cache = current.fexCacheHost ?: return
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = File(cache, "cache")
+                val files = dir.listFiles() ?: return@runCatching
+                var promoted = 0
+                var discarded = 0
+                for (file in files) {
+                    val name = file.name
+                    when {
+                        name.endsWith(".ready") -> {
+                            val target = File(dir, name.removeSuffix(".ready"))
+                            if (file.renameTo(target)) promoted++ else {
+                                log.line(
+                                    LogSource.VESSEL, LogLevel.WARN,
+                                    "could not publish ${target.name}; it will be regenerated",
+                                )
+                            }
+                        }
+                        // Incomplete by construction: see the note above.
+                        name.endsWith(".new") -> if (file.delete()) discarded++
+                    }
+                }
+                if (promoted > 0 || discarded > 0) {
+                    log.line(
+                        LogSource.VESSEL, LogLevel.INFO,
+                        "FEX code cache: published $promoted, discarded $discarded incomplete",
+                    )
+                }
+            }.onFailure {
+                log.line(
+                    LogSource.VESSEL, LogLevel.WARN,
+                    "could not publish pending FEX caches: ${it.message ?: it.javaClass.simpleName}",
+                )
+            }
+        }
+    }
+
     private suspend fun generateCodeCache(current: LaunchPlan, log: SessionLog) {
         val compiler = current.offlineCompiler ?: return
         // The host directory, not `FEX_APP_CACHE_LOCATION` — that is now the DOS

@@ -1,0 +1,96 @@
+imagetracker: the exclusion must name the process, not the image it just mapped.
+
+`LoadAOTImages` opens with a guard whose intent is right and whose test cannot
+implement it:
+
+    // Don't attempt cache loading for FEXOfflineCompiler itself
+    static bool IsFOC32 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler32.exe");
+    static bool IsFOC64 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler64.exe");
+
+It is wrong in two independent ways.
+
+FIRST, IT ASKS ABOUT THE WRONG SUBJECT. `ImageInfo` is whichever image was just
+mapped, so this only declines to load a cache *for the compiler's own binary* --
+and the compiler exists to map other people's binaries. `TryMapImage` maps
+`re9.exe` with `SEC_IMAGE`, that fires `NotifyMapViewOfSection`, and this
+function then loaded the 339 MB cache for `re9.exe` into the compiler process:
+the very file the compiler was about to replace.
+
+That makes the compiler a second holder of its own destination, in the same
+process that performs the rename -- so the publish failure in `0018` occurs even
+with no game running, and the concurrency with the session is not the whole
+story. It also costs the compiler a 339 MB mapping, a code-buffer allocation and
+copy, and a full relocation pass over millions of entries, per binary, for a
+cache it has no use for.
+
+SECOND, `static` ON A VALUE DERIVED FROM A PARAMETER freezes the first call's
+answer for the life of the process. Whatever image happened to be mapped first
+decided the outcome for every image after it, so even the question it was asking
+was only ever asked once.
+
+The host process is genuinely constant, so a `static` is correct here -- and the
+answer no longer depends on which image triggered the call.
+`FEX::Windows::GetExecutableFilePath` is `LdrGetDllFullName(nullptr, …)`, which
+names the running process rather than a mapped image. It goes through the file's
+existing `ToLower` for the same reason `MappedImageInfo` normalises `Filename`:
+Windows paths are case-insensitive and `LdrGetDllFullName` does not normalise.
+
+Both compiler names are still tested, and both still matter: `ProcessAll`
+re-execs itself per module and rewrites the trailing name of its own path to pick
+the sibling matching that module's bitness, so the 32-bit compiler is a real host
+process even though nothing invokes it directly.
+
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index 6814e6562..b743f0abe 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include "Handle.h"
+ #include "Module.h"
++#include "Module.h"
+ #include "Priv.h"
+ #include "ImageTracker.h"
+ 
+@@ -297,10 +298,37 @@ int ImageTracker::OpenCodeMapFile() {
+ }
+ 
+ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
+-  // Don't attempt cache loading for FEXOfflineCompiler itself
+-  static bool IsFOC32 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler32.exe");
+-  static bool IsFOC64 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler64.exe");
+-  if (IsFOC32 || IsFOC64) {
++  /* Vessel: the exclusion has to name the *process*, not the image it just mapped.
++   *
++   * The intent -- "don't attempt cache loading for FEXOfflineCompiler itself" --
++   * was right and the test could not implement it, in two independent ways.
++   *
++   * FIRST, it asked about the wrong subject. `ImageInfo` is whichever image was
++   * just mapped, so this only declined to load a cache *for the compiler's own
++   * binary*. The compiler exists to map other people's binaries: `TryMapImage`
++   * maps re9.exe with SEC_IMAGE, that fires NotifyMapViewOfSection, and this
++   * function then loaded the 339 MB cache for re9.exe into the compiler process
++   * -- the very file the compiler was about to replace. That is a second holder
++   * of the destination, in the same process doing the rename, so the publish
++   * failed even with no game running. It also cost the compiler a 339 MB
++   * mapping, a code-buffer allocation and copy, and a full relocation pass over
++   * millions of entries, per binary, for a cache it has no use for.
++   *
++   * SECOND, `static` on a value derived from a parameter freezes the first
++   * call's answer for the life of the process. Whatever the first mapped image
++   * happened to be decided the outcome for every image after it, so even the
++   * question it was asking was only ever asked once.
++   *
++   * The host process is a property of the process, so a `static` is right here
++   * -- it is genuinely constant -- and the answer no longer depends on which
++   * image triggered the call. Through ToLower for the same reason MappedImageInfo
++   * normalises `Filename`: Windows paths are case-insensitive and
++   * LdrGetDllFullName does not normalise them. */
++  static const bool HostIsOfflineCompiler = [] {
++    const auto Path = ToLower(GetExecutableFilePath());
++    return Path.ends_with("fexofflinecompiler32.exe") || Path.ends_with("fexofflinecompiler64.exe");
++  }();
++  if (HostIsOfflineCompiler) {
+     return;
+   }
+ 

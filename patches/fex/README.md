@@ -1067,3 +1067,139 @@ fix and a content hash in the header are one change, not two.
 
 **Policy.** Not for upstream, for the reason at the top of this file. AI-authored
 in full.
+
+## `0018-offlinecompiler-a-cache-that-cannot-be-published-must-not-abort-the-compiler`
+
+`0016` stopped an *unwritable* cache being published. This is the failure one
+step later, and it is the one that was actually costing every launch: a cache
+written correctly, validated, and then impossible to rename into place.
+
+```
+libc++abi: terminating due to uncaught exception of type
+std::__1::__fs::filesystem::filesystem_error: filesystem error: in rename:
+Access denied.
+["C:\vessel\fexcache\cache/re9.exe-a7b10b28eeac3098-….new"]
+["C:\vessel\fexcache\cache/re9.exe-a7b10b28eeac3098-…"]
+```
+
+The throwing overload of `std::filesystem::rename`, uncaught in this function, in
+`GenerateCache`, and in `main`. So `std::terminate` aborted the child and the
+parent printed only `Cache generation failed for {}` — discarding every other
+diagnostic that child still had to give, along with the 339 MB it had just spent
+minutes producing.
+
+**The denial is a rule in our own Wine, not a file-in-use heuristic**, and naming
+it is what makes the fix correct rather than hopeful. `server/fd.c:set_fd_name`:
+
+```c
+/* can't replace an opened file */
+if ((inode = get_inode( st.st_dev, st.st_ino, -1 )))
+{
+    int is_empty = list_empty( &inode->open );
+    …
+    if (!is_empty) set_error( STATUS_ACCESS_DENIED );
+```
+
+It never consults share modes, and a **mapped view** keeps such an fd alive long
+after every handle is closed — `server/mapping.c` grabs the mapping's fd for the
+life of the view. `ImageTracker::LoadAOTImages` maps a cache at image load and
+never unmaps it. So from that instant the name cannot be replaced from inside the
+prefix, by anything, for the rest of the session. `FILE_SHARE_DELETE` is
+therefore not the fix, and neither is closing handles earlier: they are closed
+already.
+
+**So publication leaves the guest.** The finished cache is renamed to
+`<final>.ready` — a name nothing ever opens or maps, so that rename always
+succeeds — and Vessel promotes it on the host before the next session starts
+anything, where a plain Linux `rename(2)` replaces a mapped file without
+complaint because wineserver is not involved. See `promoteReadyCaches` in
+`SessionRuntime.kt`, whose *ordering* is the mechanism: before the compiler and
+before the first guest process is the only window in which nothing has mapped a
+cache yet.
+
+`.ready` rather than leaving `.new`, because the two states must be told apart.
+`.new` is also what a compiler killed mid-write leaves behind — teardown cancels
+that job — and promoting one of those would publish a truncated cache over a good
+one. Only the line after `SaveData` returned true can create a `.ready`.
+
+**The loop this ends.** `Main.cpp`'s up-to-date test compares the cache file's
+mtime against the merged codemap's. Because the rename always failed, the cache's
+mtime stayed frozen older than the codemap, so every session printed `Updating
+outdated cache` and regenerated ~337 MB from scratch — **even a session that
+discovered no new blocks at all**. It was self-perpetuating, and it was not
+Denuvo that made it so.
+
+The unchecked `open` is fixed in the same hunk because it produces the same
+misleading error: on failure `fd` is -1, `SaveData`'s writes all fail, it still
+returns true, and the rename is attempted on a source that does not exist — so
+the message names the rename rather than the open. `O_TRUNC` is added beside it
+so that shortening a leftover `.new` stops depending on `SaveData`'s own
+`ftruncate`, which is a correctness guarantee living in the wrong file.
+
+**What this does not fix, stated plainly.** `0017` still stops at the code buffer
+ceiling, so re9.exe's cache covers roughly a quarter of its blocks — and
+`Main.cpp` walks `BlockList` in *address* order, so it is an arbitrary quarter
+rather than a hot one. Each regeneration caches a *different* quarter, which is
+why the `.new` file was 1.9 MB **smaller** than the published one: ~1000 new
+low-address blocks displaced higher-address ones. Hotness-ordered codemaps are
+the change that would make the 128 MB the *useful* 128 MB, and this is not it.
+
+**AND IT MAKES THIS FILE'S STANDING WARNING LIVE.** `0011` and `0016` both record
+that Requiem's cache being refused on every load is what keeps the risk of
+executing a stale translation at exactly zero, and that the buffer-swap fix and a
+content hash in the header "are one change, not two". This patch delivers the
+first half of a loadable cache without the second. The format still has no field
+binding a cache to the bytes it was generated from, and Denuvo decrypts code at
+runtime — so a cache generated from encrypted bytes could now be loaded and run.
+That is silent wrong execution, and far harder to diagnose than the honest
+refusal it replaces. The first session after this lands must be an observed one,
+and a content hash in the header remains owed.
+
+**Policy.** Not for upstream, for the reason at the top of this file. AI-authored
+in full.
+
+## `0019-imagetracker-the-exclusion-must-name-the-process-not-the-image`
+
+`LoadAOTImages` opened with a guard whose intent was right and whose test could
+not implement it:
+
+```c
+// Don't attempt cache loading for FEXOfflineCompiler itself
+static bool IsFOC32 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler32.exe");
+static bool IsFOC64 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler64.exe");
+```
+
+Wrong in two independent ways.
+
+**It asked about the wrong subject.** `ImageInfo` is whichever image was just
+mapped, so this only declined to load a cache *for the compiler's own binary* —
+and the compiler exists to map other people's binaries. `TryMapImage` maps
+`re9.exe` with `SEC_IMAGE`, that fires `NotifyMapViewOfSection`, and this function
+then loaded the 339 MB cache for `re9.exe` into the compiler process: the very
+file the compiler was about to replace.
+
+That matters beyond waste. It makes the compiler a second holder of its own
+destination, **in the same process that performs the rename** — so `0018`'s
+publish failure occurs even with no game running, and concurrency with the
+session was never the whole story. The waste is real too: a 339 MB mapping, a
+code-buffer allocation and copy, and a full relocation pass over millions of
+entries, per binary, for a cache the compiler has no use for.
+
+**And `static` on a value derived from a parameter** freezes the first call's
+answer for the life of the process. Whatever image happened to be mapped first
+decided the outcome for every image after it, so even the wrong question was only
+ever asked once.
+
+The host process is genuinely constant, so `static` is correct here, and the
+answer no longer depends on which image triggered the call.
+`FEX::Windows::GetExecutableFilePath` is `LdrGetDllFullName(nullptr, …)`, which
+names the running process rather than a mapped image; it goes through the file's
+existing `ToLower` for the same reason `MappedImageInfo` normalises `Filename`.
+
+Both compiler names are still tested, and both still matter: `ProcessAll`
+re-execs itself per module and rewrites the trailing name of its own path to pick
+the sibling matching that module's bitness, so the 32-bit compiler is a real host
+process even though nothing invokes it directly.
+
+**Policy.** Not for upstream, for the reason at the top of this file. AI-authored
+in full.

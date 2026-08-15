@@ -1109,12 +1109,19 @@ fun sessionEnvironment(
     // own that is pure cost: a file write per module load on every launch and
     // never a cache read back. Two things had to exist first, and both do:
     //
-    //  1. **Something runs the compiler.** `SessionRuntime.teardown` runs
-    //     `FEXOfflineCompiler64.exe process-all` once the guest is dead, which
-    //     merges the run's codemaps into the reference set and generates a cache
-    //     per binary. Teardown is the right moment because the codemap is
-    //     complete and nothing else is using the CPU. It is best-effort and
-    //     cannot fail a teardown; see the method for what it does when it fails.
+    //  1. **Something runs the compiler.** `SessionRuntime.start` launches
+    //     `FEXOfflineCompiler64.exe process-all` beside the desktop, gated on
+    //     `CODE_CACHE_DURING_SESSION`; it merges the run's codemaps into the
+    //     reference set and generates a cache per binary. It is best-effort and
+    //     cannot fail a session; see the method for what it does when it fails.
+    //
+    //     *This said "teardown runs it, once the guest is dead" and that had
+    //     stopped being true.* Teardown only cancels the job — by then
+    //     `wineserver -k` has run and there is nothing left to compile in. The
+    //     wrong version mattered rather than being merely untidy: it is the
+    //     sentence that would convince a reader the compiler cannot be running
+    //     while the game holds a cache open, which is exactly the race that
+    //     `patches/fex/0018` and `promoteReadyCaches` exist to answer.
     //  2. **The cache is keyed on FEX's configuration.** Upstream's
     //     `CodeCacheConfigId` is `0 // TODO` (`ImageTracker.cpp`), so FEX itself
     //     would load a cache built under a different TSO or CPU setting without
