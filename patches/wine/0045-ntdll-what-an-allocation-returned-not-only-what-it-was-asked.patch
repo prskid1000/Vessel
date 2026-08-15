@@ -1,0 +1,71 @@
+ntdll: what an allocation returned, not only what it was asked.
+
+NtAllocateVirtualMemory TRACEs its arguments on entry, so a VirtualAlloc(NULL,
+...) records the address as 0x0 and the address actually chosen is never written
+down. The common case is therefore unattributable: the log shows that something
+asked for N bytes, and separately that some region exists, and gives no way to
+join them.
+
+That cost a day on Resident Evil Requiem. A 240-byte memmove faults 16 bytes
+past a three-page allocation at 0x22F40000, in the same place every run, and the
+question that decides whose defect it is -- did the guest ask for more than
+three pages? -- cannot be answered, because the request that produced
+0x22F40000 logged its address as zero.
+
+A source audit of every path from NtAllocateVirtualMemory to the mmap found no
+way for this file to commit less than was asked: sizes only round up, the
+free-area search skips a range that is too small rather than clamping to it
+(virtual.c:2341), and a commit past a view's end returns STATUS_NOT_MAPPED_VIEW
+instead of committing part of it. The fault report agrees -- had a larger
+request been shorted, view->size would still be the full size and the fault
+would have printed 0043's "in view ... committed" WARN rather than the "no view
+covers it" ERR it did print. So Wine's bookkeeping believes the allocation is
+three pages, and that number is the guest's own rounded request. This trace is
+what turns that inference into a record.
+
+On its own channel, for the reason 0043 exists: `virtual` at TRACE is 85% view
+dumps and elided three quarters of a session, so a line that answers a question
+does not survive in it. `+virtualres` is one line per successful allocation.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -106,6 +106,7 @@
+ WINE_DECLARE_DEBUG_CHANNEL(virtual_ranges);
+ WINE_DECLARE_DEBUG_CHANNEL(virtstat);
+ WINE_DECLARE_DEBUG_CHANNEL(virtual_views);
++WINE_DECLARE_DEBUG_CHANNEL(virtualres);
+ 
+ /* Gdb integration, in loader/main.c */
+ static struct r_debug *wine_r_debug;
+@@ -5688,6 +5689,30 @@
+     {
+         *ret = base;
+         *size_ptr = size;
++
++        /* Vessel: what the allocation *returned*, on a channel of its own.
++         *
++         * NtAllocateVirtualMemory's own TRACE prints its arguments on entry, so
++         * a VirtualAlloc(NULL, ...) -- which is most of them -- records the
++         * address as 0x0 and the address actually chosen is never written down.
++         * That makes the common case unattributable: you can see that something
++         * asked for N bytes, and separately that some region exists, and never
++         * join the two.
++         *
++         * It cost a day on Requiem. A 240-byte memmove faults 16 bytes past a
++         * three-page allocation at 0x22F40000, deterministically, and the one
++         * question that decides whose defect it is -- did the guest ask for more
++         * than three pages? -- could not be answered from the log, because the
++         * request that produced 0x22F40000 logged its address as zero.
++         *
++         * Its own channel rather than `virtual`, for the reason 0043 exists:
++         * `virtual` at TRACE is 85% view dumps and elided three quarters of a
++         * session, so the one line that answers a question does not survive in
++         * it. `+virtualres` is one line per successful allocation and can be
++         * read on its own.
++         */
++        TRACE_(virtualres)( "returned %p size %08lx for request %08lx type %x prot %08x\n",
++                            base, size, *size_ptr, type, protect );
+     }
+     else if (status == STATUS_NO_MEMORY)
+         ERR( "out of memory for allocation, base %p size %08lx\n", base, size );

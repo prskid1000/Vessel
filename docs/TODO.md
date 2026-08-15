@@ -179,8 +179,58 @@ avoid.
 
   ---
 
-  **ROOT CAUSE, 2026-08-15. A relocated ntdll keeps a header that says where it
-  used to be, and `patches/wine/0044` is one assignment.**
+  **THE FAULT ITSELF, FULLY CHARACTERISED 2026-08-15 — and `0044` below is NOT
+  its cause.** `0044` fixed a real crash (an early death whose fault was at
+  `0x6fffe3003c`); this is a different one, and it survives every fix made today.
+  Seven reproductions, byte-identical each time:
+
+  ```
+  VCRUNTIME140.dll+0x114EF   vmovdqu %ymm5, -0x20(%rcx,%r8)
+  rcx = 0x22F42F20   r8 = 0xF0 (240)   info[1] = 0x22F43000   info[0] = 1 (write)
+  ```
+
+  Disassembled from the game's own shipped `VCRUNTIME140.dll` (not packed, unlike
+  `re9.exe`): that is the **final tail store of a stock MSVC `memmove`**, which
+  rounds the length up to 32 and writes whole 32-byte chunks through a jump table.
+  The copy covers `[0x22F42F20, 0x22F43010)`. Traced allocations put the
+  destination inside a **three-page** allocation at `0x22F40000`, so the copy runs
+  **16 bytes past its end**. `/proc/<pid>/maps` agrees: `22f43000-22f50000 ---p`.
+
+  **A full audit of `unix/virtual.c` says Wine cannot have shorted it.** Sizes
+  only ever round *up*; the free-area search *skips* a range too small rather than
+  clamping to it (`virtual.c:2341`); a commit past a view's end returns
+  `STATUS_NOT_MAPPED_VIEW` rather than committing part. **And the fault report
+  proves it independently**: had a larger request been shorted, `view->size` would
+  still be the full size — it is recorded before any mmap — and `0043` would have
+  printed its *in-view* WARN. It printed `no view covers it`, so Wine's own
+  bookkeeping believes the allocation is three pages, and that number is the
+  guest's rounded request.
+
+  **The "harmless on Windows" assumption is also false.** Windows aligns
+  `VirtualAlloc` bases to 64 KB as well, so nothing can start at `0x22F43000`
+  there either; the fourth page would be `MEM_FREE` and the same write would
+  fault. So this is not simply a game bug that we happen to expose.
+
+  That leaves exactly three live hypotheses, and they have different fixes:
+
+  1. the guest **computes** the size from something environment-dependent and on
+     Windows asks for `>= 0x3010`
+  2. the size is mangled **between the guest's syscall and Wine** — FEX
+     marshalling, which is outside `virtual.c` and outside what the audit covered
+  3. the **destination pointer**, not the size, is the environment-dependent part
+
+  *Done when:* `patches/wine/0045` (one line per successful allocation, on its own
+  `virtualres` channel) names the size of the request that returned `0x22F40000`.
+  Entry-side tracing cannot answer it: `NtAllocateVirtualMemory` TRACEs its
+  arguments on entry, so a `VirtualAlloc(NULL, …)` logs its address as `0x0` and
+  the address chosen is never recorded — which is why a day of `+virtual` sessions
+  could not join a request to a region.
+
+  ---
+
+  **A relocated ntdll keeps a header that says where it used to be, and
+  `patches/wine/0044` is one assignment.** *(A real defect and a real crash —
+  but, as recorded above, not the cause of the `memmove` fault.)*
 
   `virtual_relocate_module` (`unix/virtual.c:4199`) applies the base relocations
   and stops. The map-time path that does the same job — "relocate to dynamic

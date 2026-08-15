@@ -1,0 +1,133 @@
+offlinecompiler: stop before the code buffer is replaced.
+
+0016 stopped a cache that spans a code buffer swap from being written and
+published. This stops the swap happening during generation at all, so a binary
+too large for one buffer gets a partial cache instead of none.
+
+When emission fills the buffer, JIT.cpp calls ClearCodeCache, which installs a
+fresh buffer and restarts the offset at zero, while relocations are deliberately
+kept across that point -- so everything recorded before the swap names an offset
+into a buffer that is gone. Measured on Resident Evil Requiem: ~74 seconds and
+~350 MB per launch, discarded on load every time, in every session of the
+corpus.
+
+The buffer cannot be made bigger. MAX_CODE_SIZE's own comment says why: "we
+don't want to move above 128MB atm because that means we will have to encode
+longer jumps". That is the +/-128 MB reach of an AArch64 b/bl. Caching beyond
+one buffer needs far-branch veneers at every cross-buffer edge -- JIT work with
+a permanent cost on those edges, not a patch.
+
+Two limitations stated rather than discovered later. The blocks that make it in
+are the ones compiled first, and BlockList is walked in address order rather
+than by how often a block runs, so the cached slice is arbitrary rather than
+hot; ordering the codemap by frequency is what would fix that. And the margin is
+a bound on one block's translated size, not a measurement -- a block larger than
+it still reaches the swap, where 0016's checks catch it.
+
+WHAT THIS DOES NOT SETTLE. A cache is only sound if the guest bytes it was
+generated from are the bytes that run. For a title that decrypts its own code
+that is not guaranteed, and 0011 recorded it as an open correctness problem. It
+is substantially mitigated in practice by FEX's own SMC tracking -- a write to a
+code page invalidates the translations for it, cached ones included, which is
+the same mechanism observed thrashing 5,600 times on one Requiem page -- but
+mitigated is not proven, and a page decrypted before write tracking is armed
+would still slip through. Binding a cache to a hash of its source bytes is what
+would prove it, and the format has no such field today.
+
+diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -141,6 +141,17 @@
+   virtual void FlushAndCloseCodeMap() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;
++
++  /**
++   * @brief How many bytes remain in the code buffer translated code is being emitted into.
++   *
++   * Vessel: exists so that ahead-of-time generation can stop before the buffer is
++   * replaced. A replacement restarts the buffer offset at zero while relocations
++   * recorded before it keep offsets into the buffer that is now gone, which makes
++   * the whole cache unwritable -- see patches/fex/0016. Nothing at runtime needs
++   * this; the runtime is entitled to swap buffers whenever it likes.
++   */
++  FEX_DEFAULT_VISIBILITY virtual size_t GetCodeBufferFreeBytes() = 0;
+   FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void
+   InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) = 0;
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -218,6 +218,14 @@
+ 
+   void OnCodeBufferAllocated(const std::shared_ptr<CPU::CodeBuffer>&) override;
+   void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
++
++  // Vessel: see the declaration in the public header. ContextImpl already derives
++  // from SharedCodeBufferManager, so this is the manager's own arithmetic.
++  size_t GetCodeBufferFreeBytes() override {
++    auto Buffer = GetLatest();
++    const size_t Usable = Buffer->UsableSize();
++    return Usable > LatestOffset ? Usable - LatestOffset : 0;
++  }
+   void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
+   void InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
+   FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() override {
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -543,12 +543,54 @@
+     fmt::print(stderr, "Compiling code...\n");
+ 
+     FEX_CONFIG_OPT(MaxInst, MAXINST);
++
++    /* Vessel: stop before the code buffer is replaced, not after.
++     *
++     * When emission fills the buffer, JIT.cpp calls ClearCodeCache, which
++     * installs a fresh one and restarts the offset at zero -- while relocations
++     * are deliberately kept across that point. Everything recorded before the
++     * swap then names an offset into a buffer that no longer exists, and the
++     * cache cannot be written at all: 0016 measured this costing ~74 seconds and
++     * ~350 MB per launch on Resident Evil Requiem, every launch, for a file that
++     * was refused on load every time.
++     *
++     * The buffer cannot simply be made bigger. MAX_CODE_SIZE's own comment says
++     * why -- "we don't want to move above 128MB atm because that means we will
++     * have to encode longer jumps" -- which is the +/-128 MB reach of an AArch64
++     * b/bl, not a preference. Caching more than that needs far-branch veneers at
++     * every cross-buffer edge, which is JIT work with a permanent cost on those
++     * edges.
++     *
++     * So a binary whose translated code exceeds one buffer gets a *partial*
++     * cache instead of none. Two honest limitations, both worth knowing before
++     * reading a benchmark: the blocks that make it in are the ones compiled
++     * first, and this walks BlockList in address order rather than by how often
++     * a block runs -- so the slice is arbitrary, not hot. And the margin below is
++     * a bound on one block's translated size, not a measurement; a block larger
++     * than it would still trigger the swap, which 0016's checks then catch.
++     */
++    constexpr size_t BlockSizeMargin = 4 * 1024 * 1024;
++    size_t Compiled = 0, Skipped = 0;
++
+     for (auto Addr : BlockList) {
+       if (!CTX->CheckIfBlockIsCacheable(*Thread, Addr + SyscallHandler->VAFileStart, MaxInst)) {
+         continue;
+       }
+ 
++      if (CTX->GetCodeBufferFreeBytes() < BlockSizeMargin) {
++        ++Skipped;
++        continue;
++      }
++
+       CTX->CompileRIP(Thread, Addr + SyscallHandler->VAFileStart);
++      ++Compiled;
++    }
++
++    if (Skipped) {
++      LogMan::Msg::IFmt("Code buffer full after {} blocks; {} left uncached and will be translated at "
++                        "runtime. A single buffer holds 128 MB of translated code, which is the branch "
++                        "range of the instructions that jump between blocks.",
++                        Compiled, Skipped);
+     }
+ 
+     auto Filename = fmt::format("{}{}-{:016x}", OutDir, FEXCore::CodeMap::GetBaseFilename(Binary, false), CodeCacheConfigId);
