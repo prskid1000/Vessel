@@ -1,0 +1,211 @@
+codecache: a cache that cannot be written must not be half-written.
+
+SaveData writes the header, the block list, the relocation table and the file
+padding before anything checks them. The only check was ApplyCodeRelocations,
+five writes later, whose failure path is
+
+    LOGMAN_THROW_A_FMT(false, "Failed to apply code relocations");
+    return false;
+
+and LOGMAN_THROW_A_FMT is compiled out of the Release build this ships. So a
+rejected cache was a silent return that left a file holding a header, a block
+list and a relocation table with no code section behind them. The next launch
+mmaps it, walks into the code that is not there, and refuses it.
+
+MEASURED on Resident Evil Requiem, in every session in the corpus:
+
+    Code cache relocation 1863801 offset 0x6630e70 (base 0x0) does not fit a
+      107151044 byte buffer; refusing to apply           <- generation
+    Code cache relocation 1878114 of 7952524 targets 0x66f403c, outside a
+      0x66f4000 byte code buffer                         <- load
+    Failed to load cache: re9.exe-a7b10b28eeac3098
+
+Roughly 74 seconds of ahead-of-time compilation and ~100 MB written, discarded
+on load, every launch -- with the game running on the runtime JIT throughout
+while appearing to have a warm cache.
+
+WHY THE TABLE IS BAD was already written down under 0011, as an inference drawn
+after the corpus had been cleared. These logs are the observation that confirms
+it: when generation exhausts the code buffer, JIT.cpp calls ClearCodeCache,
+which installs a fresh buffer and restarts LatestOffset at zero, while
+relocations are deliberately kept across that point. Everything recorded before
+the swap keeps an offset into a buffer that no longer exists.
+
+Raising MAX_CODE_SIZE is not the fix, and its own comment says why: "we don't
+want to move above 128MB atm because that means we will have to encode longer
+jumps". That is the +/-128 MB reach of an AArch64 b/bl, not a preference.
+
+A cache that spans a swap cannot be repaired at this point -- the code those
+offsets referred to is gone. What is fixed here is writing it anyway. The same
+invariants the loader enforces are checked before the first write, so the
+failure costs an empty file and one line that says which invariant failed,
+instead of a hundred megabytes that look valid until the next launch.
+
+MaxRelocationSize moves above SaveData because SaveData is defined before the
+point 0011 introduced it.
+
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -303,6 +303,11 @@
+ template<typename T>
+ concept OrderedContainer = requires { typename T::key_compare; };
+ 
++// Vessel: the largest number of bytes any single relocation can emit.
++// SelectCodeRangeToFinalize already assumes this exact bound, in its own words
++// "Upper bound for relocation size"; named here so the two cannot drift.
++static constexpr size_t MaxRelocationSize = 16;
++
+ bool CodeCache::SaveData(Core::InternalThreadState& Thread, int fd, const ExecutableFileSectionInfo& SourceBinary, uint64_t SerializedBaseAddress) {
+   auto CodeBuffer = CTX.GetLatest();
+   auto& LookupCache = *Thread.LookupCache->Shared;
+@@ -317,6 +322,90 @@
+   header.CodeBufferSize = FEXCore::AlignUp(CTX.LatestOffset, Utils::FEX_PAGE_SIZE);
+   header.NumRelocations = Relocations.size();
+   header.SerializedBaseAddress = SerializedBaseAddress;
++
++  /* Vessel: refuse before the first write, not after the last one.
++   *
++   * The only validation this function had was ApplyCodeRelocations, five writes
++   * later, and its failure path is
++   *
++   *     LOGMAN_THROW_A_FMT(false, "Failed to apply code relocations");
++   *     return false;
++   *
++   * -- which is compiled out of this Release build, so it was a silent return
++   * that left the header, the block list and the relocation table already on
++   * disk with no code section behind them. The next launch mmaps that file,
++   * walks into the missing code, and rejects it. Measured on Resident Evil
++   * Requiem, every single session:
++   *
++   *     Code cache relocation 1863801 offset 0x6630e70 (base 0x0) does not fit
++   *       a 107151044 byte buffer; refusing to apply          <- generation
++   *     Code cache relocation 1878114 of 7952524 targets 0x66f403c, outside a
++   *       0x66f4000 byte code buffer                          <- load
++   *     Failed to load cache: re9.exe-a7b10b28eeac3098
++   *
++   * So roughly 74 seconds of ahead-of-time compilation was spent, ~100 MB was
++   * written, and the result was discarded on load every time. The game ran on
++   * the runtime JIT throughout while appearing to have a warm cache.
++   *
++   * WHY THE TABLE IS BAD IS ALREADY KNOWN, and 0011 wrote it down as an
++   * inference; these logs are the observation that confirms it. When generation
++   * exhausts the code buffer, JIT.cpp calls ClearCodeCache, which installs a
++   * fresh buffer and restarts LatestOffset at zero, while relocations are
++   * deliberately kept across that point. Everything recorded before the swap
++   * then carries an offset into a buffer that no longer exists, and both the
++   * block list and the relocation table are written against the *new*
++   * LatestOffset.
++   *
++   * Raising MAX_CODE_SIZE is not the fix. Its own comment says why -- "we don't
++   * want to move above 128MB atm because that means we will have to encode
++   * longer jumps" -- and that is the Â±128 MB reach of an AArch64 b/bl, not a
++   * preference.
++   *
++   * A cache that spans a swap cannot be repaired here, because the code those
++   * offsets referred to is gone. What can be fixed is writing it anyway: this
++   * checks the same invariants the loader will, before anything is written, and
++   * leaves an empty file rather than a plausible one. */
++  {
++    const uint64_t CodeSize = CTX.LatestOffset;
++    uint64_t PreviousOffset = 0;
++    size_t Rejected = 0;
++
++    for (size_t i = 0; i < Relocations.size(); ++i) {
++      const uint64_t Offset = Relocations[i].Header.Offset;
++      if (Offset + MaxRelocationSize > CodeSize) {
++        if (!Rejected++) {
++          LogMan::Msg::EFmt("Code cache not written: relocation {} of {} is at {:#x}, past the {:#x} "
++                            "bytes of code this cache would hold; the code buffer was replaced during "
++                            "generation and everything recorded before that points into the old one",
++                            i, Relocations.size(), Offset, CodeSize);
++        }
++      } else if (Offset < PreviousOffset) {
++        if (!Rejected++) {
++          LogMan::Msg::EFmt("Code cache not written: relocation {} offset {:#x} is below its predecessor "
++                            "{:#x}; the table is not sorted, which LoadCache's page partitioning requires",
++                            i, Offset, PreviousOffset);
++        }
++      }
++      PreviousOffset = Offset;
++    }
++
++    for (const auto& [Guest, BlockEntry] : LookupCache.BlockList) {
++      const uint64_t HostCode = BlockEntry.HostCode - reinterpret_cast<uintptr_t>(CodeBuffer->Ptr);
++      if (HostCode >= CodeSize) {
++        if (!Rejected++) {
++          LogMan::Msg::EFmt("Code cache not written: block for guest {:#x} maps to host offset {:#x}, "
++                            "past the {:#x} bytes of code this cache would hold",
++                            Guest, HostCode, CodeSize);
++        }
++        break;
++      }
++    }
++
++    if (Rejected) {
++      return false;
++    }
++  }
++
+   ::write(fd, &header, sizeof(header));
+ 
+   // Dump guest<->host block mappings
+@@ -505,11 +594,6 @@
+   LogMan::Msg::IFmt("            successfully validated cache");
+ }
+ 
+-// Vessel: the largest number of bytes any single relocation can emit.
+-// SelectCodeRangeToFinalize already assumes this exact bound, in its own words
+-// "Upper bound for relocation size"; named here so the two cannot drift.
+-static constexpr size_t MaxRelocationSize = 16;
+-
+ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> Code,
+                                      std::span<const FEXCore::CPU::Relocation> EntryRelocations, uint32_t RelocationOffset, bool ForStorage) {
+   CPU::Arm64Emitter Emitter(&CTX, Code.data(), Code.size_bytes());
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -554,15 +554,41 @@
+     auto Filename = fmt::format("{}{}-{:016x}", OutDir, FEXCore::CodeMap::GetBaseFilename(Binary, false), CodeCacheConfigId);
+     auto FilenameNew = Filename + ".new";
+     int fd = open(FilenameNew.c_str(), O_CREAT | O_WRONLY | O_BINARY, 0644);
++    bool Saved;
+     {
+       auto Entry = SyscallHandler->LookupExecutableFileSection(Thread, SyscallHandler->VAFileStart).value();
+ #ifndef _WIN32
+-      CTX->GetCodeCache().SaveData(*Thread, fd, Entry, 0 /* TODO: Use static base address information if available */);
++      Saved = CTX->GetCodeCache().SaveData(*Thread, fd, Entry, 0 /* TODO: Use static base address information if available */);
+ #else
+-      CTX->GetCodeCache().SaveData(*Thread, fd, Entry, SyscallHandler->VAFileStart);
++      Saved = CTX->GetCodeCache().SaveData(*Thread, fd, Entry, SyscallHandler->VAFileStart);
+ #endif
+     }
+     close(fd);
++
++    /* Vessel: a save that failed must not be published.
++     *
++     * SaveData returns bool and the result was dropped, so the .new file was
++     * renamed into place whatever happened -- which is how a cache that the
++     * loader refuses came to exist at all. The `.new`-then-rename dance is there
++     * to make publication atomic, and it did that faithfully: it atomically
++     * published a file that could not be read.
++     *
++     * Measured on Resident Evil Requiem: every session generated a cache, every
++     * session refused it on load, and the compile time was spent again the next
++     * launch. The refusal is a real one -- see the sibling change in
++     * CodeCache.cpp for why a code buffer swap during generation leaves the
++     * relocation table pointing into a buffer that no longer exists -- and the
++     * right response to it is no file, not an unreadable one.
++     *
++     * Unlinked rather than left behind, because a stale `.new` beside a real
++     * cache is a second thing to explain later. */
++    if (!Saved) {
++      LogMan::Msg::EFmt("Not publishing {}: the cache could not be written", Filename);
++      std::error_code Ignored;
++      std::filesystem::remove(FilenameNew.c_str(), Ignored);
++      return {};
++    }
++
+     std::filesystem::rename(FilenameNew.c_str(), Filename.c_str());
+     return Filename;
+   }

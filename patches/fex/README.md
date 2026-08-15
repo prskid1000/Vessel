@@ -1007,3 +1007,63 @@ redundant" change killed Metro 2033.
 
 **Policy.** Not for upstream, for the reason at the top of this file. This one
 is AI-authored in full.
+
+## 0016-codecache-a-cache-that-cannot-be-written-must-not-be-half-written.patch
+
+**The code cache has never once loaded for Resident Evil Requiem, and the
+failure was invisible.** Every session spent about 74 seconds compiling ahead of
+time, wrote roughly 100 MB, and had it refused on the next launch — while the
+game ran on the runtime JIT throughout, looking like it had a warm cache.
+
+Observed in every session in the 2026-08-15 corpus, from both ends:
+
+```
+Code cache relocation 1863801 offset 0x6630e70 (base 0x0) does not fit a
+  107151044 byte buffer; refusing to apply            <- generation
+Code cache relocation 1878114 of 7952524 targets 0x66f403c, outside a
+  0x66f4000 byte code buffer                          <- load
+Failed to load cache: re9.exe-a7b10b28eeac3098
+```
+
+**Why the table is bad was already written down under `0011`, as an inference
+drawn after the corpus had been cleared. These logs are the observation that
+confirms it**: when generation exhausts the code buffer, `JIT.cpp` calls
+`ClearCodeCache`, which installs a fresh buffer and restarts `LatestOffset` at
+zero, while relocations are deliberately kept across that point. Everything
+recorded before the swap keeps an offset into a buffer that no longer exists,
+and both the block list and the relocation table are then written against the
+*new* `LatestOffset`.
+
+This patch fixes two things, and deliberately not the third:
+
+1. **`SaveData` validated after five writes.** Its only check was
+   `ApplyCodeRelocations`, whose failure path is `LOGMAN_THROW_A_FMT(false, …)`
+   followed by `return false` — and that macro is compiled out of this Release
+   build. So a rejected cache was a silent return leaving a header, a block list
+   and a relocation table on disk with no code behind them. The same invariants
+   the loader enforces are now checked *before the first write*.
+2. **The caller ignored the result.** `Main.cpp` dropped `SaveData`'s `bool` and
+   renamed `.new` into place unconditionally — the atomic-publish dance
+   faithfully publishing a file that could not be read. It now unlinks and
+   publishes nothing.
+
+### What this does not fix, and why not
+
+**The swap itself.** Raising `MAX_CODE_SIZE` is not available: its own comment
+says "we don't want to move above 128MB atm because that means we will have to
+encode longer jumps", which is the ±128 MB reach of an AArch64 `b`/`bl`. A cache
+that spans a swap cannot be repaired at save time either, because the code those
+offsets referred to is gone. Stopping compilation *before* the buffer fills
+would produce a valid partial cache and is the obvious next step —
+
+**— and it must not be done alone, which is the point worth recording.** Today
+Requiem's cache is refused on every load, so the risk of executing a stale
+translation is exactly zero. Making the cache loadable would replace that with
+FEX executing code translated from Denuvo's *encrypted* bytes, which differ from
+what is in memory at runtime: silent wrong execution, and far harder to diagnose
+than an honest refusal. `0011` flagged this and it is still true — the format has
+no field binding a cache to the bytes it was generated from. So the buffer-swap
+fix and a content hash in the header are one change, not two.
+
+**Policy.** Not for upstream, for the reason at the top of this file. AI-authored
+in full.
