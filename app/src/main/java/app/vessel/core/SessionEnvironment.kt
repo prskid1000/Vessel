@@ -1949,6 +1949,32 @@ fun hardwareLimits(
  * Returns 0 when it cannot be read, which disables both memory settings rather
  * than sizing them against a guess.
  */
+/**
+ * How many CPU cores this device *has*, which is not what the JVM will tell you.
+ *
+ * **`Runtime.availableProcessors()` reports cores that are online right now**,
+ * and Android parks cores aggressively when idle. Read on a quiet phone it
+ * returns four on an eight-core chip, and the caller then filtered a six-core
+ * selection down to "cores 0-3, because 4 and 5 are not on this device" —
+ * measured, from a session where the container was set to six and the guest was
+ * told four. The setting silently became a different setting.
+ *
+ * `/sys/devices/system/cpu/present` is the kernel's list of cores that exist
+ * whether or not they are running, in the form `0-7`. Falling back to the JVM's
+ * answer is still better than zero, which would disable the setting entirely.
+ */
+fun deviceCoreCount(present: File = File("/sys/devices/system/cpu/present")): Int = runCatching {
+    // "0-7" -> 8, "0" -> 1, "0-3,6-7" -> the highest index plus one, because the
+    // selection is by core number and a gap is still a number that exists.
+    present.readText().trim()
+        .split(",")
+        .flatMap { it.split("-") }
+        .mapNotNull { it.trim().toIntOrNull() }
+        .maxOrNull()
+        ?.plus(1)
+        ?: 0
+}.getOrDefault(0).takeIf { it > 0 } ?: Runtime.getRuntime().availableProcessors()
+
 fun deviceTotalRamMb(meminfo: File = File("/proc/meminfo")): Int = runCatching {
     meminfo.useLines { lines ->
         lines.firstOrNull { it.startsWith("MemTotal:") }

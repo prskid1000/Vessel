@@ -31,6 +31,7 @@ import app.vessel.core.WcpProfile
 import app.vessel.core.WineTree
 import app.vessel.core.deleteTree
 import app.vessel.core.desktopArgv
+import app.vessel.core.deviceCoreCount
 import app.vessel.core.deviceTotalRamMb
 import app.vessel.core.diagnoseSessionLine
 import app.vessel.core.fexCacheHost
@@ -807,7 +808,7 @@ class SessionRuntime @Inject constructor(
             profile = profile,
             manifest = manifest,
             deviceRamMb = deviceTotalRamMb(),
-            deviceCores = Runtime.getRuntime().availableProcessors(),
+            deviceCores = deviceCoreCount(),
         )
         val environment = wineLauncherEnvironment(
             tree = tree,

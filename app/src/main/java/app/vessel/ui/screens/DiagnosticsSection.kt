@@ -216,6 +216,13 @@ fun DiagnosticsPanel(
         diagnostics.env.forEachIndexed { index, row ->
             EnvRow(
                 row = row,
+                // Every other row's name, so this one can neither offer a
+                // duplicate nor stay quiet about one that was typed.
+                taken = diagnostics.env
+                    .filterIndexed { i, _ -> i != index }
+                    .map { it.name }
+                    .filter { it.isNotBlank() }
+                    .toSet(),
                 onName = { onChange(diagnostics.withEnvName(index, it)) },
                 onValue = { onChange(diagnostics.withEnvValue(index, it)) },
                 onRemove = { onChange(diagnostics.withEnvRemoved(index)) },
@@ -313,12 +320,16 @@ private fun InventoryRow(
 ) {
     VDiagnosticRow(
         name = row.name,
-        // Only this table's names. Offering all of them would let a graphics
-        // flag be named into the logging table, where it would then be drawn
-        // under a header that describes it wrongly.
+        // Only this table's names, and only the ones not already on a row.
+        // Offering all of them would let a graphics flag be named into the
+        // logging table, where it would be drawn under a header that describes
+        // it wrongly; offering one that is already there invites a second row
+        // for a setting that can only have one value.
         nameOptions = (
             if (row.isTurnipFlag) ADDABLE_TURNIP_LOGGABLES else ADDABLE_LOG_LOGGABLES
-        ).map { it.name },
+        ).map { it.name }.filter { name ->
+            name == row.name || diagnostics.rows.none { it.name == name }
+        },
         onName = { propose(diagnostics.withRowNamed(row.index, it), row.index) },
         levels = row.levels,
         levelLabel = { row.levelLabels[it] ?: it },
@@ -359,6 +370,8 @@ private fun InventoryRow(
 @Composable
 private fun EnvRow(
     row: EnvSetting,
+    /** Names the other rows already hold: not offered, and named if typed. */
+    taken: Set<String>,
     onName: (String) -> Unit,
     onValue: (String) -> Unit,
     onRemove: () -> Unit,
@@ -374,7 +387,11 @@ private fun EnvRow(
             // offering, and the seventh is the reason this table exists.
             VComboField(
                 value = row.name,
-                options = KNOWN_ENV.map { it.name },
+                // A name another row already holds is not offered. Two rows for
+                // one variable is not an error -- the composer is a
+                // LinkedHashMap and the last put wins -- but it is a way to set
+                // something twice and read the wrong half.
+                options = KNOWN_ENV.map { it.name }.filter { it !in taken },
                 onValueChange = onName,
                 placeholder = "TU_AUTOTUNE_ALGO",
                 modifier = Modifier.weight(1f),
@@ -408,6 +425,16 @@ private fun EnvRow(
                 style = Vessel.type.bodySmall,
                 color = Vessel.colors.textMuted,
                 modifier = Modifier.padding(top = Vessel.metrics.s3),
+            )
+        }
+        // Typed rather than picked, and already on another row. Said rather
+        // than refused, for the reason in this function's own note about
+        // reserved names: a field that will not accept a keystroke looks
+        // broken, and the useful thing is to say what will actually happen.
+        if (row.name.isNotBlank() && row.name in taken) {
+            VCaution(
+                "${'$'}{row.name} is set on another row too. The environment is composed in " +
+                    "order and the last one wins, so this row is the one that counts.",
             )
         }
         known?.caution?.let { VCaution(it) }
