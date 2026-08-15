@@ -1266,13 +1266,26 @@ fun sessionEnvironment(
     hardware?.cpuTopology?.let { environment["WINE_CPU_TOPOLOGY"] = it }
     hardware?.ramBiasMb?.let { environment["WINE_RAM_REPORTING_BIAS"] = it.toString() }
 
-    // The driconf file itself is written by the session, not here: this function
-    // returns an environment and does not touch the disk. `DRIRC_CONFIGDIR` is
-    // named here anyway so both halves read from one place, and pointing it at a
-    // directory that does not exist is harmless — Mesa parses what it finds.
-    if (hardware?.heapMemoryPercent != null) {
-        environment["DRIRC_CONFIGDIR"] = File(paths.tmp, "drirc.d").absolutePath
-    }
+    // **A driconf option set as a plain variable, and the first attempt at this
+    // was wrong in a way worth recording.**
+    //
+    // It first wrote a `drirc` XML into the container and named it with
+    // `DRIRC_CONFIGDIR`, which is how Mesa's documentation says to do this. On
+    // the device the driver kept reporting 11.16 GiB of a 14.88 GiB phone —
+    // exactly `os_gpu_heap_size_calculate`'s 0.75 heuristic for the
+    // `percent == 0` case (`os_misc.h:170`), which is to say the option never
+    // arrived. The reason is ours: `build/turnip.sh` builds the ICD with
+    // `-Dexpat=disabled`, because the only thing in Mesa that wants expat is
+    // driconf and shipping libexpat to the device to carry a database of other
+    // people's GPU workarounds was not a trade worth making. That switch sets
+    // `WITH_XMLCONFIG=0`, which compiles the whole `DRIRC_CONFIGDIR` path out.
+    //
+    // `driParseOptionInfo` overrides any option from a variable of the same
+    // name (`xmlconfig.c:424`), and that code is *not* inside the expat guard —
+    // the `#if WITH_XMLCONFIG` at `:40` closes at `:46` around the include
+    // alone. `os_get_option` is `getenv` first (`os_misc.c:228`). So the option
+    // name is the variable name, lower case, and it works in the build we ship.
+    hardware?.heapMemoryPercent?.let { environment["heap_memory_percent"] = it.toString() }
 
     // The shader caches, all three, pointed at the container.
     //
@@ -1753,7 +1766,7 @@ internal fun ParamValue.asEnvValue(): String = when (this) {
  * |---|---|---|
  * | [cores] | `WINE_CPU_TOPOLOGY` | what the guest enumerates as CPUs |
  * | [ramMb] | `WINE_RAM_REPORTING_BIAS` | `GlobalMemoryStatusEx`, `SystemBasicInformation` |
- * | [vramMb] | driconf `heap_memory_percent` | Turnip's heap, and therefore DXVK, vkd3d and Zink |
+ * | [vramMb] | `heap_memory_percent` | Turnip's heap, and therefore DXVK, vkd3d and Zink |
  *
  * The video memory one is the reason this is worth doing carefully. Capping it
  * in DXVK would leave OpenGL titles and the Vulkan budget itself reporting the
@@ -1908,40 +1921,3 @@ fun deviceTotalRamMb(meminfo: File = File("/proc/meminfo")): Int = runCatching {
     }
 }.getOrDefault(0)
 
-/**
- * Write the driconf file that caps the driver's reported heap, and return the
- * directory to point `DRIRC_CONFIGDIR` at — or null when nothing needs writing.
- *
- * **Why a file and not a variable.** Mesa has no environment override for
- * `heap_memory_percent`; the only way in is a driconf XML, and the only way to
- * choose which one is `DRIRC_CONFIGDIR` (`xmlconfig.c:1364`). The file is
- * rewritten every session into the container's scratch, so it cannot drift from
- * the setting and a container reset takes it away.
- *
- * The `executable` attribute is deliberately absent: this applies to every
- * process in the container, which is the point — a game's helper process that
- * saw a different heap size than the game would be exactly the inconsistency
- * [HardwareLimits] exists to prevent.
- */
-fun writeDriconf(paths: SessionPaths, limits: HardwareLimits): File? {
-    val percent = limits.heapMemoryPercent ?: return null
-    val dir = File(paths.tmp, "drirc.d")
-    dir.mkdirs()
-    File(dir, "00-vessel-hardware.conf").writeText(
-        """
-        <?xml version="1.0" standalone="yes"?>
-        <!DOCTYPE driconf [<!ELEMENT driconf (device)><!ELEMENT device (application)>
-          <!ELEMENT application (option)><!ATTLIST application name CDATA #IMPLIED>
-          <!ELEMENT option EMPTY><!ATTLIST option name CDATA #REQUIRED>
-          <!ATTLIST option value CDATA #REQUIRED>]>
-        <driconf>
-            <device>
-                <application name="Vessel">
-                    <option name="heap_memory_percent" value="$percent" />
-                </application>
-            </device>
-        </driconf>
-        """.trimIndent() + "\n"
-    )
-    return dir
-}

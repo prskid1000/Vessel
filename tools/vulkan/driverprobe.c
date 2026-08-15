@@ -50,12 +50,13 @@ static void report(const char *label, const vessel_vk_driver *d)
     vessel_vk_format_version(d->driver_version, driver_version, sizeof(driver_version));
 
     printf("VESSEL-VK source=%s result=OK driver_id=%u driver=\"%s\" device=\"%s\" "
-           "api=%s driver_version=%s(0x%08x) vendor=0x%04x turnip=%s\n",
+           "api=%s driver_version=%s(0x%08x) vendor=0x%04x turnip=%s vram_mib=%llu\n",
            d->source == VESSEL_VK_SOURCE_ADRENOTOOLS ? "adrenotools" : "system",
            d->driver_id,
            d->has_driver_properties ? d->driver_name : "(no VkPhysicalDeviceDriverProperties)",
            d->device_name, api, driver_version, d->driver_version, d->vendor_id,
-           vessel_vk_driver_is_turnip(d) ? "yes" : "no");
+           vessel_vk_driver_is_turnip(d) ? "yes" : "no",
+           (unsigned long long)(d->device_local_bytes >> 20));
 
     printf("  device          %s\n", d->device_name);
     printf("  driverID        %u (%s)%s\n", d->driver_id, driver_id_name(d->driver_id),
@@ -68,6 +69,19 @@ static void report(const char *label, const vessel_vk_driver *d)
     printf("  driverVersion   %s (0x%08x)\n", driver_version, d->driver_version);
     printf("  vendorID        0x%04x   deviceID 0x%08x\n", d->vendor_id, d->device_id);
     printf("  physicalDevices %u\n", d->device_count);
+    /* Printed in MiB as well as counted, because a container's VRAM setting is
+     * chosen in gigabytes and this is the number it has to move. Every layer
+     * above only paraphrases this one: DXVK sums the device-local heaps for
+     * DedicatedVideoMemory, vkd3d reports through DXVK's DXGI, and Zink sums the
+     * same heaps for GL. Reading it back from a game says what the game was told
+     * at the end of that chain; reading it here says what the driver decided. */
+    if (d->heap_count)
+        printf("  memoryHeaps     %u, device-local %llu MiB, total %llu MiB\n",
+               d->heap_count,
+               (unsigned long long)(d->device_local_bytes >> 20),
+               (unsigned long long)(d->heap_total_bytes >> 20));
+    else
+        printf("  memoryHeaps     absent (no vkGetPhysicalDeviceMemoryProperties)\n");
 }
 
 int main(int argc, char **argv)

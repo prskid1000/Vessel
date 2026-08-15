@@ -1165,7 +1165,11 @@ class SessionEnvironmentTest {
         // there is no absolute form to write, so the conversion happens here.
         val limits = HardwareLimits(vramMb = 4096, deviceRamMb = 16_384)
         assertEquals(0.25, limits.heapMemoryPercent!!, 0.0005)
-        assertTrue(env(hardware = limits)["DRIRC_CONFIGDIR"]!!.endsWith("drirc.d"))
+        // The variable is named for the driconf option, lower case, because that
+        // is the name driParseOptionInfo looks up. Asserted as a literal so a
+        // rename cannot pass silently: the driver ignores an unknown variable,
+        // which looks exactly like the setting having no effect.
+        assertEquals("0.25", env(hardware = limits)["heap_memory_percent"])
     }
 
     @Test

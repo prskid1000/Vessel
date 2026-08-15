@@ -67,6 +67,21 @@ typedef struct {
 
     /** How many physical devices the instance enumerated. Zero is a real answer. */
     uint32_t device_count;
+
+    /* Memory heaps of the first physical device.
+     *
+     * Here because it is the quantity every layer above derives its idea of
+     * "video memory" from -- DXVK sums the DEVICE_LOCAL heaps for
+     * DedicatedVideoMemory, vkd3d reports through DXVK's DXGI, and Zink sums
+     * the same heaps for GL. A container's VRAM setting is applied to the
+     * driver, so this is where it has to be checked; reading it back from a
+     * game only says what the game was told at the end of a long chain.
+     *
+     * Zero when the entry point was missing, which is reported as absent rather
+     * than as a device with no memory. */
+    uint32_t heap_count;
+    uint64_t device_local_bytes;
+    uint64_t heap_total_bytes;
 } vessel_vk_driver;
 
 /**

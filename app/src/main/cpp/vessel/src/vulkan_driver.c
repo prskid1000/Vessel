@@ -110,6 +110,7 @@ static void probe_handle(void *handle, vessel_vk_driver *out)
     PFN_vkEnumerateInstanceVersion enumerate_instance_version;
     PFN_vkGetPhysicalDeviceProperties get_properties;
     PFN_vkGetPhysicalDeviceProperties2 get_properties2;
+    PFN_vkGetPhysicalDeviceMemoryProperties get_memory_properties;
 
     VkPhysicalDeviceDriverProperties driver_properties;
     VkPhysicalDeviceProperties2 properties2;
@@ -225,6 +226,25 @@ static void probe_handle(void *handle, vessel_vk_driver *out)
             out->driver_id = (uint32_t)driver_properties.driverID;
             copy_string(out->driver_name, sizeof(out->driver_name), driver_properties.driverName);
             copy_string(out->driver_info, sizeof(out->driver_info), driver_properties.driverInfo);
+        }
+    }
+
+    /* The heaps, for the reason given in the header: this is the number a
+     * container's VRAM setting has to move, and every layer above only
+     * paraphrases it. */
+    get_memory_properties = (PFN_vkGetPhysicalDeviceMemoryProperties)
+        get_instance_proc_addr(instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (get_memory_properties) {
+        VkPhysicalDeviceMemoryProperties memory;
+        uint32_t i;
+
+        memset(&memory, 0, sizeof(memory));
+        get_memory_properties(devices[0], &memory);
+        out->heap_count = memory.memoryHeapCount;
+        for (i = 0; i < memory.memoryHeapCount; i++) {
+            out->heap_total_bytes += memory.memoryHeaps[i].size;
+            if (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                out->device_local_bytes += memory.memoryHeaps[i].size;
         }
     }
 

@@ -48,7 +48,6 @@ import app.vessel.core.sessionEnvironment
 import app.vessel.core.toolArgv
 import app.vessel.core.vkd3dCacheLink
 import app.vessel.core.wineLauncherEnvironment
-import app.vessel.core.writeDriconf
 import app.vessel.input.InputProfile
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -810,11 +809,6 @@ class SessionRuntime @Inject constructor(
             deviceRamMb = deviceTotalRamMb(),
             deviceCores = Runtime.getRuntime().availableProcessors(),
         )
-        // Written before the environment is composed, so `DRIRC_CONFIGDIR` never
-        // names a directory that does not exist yet. Returns null and writes
-        // nothing when video memory is left at Auto.
-        writeDriconf(sessionPaths, hardware)
-
         val environment = wineLauncherEnvironment(
             tree = tree,
             scratch = SessionScratch(home = layout.base, tmp = layout.tmp),
