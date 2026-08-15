@@ -250,12 +250,38 @@ avoid.
   without being put side by side. The allocation and the copy disagree by
   sixteen bytes.
 
-  *Done when:* the source of those two figures is identified. Every layer below
-  the guest is now cleared by measurement, so this needs guest-level work — the
-  call site that computes the commit high-water mark versus the one that computes
-  the `memmove` length. Note the address is **identical across configuration
-  changes** (RAM 6 and 8 GB, 1280×720 and 640×360), which argues against the
-  remaining "environment-dependent" explanations and toward a fixed divergence.
+  **THE ADDRESS IS INVARIANT, which kills the last "environment" hypothesis.**
+  `0x22f43000`, byte for byte, across every knob we have:
+
+  | varied | fault address |
+  |---|---|
+  | RAM 6 GB → 8 GB → **`auto`, the full 14.9 GB** | unchanged |
+  | resolution 1280×720 → 640×360 | unchanged |
+  | VRAM 6 GB → `auto` | unchanged |
+
+  The `auto` run is the interesting one: a working reference exists — Requiem is
+  reported running at up to 100 FPS on a Snapdragon 8 Elite Gen 5 with **16 GB**,
+  with the note that 8 GB "may struggle" — so under-reporting RAM was the one
+  place our configuration was plainly below a known-good one. Reporting the whole
+  device changed nothing. The same title is also reported to run on other Android
+  Wine stacks, so this is not a game that simply always overruns.
+
+  So nothing we *report* to the guest moves it, and `0045` proved nothing we
+  *give* the guest is short. What is left is that the emulated code computes a
+  different value than the same x86-64 would on hardware — and the faulting
+  instruction is a 256-bit AVX store, on a chip where FEX emulates AVX as two
+  128-bit halves (`build/targets/canoe.env:32-35`). RE Engine plus AVX under
+  emulation is known-awkward ground (see box64#1770 for RE4).
+
+  *Done when:* the two figures are traced to their source. Every layer below the
+  guest is cleared by measurement, so this needs guest-level work: the call site
+  that computes the commit high-water mark against the one that computes the
+  `memmove` length. `patches/wine/0046` is the cheap way to ask the next question
+  without answering this one — an **opt-in** quirk
+  (`WINE_GROW_COMMIT_ON_FAULT=1`, off by default) that grows a commit by exactly
+  one page when a write runs off the end of a view. If the game then proceeds,
+  this divergence is the only one and the rest of the stack is sound; if it dies
+  elsewhere, the overrun was a symptom.
 
   A note on method that this cost a day to learn: entry-side tracing could never
   have answered it. `NtAllocateVirtualMemory` TRACEs its arguments on entry, so a
