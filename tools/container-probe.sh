@@ -28,11 +28,19 @@ DEVICE_SUBDIR=prefix/drive_c/vessel/probes
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="${TMPDIR:-/tmp}/vessel-container-probe"
+# Made here rather than in `install`, because `remove` and `results` also stage a
+# file through it and only `install` used to create it -- so removing the probes
+# without having installed them in this shell failed on a missing directory.
+mkdir -p "$STAGE"
 
 say()  { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mok\033[0m %s\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Device paths below are written with a leading double slash. Git Bash rewrites
+# a /data/... argument into C:/Program Files/Git/data/..., and // suppresses that
+# for the remote argument alone -- MSYS_NO_PATHCONV would also stop converting
+# the *local* path, which then fails instead.
 in_app() { adb shell "run-as $PKG sh -c '$1'" | tr -d '\r'; }
 
 container_id() {
@@ -65,11 +73,11 @@ install)
     say "installing into container $CID"
     in_app "mkdir -p files/containers/$CID/$DEVICE_SUBDIR" >/dev/null
     for p in $PROBES; do
-        adb push "$STAGE/$p-x86_64.exe" "/data/local/tmp/$p-x86_64.exe" >/dev/null
+        adb push "$STAGE/$p-x86_64.exe" "//data/local/tmp/$p-x86_64.exe" >/dev/null
         # Through /data/local/tmp and `cat`, because adb cannot write into an
         # app's private storage directly and run-as cannot read /sdcard.
         in_app "cat /data/local/tmp/$p-x86_64.exe > files/containers/$CID/$DEVICE_SUBDIR/$p-x86_64.exe"
-        adb shell "rm -f /data/local/tmp/$p-x86_64.exe"
+        adb shell "rm -f //data/local/tmp/$p-x86_64.exe"
         ok "$p"
     done
 
@@ -95,7 +103,7 @@ for i, (exe, name) in enumerate(sorted(names.items())):
 json.dump(d, open(dst, "w", encoding="utf-8"), indent=4)
 print(" ".join(s["name"] for s in d["shortcuts"]))
 PY
-    adb push "$STAGE/shortcuts.new.json" /data/local/tmp/shortcuts.json >/dev/null
+    adb push "$STAGE/shortcuts.new.json" //data/local/tmp/shortcuts.json >/dev/null
     in_app "cat /data/local/tmp/shortcuts.json > files/datastore/shortcuts.json"
     ok "registered — open the app and tap p-vulkan, p-d3d12, p-opengl, p-d3d11"
     ;;
@@ -122,7 +130,7 @@ d["shortcuts"] = [s for s in d["shortcuts"] if not s["name"].startswith("p-")]
 json.dump(d, open(dst, "w", encoding="utf-8"), indent=4)
 print(" ".join(s["name"] for s in d["shortcuts"]) or "(none left)")
 PY
-    adb push "$STAGE/shortcuts.new.json" /data/local/tmp/shortcuts.json >/dev/null
+    adb push "$STAGE/shortcuts.new.json" //data/local/tmp/shortcuts.json >/dev/null
     in_app "cat /data/local/tmp/shortcuts.json > files/datastore/shortcuts.json"
     # The binaries stay: they are 700 KB inside the container's own drive_c and
     # leaving them means `install` is only needed again when a probe changes.

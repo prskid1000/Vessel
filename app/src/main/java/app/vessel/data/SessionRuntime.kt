@@ -1930,8 +1930,27 @@ class SessionRuntime @Inject constructor(
         // Wine and FEX both stamp the writing thread on every line and the
         // parser used to discard it; `GuestUnits` turns that stamp into a name
         // learned from the guest's own module-load lines.
+        // **The thread as well as the program, because a deadlock is named by
+        // thread.** `patches/wine/0030` reports a stuck lock as "wait timed out
+        // in thread 0274, blocked by 0270", and until now those numbers led
+        // nowhere: the parser read Wine's thread id, used it to look up a
+        // program name, and dropped it. So a log could say a thread held a lock
+        // for two minutes and contain not one other line attributable to that
+        // thread — measured on three Requiem sessions, where the only question
+        // worth asking was "what was 0270 doing" and nothing could answer it.
+        //
+        // Kept as `[program:thread]` rather than a column of its own: it is four
+        // hex digits on a line that already carries a tag, and the pair is what
+        // a reader greps for. The thread alone when the program is not yet known
+        // — a unit that has announced no executable is still a thread whose
+        // lines belong together.
         val owner = units.label(parsed.unit, parsed.text)
-        val text = if (owner == null) parsed.text else "[$owner] ${parsed.text}"
+        val tag = when {
+            owner != null && parsed.unit != null -> "$owner:${parsed.unit}"
+            owner != null -> owner
+            else -> parsed.unit
+        }
+        val text = if (tag == null) parsed.text else "[$tag] ${parsed.text}"
 
         // **Before the display server answers, "there is no display" is not an
         // error.** Prefix creation runs wineboot, regedit, services.exe,
