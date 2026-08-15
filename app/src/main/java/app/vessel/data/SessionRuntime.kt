@@ -2,50 +2,54 @@ package app.vessel.data
 
 import android.content.Context
 import android.os.PowerManager
-import app.vessel.core.GuestUnits
+import app.vessel.core.BOOTSTRAP_SESSION_ENV
 import app.vessel.core.ComponentType
 import app.vessel.core.ContainerInput
 import app.vessel.core.ContainerProfile
-import app.vessel.input.InputProfile
 import app.vessel.core.DEFAULT_DISPLAY
 import app.vessel.core.DisplayGeometry
 import app.vessel.core.DisplayOutcome
 import app.vessel.core.DisplayParams
 import app.vessel.core.DisplayRequest
+import app.vessel.core.FEX_CACHE_DOS_DIR
+import app.vessel.core.FexPackage
+import app.vessel.core.GuestUnits
 import app.vessel.core.LogLevel
 import app.vessel.core.LogSource
 import app.vessel.core.PrefixRegistry
+import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionDiagnosis
 import app.vessel.core.SessionDisplayServer
-import app.vessel.core.SYSVSHM_SOCKET_ENV
 import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
-import app.vessel.core.FEX_CACHE_DOS_DIR
-import app.vessel.core.fexCacheHost
-import app.vessel.core.fexCacheLink
-import app.vessel.core.vkd3dCacheLink
-import app.vessel.core.FexPackage
 import app.vessel.core.TurnipDriver
 import app.vessel.core.UpscalerRequest
 import app.vessel.core.WINE_BOOT
 import app.vessel.core.WINE_REGEDIT
-import app.vessel.core.BOOTSTRAP_SESSION_ENV
 import app.vessel.core.WINE_UNIX_ARCH
+import app.vessel.core.WcpProfile
 import app.vessel.core.WineTree
+import app.vessel.core.deleteTree
 import app.vessel.core.desktopArgv
+import app.vessel.core.deviceTotalRamMb
 import app.vessel.core.diagnoseSessionLine
+import app.vessel.core.fexCacheHost
+import app.vessel.core.fexCacheLink
+import app.vessel.core.hardwareLimits
 import app.vessel.core.isDisplayAbsenceDiagnostic
-import app.vessel.core.programArgv
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamValue
 import app.vessel.core.parseFpsLimit
 import app.vessel.core.parseGeometry
 import app.vessel.core.parseSessionLogLine
+import app.vessel.core.programArgv
 import app.vessel.core.serverArgv
 import app.vessel.core.sessionEnvironment
 import app.vessel.core.toolArgv
+import app.vessel.core.vkd3dCacheLink
 import app.vessel.core.wineLauncherEnvironment
-import app.vessel.core.deleteTree
+import app.vessel.core.writeDriconf
+import app.vessel.input.InputProfile
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,8 +60,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
@@ -65,7 +69,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
-import app.vessel.core.WcpProfile
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.Files
@@ -794,6 +797,24 @@ class SessionRuntime @Inject constructor(
             logs = layout.logs,
             tmp = layout.tmp,
         )
+        // **What the guest is told this phone has**, resolved once here.
+        //
+        // Once, because two of the three are expressed as a delta from what the
+        // device really has and the third has to be written to a file as well as
+        // named in the environment. A second reader would have to repeat both
+        // the arithmetic and the device query, and the failure mode is the guest
+        // being told one number by Wine and another by the driver.
+        val hardware = hardwareLimits(
+            profile = profile,
+            manifest = manifest,
+            deviceRamMb = deviceTotalRamMb(),
+            deviceCores = Runtime.getRuntime().availableProcessors(),
+        )
+        // Written before the environment is composed, so `DRIRC_CONFIGDIR` never
+        // names a directory that does not exist yet. Returns null and writes
+        // nothing when video memory is left at Auto.
+        writeDriconf(sessionPaths, hardware)
+
         val environment = wineLauncherEnvironment(
             tree = tree,
             scratch = SessionScratch(home = layout.base, tmp = layout.tmp),
@@ -815,6 +836,7 @@ class SessionRuntime @Inject constructor(
             // compositor was already throwing away — measured at 116 rendered for
             // every 24 shown, at 84% GPU. See `sessionEnvironment`.
             fpsLimit = fpsLimit,
+            hardware = hardware,
         )
 
         if (turnip == null) {

@@ -169,6 +169,103 @@
       ]
     },
     {
+      "id": "hardware",
+      "title": "Hardware",
+      "help": "What the guest is told this phone has. Every layer is configured from these, so Wine, FEX, the two D3D translators and the driver all report the same machine.",
+      "params": [
+        {
+          "key": "hardware.cores",
+          "title": "Cores",
+          "help": "Which CPU cores the guest is told about. Unticking the slow cores can help a game that sizes its thread pool from the count and then spreads work evenly across cores that are not equal. Leave all ticked unless a game is stuttering.",
+          "type": "multi",
+          "options": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7"
+          ],
+          "default": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7"
+          ],
+          "optionLabels": {
+            "0": "Core 0",
+            "1": "Core 1",
+            "2": "Core 2",
+            "3": "Core 3",
+            "4": "Core 4",
+            "5": "Core 5",
+            "6": "Core 6",
+            "7": "Core 7"
+          }
+        },
+        {
+          "key": "hardware.ram",
+          "title": "RAM",
+          "help": "How much system memory the guest is told it has. Games size streaming and texture pools from this number, and the phone has to run Android, the translator and shader compilation in the same memory. Auto reports what the device really has.",
+          "type": "enumOrText",
+          "options": [
+            "auto",
+            "2",
+            "3",
+            "4",
+            "6",
+            "8",
+            "12",
+            "16"
+          ],
+          "default": "auto",
+          "optionLabels": {
+            "auto": "Auto  (report the whole device)",
+            "2": "2 GB",
+            "3": "3 GB",
+            "4": "4 GB",
+            "6": "6 GB",
+            "8": "8 GB",
+            "12": "12 GB",
+            "16": "16 GB"
+          }
+        },
+        {
+          "key": "hardware.vram",
+          "title": "VRAM",
+          "help": "How much video memory the guest is told it has. This phone shares one pool between CPU and GPU, so with Auto a game is told it has the whole of system memory and sizes its texture budget accordingly. Set on the driver, so every graphics layer reports the same figure.",
+          "type": "enumOrText",
+          "options": [
+            "auto",
+            "1",
+            "2",
+            "3",
+            "4",
+            "6",
+            "8",
+            "12"
+          ],
+          "default": "auto",
+          "optionLabels": {
+            "auto": "Auto  (report shared memory)",
+            "1": "1 GB",
+            "2": "2 GB",
+            "3": "3 GB",
+            "4": "4 GB",
+            "6": "6 GB",
+            "8": "8 GB",
+            "12": "12 GB"
+          }
+        }
+      ]
+    },
+    {
       "id": "compatibility",
       "title": "Compatibility",
       "help": "One escape hatch for a single misbehaving program.",

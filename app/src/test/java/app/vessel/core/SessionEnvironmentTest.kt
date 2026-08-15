@@ -127,7 +127,10 @@ class SessionEnvironmentTest {
         fexPackage: FexPackage? = fex,
         display: String = DEFAULT_DISPLAY,
         fpsLimit: Int? = null,
-    ) = sessionEnvironment(container(params), manifest, paths, driver, fexPackage, display, fpsLimit)
+        hardware: HardwareLimits? = null,
+    ) = sessionEnvironment(
+        container(params), manifest, paths, driver, fexPackage, display, fpsLimit, hardware,
+    )
 
     // — the logging contract --------------------------------------------------
 
@@ -761,7 +764,8 @@ class SessionEnvironmentTest {
                 // Version 2, not version 1. A first attempt named the v1
                 // extensions, which vkd3d does not use, so it disabled nothing
                 // while looking like it had — hence pinning the exact string.
-                "VKD3D_DISABLE_EXTENSIONS" to "VK_KHR_present_id2,VK_KHR_present_wait2",
+                "VKD3D_DISABLE_EXTENSIONS" to
+                    "VK_KHR_present_id,VK_KHR_present_wait,VK_KHR_present_id2,VK_KHR_present_wait2",
                 "TU_DEBUG" to "startup",
                 // The two Turnip instrument paths, always set and inert until a
                 // flag asks for them. `TU_DEBUG_FILE` is the one that matters:
@@ -1108,4 +1112,68 @@ class SessionEnvironmentTest {
             "GST_PLUGIN_SYSTEM_PATH", "WINE_GST_REGISTRY_DIR", "GST_REGISTRY_FORK",
         ).forEach { assertTrue("$it is missing from the prefix bootstrap", bootstrap.containsKey(it)) }
     }
+
+    // — the Hardware group ---------------------------------------------------
+    //
+    // The point of these is the *arithmetic*, not the plumbing. Two of the three
+    // settings are expressed as a delta from what the device really has, and a
+    // sign error in either is invisible in a log and obvious to a game.
+
+    @Test
+    fun `a container that has not touched the hardware group adds nothing`() {
+        val limits = HardwareLimits(deviceRamMb = 15_000, deviceCores = 8)
+        assertTrue(limits.isEmpty)
+        val environment = env(hardware = limits)
+        assertEquals(null, environment["WINE_CPU_TOPOLOGY"])
+        assertEquals(null, environment["WINE_RAM_REPORTING_BIAS"])
+        assertEquals(null, environment["DRIRC_CONFIGDIR"])
+    }
+
+    @Test
+    fun `every core ticked is the same as saying nothing`() {
+        val limits = HardwareLimits(cores = (0..7).toList(), deviceCores = 8)
+        assertEquals(null, limits.cpuTopology)
+    }
+
+    @Test
+    fun `a subset of cores names them rather than counting them`() {
+        val limits = HardwareLimits(cores = listOf(6, 7, 0, 1), deviceCores = 8)
+        assertEquals("4:0,1,6,7", limits.cpuTopology)
+    }
+
+    @Test
+    fun `reported RAM is written as the difference Wine subtracts`() {
+        // Wine subtracts the bias from what it would have reported, so asking
+        // for 4 GB of a 15 GB device is a bias of 11 GB, not a total of 4.
+        val limits = HardwareLimits(ramMb = 4096, deviceRamMb = 15_360)
+        assertEquals(15_360 - 4096, limits.ramBiasMb)
+        assertEquals("11264", env(hardware = limits)["WINE_RAM_REPORTING_BIAS"])
+    }
+
+    @Test
+    fun `asking for more memory than the device has reports the device`() {
+        // Not clamped to zero and not written: a bias of zero is a variable that
+        // says nothing, and Wine's ERR on startup would announce a hack that is
+        // not in force.
+        assertEquals(null, HardwareLimits(ramMb = 32_768, deviceRamMb = 15_360).ramBiasMb)
+        assertEquals(null, HardwareLimits(vramMb = 32_768, deviceRamMb = 15_360).heapMemoryPercent)
+    }
+
+    @Test
+    fun `reported VRAM becomes a fraction of system memory for the driver`() {
+        // driconf's option is a percentage of total system memory, 0.0 to 1.0 —
+        // there is no absolute form to write, so the conversion happens here.
+        val limits = HardwareLimits(vramMb = 4096, deviceRamMb = 16_384)
+        assertEquals(0.25, limits.heapMemoryPercent!!, 0.0005)
+        assertTrue(env(hardware = limits)["DRIRC_CONFIGDIR"]!!.endsWith("drirc.d"))
+    }
+
+    @Test
+    fun `the memory settings do nothing when the device size is unknown`() {
+        // Zero means /proc/meminfo could not be read. Sizing a delta against a
+        // guess would report a machine that does not exist.
+        assertEquals(null, HardwareLimits(ramMb = 4096, deviceRamMb = 0).ramBiasMb)
+        assertEquals(null, HardwareLimits(vramMb = 4096, deviceRamMb = 0).heapMemoryPercent)
+    }
+
 }

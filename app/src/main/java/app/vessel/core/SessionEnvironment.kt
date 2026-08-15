@@ -865,6 +865,16 @@ fun sessionEnvironment(
      * one rate and presenting at another.
      */
     fpsLimit: Int? = null,
+    /**
+     * What the guest is told this phone has, already resolved.
+     *
+     * Passed in for the same reason [fpsLimit] is: the session needs these
+     * numbers itself — it writes the driconf file from them — and a second
+     * reader of the same params is how the guest ends up being told two
+     * different things. Null, or a value that matches the device, adds no
+     * variables at all.
+     */
+    hardware: HardwareLimits? = null,
 ): Map<String, String> {
     val environment = LinkedHashMap<String, String>()
 
@@ -1244,6 +1254,24 @@ fun sessionEnvironment(
     fpsLimit?.takeIf { it > 0 }?.let { limit ->
         environment["DXVK_FRAME_RATE"] = limit.toString()
         environment["VKD3D_FRAME_RATE"] = limit.toString()
+    }
+
+    // **What the guest is told this phone has**, from the Hardware group. Each
+    // of the three is written to the variable the other layers *derive from*
+    // rather than to each layer in turn — see [HardwareLimits] for why that
+    // distinction is the whole point of the group.
+    //
+    // Nothing is written for a container that has not touched them, so the
+    // golden environment is unaffected.
+    hardware?.cpuTopology?.let { environment["WINE_CPU_TOPOLOGY"] = it }
+    hardware?.ramBiasMb?.let { environment["WINE_RAM_REPORTING_BIAS"] = it.toString() }
+
+    // The driconf file itself is written by the session, not here: this function
+    // returns an environment and does not touch the disk. `DRIRC_CONFIGDIR` is
+    // named here anyway so both halves read from one place, and pointing it at a
+    // directory that does not exist is harmless — Mesa parses what it finds.
+    if (hardware?.heapMemoryPercent != null) {
+        environment["DRIRC_CONFIGDIR"] = File(paths.tmp, "drirc.d").absolutePath
     }
 
     // The shader caches, all three, pointed at the container.
@@ -1705,4 +1733,215 @@ internal fun ParamValue.asEnvValue(): String = when (this) {
     is ParamValue.Count -> value.toString()
     is ParamValue.Text -> value
     is ParamValue.Choices -> values.joinToString(",")
+}
+
+/**
+ * What the guest is told this phone has.
+ *
+ * **One declared number per thing, and every layer configured from it.** The
+ * failure this exists to prevent is the one `display.fpsLimit` documents above:
+ * two readers of one setting, disagreeing. A game that is told it has four cores
+ * by Wine while DXVK sizes its compiler pool from eight, or that reads 15.6 GB
+ * of video memory from the driver and 4 GB from DXGI, is being lied to
+ * inconsistently — which is worse than not being limited at all, because its own
+ * budgeting arithmetic stops adding up.
+ *
+ * So each field below is resolved once, here, and the composer writes it to
+ * whichever variable is *upstream* of the rest:
+ *
+ * | Field | Written to | Reaches |
+ * |---|---|---|
+ * | [cores] | `WINE_CPU_TOPOLOGY` | what the guest enumerates as CPUs |
+ * | [ramMb] | `WINE_RAM_REPORTING_BIAS` | `GlobalMemoryStatusEx`, `SystemBasicInformation` |
+ * | [vramMb] | driconf `heap_memory_percent` | Turnip's heap, and therefore DXVK, vkd3d and Zink |
+ *
+ * The video memory one is the reason this is worth doing carefully. Capping it
+ * in DXVK would leave OpenGL titles and the Vulkan budget itself reporting the
+ * old number; capping it in the driver caps the quantity all three of them are
+ * *derived from* — `dxgi_adapter.cpp` sums the `DEVICE_LOCAL` heaps, vkd3d
+ * reports through DXVK's DXGI, and Zink reads the same heaps.
+ *
+ * Every field is nullable or empty for "report what the device really has", and
+ * a container that has touched none of them adds no variables at all — which is
+ * what keeps the golden environment golden.
+ */
+data class HardwareLimits(
+    /**
+     * Host CPU ids the guest may see, in ascending order. Empty means all of
+     * them, and so does a selection that covers every core the device has.
+     */
+    val cores: List<Int> = emptyList(),
+    /** Megabytes of system memory to report. Null reports the device's own. */
+    val ramMb: Int? = null,
+    /** Megabytes of video memory to report. Null reports the shared pool. */
+    val vramMb: Int? = null,
+    /** What the device really has, for the two settings expressed as a delta. */
+    val deviceRamMb: Int = 0,
+    val deviceCores: Int = 0,
+) {
+    /**
+     * `WINE_CPU_TOPOLOGY`, or null when there is nothing to say.
+     *
+     * The explicit `N:list` form rather than a bare count, because which cores
+     * is the point on a phone: these are not eight equal cores, and "give the
+     * guest four" is a different instruction from "give the guest these four".
+     */
+    val cpuTopology: String?
+        get() {
+            val chosen = cores.distinct().sorted()
+            if (chosen.isEmpty() || (deviceCores > 0 && chosen.size >= deviceCores)) return null
+            return "${chosen.size}:${chosen.joinToString(",")}"
+        }
+
+    /**
+     * `WINE_RAM_REPORTING_BIAS`, in megabytes, or null.
+     *
+     * Wine subtracts this from what it reports rather than clamping to a total
+     * (`loader.c:2321`, `virtual.c:4001`), so the variable is the *difference* —
+     * and a bias larger than the machine would report a negative amount of
+     * memory, hence the floor.
+     */
+    val ramBiasMb: Int?
+        get() {
+            val want = ramMb ?: return null
+            if (deviceRamMb <= 0 || want <= 0 || want >= deviceRamMb) return null
+            return deviceRamMb - want
+        }
+
+    /**
+     * driconf `heap_memory_percent`, or null.
+     *
+     * A fraction of total system memory rather than an absolute size, because
+     * that is the only shape the option has (`driconf.h:473`, range 0.0-1.0,
+     * "0 = driver default"). Rounded to three places: the option is a float and
+     * the difference between 0.256 and 0.2564 is 6 MB on this device, which is
+     * far below anything a game's budgeting will notice.
+     */
+    val heapMemoryPercent: Double?
+        get() {
+            val want = vramMb ?: return null
+            if (deviceRamMb <= 0 || want <= 0 || want >= deviceRamMb) return null
+            return ((want.toDouble() / deviceRamMb) * 1000.0).toInt() / 1000.0
+        }
+
+    /** True when nothing here differs from the machine underneath. */
+    val isEmpty: Boolean
+        get() = cpuTopology == null && ramBiasMb == null && heapMemoryPercent == null
+}
+
+/** The manifest keys this resolver reads. Grouped, so the set is greppable. */
+private const val CORES_KEY = "hardware.cores"
+private const val RAM_KEY = "hardware.ram"
+private const val VRAM_KEY = "hardware.vram"
+
+/** `auto` is the manifest's word for "report what the device really has". */
+private const val HARDWARE_AUTO = "auto"
+
+/**
+ * Read the three Hardware params, in gigabytes, into [HardwareLimits].
+ *
+ * Resolved by the caller and passed to [sessionEnvironment] rather than read
+ * there, for the reason `fpsLimit` gives: the session composes the environment
+ * *and* has to know these numbers itself, and two readers of one param is how
+ * they end up disagreeing.
+ *
+ * @param deviceRamMb total physical memory, which both memory settings are a
+ *   delta from. Zero disables them rather than guessing.
+ * @param deviceCores what the device really has, so "all of them ticked" can be
+ *   recognised as "say nothing" rather than written out as an identity mapping.
+ */
+fun hardwareLimits(
+    profile: ContainerProfile,
+    manifest: ParamManifest?,
+    deviceRamMb: Int,
+    deviceCores: Int,
+): HardwareLimits {
+    fun value(key: String): ParamValue? =
+        manifest?.allParams.orEmpty().firstOrNull { it.key == key }
+            ?.let { spec -> profile.params[spec.key] ?: spec.defaultValue() }
+
+    // A gigabyte count, or null for `auto` and for anything that will not parse.
+    // Unparseable is deliberately the same as auto: the field is free text so a
+    // user can type a size the presets do not offer, and the honest failure for
+    // "4gb" is to report the real machine rather than to invent a number.
+    fun gigabytes(key: String): Int? = (value(key) as? ParamValue.Text)
+        ?.value
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && !it.equals(HARDWARE_AUTO, ignoreCase = true) }
+        ?.toIntOrNull()
+        ?.takeIf { it > 0 }
+        ?.times(1024)
+
+    val cores = (value(CORES_KEY) as? ParamValue.Choices)
+        ?.values
+        .orEmpty()
+        .mapNotNull { it.toIntOrNull() }
+        .filter { it >= 0 && (deviceCores <= 0 || it < deviceCores) }
+
+    return HardwareLimits(
+        cores = cores,
+        ramMb = gigabytes(RAM_KEY),
+        vramMb = gigabytes(VRAM_KEY),
+        deviceRamMb = deviceRamMb,
+        deviceCores = deviceCores,
+    )
+}
+
+/**
+ * Total physical memory in megabytes, from `/proc/meminfo`.
+ *
+ * Read here rather than through `ActivityManager.MemoryInfo.totalMem` so this
+ * file keeps no Android dependency and stays testable, and because the two
+ * agree: `totalMem` is the same `MemTotal`.
+ *
+ * Returns 0 when it cannot be read, which disables both memory settings rather
+ * than sizing them against a guess.
+ */
+fun deviceTotalRamMb(meminfo: File = File("/proc/meminfo")): Int = runCatching {
+    meminfo.useLines { lines ->
+        lines.firstOrNull { it.startsWith("MemTotal:") }
+            ?.split(Regex("""\s+"""))
+            ?.getOrNull(1)
+            ?.toLongOrNull()
+            ?.let { (it / 1024L).toInt() }
+            ?: 0
+    }
+}.getOrDefault(0)
+
+/**
+ * Write the driconf file that caps the driver's reported heap, and return the
+ * directory to point `DRIRC_CONFIGDIR` at — or null when nothing needs writing.
+ *
+ * **Why a file and not a variable.** Mesa has no environment override for
+ * `heap_memory_percent`; the only way in is a driconf XML, and the only way to
+ * choose which one is `DRIRC_CONFIGDIR` (`xmlconfig.c:1364`). The file is
+ * rewritten every session into the container's scratch, so it cannot drift from
+ * the setting and a container reset takes it away.
+ *
+ * The `executable` attribute is deliberately absent: this applies to every
+ * process in the container, which is the point — a game's helper process that
+ * saw a different heap size than the game would be exactly the inconsistency
+ * [HardwareLimits] exists to prevent.
+ */
+fun writeDriconf(paths: SessionPaths, limits: HardwareLimits): File? {
+    val percent = limits.heapMemoryPercent ?: return null
+    val dir = File(paths.tmp, "drirc.d")
+    dir.mkdirs()
+    File(dir, "00-vessel-hardware.conf").writeText(
+        """
+        <?xml version="1.0" standalone="yes"?>
+        <!DOCTYPE driconf [<!ELEMENT driconf (device)><!ELEMENT device (application)>
+          <!ELEMENT application (option)><!ATTLIST application name CDATA #IMPLIED>
+          <!ELEMENT option EMPTY><!ATTLIST option name CDATA #REQUIRED>
+          <!ATTLIST option value CDATA #REQUIRED>]>
+        <driconf>
+            <device>
+                <application name="Vessel">
+                    <option name="heap_memory_percent" value="$percent" />
+                </application>
+            </device>
+        </driconf>
+        """.trimIndent() + "\n"
+    )
+    return dir
 }
