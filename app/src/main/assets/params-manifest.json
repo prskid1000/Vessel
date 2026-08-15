@@ -176,7 +176,7 @@
         {
           "key": "hardware.cores",
           "title": "Cores",
-          "help": "Which CPU cores the guest is told about. Unticking the slow cores can help a game that sizes its thread pool from the count and then spreads work evenly across cores that are not equal. Leave all ticked unless a game is stuttering.",
+          "help": "How many of this phone's eight cores the guest is told about. Six by default, which leaves two for Android, the translator and shader compilation; going lower has been measured to stall a game's launch while the code cache is being built.",
           "type": "multi",
           "options": [
             "0",
@@ -194,9 +194,7 @@
             "2",
             "3",
             "4",
-            "5",
-            "6",
-            "7"
+            "5"
           ],
           "optionLabels": {
             "0": "Core 0",
@@ -212,7 +210,7 @@
         {
           "key": "hardware.ram",
           "title": "RAM",
-          "help": "How much system memory the guest is told it has. Games size streaming and texture pools from this number, and the phone has to run Android, the translator and shader compilation in the same memory. Auto reports what the device really has.",
+          "help": "How much system memory the guest is told it has. Games size streaming and texture pools from this, and the phone runs Android and the translator in the same memory, so six is a deliberate under-report rather than the fifteen the device has.",
           "type": "enumOrText",
           "options": [
             "auto",
@@ -224,7 +222,7 @@
             "12",
             "16"
           ],
-          "default": "auto",
+          "default": "6",
           "optionLabels": {
             "auto": "Auto  (report the whole device)",
             "2": "2 GB",
@@ -239,7 +237,7 @@
         {
           "key": "hardware.vram",
           "title": "VRAM",
-          "help": "How much video memory the guest is told it has. This phone shares one pool between CPU and GPU, so with Auto a game is told it has the whole of system memory and sizes its texture budget accordingly. Set on the driver, so every graphics layer reports the same figure.",
+          "help": "How much video memory the guest is told it has. This phone shares one pool between CPU and GPU, so left to itself a game is told it has all of system memory and sizes its texture budget for a machine that does not exist. Set on the driver, so every graphics layer reports it.",
           "type": "enumOrText",
           "options": [
             "auto",
@@ -251,7 +249,7 @@
             "8",
             "12"
           ],
-          "default": "auto",
+          "default": "6",
           "optionLabels": {
             "auto": "Auto  (report shared memory)",
             "1": "1 GB",
