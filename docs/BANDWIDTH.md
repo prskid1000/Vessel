@@ -469,12 +469,23 @@ for this device. They are also inert.
 
 ### 7. Retry DRI3 presentation — the one place with a measured 3.5× sitting unused
 
-**Status.** `ZERO_COPY_PRESENT` is still `false`
-(`app/src/main/java/app/vessel/core/SessionEnvironment.kt`), so every session
-*defaults* to the software present path — but it is no longer a rebuild to try
-the other one. `MESA_VK_WSI_DEBUG` is in `DIAGNOSTIC_SESSION_ENV` and has a
-declared row in the `mesa` family, so a container picks its present path from
-Diagnostics and picks it back if the window comes up black.
+**Status — this candidate has been taken, and it is now §9's problem.**
+`ZERO_COPY_PRESENT` is `true` as of `4e8dad3`
+(`app/src/main/java/app/vessel/core/SessionEnvironment.kt`), so DRI3 is the
+shipped default and the software path is the fallback rather than the baseline.
+It went on, off in `85a8f4d`, and on again: what sent it back was the X server's
+own present copy at **19.1 ms per frame**, which is a cost this candidate never
+counted because every number below was taken with `tools/gfx/x11present.c`, a
+native client whose measurements never included that copy. **§9 is the whole of
+that story** — where the 19.1 ms goes, what has been ruled out, and the two log
+lines that settle the rest. Everything in the rest of this section stands as
+written and as measured; it is simply no longer the last word.
+
+`MESA_VK_WSI_DEBUG` is in `DIAGNOSTIC_SESSION_ENV` and has a declared row in the
+`mesa` family, so a container still picks its present path from Diagnostics and
+picks it back if the window comes up black — the row now overrides *leftward*,
+to *Copy each frame (sw)*, which is what makes moving the default cheap to be
+wrong about.
 
 **The failure the constant rested on is fully explained, and it was stale by
 104 minutes.** This document used to repeat the KDoc's "predates the
@@ -762,3 +773,219 @@ the window is not comparable and nothing else measured in it means anything.
   which is the mechanism candidate 2 turns on. This is an interconnect property
   that no interface here exposes, so it can only be inferred from the end-to-end
   A/B, not measured directly.
+- **Which of the three dma-buf allocation paths Turnip takes on this device**,
+  and therefore whether §9.1's finding that the exporter is cached applies to it
+  at all — the ION fallbacks are uncached and are not ruled out. Nothing in the
+  driver logged it before `patches/mesa/0008`; §9.2.
+- **Where the DRI3 present copy's 19.1 ms actually goes** — the cache
+  maintenance, the copy, or something that blocks. The single timer that
+  produced that number could not attribute it. `885da17` splits it and the split
+  has never been captured on a device; §9.4.
+- **Whether the row-band worker pool in `f1f8de0` moves that number at all.**
+  It was built on the reading that the copy is the cost, which §9 has not
+  confirmed and §9.4(a) gives a specific mechanism for doubting. If the sync
+  bracket dominates, the pool is parallelising the wrong half.
+- **Whether the copy's *destination* is cached.** It is an AHardwareBuffer
+  locked with `AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN`, which is a request for a
+  cached mapping and not a guarantee of one; nothing on the device reports what
+  gralloc gave. §9.4(b).
+
+---
+
+## 9. Where the DRI3 present copy's 19 ms goes
+
+Its own section rather than a candidate under §4, because it is not a candidate:
+DRI3 is the shipped default as of `4e8dad3`, and this is a cost the stack is
+paying right now.
+
+    Present copyArea x6720 mean=19114us max=385490us last=69539us 1280x720
+
+3.5 MB in 19.1 ms is **~154 MB/s**. That is the figure the whole investigation
+hangs off, and it is a real measurement — the only one in this area taken
+through the guest stack rather than through `tools/gfx/x11present.c`.
+
+### 9.1 The write-combine hypothesis is refuted at the exporter
+
+`85a8f4d` and the long comment in `PresentExtension.presentToContent` both
+concluded from 154 MB/s that the server's mapping of the client's dma-buf must
+be write-combine or uncached. The reasoning was sound and the conclusion does
+not survive the kernel source. Three links, and only the first is in this tree:
+
+1. **Turnip asks for nothing about cacheability.** `bo_init_new_dmaheap`
+   (`native/mesa/src/freedreno/vulkan/tu_knl_kgsl.cc:173-200`) fills
+   `struct dma_heap_allocation_data` with `.len` and `.fd_flags` and leaves
+   `heap_flags` zero, and the heap is chosen purely by which node it opened —
+   `/dev/dma_heap/system`, `:2706`. *Verified in tree.*
+2. **On Qualcomm's downstream kernel `/dev/dma_heap/system` is not the mainline
+   system heap.** `gki_defconfig` leaves `CONFIG_DMABUF_HEAPS_SYSTEM` unset, so
+   mainline's heap is not built and there is no name collision; the QCOM
+   dma-heap module registers the name itself, as an *alias*:
+   `qcom_system_heap_create("qcom,system", "system", false)` —
+   `drivers/dma-buf/heaps/qcom_dma_heap.c`, `qcom_dma_heap_probe()`. The third
+   argument is `uncached`. The alias is a second `dma_heap_add()` over the same
+   `exp_info.priv`, so `system` and `qcom,system` are one heap object under two
+   names.
+3. **`pgprot_writecombine` is applied only to the uncached heap.**
+   `qcom_sg_mmap()` in `drivers/dma-buf/heaps/qcom_sg_ops.c` reads
+   `if (buffer->uncached) vma->vm_page_prot = pgprot_writecombine(...)` before
+   `remap_pfn_range`. With `uncached = false` the protection is untouched:
+   **cached, writeback.** Mainline agrees — `system_heap_mmap()` never touches
+   `vm_page_prot` either.
+
+So the exporter hands out a cached mapping, and **there is no cached heap to
+switch to, because the one already in use is it.** Qualcomm's uncached variant
+is a separately named heap, `qcom,system-uncached`, gated on
+`CONFIG_QCOM_DMABUF_HEAPS_SYSTEM_UNCACHED` — which is *absent* from
+`arch/arm64/configs/vendor/pineapple_GKI.config`, the SM8650 (8 Gen 3) config,
+so on a stock part it most likely does not exist at all.
+
+Nor is there a flag to ask with. AOSP is explicit that *"DMA-BUF heaps don't
+support heap private flags"*, and gives the ION translation as `ION_FLAG_CACHED`
+set → `Alloc("system")`, unset → `Alloc("system-uncached")`, *"the cached and
+uncached system heap variants are separate heaps"*
+(<https://source.android.com/docs/core/architecture/kernel/dma-buf-heaps>).
+In the QCOM code `buffer->uncached` is assigned only from `sys_heap->uncached`,
+never from the ioctl.
+
+Sources, read rather than recalled — SM8650 (8 Gen 3) and SM8550 carry identical
+code:
+<https://raw.githubusercontent.com/LineageOS/android_kernel_qcom_sm8650/lineage-22.2/drivers/dma-buf/heaps/qcom_dma_heap.c>,
+<https://raw.githubusercontent.com/LineageOS/android_kernel_qcom_sm8550/lineage-21/drivers/dma-buf/heaps/qcom_sg_ops.c>,
+<https://git.codelinaro.org/clo/la/kernel/msm-5.10/-/blob/4e1a39648cdd0341d65f8c44f19fc281fc71fa9e/drivers/dma-buf/heaps/qcom_system_heap.c>.
+A real `ls /dev/dma_heap/` from a Qualcomm platform, for shape:
+`linux,cma  qcom,secure-non-pixel  qcom,secure-pixel  qcom,system
+qcom,system-uncached  system`
+(<https://gitlab.com/CentOS/automotive/src/kmod-qcom-scmi/-/merge_requests/24>).
+
+**This is the CLO reference configuration, not this phone.** An OEM can add
+device-tree heaps — `qcom_dt_parser.c` takes the name from `qcom,dma-heap-name`
+and cacheability from a `qcom,uncached-heap` boolean — or flip Kconfigs.
+Unverified on device; §9.5 says what would verify it.
+
+### 9.2 The one path that would be uncached, and it is not ruled out
+
+Turnip's ION fallbacks pass `.flags = 0` — **without** `ION_FLAG_CACHED` — in
+both `bo_init_new_ion` (`tu_knl_kgsl.cc:203-227`) and `bo_init_new_ion_legacy`
+(`:229-271`). `ION_FLAG_CACHED` is defined in the vendored
+`src/freedreno/vulkan/ion/ion.h:34` and used nowhere in the tree. Under ION, no
+`ION_FLAG_CACHED` means a write-combine mapping. So **if this device took an ION
+path, 154 MB/s is fully explained and §9.1 is irrelevant to it.**
+
+Nothing in the stack currently says which path ran. `tu_knl_kgsl_load` records
+`kgsl_dma_type` and never logs it, and the enum cannot answer on its own:
+`TU_KGSL_DMA_TYPE_ION_LEGACY` is 0 (`tu_device.h:73-78`) and the physical device
+comes from `vk_zalloc`, so "neither node opened" and "legacy ION" are the same
+value. `patches/mesa/0008` adds the line that settles it, printing the path, the
+fd, and the heaps the kernel actually exposes.
+
+### 9.3 KGSL cannot be the cause, confirmed rather than assumed
+
+The importer has no say: `vm_page_prot` is set by the exporter's `.mmap` op via
+`dma_buf_mmap`, and KGSL's `kgsl_setup_dma_buf()` only attaches and maps the
+attachment. Its own view is recorded in a comment in `_gpuobj_map_dma_buf()` —
+*"DMA BUFS are always cached so make sure that is reflected in the memdesc"* —
+followed by `KGSL_CACHEMODE_WRITEBACK`. KGSL's `pgprot_writecombine()` calls are
+in `kgsl_mmap()`, which is the mapping produced by `mmap`ing `/dev/kgsl-3d0`: a
+different vma, driven by the memdesc's cache mode, and nothing to do with the X
+server's mapping of the dma-buf fd.
+
+### 9.4 What is left, and the instrument that separates it
+
+If the source is cached, a 3.5 MB `memcpy` should run at GB/s and **19.1 ms is
+not the copy**. Three candidates survive. They are listed with what has been
+ruled out of each rather than ranked, because none of them has a number.
+
+**(a) The `DMA_BUF_IOCTL_SYNC` bracket, which is inside the measurement.** The
+19.1 ms was taken by a timer spanning the whole of `Drawable.copyArea`, and that
+is `START|READ`, the copy, and `END|READ`.
+`qcom_sg_dma_buf_begin_cpu_access()` runs `dma_sync_sgtable_for_cpu()` across
+**every attachment** of the buffer and returns early only when
+`buffer->uncached` — and KGSL is attached. On a cached buffer that is a full
+cache-maintenance pass per attachment on `START` and again on `END`: 3.5 MB,
+~900 pages, twice a frame. This is precisely the cost the uncached heap exists
+to avoid, which is what the "uncached is the graphics default" folklore is
+actually about. **The ABI offers no way to narrow it**: `struct dma_buf_sync` is
+a flags word with no offset or length, so "invalidate less" is not reachable
+from userspace — the choices are the whole buffer or nothing.
+
+**(b) The copy, at one end or the other.** Ruled out as a Java artefact: it is a
+native `memcpy` over `GetDirectBufferAddress` pointers
+(`cpp/winlator/src/drawable.c`, `copy_pool.c`), not a `ByteBuffer` element loop,
+which is the usual explanation for a number in this band. Not ruled out at the
+*destination*: that is a `GPUImage`'s AHardwareBuffer, locked once for the life
+of the window, allocated with `AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN` and no GPU
+usage bit at all (`cpp/winlator/src/gpu_image.c:53`, locked at `:108`).
+`CPU_WRITE_OFTEN` is gralloc's request for a cached mapping, so this is
+*expected* to be cached — expected from the flag's meaning, not verified.
+
+**(c) Neither: something that blocks, rather than a bandwidth limit.** The
+existing number already hints at this and it has not been said out loud —
+`mean=19114us max=385490us last=69539us`. A `memcpy` of a fixed size at a fixed
+rate has a tight distribution; twenty times the mean at the tail does not look
+like bandwidth. It looks like waiting, or like being preempted. Preemption of a
+19 ms copy on a device also running a game under FEX would produce the same
+shape, so this is a hint and not an argument.
+
+**The instrument that separates them exists as of `885da17`** and needs one
+session, not a rebuild. `presentToContent` now prints the phases beside the
+total:
+
+    Present copyArea x120 mean=..us max=..us last=..us 1280x720 \
+        means syncIn=..us copy=..us syncOut=..us other=..us sync=LIVE
+
+- `syncIn` (and `syncOut`) large with `sync=LIVE` → **(a)**. The row-band pool
+  added in `f1f8de0` is parallelising the wrong half and the mean will barely
+  move; the work goes to reducing or removing the sync, not to copying faster.
+- `copy` large with the syncs small → **(b)**, or the mapping really is uncached
+  after all — read the `VESSEL-KGSL` line from `patches/mesa/0008` in the same
+  log to see whether an ION path is why.
+- `other` large → **neither**; the cost is the rewinds and `forceUpdate`, which
+  runs the window's on-draw listener.
+- `sync=REFUSED` → the bracket is latched off, the sync numbers are an absence
+  rather than a measurement, and the cache-maintenance question is moot because
+  none is being done.
+
+### 9.5 What would settle §9.1 and §9.2 on a device
+
+Nothing in this section beyond the 19.1 ms was measured on the phone; none of it
+could be, because no device was attached. Two of the three questions need no adb
+at all — they come back in the session log:
+
+- **Which allocation path ran, and what heaps exist:** the
+  `VESSEL-KGSL dma_type=… dma_fd=… heaps=[…]` line from `patches/mesa/0008`,
+  once per physical device.
+- **Where the 19.1 ms goes:** the `means syncIn=… copy=… syncOut=… other=…`
+  line above, once per 120 presents.
+
+With a shell, in rough order of how much they settle:
+
+```sh
+# The heaps that exist. Names only -- it does NOT give cacheability, because
+# `system` and `qcom,system` are the same cached heap under two names.
+ls -la /dev/dma_heap/
+
+# What the kernel logged while creating them, alias included.
+dmesg | grep -i 'DMA-BUF Heap'
+
+# The direct answer to whether an uncached heap is even compiled in.
+zcat /proc/config.gz | grep -iE 'QCOM_DMABUF_HEAPS|DMABUF_HEAPS_SYSTEM'
+#   want: CONFIG_QCOM_DMABUF_HEAPS_SYSTEM_UNCACHED=y   (absent => cached only)
+
+# Which heap a live buffer came from, if CONFIG_DMABUF_SYSFS_STATS is on.
+# Turnip's swapchain BOs should read exporter_name=system, size ~3.5 MB.
+for d in /sys/kernel/dmabuf/buffers/*; do
+  echo "$d $(cat $d/exporter_name 2>/dev/null) $(cat $d/size 2>/dev/null)"
+done
+```
+
+And the check that cannot lie, if those disagree with each other: allocate a few
+MB from `/dev/dma_heap/system`, `mmap` it, `memcpy` it out and time it. Cached
+is several GB/s; write-combine is 100–400 MB/s. Do it in C against a `malloc`
+buffer of the same size as a control — in Java the result is a measurement of
+the JVM. Published calibration for the uncached band, since it is worth knowing
+that 154 MB/s sits inside it and that is why the original inference was
+reasonable: 234 MiB/s read from a non-coherent dma-buf mapping on a Zynq/ARM
+part (<https://lkml.rescloud.iu.edu/2111.3/05514.html>), and 323 MB/s
+vectorised against 91 MB/s scalar for reads of x86 write-combine memory
+(<https://fgiesen.wordpress.com/2013/01/29/write-combining-is-not-your-friend/>).
+No ARM64 write-combine read benchmark was found.

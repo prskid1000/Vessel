@@ -1,0 +1,84 @@
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -3,11 +3,13 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <dirent.h>
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <linux/dma-heap.h>
+ #include <poll.h>
+ #include <stdint.h>
++#include <stdio.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ 
+@@ -2728,6 +2730,67 @@
+       }
+    }
+ 
++   /* Vessel diagnostic: which exporter a DRI3 swapchain image will come from,
++    * and what this kernel actually offers to come from.
++    *
++    * The X server CPU-reads every presented image out of this allocation once a
++    * frame and measured ~154 MB/s doing it, which is uncached-read speed. Which
++    * of the three paths above ran decides whether that is explicable: the ION
++    * paths pass `.flags = 0`, i.e. without ION_FLAG_CACHED, which is an uncached
++    * buffer by ION's own definition, while the dma-heap path passes no
++    * cacheability request at all and inherits whatever `/dev/dma_heap/system`
++    * is on this kernel. Nothing already in this driver says which ran.
++    *
++    * `dma_fd` is printed because the enum cannot answer on its own:
++    * TU_KGSL_DMA_TYPE_ION_LEGACY is 0 and `device` came from vk_zalloc, so
++    * "neither node opened" and "legacy ION" are the same value. A negative fd
++    * is the only thing that separates them.
++    *
++    * The heap listing is the point of the whole block. It is the difference
++    * between knowing that `/dev/dma_heap/system` opened and knowing whether a
++    * cached alternative sits beside it under another name, and it costs one
++    * opendir at physical-device creation.
++    *
++    * Space-separated and not comma-separated, which is not a style choice:
++    * Qualcomm's downstream heap names contain commas themselves (`qcom,system`),
++    * so a comma-joined list of them cannot be split back into its entries. Heap
++    * names are device-tree node names and contain no spaces.
++    *
++    * Truncation is silent and bounded by the buffer rather than reported. A
++    * kernel with more heap names than 512 bytes holds is not a case worth a
++    * branch, and a partial list still answers the question this exists for.
++    *
++    * stderr and not mesa_log: mesa_log goes to logcat, which the session log
++    * does not read. See patches/mesa/0005 for the same choice.
++    */
++   {
++      char heaps[512];
++      size_t used = 0;
++      DIR *dir = opendir("/dev/dma_heap");
++
++      heaps[0] = '\0';
++      if (dir) {
++         struct dirent *ent;
++         while ((ent = readdir(dir)) != NULL) {
++            if (ent->d_name[0] == '.')
++               continue;
++            int n = snprintf(heaps + used, sizeof(heaps) - used, "%s%s",
++                             used ? " " : "", ent->d_name);
++            if (n < 0 || (size_t) n >= sizeof(heaps) - used)
++               break;
++            used += n;
++         }
++         closedir(dir);
++      }
++
++      fprintf(stderr, "VESSEL-KGSL dma_type=%s dma_fd=%d heaps=[%s]\n",
++              dma_fd < 0 ? "none" :
++              device->kgsl_dma_type == TU_KGSL_DMA_TYPE_DMAHEAP ? "dmaheap" :
++              device->kgsl_dma_type == TU_KGSL_DMA_TYPE_ION ? "ion" : "ion_legacy",
++              dma_fd, heaps);
++      fflush(stderr);
++   }
++
+    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+ 
+    struct kgsl_devinfo info;

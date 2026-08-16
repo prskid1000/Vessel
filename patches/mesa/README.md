@@ -253,3 +253,65 @@ derived from the Mesa version string alone, so a rebuild carrying a new patch
 produced the code already in the store and the old driver kept being served —
 the collision `build/turnip.sh` already warns about between its two variants, in
 the other direction.
+
+## `0008-diagnostic-name-the-dma-heap-the-swapchain-comes-from`
+
+For **turnip**. Inert in the Zink build, which compiles no freedreno code.
+
+One `fprintf` at physical-device creation, naming which of the three exportable
+allocation paths this kernel gave Turnip, and listing what
+`/dev/dma_heap/` actually holds:
+
+    VESSEL-KGSL dma_type=dmaheap dma_fd=7 heaps=[qcom,system system linux,cma]
+
+**Why it is worth a patch.** On the DRI3 path Vessel's X server CPU-reads every
+presented image out of this allocation once a frame, and measured ~154 MB/s
+doing it (`docs/BANDWIDTH.md` §9). Whether that is explicable depends entirely
+on which path ran, and the three do not agree with each other:
+
+- **dma-heap** — `bo_init_new_dmaheap` opens `/dev/dma_heap/system` and passes
+  no cacheability request at all (`heap_flags` is left zero). On Qualcomm's
+  downstream kernel that name is an alias for `qcom,system`, registered
+  `uncached = false`, so the mapping is **cached** — see §9.1 for the source
+  chain.
+- **ION / legacy ION** — both pass `.flags = 0`, i.e. *without*
+  `ION_FLAG_CACHED`, which under ION means a **write-combine** mapping. If this
+  is the path, 154 MB/s is fully explained and §9.1 does not apply.
+
+Nothing in the driver said which. `tu_knl_kgsl_load` records `kgsl_dma_type` and
+never logs it, and the enum cannot answer alone: `TU_KGSL_DMA_TYPE_ION_LEGACY`
+is 0 and the physical device comes from `vk_zalloc`, so "neither node opened"
+and "legacy ION" are the same value. **`dma_fd` is printed for exactly that
+reason** — a negative fd is the only thing that separates them, and the patch
+prints `dma_type=none` when it is negative rather than reporting a path that
+never ran.
+
+**The heap listing is the half that could not be got any other way.** Knowing
+`/dev/dma_heap/system` opened does not say whether a cached or uncached
+alternative sits beside it under another name, and that is the question a fix
+would turn on. It costs one `opendir` at device creation. Space-separated, not
+comma-separated: Qualcomm's heap names contain commas themselves (`qcom,system`),
+so a comma-joined list cannot be split back into its entries.
+
+`fprintf(stderr)` and not `mesa_log`, for the same reason as `0005` — `mesa_log`
+goes to logcat, which the session log does not read.
+
+**It changes no behaviour.** No allocation, no heap choice and no flag moves;
+this is the instrument that has to exist before any of those can be changed on
+evidence. Specifically it does **not** switch heaps: §9.1 concludes there is no
+cached heap to switch *to*, because the one already in use is the cached one,
+and the uncached variant is not even compiled into the SM8650 reference config.
+
+**Verified by compiling and running the inserted block**, not by `git apply
+--check`: the block was extracted verbatim into a standalone translation unit,
+compiled `-Wall -Wextra` for `aarch64-linux-android` and built and executed for
+`x86_64-linux-android`, exercising the multi-entry, empty-directory,
+missing-directory and buffer-overflow-truncation paths. The full Turnip build was
+not run — no Linux build host was available in the session that wrote it — so
+the patch is verified to apply to the post-`0001` tree and the code is verified
+to compile and behave, but the two have not been verified together.
+
+**If it stops applying**, the cause is almost certainly `0001`, the only other
+patch that touches `tu_knl_kgsl.cc`; this hunk sits between two of its hunks in
+`tu_knl_kgsl_load`. Rebase this one, not that one — it is a diagnostic and
+deleting it costs nothing but the answer.
