@@ -425,14 +425,47 @@ only one. So this device gets the settings meant for scarce VRAM while having
 Defragmentation is `vkCmdCopyBuffer` and `vkCmdCopyImage` of live resources.
 Every byte of it is bandwidth spent to solve a problem this device does not have.
 
-**Expected size: small, and a stutter rather than a rate.** The copies are
-throttled and occur off the steady-state path, so this will not move an fps
-average. It is on the list because it is nearly free to try and because it
-removes an unpredictable cost.
+**Correction, and it closes this entry: defragmentation already does nothing
+here, so turning it off wins nothing.** The paragraphs above are right about the
+tolerance and about the motivation, and wrong about the consequence, because
+they stop one step short of asking *which allocations are eligible*. Only these
+are:
 
-**The cheapest experiment.** One line through the `dxvkconfig` family
-(`ContainerDiagnostics.kt:672-679`), which splits on `;` and already carries
-`dxgi.maxSharedMemory`. Judge it on frame-time outliers, not on the mean.
+```c
+if (!(allocationInfo.properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && allocationInfo.resourceCookie)
+    allocation->m_flags.set(DxvkAllocationFlag::CanMove);
+```
+
+`dxvk_memory.cpp:1412-1413`, and identically at `:1468-1469` for dedicated
+allocations. `CanMove` is set **only when the allocation is not host visible**,
+and the relocation scan skips anything without it (`:2506`). DXVK states the
+reason in its own comment at `:2589` — *"We cannot do anything about mapped
+allocations since we rely on pointer stability there."*
+
+On this part that eliminates almost everything. The device reports four memory
+types and three of them are host visible:
+
+```
+Type 0: DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
+Type 1: DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+Type 2: DEVICE_LOCAL | HOST_VISIBLE | HOST_CACHED
+Type 3: DEVICE_LOCAL | LAZILY_ALLOCATED
+```
+
+Only type 3 can ever carry `CanMove`, and it holds transient attachments that
+are lazily allocated precisely so they never occupy real memory. So the entry
+guard at `:2375` — the aggressive `/8` tolerance this entry was built on — is
+reached with nothing eligible behind it.
+
+What `dxvk.enableMemoryDefrag = False` actually saves is one bookkeeping walk per
+500 ms (`performTimedTasks`, `:2551`) and **zero GPU copies**, because there are
+no GPU copies. It is not a bandwidth lever on this hardware.
+
+**Kept rather than deleted**, because the mechanism is real on hardware with a
+small host-visible window, and because the reasoning that produced the wrong
+conclusion — "the settings are wrong for this device, therefore they cost
+something" — is the kind that will be produced again. The settings *are* wrong
+for this device. They are also inert.
 
 ### 7. Retry DRI3 presentation — the one place with a measured 3.5× sitting unused
 
