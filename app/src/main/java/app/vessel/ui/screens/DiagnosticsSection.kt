@@ -144,7 +144,6 @@ fun DiagnosticsPanel(
     }
 
     Column(modifier.fillMaxWidth()) {
-        VSectionHeader("Diagnostics")
         VDisclosure(
             "Always on",
             expanded = baselineExpanded,

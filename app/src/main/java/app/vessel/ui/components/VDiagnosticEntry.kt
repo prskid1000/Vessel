@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -113,16 +114,17 @@ fun VDiagnosticEntry(
     Column(
         modifier
             .fillMaxWidth()
-            .padding(top = Vessel.metrics.s6)
+            .padding(top = Vessel.metrics.s3)
             .background(Vessel.colors.surface, Vessel.metrics.shapeMd)
             .border(Vessel.metrics.hairline, Vessel.colors.divider, Vessel.metrics.shapeMd)
-            .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s3),
+            .padding(horizontal = Vessel.metrics.s8),
     ) {
-        // **The header is the whole entry when it is closed**, so it has to
-        // carry what the three fields say: which subsystem, which flag, and what
-        // it is set to. A list of open cards is unreadable past about four of
-        // them — each is five lines plus a description — and the reason to open
-        // this screen is usually to change one row, not to read all of them.
+        // **Closed, an entry is one line, and that is the whole point of the
+        // header.** Two lines each meant four settings filled a screen; the type
+        // moves into a chip, the key sits beside it and the value trails at the
+        // end, so a screenful is a dozen. Nothing here is truncated that matters
+        // — the key keeps the width, and the value is the thing you can see by
+        // opening the card.
         Row(
             Modifier
                 .fillMaxWidth()
@@ -131,29 +133,27 @@ fun VDiagnosticEntry(
             horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
+            VTag(
+                typeLabel.ifBlank { type }.ifBlank { "new" },
+                tone = if (onRemove == null) VTagTone.Outline else VTagTone.Accent,
+            )
+            Text(
+                flag.ifBlank { "unnamed" },
+                style = Vessel.type.monoSmall,
+                color = if (flag.isBlank()) Vessel.colors.textMuted else Vessel.colors.text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (level.isNotEmpty()) {
                 Text(
-                    // The type, then the flag. A row that has neither yet says
-                    // so rather than rendering an empty line with a separator
-                    // floating in it.
-                    listOf(typeLabel.ifBlank { type }, flag)
-                        .filter { it.isNotBlank() }
-                        .joinToString(" · ")
-                        .ifBlank { "New setting" },
+                    levelLabel(level),
                     style = Vessel.type.monoSmall,
-                    color = Vessel.colors.text,
+                    color = Vessel.colors.textMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = Vessel.metrics.diagnosticControlWidth),
                 )
-                if (!open && level.isNotEmpty()) {
-                    Text(
-                        levelLabel(level),
-                        style = Vessel.type.bodySmall,
-                        color = Vessel.colors.textMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
             // A caution is the one thing that must survive the card being shut:
             // it says this row costs something or cannot act, and a closed card
@@ -172,8 +172,6 @@ fun VDiagnosticEntry(
                 tint = Vessel.colors.textMuted,
                 modifier = Modifier.size(Vessel.metrics.iconSm).rotate(if (open) 180f else 0f),
             )
-            // On the header rather than beside a field: it acts on the whole
-            // entry, and beside a field it would steal width from that one alone.
             if (onRemove != null) {
                 VIconButton(
                     VIcons.X,
@@ -181,8 +179,6 @@ fun VDiagnosticEntry(
                     onClick = onRemove,
                     tint = Vessel.colors.textMuted,
                 )
-            } else {
-                Box(Modifier.size(Vessel.metrics.touchTarget))
             }
         }
 
