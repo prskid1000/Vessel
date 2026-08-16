@@ -477,12 +477,41 @@ const val MANAGED_DESKTOP: Boolean = true
  * property is unchanged — should scale close to linearly on eight cores. Get
  * `mean` under about 3 ms and re-run the table above.
  *
- * `MESA_VK_WSI_DEBUG` is in [DIAGNOSTIC_SESSION_ENV], so that is one row and no
- * rebuild: Diagnostics, `MESA_VK_WSI_DEBUG`, *Copy each frame (sw)*. The failure
- * mode this guards is total and instant — a black window or no swapchain, never
- * a slow one — so it is unmistakable and the way back is unambiguous.
+ * **And the copy was split, so it goes back on. 2026-08-16.** That *done when*
+ * has been built: `Drawable.copyArea` now runs through `copyPoolCopyRows`
+ * (`app/src/main/cpp/winlator/src/copy_pool.c`), which divides the rectangle
+ * into row bands across a persistent pthread pool — four participants by
+ * default on this eight-core part, the calling thread taking one band itself
+ * and joining the workers before it returns. Payloads under 256 KB skip the
+ * pool entirely, so ordinary X `CopyArea` traffic is untouched.
+ *
+ * **What has changed is the cost of the copy, and nothing else on this page.**
+ * Every measurement above still stands as taken. The 19.1 ms line is real, the
+ * table of two Requiem sessions is real, and the reason the table looked the
+ * way it did — a GPU idling at 15.5% and 45.7 C behind one core memcpying an
+ * uncached buffer — is exactly the thing that has been attacked. What has *not*
+ * happened is a re-measurement: **the post-split `mean` has not been captured on
+ * a device, and neither has a new version of that table.** The argument for
+ * flipping is the mechanism, not a number: 154 MB/s is uncached-read speed,
+ * uncached reads stall on latency rather than saturating a bus, and stalls from
+ * different cores overlap. That predicts close to linear scaling and it is the
+ * same class of code-reading argument that lost once already on this page. It
+ * is being trusted this time because the thing it predicts is directly
+ * measurable by an instrument already in the tree: the `Present copyArea`
+ * sampler in `PresentExtension.presentToContent` prints `mean` every 120
+ * presents, and one session says whether this was right.
+ *
+ * *Done when:* that sampler reads under about 3 ms and the table above has a
+ * third column. Until then this default is a considered bet, not a result.
+ *
+ * `MESA_VK_WSI_DEBUG` is in [DIAGNOSTIC_SESSION_ENV], so the way back is one row
+ * and no rebuild: Diagnostics, `MESA_VK_WSI_DEBUG`, *Copy each frame (sw)*. That
+ * row is unchanged by this flip — it overrides in both directions now, which is
+ * what makes moving the default a cheap thing to be wrong about. The failure
+ * mode it guards is total and instant — a black window or no swapchain, never a
+ * slow one — so it is unmistakable and the way back is unambiguous.
  */
-const val ZERO_COPY_PRESENT: Boolean = false
+const val ZERO_COPY_PRESENT: Boolean = true
 
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
@@ -765,8 +794,9 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
  *     compiled. `patches/mesa/0004` and `0006` compiled it, and
  *     `patches/mesa/README.md` measures the other path at 0.602 ms against
  *     2.143 ms. A fixed value with a 3.5x alternative behind it is a setting
- *     nobody had got round to exposing, not an invariant. See
- *     [ZERO_COPY_PRESENT] for why the *default* still does not move.
+ *     nobody had got round to exposing, not an invariant. The default has since
+ *     moved to DRI3 and back and to DRI3 again; see [ZERO_COPY_PRESENT] for the
+ *     chronology and for what is measured at each step.
  *  4. The set is assertable: ⊆ [RESERVED_SESSION_ENV], and an untouched record
  *     produces an empty diagnostics map. Two assertions, and they are in
  *     `SessionEnvironmentTest`.

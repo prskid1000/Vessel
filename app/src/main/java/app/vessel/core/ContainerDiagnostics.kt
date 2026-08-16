@@ -1200,17 +1200,27 @@ val LOGGABLES: List<Loggable> = listOf(
     // this server's dma-buf and binding a `TILING_LINEAR` image at rowPitch
     // 5120, and `tools/gfx/x11present.c` ran a real Vulkan swapchain against
     // this app's own X server on the DRI3 path and produced the table above.
-    // Not proven: the same path under a *guest* — winex11 holding the X
-    // connection, vkd3d or DXVK driving the swapchain, Turnip reached through
-    // win32u's ICD under FEX. That join has never been run, which is why
-    // [ZERO_COPY_PRESENT] is still false and this row exists to answer it one
-    // container at a time.
+    // The guest join — winex11 holding the X connection, vkd3d or DXVK driving
+    // the swapchain, Turnip reached through win32u's ICD under FEX — has since
+    // been run too, on Resident Evil Requiem: six dma-bufs imported, no device
+    // lost. [ZERO_COPY_PRESENT] carries that log line.
     //
     // The 2026-08-10 session that died with this on is *not* evidence about the
     // server as it stands: its cause was found 104 minutes later and was the
     // missing XFIXES extension, which libxcb answers by tearing the connection
     // down client-side before a request is even sent. [ZERO_COPY_PRESENT] has
     // the whole chronology.
+    //
+    // **The default now sits at the right-hand stop, and this row overrides
+    // leftward.** [ZERO_COPY_PRESENT] is true, so the baseline this row emits
+    // against is [WSI_DRI3] and the useful move is *back* to
+    // *Copy each frame (sw)*. The reason the default moved is not that the
+    // caution above expired — it is that the cost that sent it back off, a 19 ms
+    // per-present CPU copy out of an uncached mapping, is now split across a
+    // worker pool (`cpp/winlator/src/copy_pool.c`). Whether that was enough is
+    // unmeasured, which is the strongest argument this row has ever had for
+    // existing: the way back from a wrong bet is still one dropdown and no
+    // rebuild.
     //
     // `levelIsMachine` is off deliberately — the wire values are `sw` and the
     // empty string, and a mono `""` is not a control anybody can read, so the
