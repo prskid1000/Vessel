@@ -21,6 +21,17 @@ setup_mingw
 COMPONENT=dxvk
 COMPONENT_REF="$DXVK_REF"
 VERSION="${DXVK_REF#v}"
+# Vessel patches change what this builds without moving the upstream version,
+# and the component store is keyed by type and version code -- so an unchanged
+# code makes the rebuild a silent no-op on the device.
+#
+# This script did not compute one until now, which meant *every* DXVK build
+# since patches/dxvk/0001 landed has shipped the same code as stock 2.7.1. A
+# phone that already had 2.7.1 installed would accept the .wcp and keep what it
+# had, and the only symptom is a counter that never changes. vkd3d.sh, wine.sh,
+# turnip.sh and fex.sh all did this correctly; dxvk.sh and zink.sh were the two
+# that did not, and zink's VERSION carries a source SHA so it moves on its own.
+VERSION_CODE="$(vessel_version_code "$VERSION" "${DXVK_REVISION:-0}")"
 
 fetch_source "$COMPONENT" "$DXVK_REPO" "$DXVK_REF"
 
@@ -134,6 +145,7 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type DXVK \
   --name "DXVK $VERSION ARM64EC ($TARGET_NAME)" \
   --version "$VERSION" \
+  --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
   --description "DXVK $VERSION, arm64ec system32 + i386 syswow64, built for $TARGET_DESC" \

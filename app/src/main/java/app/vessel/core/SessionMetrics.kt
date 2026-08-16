@@ -151,6 +151,25 @@ data class MetricSample(
     val d3dExecuteIndirectCommandsPerFrame: Float? = null,
     val d3dCommandListsPerFrame: Float? = null,
     /**
+     * Microseconds a frame spent *waiting*, D3D 8/9/10/11 only.
+     *
+     * The counterpart to everything above, which counts work. `d3dGpuIdleUs` is
+     * time the GPU had nothing submitted and `d3dGpuSyncUs` is time the CPU
+     * spent blocked on it; the two are close to mutually exclusive, so which of
+     * them is large is the GPU-bound-versus-CPU-bound answer directly rather
+     * than by inference from a load percentage. The `cs` pair asks the same
+     * question about DXVK's own command-stream thread, which is a third place a
+     * frame can be lost and one no host counter can see.
+     *
+     * Null for D3D 12: vkd3d's equivalent is spread across its queue timeline
+     * and is what `VKD3D_QUEUE_PROFILE` reports, in far more detail and at a
+     * cost that is not worth paying by default.
+     */
+    val d3dGpuIdleUsPerFrame: Float? = null,
+    val d3dGpuSyncUsPerFrame: Float? = null,
+    val d3dCsIdleUsPerFrame: Float? = null,
+    val d3dCsSyncUsPerFrame: Float? = null,
+    /**
      * How many pipelines exist, which is a population and not a rate.
      *
      * Absolute rather than per frame, and the producer treats it that way too: a
@@ -734,6 +753,20 @@ data class GfxStats(
     val executeIndirectsPerFrame: Float? = null,
     val executeIndirectCommandsPerFrame: Float? = null,
     val commandListsPerFrame: Float? = null,
+    /**
+     * The waiting, in microseconds a frame; written by the DXVK producer only.
+     *
+     * DXVK has kept these since long before Vessel existed and nothing has ever
+     * read them — `patches/dxvk/0001` dumped only the counters that count work.
+     * Work alone cannot say whether a frame was slow because there was too much
+     * of it or because something was blocked, which is the question this stack
+     * has been answering from GPU load percentages and getting wrong.
+     */
+    val gpuIdleUsPerFrame: Float? = null,
+    val gpuSyncUsPerFrame: Float? = null,
+    val csIdleUsPerFrame: Float? = null,
+    val csSyncUsPerFrame: Float? = null,
+    val drawsMergedPerFrame: Float? = null,
     val pipelinesGraphics: Int? = null,
     val pipelineLibraries: Int? = null,
     val pipelinesCompute: Int? = null,
@@ -887,6 +920,18 @@ fun formatWatts(milliwatts: Int): String {
 /** Megabytes as `3.4 GB` past a gigabyte, whole MB below it. */
 fun formatMegabytes(megabytes: Int): String =
     if (megabytes >= 1024) "${megabytes / 1024}.${megabytes % 1024 * 10 / 1024} GB" else "$megabytes MB"
+
+/**
+ * Microseconds as `12.4 ms` past a millisecond, whole µs below it.
+ *
+ * Milliseconds are the unit a frame budget is quoted in — 16.7 at 60 Hz, 41.7
+ * at the 24 fps this device is usually capped to — and a per-frame wait is only
+ * meaningful against that budget. Below a millisecond the fraction would be
+ * noise, so it stays in µs and reads as "not worth caring about", which is
+ * exactly what a sub-millisecond wait is.
+ */
+fun formatMicroseconds(microseconds: Int): String =
+    if (microseconds >= 1000) "${microseconds / 1000}.${microseconds % 1000 / 100} ms" else "$microseconds µs"
 
 /** Tenths of a degree as `41.3`, with the caller supplying the unit. */
 fun formatDeciCelsius(deciC: Int): String = "${deciC / 10}.${deciC % 10}"

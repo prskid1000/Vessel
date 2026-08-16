@@ -1278,6 +1278,41 @@ val LOGGABLES: List<Loggable> = listOf(
         oneSessionFrom = Emit.ON,
     ),
 
+    // **The only frame-timing instrument on the D3D12 path, and the reason it is
+    // a switch rather than always on.**
+    //
+    // vkd3d's queue timeline records every submission, wait, present and fence
+    // signal with timestamps and writes a Chrome trace. It is the one thing on
+    // this stack that can say where a D3D12 frame went — the per-frame counters
+    // Vessel writes (`patches/vkd3d/0007`) count work, and work alone cannot
+    // distinguish "too much of it" from "waiting for something".
+    //
+    // It costs 33 MB the moment it is switched on, before a frame is drawn:
+    // `queue_timeline.c:28` allocates 256 Ki entries of a 128-byte state struct
+    // plus a 1 MB free list, unconditionally, whatever the session goes on to
+    // do. The trace file then grows for as long as the session lasts and
+    // nothing prunes it. On a phone this project has already had out-of-memory
+    // kills on, that is not a default — it is a measurement you take once.
+    //
+    // The value here is a switch; the path is filled in by the session, because
+    // the variable vkd3d reads is the path itself and a container that could
+    // name it could have vkd3d writing outside the container. See
+    // `SessionEnvironment`'s diagnostics stage.
+    Loggable(
+        name = "VKD3D_QUEUE_PROFILE",
+        emit = Emit.Variable("VKD3D_QUEUE_PROFILE", Emit.OFF),
+        levels = ON_OFF,
+        labels = ON_OFF_LABELS,
+        baseline = Emit.OFF,
+        secondary = "Records when every D3D12 submission, wait and present started and " +
+            "finished, to a trace file in the container — the only way to see where a " +
+            "frame went rather than how much was in it.",
+        caution = "Takes 33 MB the moment it is on, and the trace grows for the whole " +
+            "session. One session, then turn it off.",
+        addAt = Emit.ON,
+        oneSessionFrom = Emit.ON,
+    ),
+
     // — Turnip flags that only *say* something. Gated on the driver logger, ----
     //   because without it their output goes to logcat, which Vessel cannot read.
     turnipLogFlag("perf", "Says why a frame was slow — including why the driver turned off " +

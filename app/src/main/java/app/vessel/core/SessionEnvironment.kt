@@ -602,6 +602,11 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // preference anyone wants to be able to express, and the graphs are not
     // improved by being able to move their own source.
     "VESSEL_GFX_STATS",
+    // Where vkd3d writes its submission timeline, and reserved for exactly the
+    // reason its neighbour above is: the variable *is* the destination. It is
+    // also in [DIAGNOSTIC_SESSION_ENV], which is where the switch that turns it
+    // on lives, and that set's own comment says how a switch becomes a path.
+    "VKD3D_QUEUE_PROFILE",
     // Where the audio driver tees what it hands the device — `patches/wine/0047`.
     // Reserved for the same reason as its neighbour and with one addition: this
     // one is *written to* rather than read, at ten writes a second for as long
@@ -809,6 +814,15 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
  * hand-edited document cannot reach them either.
  */
 val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
+    // **`VKD3D_QUEUE_PROFILE` is a path, and the row that switches it on does
+    // not carry one.** The row sends `on` or `off`; the session turns `on` into
+    // [vkd3dQueueProfileFile] and `off` into an empty string, in the diagnostics
+    // stage below. That indirection is the whole reason it can be here at all:
+    // the variable vkd3d reads *is* the destination, so a surface that could set
+    // it literally could have vkd3d writing anywhere on the device. Reserved for
+    // the same reason as `VESSEL_GFX_STATS`, and exposed for the same reason as
+    // `VKD3D_CONFIG` — it holds an instrument nothing else in the stack has.
+    "VKD3D_QUEUE_PROFILE",
     "WINEDEBUG",
     "DXVK_LOG_LEVEL",
     "VKD3D_DEBUG",
@@ -1210,6 +1224,19 @@ fun turnipDebugFile(tmp: File): File = File(tmp, TU_DEBUG_FILE_NAME)
 
 /** The per-render-pass trace for a container. */
 fun gpuTraceFile(tmp: File): File = File(tmp, GPU_TRACE_FILE_NAME)
+
+/**
+ * `VKD3D_QUEUE_PROFILE` — vkd3d's submission timeline, when the row asks for it.
+ *
+ * A Chrome trace: open it in `chrome://tracing` or Perfetto. It is the D3D12
+ * counterpart to nothing — DXVK has no equivalent and neither does Turnip — and
+ * it is the only instrument on this stack that can say when a submission
+ * started and when it finished rather than how many there were.
+ */
+const val VKD3D_QUEUE_PROFILE_FILE_NAME: String = "vkd3d-queue-profile.json"
+
+/** The submission timeline for a container. */
+fun vkd3dQueueProfileFile(tmp: File): File = File(tmp, VKD3D_QUEUE_PROFILE_FILE_NAME)
 
 /**
  * The environment a session is started with — `docs/LOGGING.md` as code.
@@ -2074,7 +2101,19 @@ fun sessionEnvironment(
         )
     ) {
         if (key !in DIAGNOSTIC_SESSION_ENV) continue
-        environment[key] = value
+        // `VKD3D_QUEUE_PROFILE` names its own destination, so the switch cannot
+        // send its value through unchanged: vkd3d would `fopen("on")` and drop a
+        // file called `on` in whatever directory the guest happened to be in.
+        // Resolved here rather than in the row because this is the only place
+        // that knows the container's paths, and off must be empty rather than
+        // absent — `vkd3d_get_env_var` treats an empty value as unset, and
+        // leaving the key out entirely would let stage four's escape hatch or an
+        // inherited value stand in for a switch the user turned off.
+        environment[key] = if (key == "VKD3D_QUEUE_PROFILE") {
+            if (value == Emit.ON) vkd3dQueueProfileFile(paths.tmp).absolutePath else ""
+        } else {
+            value
+        }
     }
 
     // **Stage four: the container's own environment table, last.**

@@ -1,9 +1,42 @@
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index a35626f8..b3e88ef0 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -2,6 +2,7 @@
+ #include "dxvk_instance.h"
+ #include "dxvk_latency_builtin.h"
+ #include "dxvk_latency_reflex.h"
++#include "dxvk_vessel_stats.h"
+ 
+ namespace dxvk {
+   
+@@ -543,9 +544,17 @@ namespace dxvk {
+     latencyInfo.frameId = frameId;
+ 
+     m_submissionQueue.present(presentInfo, latencyInfo, status);
+-    
+-    std::lock_guard<sync::Spinlock> statLock(m_statLock);
+-    m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
++
++    {
++      std::lock_guard<sync::Spinlock> statLock(m_statLock);
++      m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
++    }
++
++    /* Vessel: the same counters the HUD draws, written to a file once a second
++     * so the host can graph them instead of a person reading a screenshot. The
++     * lock above is released first: getStatCounters takes it again, and this
++     * used to be the last statement in the function for that reason. */
++    VesselStats::sample(getStatCounters(), getMemoryStats(0).memoryAllocated, getMemoryStats(0).memoryUsed);
+   }
+ 
+ 
 diff --git a/src/dxvk/dxvk_vessel_stats.cpp b/src/dxvk/dxvk_vessel_stats.cpp
 new file mode 100644
-index 00000000..d4fcb5e5
+index 00000000..eebcde55
 --- /dev/null
 +++ b/src/dxvk/dxvk_vessel_stats.cpp
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,135 @@
 +#include "dxvk_vessel_stats.h"
 +
 +#include "../util/util_env.h"
@@ -76,7 +109,12 @@ index 00000000..d4fcb5e5
 +    const double seconds = last ? double(now - last) / 1.0e9 : 1.0;
 +    const double frames  = presents ? double(presents) : 1.0;
 +
-+    char line[768];
++    /* 768 until the idle/sync counters were added. Widened rather than
++     * measured to the byte, because the failure mode is bad: snprintf truncates
++     * silently, the truncated line is invalid JSON, parseGfxStats returns null,
++     * and the panel shows "no Direct3D counters" for a title that was drawing.
++     * A few hundred bytes of stack is not worth being clever about. */
++    char line[1024];
 +    const int n = std::snprintf(line, sizeof(line),
 +      "{\"intervalMs\":%llu,\"presents\":%llu,\"fps\":%.2f,"
 +      "\"drawCallsPerFrame\":%.1f,\"dispatchesPerFrame\":%.1f,"
@@ -84,7 +122,25 @@ index 00000000..d4fcb5e5
 +      "\"submissionsPerFrame\":%.1f,\"gpuSyncsPerFrame\":%.1f,"
 +      "\"pipelinesGraphics\":%llu,\"pipelineLibraries\":%llu,"
 +      "\"pipelinesCompute\":%llu,\"pipeTasksDone\":%llu,\"pipeTasksTotal\":%llu,"
-+      "\"memAllocatedMb\":%llu,\"memUsedMb\":%llu}\n",
++      "\"memAllocatedMb\":%llu,\"memUsedMb\":%llu,"
++      /* Vessel: the four counters DXVK has always kept and nothing ever read.
++       *
++       * Everything above this line counts *work*, and work alone cannot say
++       * whether a frame was slow because there was too much of it or because
++       * something was waiting. These are the waiting: GpuIdleTicks is time the
++       * GPU had nothing submitted, GpuSyncTicks is time the CPU spent blocked
++       * on the GPU, and the Cs pair is the same question for DXVK's own
++       * command-stream thread. Between them they answer GPU-bound versus
++       * CPU-bound directly, which is the diagnosis this stack has been
++       * inferring from GPU load percentages and getting wrong.
++       *
++       * Microseconds -- DxvkStatCounter's "Ticks" are us, per dxvk_stats.h --
++       * and reported per frame like their neighbours, so a number near the
++       * frame budget is the whole story of that frame. Deltas, because they
++       * are cumulative and a lifetime total says nothing about now. */
++      "\"gpuIdleUsPerFrame\":%.1f,\"gpuSyncUsPerFrame\":%.1f,"
++      "\"csIdleUsPerFrame\":%.1f,\"csSyncUsPerFrame\":%.1f,"
++      "\"drawsMergedPerFrame\":%.1f}\n",
 +      (unsigned long long)((now - last) / 1000000ull),
 +      (unsigned long long)presents,
 +      seconds > 0.0 ? double(presents) / seconds : 0.0,
@@ -102,7 +158,12 @@ index 00000000..d4fcb5e5
 +      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeTasksDone),
 +      (unsigned long long)counters.getCtr(DxvkStatCounter::PipeTasksTotal),
 +      (unsigned long long)(memAllocated >> 20),
-+      (unsigned long long)(memUsed >> 20));
++      (unsigned long long)(memUsed >> 20),
++      double(ctr(DxvkStatCounter::GpuIdleTicks))  / frames,
++      double(ctr(DxvkStatCounter::GpuSyncTicks))  / frames,
++      double(ctr(DxvkStatCounter::CsIdleTicks))   / frames,
++      double(ctr(DxvkStatCounter::CsSyncTicks))   / frames,
++      double(ctr(DxvkStatCounter::CmdDrawsMerged))/ frames);
 +
 +    prev = counters;
 +
@@ -152,39 +213,6 @@ index 00000000..bdcf81d8
 +  };
 +
 +}
-diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
-index a35626f8..b3e88ef0 100644
---- a/src/dxvk/dxvk_device.cpp
-+++ b/src/dxvk/dxvk_device.cpp
-@@ -2,6 +2,7 @@
- #include "dxvk_instance.h"
- #include "dxvk_latency_builtin.h"
- #include "dxvk_latency_reflex.h"
-+#include "dxvk_vessel_stats.h"
- 
- namespace dxvk {
-   
-@@ -543,9 +544,17 @@ namespace dxvk {
-     latencyInfo.frameId = frameId;
- 
-     m_submissionQueue.present(presentInfo, latencyInfo, status);
--    
--    std::lock_guard<sync::Spinlock> statLock(m_statLock);
--    m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
-+
-+    {
-+      std::lock_guard<sync::Spinlock> statLock(m_statLock);
-+      m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
-+    }
-+
-+    /* Vessel: the same counters the HUD draws, written to a file once a second
-+     * so the host can graph them instead of a person reading a screenshot. The
-+     * lock above is released first: getStatCounters takes it again, and this
-+     * used to be the last statement in the function for that reason. */
-+    VesselStats::sample(getStatCounters(), getMemoryStats(0).memoryAllocated, getMemoryStats(0).memoryUsed);
-   }
- 
- 
 diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
 index f58db33e..fcf26dee 100644
 --- a/src/dxvk/meson.build

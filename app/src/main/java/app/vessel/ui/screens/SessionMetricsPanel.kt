@@ -22,6 +22,7 @@ import app.vessel.core.formatDeciCelsius
 import app.vessel.core.formatElapsed
 import app.vessel.core.formatMegabytes
 import app.vessel.core.formatMegahertz
+import app.vessel.core.formatMicroseconds
 import app.vessel.core.formatWatts
 import app.vessel.core.oneDecimal
 import app.vessel.data.SessionMetricsState
@@ -501,6 +502,63 @@ private fun D3dCards(state: SessionMetricsState) {
             },
         ),
     )
+
+    // **Where the frame was spent waiting, and only for D3D 8/9/10/11.** DXVK
+    // has kept these four counters since long before this app existed and
+    // nothing ever read them; vkd3d has no equivalent that is cheap enough to
+    // leave on, so this card is absent under D3D 12 rather than flat at zero.
+    //
+    // **This is the card to read first when a frame rate is disappointing**, and
+    // it is the only one here that answers a question rather than describing
+    // work. GPU idle high means the GPU is starved and the cost is on the CPU
+    // side; GPU sync high means the CPU is blocked waiting for the GPU and the
+    // cost is the frame's own rendering. The two are close to mutually
+    // exclusive, which is what makes the pair a diagnosis instead of two more
+    // numbers — and it is a diagnosis this project has otherwise been inferring
+    // from GPU load percentages, which cannot distinguish useful work from
+    // overhead and has already misled it once.
+    //
+    // Drawn against the frame budget rather than their own peak, so the height
+    // of a line is legible as a fraction of a frame without arithmetic.
+    val waitPeak = maxOf(
+        history.peak { it.d3dGpuIdleUsPerFrame.rounded() } ?: 0,
+        history.peak { it.d3dGpuSyncUsPerFrame.rounded() } ?: 0,
+        history.peak { it.d3dCsSyncUsPerFrame.rounded() } ?: 0,
+    )
+    if (waitPeak > 0) {
+        VMetricGraphCard(
+            title = "d3d · waiting",
+            axisStyle = ::formatMicroseconds,
+            spanSeconds = history.spanSeconds,
+            value = sample.d3dGpuIdleUsPerFrame.rounded()?.let(::formatMicroseconds),
+            unit = "/frame",
+            stats = buildList {
+                history.mean { it.d3dGpuIdleUsPerFrame.rounded() }?.let {
+                    add(VMetricStat("gpu idle", formatMicroseconds(it)))
+                }
+                history.mean { it.d3dGpuSyncUsPerFrame.rounded() }?.let {
+                    add(VMetricStat("gpu sync", formatMicroseconds(it)))
+                }
+                history.mean { it.d3dCsSyncUsPerFrame.rounded() }?.let {
+                    add(VMetricStat("cs sync", formatMicroseconds(it)))
+                }
+                history.mean { it.d3dCsIdleUsPerFrame.rounded() }?.let {
+                    add(VMetricStat("cs idle", formatMicroseconds(it)))
+                }
+            },
+            series = listOfNotNull(
+                history.seriesOrNull(waitPeak, VSeriesTone.Primary, VSeriesForm.Area, "gpu idle") {
+                    it.d3dGpuIdleUsPerFrame.rounded()
+                },
+                history.seriesOrNull(waitPeak, VSeriesTone.Secondary, VSeriesForm.Line, "gpu sync") {
+                    it.d3dGpuSyncUsPerFrame.rounded()
+                },
+                history.seriesOrNull(waitPeak, VSeriesTone.Neutral, VSeriesForm.Dashed, "cs sync") {
+                    it.d3dCsSyncUsPerFrame.rounded()
+                },
+            ),
+        )
+    }
 
     // **Indirect drawing, and only for D3D 12.** DXVK writes nothing for these,
     // so this card is absent for every D3D 8/9/10/11 title rather than flat at
