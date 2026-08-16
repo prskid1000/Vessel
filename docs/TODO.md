@@ -26,7 +26,7 @@ against it. Dead hypotheses are the cheapest thing in this file to keep and the
 most expensive to lose.
 
 *Rewritten from scratch on 2026-08-14 (#18); re-ranked and re-checked against the
-tree on 2026-08-16 at `3d03289`. Two things to know about the line references.
+tree on 2026-08-16 at `cf711c6`. Two things to know about the line references.
 `native/wine` and `native/vkd3d` currently have their whole patch series applied,
 so line numbers into them are the patched tree's, not upstream's — where that
 matters the pristine-tree number is given beside it. `native/fex` is clean, so
@@ -42,12 +42,25 @@ same day. The stack that does it: Wine ARM64EC plus FEX, DXVK and vkd3d-proton o
 Turnip, a D3D12 device, a 1920x1080 swapchain, over three thousand pipelines,
 Wwise audio, and a Media Foundation backend behind `IMFSourceReader`.
 
-**The frontier has moved from "does it start" to "does it load".** The game
-reaches its loading screen and the GPU dies there. Everything below that layer —
-Wine's virtual memory, FEX's translation, the exception path, the loader, the
-critical sections — has been chased to the bottom and is no longer where the
-failures are. **The live blocker is one compute shader, and the layer it lives in
-had never been examined until 2026-08-15.**
+**The frontier has moved again, and this is the third time in three days.** It
+went from "does it start" to "does it load" to **"is it drawing the right
+picture"**. The game loads, runs, holds a frame rate and plays sound; what it
+does not do is draw the world. Everything below the graphics layer — Wine's
+virtual memory, FEX's translation, the exception path, the loader, the critical
+sections — has been chased to the bottom and is no longer where the failures are.
+**The live blocker is #56, and it is the first one in this file that produces no
+error message at all.**
+
+Audio came right on 2026-08-16 and the shape of that bug is worth carrying into
+#56, because it is the same shape. Six theories died before the real one:
+`oss_get_mix_format` reported int16, but a WASAPI shared-mode mix format has been
+32-bit float on every Windows since Vista, so Wwise wrote float samples into an
+int16 stream. Nothing logged an error — the stack was doing exactly what it was
+told, and what it was told was wrong. It was settled by capturing 363 MB of PCM
+and reading the same bytes both ways: as float32 the samples are clean, as int16
+the zero-crossing rate is the maximum possible. `patches/wine/0050`. **A symptom
+with no error message is settled by capturing the data, not by reasoning about
+the code.**
 
 Two supporting systems came right on 2026-08-15, and both are worth knowing
 because they change how everything else is measured:
@@ -89,82 +102,49 @@ and both were free to avoid.
 ## The blockers, in order
 
 - [x] **#55 — Requiem's loading-screen GPU hang.** Our Turnip fork set `supports_double_threadsize` on `a8xx_base`; upstream never did, because a8xx's `has_dual_wave_dispatch` replaces THREAD128 rather than joining it. `patches/mesa/0007`. 64 is native here, so pinning it back costs nothing — the earlier "half the lanes" claim was wrong. Still owed: one clean run, no override, no workaround variable.
-- [ ] **#54 — the session ends when the X server goes away, and it is probably
-  #55 wearing a different hat.** Every run ends with
 
-  ```
-  X connection to :0 broken (explicit kill or server shutdown)
-  XIO: fatal IO error 2 (No such file or directory) on X server ":0"
-  ```
+- [ ] **#56 — the world is not drawn.** Standing inside a house basement, the
+  room's own geometry is missing while the city outside is visible through where
+  the walls should be, and props render as unlit black. The game is interactive
+  and does not fault. **The log contains no graphics error, warning or FIXME of
+  any kind** — which is itself the strongest fact in this entry, because it rules
+  out every failure that announces itself and leaves only ones that do not.
 
-  and `exit CRASHED code 1`, after the game has been rendering.
+  **What has been eliminated, so none of it is re-run.** Each was tested on the
+  device, against the same scene:
 
-  **Ranked second, and the ranking is the point of this paragraph.** The X death
-  is *downstream* of the GPU device loss in #55: the thread that observed
-  `VK_ERROR_DEVICE_LOST` was holding a Requiem critical section and never
-  released it, and the teardown that follows is what drops the display
-  connection. **#54 may be entirely explained by #55.** It is kept as its own
-  entry rather than merged, for one reason that is not sentiment: the `EINTR`
-  defect found under it is a genuine, independent bug in Vessel's own X server
-  that would drop every client on any signal, whether or not a GPU ever hung.
-  Merging the entries would delete a real fix's only record. It is closed by
-  fixing #55 **only if** a session that survives #55 also stops producing this,
-  and that has not been observed.
-
-  **The app-side surface has been examined and it cleared every theory this entry
-  used to hold — including the memory one.** Measured on 2026-08-15 with a
-  device-side sampler and a live `logcat`, at the moment `re9.exe` died:
-
-  | check | result |
+  | eliminated | how |
   |---|---|
-  | `app.vessel` after the death | **still alive, same pid** — the app never died |
-  | `lmkd` / lowmemorykiller | nothing |
-  | tombstone, `SIGSEGV`, `SIGABRT`, ANR | nothing |
-  | MemAvailable / SwapFree | **3.3 GB / 8.6 GB** free |
-  | RSS over the last 15 s | **flat-to-falling** (5.48 → 5.46 GB) |
-  | teardown | ~4 s, orderly |
+  | shader and pipeline caches | invalidated; the rebuild was watched happening and the picture did not change |
+  | the ir3 compiler | run with `IR3_SHADER_DEBUG` variations plus `nocache`, since the flags do not invalidate the cache on their own |
+  | LRZ, and LRZ fast-clear | `TU_DEBUG=nolrz`, `nolrzfc` |
+  | UBWC | `TU_DEBUG=noubwc`, and separately `patches/vkd3d/0006` |
+  | tiling versus direct rendering | `TU_DEBUG=sysmem`, `nobin`, `forcebin` |
+  | driver-side batching | `TU_DEBUG=flushall` |
+  | vkd3d's initial layout transition | `force_initial_transition` off |
+  | placed versus committed resources | `patches/vkd3d/0006` |
+  | the upscalers | already off before the symptom was reported |
+  | the present path | reproduces on both DRI3 and the software copy |
+  | the `0x100` write faults | handled probes; they recur for 1,500 lines while the game keeps rendering |
 
-  So memory is ruled out, not merely unproven, and the app is not what goes away.
-  Two further corrections fall out of that:
+  **The standing lead is the one line every session prints and nothing has yet
+  followed up:** `vkd3d_init_device_caps: Not all relevant pipeline stages are
+  supported by EXT_dgc. Skipping.` vkd3d therefore cannot use device-generated
+  commands and lowers every `ExecuteIndirect` to a compute pass that patches an
+  argument buffer. RE Engine draws world geometry indirectly and props through
+  conventional draws — which is the same split as the symptom, world missing and
+  props present. That is a shape match and not yet evidence.
 
-  - **`exit code 1` is not the game's.** `SessionRuntime` waits on
-    `explorer /desktop=`, not on `re9.exe`. libX11's `_XIOError` calls `exit(1)`,
-    so *every* X client exits 1 the moment the connection drops — the desktop
-    included. The code is a consequence of the X death, not a report about the
-    game.
-  - **The game did not fault.** 3,942 lines contain no `err:seh:`, no unhandled
-    exception, no `CrashReport.exe`. Per `TraceSpec.kt`'s `exceptions` topic, an
-    unhandled exception prints *without* any channel enabled — so that absence is
-    already proof at full strength, and `+seh` would add nothing. (The
-    `unrepaired write fault at 0x100` entries are handled probes: they recur on
-    thread `0194` for 1,500 lines while the game keeps rendering.)
+  **The instrument for it now exists and has never been run.** `patches/vkd3d/0007`
+  counts `ExecuteIndirect` calls and the commands they were given, per frame, on
+  the `d3d · indirect` card. It was built for this entry. A frame drawing a
+  basement with no walls should still be issuing indirect draws; if the counter
+  is zero the fallback is not reached and this lead is dead, and if it is large
+  the lead survives and the next question is what the patching pass produces.
 
-  **A mechanism was found in Vessel's own X server and fixed in `c8b4b30`, and it
-  is still unverified.** `xconnector_epoll.c` had no `EINTR` handling anywhere —
-  the string did not appear in `app/src/main/cpp` at all — and `signal(7)` lists
-  `poll`, `epoll_wait` and `select` as never restarted after a signal *regardless
-  of `SA_RESTART`*. ART installs handlers on this process (SIGSEGV for implicit
-  null checks, SIGQUIT for thread dumps, SIGUSR1) and profilers use `SIGRTMIN+n`.
-  On the epoll thread `epoll_wait` returning `-1` fell through to `break` and then
-  `killAllConnections()`, dropping **every** X client at once — which is exactly
-  the observed three simultaneous `X connection broken` lines with the app still
-  running.
-
-  Both paths now retry on `EINTR` (`xconnector_epoll.c:179`, `:327`), the JNI
-  upcalls check for pending exceptions, and the Java side catches
-  `RuntimeException` so one client's bad request cannot reach native with an
-  exception pending.
-
-  **Unverified, and the reason is stated so it is not mistaken for a pass: no
-  session has died on its own since the fix.** Every session since has ended at
-  #55's device loss, which is a different death. A fix that has not had the chance
-  to fail is not a fix that worked.
-
-  *Done when:* a session survives, **or** a session dies while `logcat -s
-  VesselXServer` stays silent — which rules this mechanism out in one run. The log
-  line is deliberately there so the fix can return a negative rather than become
-  a standing assumption.
-
+  *Done when:* the room has walls. **Next step:** one session on a vkd3d build at
+  revision 7 or later, standing in the same basement, reading the indirect
+  counter. Nothing else in this entry needs doing first.
 ---
 
 ## Fixed, and waiting for the run that would prove it
@@ -180,6 +160,52 @@ regression gets attributed to the wrong change three days later.
   **Two things had to be fixed before this was even testable, and that is the lesson.** The vkd3d disk cache was deleted on every launch by Vessel's own "stale lock" sweep, so "do the keys match across runs" had nothing to match against. A fix whose test needs a working cache cannot be verified while the cache is being thrown away, and neither bug was visible from the other's symptoms.
 
 - [x] **FEX cache content hash.** The Denuvo half was never real — the cache is installed inside `NtMapViewOfSection` before the guest runs, and every later divergence is a write that invalidates. The real hole was `TryMapImage` never checking the id it was handed. `patches/fex/0021`.
+
+- [~] **DRI3's present copy is split across a worker pool, and the number that
+  justified it has not been re-taken.** The copy measured `mean=19114us
+  max=385490us` at 1280x720 — about 154 MB/s for a 3.5 MB frame, which is
+  write-combine read speed, not DRAM. `copy_pool.c` splits it into row bands
+  across four participants; uncached reads are latency-bound, so bands should
+  overlap misses and scale close to linearly. **That is a mechanism argument, not
+  a measurement**, and `ZERO_COPY_PRESENT` was flipped back to `true` on it.
+
+  Correctness *was* measured, and by execution rather than reasoning: `copy_pool.c`
+  was cross-compiled for `x86_64-linux-android` and run against a reference
+  implementation of the old code over 921 shapes — contiguous and strided, odd
+  heights, heights below and above the band count, zero rows, either side of the
+  threshold — byte-identical every time, with canaries proving nothing is written
+  outside the rectangle.
+
+  **One thing to check before crediting or blaming the pool.** The
+  `DMA_BUF_IOCTL_SYNC` bracket sits in `Drawable.java` *outside* the pooled copy,
+  and the 19.1 ms figure spans both ioctls. If cache maintenance is the dominant
+  term, the pool is parallelising the wrong half. A timer split — sync-in, copy,
+  sync-out reported separately — is the cheap experiment that says which.
+
+  *Done when:* one session prints a `Present copyArea` line with the split. Low
+  single digits earns the default; still tens of milliseconds means the mechanism
+  argument was wrong and the container row turns DRI3 off with no rebuild.
+
+- [ ] **The D3D panel is empty for every D3D12 title, and the fix is unbuilt.**
+  `patches/dxvk/0001` hooks `DxvkDevice::presentImage`, so the counters exist for
+  D3D 8/9/10/11 and never for D3D 12 — Metro fills the panel, Requiem leaves it
+  blank. `patches/vkd3d/0007` is the same instrument on the other side of that
+  boundary, writing the same schema to the same path. `patches/dxvk/0001` also
+  gained the four idle/sync counters DXVK has always kept and nothing ever read,
+  which are the only thing in the family that says whether a frame was GPU-bound
+  or CPU-bound rather than how much work was in it.
+
+  *Done when:* a Requiem session fills the `d3d · indirect` card, which is also
+  the next step for #56. **Needs a DXVK build at revision 1 and a vkd3d build at
+  revision 7**; neither has been compiled, and neither README claims otherwise.
+
+- [x] **`build/dxvk.sh` never computed a version code, so every DXVK rebuild since
+  `patches/dxvk/0001` landed installed as a no-op.** `package_wcp.py` derived
+  20701 from `"2.7.1"` alone and `ComponentStore` is keyed on it, so a phone that
+  already had 2.7.1 accepted the `.wcp` and kept what it had. The only symptom is
+  a counter that never changes. `vkd3d.sh`, `wine.sh`, `turnip.sh` and `fex.sh`
+  were all checked and are correct; `zink.sh` also lacks one but has no
+  `patches/zink/` to go stale against.
 ---
 
 ## Live, and not blocking a frame
@@ -234,6 +260,27 @@ regression gets attributed to the wrong change three days later.
 Kept with a one-line outcome and the reasoning that would otherwise be
 re-derived. Everything procedural about these has been dropped.
 
+- [x] **#43 — the FEX config assert.** `patches/fex/0005`. Closed 2026-08-16 by
+  reading the shipped binary rather than by running a session, and the
+  distinction is the point: the assert only fires on a config that *fails* to
+  parse, so a thousand successful launches never exercise it and were never
+  evidence. `ERROR_AND_DIE_FMT("Failed to parse JSON from file '{}' - invalid
+  JSON format", …)` is gone from `Config.cpp:43`, and neither literal survives in
+  `dist/fex-2608-canoe.wcp`'s `libarm64ecfex.dll` or `libwow64fex.dll` — with
+  `FEXCore` present in both as a positive control that the search works on those
+  files. What replaces it is an early `return` before any state is touched, so
+  "an unreadable override leaves the defaults standing" is true by construction
+  rather than by observation.
+- [x] **#54 — the session ending when the X server went away.** Closed as a
+  blocker: it was always downstream of #55's device loss, and no session has died
+  on its own since. One real, independent bug was found under it and is the only
+  part worth keeping — `xconnector_epoll.c` had no `EINTR` handling anywhere, and
+  `signal(7)` lists `poll`, `epoll_wait` and `select` as never restarted after a
+  signal *regardless of `SA_RESTART`*. ART installs handlers on this process, so
+  `epoll_wait` returning `-1` fell through to `break` and `killAllConnections()`,
+  dropping **every** X client at once. Both paths retry now (`:179`, `:327`),
+  `c8b4b30`. If it ever recurs, `logcat -s VesselXServer` rules this mechanism in
+  or out in one run.
 - [x] **#51 — Requiem renders, at 56 fps.** `patches/wine/0046`.
 - [x] **A relocated ntdll kept a header naming where it used to be.** `patches/wine/0044`.
 - [x] **#50 — a stack overflow that was never a recursion.** `patches/wine/0041`.
@@ -256,18 +303,6 @@ Real work, none of it blocking a frame.
   nobody has priced — **including the 56 fps in #51.** *Done when:* a
   release-variant APK runs a session on the device and one of the existing
   measurements is repeated on it.
-
-- [ ] **#43 — the FEX config assert.** `FEX::Config::JSON::LoadJSonConfig` calls
-  `ERROR_AND_DIE_FMT` on a per-app config it cannot parse (`Config.cpp:43`), from
-  `ProcessInit`, *two lines before* a log handler exists — so the process died
-  with an unexplained `c000001d` and no message. `patches/fex/0005` makes an
-  unreadable override leave the defaults standing, which is what an override
-  should do. `WINEDEBUG=+seh,+unwind` named the site, 5/5 reproducible; the route
-  is in the FEX reference below. **What is not established from the repository is
-  what remains open under this number** — the patch exists and its commit claims
-  the built `libarm64ecfex.dll` no longer contains the "invalid JSON format"
-  string. Treat it as needing one confirming session rather than as work not
-  started.
 
 - [ ] **#39 — fsync.** The session runs esync; `docs/OPTIMIZATION.md:196` records
   esync as the best available and `docs/ARCHITECTURE.md` fixes Wine sync to it.
@@ -341,9 +376,21 @@ case, and where to look.
    are Android trimming cached background processes as it always does. The second
    time from RSS scaling with commit granularity while the system sat at 11-12 GB
    of 15.2. Both are plausible and neither is evidence. The measurement that
-   settles it is in #54: 3.3 GB MemAvailable, 8.6 GB SwapFree, RSS flat-to-falling
-   over the last 15 seconds, no `lmkd`, and `app.vessel` alive with the same pid
-   afterwards.
+   settles it, taken on 2026-08-15 with a device-side sampler and a live
+   `logcat` at the moment `re9.exe` died: 3.3 GB MemAvailable, 8.6 GB SwapFree,
+   RSS flat-to-falling over the last 15 seconds (5.48 → 5.46 GB), no `lmkd`, no
+   tombstone or `SIGSEGV`/`SIGABRT`/ANR, an orderly ~4 s teardown, and
+   `app.vessel` alive with the same pid afterwards.
+
+   Two corrections fall out of the same measurement and are the reason it is
+   kept after #54 was closed. **`exit code 1` is not the game's**:
+   `SessionRuntime` waits on `explorer /desktop=`, not on `re9.exe`, and
+   libX11's `_XIOError` calls `exit(1)`, so *every* X client exits 1 the moment
+   the connection drops. **And the game did not fault** — 3,942 lines contain no
+   `err:seh:`, no unhandled exception, no `CrashReport.exe`, and per
+   `TraceSpec.kt`'s `exceptions` topic an unhandled exception prints with no
+   channel enabled, so that absence is proof at full strength rather than an
+   argument from silence.
 
 7. **`LookupCache::InvalidateRange` does not invalidate a page's worth of
    translations for a data write.** It is page-keyed and iterates only pages that
