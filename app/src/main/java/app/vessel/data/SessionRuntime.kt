@@ -1885,6 +1885,33 @@ class SessionRuntime @Inject constructor(
             // and FEX cannot see that from inside: an allocation FEXCore makes
             // for itself and one a guest makes are indistinguishable by the time
             // a notification arrives.
+            //
+            // **This line is also half of the answer to "`DisableDEP` is global
+            // and should be per-title", and the whole of that answer is written
+            // down beside `RESERVED_SESSION_ENV` in `SessionEnvironment.kt`.**
+            // Short version, re-examined 2026-08-16: the name is deliberately
+            // *not* reserved, so a container reaches it through the manifest or
+            // its own environment table and `fexCacheKey` digests it, which means
+            // per-container scoping already works and cannot silently share a
+            // cache across the two settings. The default stays on because the two
+            // failure directions are not symmetric — DEP on for a title that needs
+            // it off is a dead launch, DEP off for one that does not is a latent
+            // risk and a mutex — and nothing observed is harmed by it.
+            //
+            // **One thing this override leaves open, recorded because it is not
+            // established either way.** `fexCacheKey` digests the *session's*
+            // `FEX_*` variables, and this process deliberately runs with a
+            // different value of one of them, so a cache directory keyed on DEP-on
+            // holds blocks a compiler produced with DEP off. `patches/fex/README.md`
+            // lists `FEX_DISABLEDEP` among the variables that decide "what it
+            // treats as code", which is why they had to reach cache generation at
+            // all. Whether the two can actually diverge is untested: the compiler
+            // works from codemaps of images whose PE sections are already
+            // executable, where DEP promotion has nothing to add — a codemap entry
+            // recorded from a *runtime-generated* region is the case where it
+            // might. Not a claim and not a reason to change this line; the place
+            // to look if a loaded cache is ever suspected of running the wrong
+            // code, alongside the missing content hash in `docs/TODO.md`.
             environment = current.environment +
                 ("FEX_SILENTLOG" to "0") +
                 ("FEX_DISABLEDEP" to "0"),

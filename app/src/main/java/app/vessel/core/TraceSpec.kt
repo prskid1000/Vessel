@@ -333,11 +333,31 @@ val TRACE_TOPICS: List<TraceTopic> = listOf(
         // gate at `:181` compares only the channel's own level. So the variable
         // that was lowered has no bearing on the lines that were counted.
         //
-        // Worse, the burst is **Vessel's own doing rather than upstream's**.
+        // Worse, the burst was **Vessel's own doing rather than upstream's**.
         // `debug.c:96-97` defaults an unset channel to `FIXME` (4), and both
         // messages are `WARN` (5) in a ladder where `warn` is *above* `fixme`
-        // (`debug.c:38-47`) — so upstream is silent for both and this session
-        // was not, because `FIXED_VKD3D_SHADER_DEBUG` is `warn`.
+        // (`debug.c:38-47`) — so upstream was silent for both and that session
+        // was not, because [FIXED_VKD3D_SHADER_DEBUG] was `warn` at the time.
+        //
+        // **Past tense on purpose: the constant is `fixme` as of `a647bb5`
+        // (`ContainerDiagnostics.kt:1711`, and its neighbour `FIXED_VKD3D_DEBUG`
+        // at `:1699`), which is vkd3d's own default.** So the default session no
+        // longer emits either message, and the ~62% fall in default log volume
+        // that commit measured is mostly this. Nothing above is retracted — the
+        // mis-attribution was real, the mechanism is right, and the 26,966 lines
+        // were really counted — it is only that the tier they were counted at is
+        // now something a reader has to *ask* for rather than the baseline. The
+        // `warnings` stop below is where that ask lives, which is why its
+        // 4,500 lines/minute is still the right figure for it and why the
+        // arithmetic underneath is still worth carrying.
+        //
+        // This line said "because `FIXED_VKD3D_SHADER_DEBUG` is `warn`" from
+        // `a647bb5` until this correction — the same day, and still long enough
+        // for `docs/TODO.md` to have to carry it as an open item. It is recorded
+        // rather than quietly corrected because the failure is structural and
+        // will recur: a comment that restates a constant's *value* goes stale
+        // silently and nothing compiles it, where one that names the constant
+        // does not. Hence the link form above.
         //
         // One arithmetic consequence worth keeping: `dxbc.c:124-125` is a
         // checksum warning immediately followed by `skip_dword_unknown(&ptr, 4)`,

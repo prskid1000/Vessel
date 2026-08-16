@@ -716,6 +716,17 @@ writable executable sections" and be refused on load. The second is cheaper and
 strictly conservative; it would also disable caching for the titles that most
 need it.
 
+**Resolved in `0021`, and neither shape was needed.** Both were designed against a
+premise that turned out to be false — that a decrypted image can execute stale
+translations. It cannot: the cache is installed inside `NtMapViewOfSection`,
+before the guest runs, when the mapped bytes are by construction the file's bytes
+and therefore the bytes the compiler saw; and every subsequent write is tracked
+and drops the affected blocks through the same `LookupCache::InvalidateRange` the
+JIT uses. The real gap was on the generate side, where the compiler never checked
+that the file it opened was the image the output is named after. See `0021` for
+the whole argument, the measurements, and why a content digest was rejected on
+paging cost rather than on hash cost.
+
 ## `0012-invalidationtracker-fex-own-memory-is-not-guest-code`
 
 The exclusion designed under the withdrawn `0011` and not written at the time.
@@ -1248,6 +1259,119 @@ translation executing silently, and it should not be attempted on a hunch. This
 patch is what makes the case for it measurable, and at the rate measured so far —
 roughly ten to twenty faults a second, far below the "burns a core and renders
 nothing" bar in this file's own comment — the case is not yet made.
+
+**Policy.** Not for upstream, for the reason at the top of this file. AI-authored
+in full.
+
+## `0021-offlinecompiler-the-image-that-was-compiled-must-be-the-image-the-cache-is-named-after`
+
+`0011` left "binding a cache to the bytes it was built from" open and said the
+decryption question would come back. It has, and the answer is narrower than the
+question: **the runtime side is sound, and the generator had no binding at all.**
+
+**What the key covers today.** A cache file is
+`advapi32.dll-e40a14e11a79bc89-0000000000000000`. The basename comes from
+`CodeMap::GetBaseFilename` (`FEXCore/Source/Interface/Core/CodeCache.cpp:83-85`).
+The middle field is `FileId`, and on Windows that is
+`XXH3_64bits(tolower(basename)) ^ (SizeOfImage << 32 | TimeDateStamp)`
+(`Source/Windows/Common/ImageTracker.cpp:39-42`), computed from the PE headers of
+the image as mapped (`ImageTracker.cpp:123`). The trailing field is
+`CodeCacheConfigId`, `= 0; // TODO` on both the load side
+(`ImageTracker.cpp:336`) and the generate side (`Main.cpp:971-972`);
+`fexCacheKey` (`SessionEnvironment.kt:790`) already answers that one from
+Vessel's side by putting a digest of the FEX package and every `FEX_*` variable
+in the cache *directory*. `CodeCacheHeader` (`CodeCache.cpp:285-301`) carries no
+content digest.
+
+**The Denuvo hazard is not real, and this records why so it is not re-litigated.**
+Two independent facts. *The cache is installed at a moment when it provably
+agrees with memory*: `ImageTracker::HandleImageMap` runs inside the guest's
+`NtMapViewOfSection` (`ARM64EC/Module.cpp:955-963`), before that call returns and
+so before the guest executes an instruction of the new image, when the mapped
+bytes are the file's bytes — the same file `FEXOfflineCompiler` maps with
+`SEC_IMAGE` (`Main.cpp:323`). *And every later divergence is a tracked write*:
+cached blocks are registered through the ordinary `LookupCache` API
+(`CodeCache.cpp:969`, `:992`), so `InvalidateCodeBuffersCodeRange`
+(`Core.cpp:969-983`) → `GuestToHostMap::InvalidateRange`
+(`LookupCache.h:125-137`) erases them exactly as it erases JIT blocks — it walks
+`CodePages` and cannot tell the two apart. `NtProtectVirtualMemory`
+(`ARM64EC/Module.cpp:940-953`), `NtAllocateVirtualMemory` (`:909-923`),
+`NtFreeVirtualMemory` (`:925-938`), `NtUnmapViewOfSection` (`:969-983`),
+`NtReadFile` into guest memory (`:1012-1035`), the flush-icache notifications
+(`:994-1010`) and a plain store to an RWX page
+(`InvalidationTracker.cpp:308-445`) all reach it. A `.text` section is
+`PAGE_EXECUTE_READ`, so a decryptor must call `NtProtectVirtualMemory` before it
+can write anything — which invalidates the range before a decrypted byte lands.
+With `0002`'s `DisableDEP` the net is wider still, since any readable page counts
+as executable (`InvalidationTracker.cpp:145-146`).
+
+**The on-disk case is covered too.** `(basename, TimeDateStamp, SizeOfImage)` is
+the tuple Windows uses as a binary's identity, and every PE Vessel ships carries a
+real per-build timestamp — measured from the `.wcp` artifacts: wine-10.13's
+`advapi32.dll` is `0x6a75be93`, wine-11.14's is `0x6a7d8054`; DXVK 2.7.1's
+`d3d11.dll` is `0x6a7a9bf7`; vkd3d 3.0.1's `d3d12core.dll` is `0x6a8119ec`. Note
+that `ntdll.dll` and `user32.dll` have *identical* `SizeOfImage` across those two
+Wine releases (`0x1b0000`, `0x2e0000`) — page granularity absorbs a great deal —
+so the timestamp is the only field carrying the distinction.
+
+**Where the binding was actually missing.** `TryMapImage`
+(`Main.cpp:313-348`) takes `const FEXCore::CodeMapFileId& ID` and **never reads
+it**. It opens whatever file lives at the path a code map recorded, maps it, and
+the caller compiles that code map's block offsets out of it and files the result
+under the *recorded* id (`Main.cpp:596`, id from `:731-732`). `ProcessAll`'s only
+freshness test compares `last_write_time` of the cache against the code map
+(`Main.cpp:1011`) and never looks at the image.
+
+That is reachable in one supported operation. Code maps hold *guest* paths —
+`c:\windows\system32\advapi32.dll` for a builtin — and Vessel ships four Wine
+builds that each install a different file there, while `fexCacheKey` deliberately
+does not key the cache directory on the Wine package. Record a code map on
+wine-10.13, switch the container to wine-11.14, let `process-all` run beside the
+next session: it compiles 11.14's bytes at 10.13's block offsets into
+`advapi32.dll-<10.13 id>-0000000000000000`. Switch back to 10.13 and the runtime
+computes that id from the mapped image, finds the file, loads it and executes it —
+every entry point landing in the middle of an unrelated instruction stream.
+Nothing can catch it downstream: `0011`'s validation checks the cache file's
+internal structure, which is well-formed, and the invalidation machinery only
+reacts to writes, which never come, because the bytes were already wrong when the
+cache was installed. It is the one case where the "installed in agreement with
+memory" premise fails, because the compiler did not see the same file.
+
+**The fix is one comparison.** `ImageTracker::HandleImageMap` already computes the
+id of the image it just mapped, from that image's headers, and returns it — the
+same value the runtime will compute. Comparing it to `ID` costs two `uint64_t`
+already in hand: no image hashing, no I/O, nothing that scales with a 60 MB
+`libxess.dll`. On mismatch the compile is refused, which `ProcessAll` already
+handles.
+
+A second check in `ProcessAll` reads `TimeDateStamp` and `SizeOfImage` straight
+out of the file. **It is not there for correctness** — the child's check is
+authoritative, since it sees the image as mapped and relocated. It is there for
+cost: a refusal writes no cache file, so the `last_write_time` test never becomes
+true, so without it every affected module spawns the same doomed child on every
+`process-all`, which is every launch. `SizeOfImage` is at optional-header offset
+56 in PE32 and PE32+ alike (PE32's extra 4-byte `BaseOfData` is offset by PE32+'s
+wider `ImageBase`), so one reader serves both bitnesses — which the parent needs,
+because it handles modules of both before choosing which compiler to spawn.
+
+Refusal rather than renaming the output to the mapped image's id: the offsets
+describe the *old* image, so against the new one they are a valid cache for
+neither. The right code map for the new image comes from the next session that
+runs it.
+
+**A content digest was considered and rejected, on paging rather than on hashing.**
+XXH3 runs at several GB/s, so the arithmetic is not the problem; verifying a
+digest means *touching every code page of the image at load*, which forces a
+60 MB module fully resident and defeats the demand paging that makes a large
+module cheap to map on a phone. That is a permanent per-launch tax against a
+collision requiring a second-accurate timestamp match on a same-named,
+same-`SizeOfImage` module — and the measurements above say nothing Vessel ships
+produces one. `0011`'s other candidate, refusing to cache images with writable
+executable sections, is moot now that the invalidation argument is written down.
+If a title is ever found where this matters, the bounded escalation is to digest
+the headers plus the first and last page of each executable section — bounded by
+section count rather than image size. Not correct in general, so not shipped on
+speculation.
 
 **Policy.** Not for upstream, for the reason at the top of this file. AI-authored
 in full.

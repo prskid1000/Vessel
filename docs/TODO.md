@@ -59,7 +59,7 @@ because they change how everything else is measured:
   module on the runs after, and 25 `Loaded cache:` lines with **zero** failures.
 - **Default log volume fell about 62%.** `FIXED_VKD3D_DEBUG` and
   `FIXED_VKD3D_SHADER_DEBUG` moved from `warn` to `fixme`
-  (`ContainerDiagnostics.kt:1562`, `:1574`) — which is vkd3d's own default
+  (`ContainerDiagnostics.kt:1699`, `:1711`) — which is vkd3d's own default
   (`debug.c:96-97`), and in vkd3d's ladder `warn` is *above* `fixme`, so we had
   been strictly louder than upstream. Every line-count in this file taken before
   that change is against the louder baseline.
@@ -398,30 +398,97 @@ regression gets attributed to the wrong change three days later.
   becomes a container parameter, because every device will want a different
   number.
 
-- [ ] **`is_ec_code`, the unix twin of `RtlIsEcCode`, is still unbounded.**
-  `dlls/ntdll/unix/unix_private.h:477` has the identical shape and the identical
-  hazard as the function `patches/wine/0041` fixes. It was left alone deliberately
-  — nothing has been observed faulting there, and it is an inline on a hot path
-  the change has not been measured against — but it is the same bug. *Done when:*
-  either it is bounded the same way, or a measurement shows the bound costs more
-  than the fault it prevents.
+- [~] **`is_ec_code`, the unix twin of `RtlIsEcCode`, is bounded —
+  `patches/wine/0048`, written and not yet compiled.**
+  `dlls/ntdll/unix/unix_private.h:475` had the identical shape and the identical
+  hazard as the function `patches/wine/0041` fixes.
 
-- [ ] **`DisableDEP` is a global default and should be per-title.**
+  **The "Done when" is answered by counting callers rather than by measuring, and
+  the reason this entry stayed open is that one of its own clauses was wrong.** It
+  said the change had to be measured because this is *"an inline on a hot path"*.
+  It is not on a hot path. `is_ec_code` has exactly one caller,
+  `signal_set_full_context` (`unix/signal_arm64.c:366`), and that function has
+  exactly two: `NtContinueEx` (`unix/server.c:875`) and `signal_start_thread`
+  (`unix/signal_arm64.c:1558`). One call per `NtContinue`, one per thread start —
+  syscall granularity, order thousands a session, nothing per frame. The hot path
+  the note was protecting belongs to the *other* copy: FEX's
+  `BranchTargetInMultiblockRange` calls the exported `RtlIsEcCode`, which has
+  paid this comparison since `0041`. So the bound is one compare on a path that
+  has just made a syscall, and there is no measurement in which that loses.
+
+  **It is also reachable, which the old entry left as "nothing has been observed
+  faulting there".** The value tested is `frame->pc` as `NtSetContextThread` has
+  just written it out of a caller-supplied `CONTEXT`, so an `NtContinue` with a
+  `Pc` above the address space indexes `Peb->EcCodeBitMap` up to `ptr >> 15`
+  bytes past the mapping.
+
+  **Two corrections worth keeping.** *The word "unbounded" meant the index, not a
+  search* — the function is a single indexed bitmap load, `page_size` is a
+  compile-time constant (`unix_private.h:153`) so the divide is a shift, and there
+  is no loop to cap. And *the bound must come from the allocation, not from a
+  query about it*: `0048` sets `arm64ec_map_pages` from the size
+  `alloc_arm64ec_map` handed to `map_view` (`unix/virtual.c:3052`), because
+  `0041`'s first version derived one from `NtQueryVirtualMemory`, got a single
+  region instead of the whole reservation, and killed Metro 2033 by reporting real
+  EC addresses as not-EC.
+
+  *Done when:* it is compiled and a session runs on it. **`WINE_REVISION` in
+  `native/pins.env` is owed** — `patches/wine/README.md` states the rule and a new
+  patch with an unchanged revision builds, installs and does nothing.
+
+- [-] **`DisableDEP` is a global default, it stays one, and the per-title need it
+  was raised for is already met.** Examined 2026-08-16; the finding is recorded
+  at `RESERVED_SESSION_ENV` in `core/SessionEnvironment.kt`, which is the file
+  that decides it, and pointed at from the compiler override in
+  `SessionRuntime.kt`.
+
   `patches/fex/0002` defaults it to true for every guest, and its own description
   names the cost: *"a genuinely wild jump is translated instead of faulting, so a
   bug that would have been a clean access violation becomes silent corruption."*
-  It exists for anti-tamper stubs, which is a per-title need. Tested and exonerated
-  as the cause of Metro's regression on 2026-08-14, so this is hygiene rather than
-  a suspicion. It is also the root of two separate defects already fixed
-  (`0012`, and edge `0188` in #49 below), which is what a global default that
-  should be per-title looks like from the inside.
+  The second cost is a lock: with DEP off an ordinary `PAGE_READWRITE` heap block
+  gives `EffectiveExec = true`, so every guest heap growth takes
+  `CodeInvalidationMutex` exclusively (`InvalidationTracker.cpp:502`) where
+  otherwise the notification takes no lock at all. Two fixed defects have it at
+  their root (`patches/fex/0012`, and the `0188` edge in #49).
 
-- [ ] **`TraceSpec.kt:340`'s comment still describes `FIXED_VKD3D_SHADER_DEBUG` as
-  `warn`.** It is `fixme` as of `a647bb5`
-  (`ContainerDiagnostics.kt:1574`). The arithmetic in that comment — 8 lines ×
-  3,025 parses ≈ 24,200, within 10% of the 26,966 counted — is still correct and
-  still worth keeping; it is the "because `FIXED_VKD3D_SHADER_DEBUG` is `warn`"
-  clause that is now false. *Done when:* the comment says what the constant says.
+  **Why it is closed rather than done.** *It is already scoped, twice, and both
+  mechanisms are live.* Per process: `SessionRuntime` sets `FEX_DISABLEDEP=0` for
+  the offline compiler alone, measured at 21 modules with zero `RWX reprotect
+  FAILED`. Per container: the name is deliberately **not** in
+  `RESERVED_SESSION_ENV`, so the manifest stage and the container's own
+  environment table both reach it — and it is not in `FEX_CACHE_KEY_IGNORED`
+  either, so `fexCacheKey` digests it and a container that turns DEP off gets its
+  own FEX cache directory rather than loading blocks generated with it on. The
+  setting and the code it produced cannot come apart, which is what makes
+  per-container scoping safe rather than merely possible.
+
+  *What is not done, and why narrowing the default would be the wrong move.* The
+  failure directions are not symmetric: DEP **on** for a title that needs it off
+  is a dead launch before the first frame; DEP **off** for a title that does not
+  need it is a latent risk and a mutex. Nothing observed is harmed by it — tested
+  and exonerated as the cause of Metro's 2026-08-14 regression — and a per-title
+  default would need a table of titles this project does not have. **Reopen only
+  if a title is found that DEP-off actually breaks**, and the shape then is a
+  manifest param with a default, not a reserved name, because reserving it would
+  remove both mechanisms above.
+
+  *One thing left open and recorded at the override site rather than here:*
+  `fexCacheKey` digests the session's value while the compiler runs with the
+  other one, so a cache keyed on DEP-on holds blocks generated with DEP off.
+  Untested in both directions.
+
+- [x] **`TraceSpec.kt`'s `shaders` comment says what the constant says.** It
+  described `FIXED_VKD3D_SHADER_DEBUG` as `warn`; it has been `fixme` since
+  `a647bb5` — the same day the comment was corrected, and still long enough to
+  need an entry here. The arithmetic in that comment — 8 lines × 3,025 parses ≈
+  24,200, within 10% of the 26,966 counted — was always correct and is kept.
+
+  *Kept as method, because this will recur:* the stale clause restated the
+  constant's **value**, which nothing compiles and nothing checks, where the same
+  sentence naming the constant would still be true. The replacement links
+  `[FIXED_VKD3D_SHADER_DEBUG]` instead of quoting it. Note also that this entry
+  cited `ContainerDiagnostics.kt:1574` for that constant and it is at `:1711`
+  (`FIXED_VKD3D_DEBUG` at `:1699`) — the same failure one level up.
 
 ---
 

@@ -1,0 +1,146 @@
+ntdll: the unix EC bitmap query is bounded too.
+
+0041 bounded `RtlIsEcCode` and deliberately left its unix twin `is_ec_code`
+(`dlls/ntdll/unix/unix_private.h:475`) alone, on two grounds it stated plainly:
+nothing had been observed faulting there, and it is an inline on a hot path the
+change had not been measured against. `docs/TODO.md` has carried that as an open
+item ever since, closed by *"either it is bounded the same way, or a measurement
+shows the bound costs more than the fault it prevents"*.
+
+**No measurement is needed, because the second ground is false.** `is_ec_code`
+has exactly one caller in the whole tree -- `signal_set_full_context`
+(`dlls/ntdll/unix/signal_arm64.c:366`) -- and that function has exactly two:
+`NtContinueEx` (`dlls/ntdll/unix/server.c:875`) and `signal_start_thread`
+(`signal_arm64.c:1558`). That is one call per `NtContinue` and one per thread
+start. It is syscall granularity, order thousands per session on the evidence in
+`docs/TODO.md` (#50's 34 exception deliveries, #54's 1,500-line probe loop), and
+it is nothing per frame and nothing per branch target. **The hot path 0041 was
+protecting is the other copy**: FEX's per-branch-target
+`BranchTargetInMultiblockRange` calls the exported `RtlIsEcCode`, which already
+pays this comparison.
+
+So the bound costs one compare and one predictable branch on a path that has
+just made a syscall. There is no version of the trade in which that loses to a
+wild read.
+
+**And the hazard is reachable, not theoretical.** The value tested is
+`frame->pc` as `NtSetContextThread` has just written it out of a `CONTEXT` the
+caller supplied, so an `NtContinue` with a `Pc` above the address space indexes
+`Peb->EcCodeBitMap` at up to `ptr >> 15` bytes past the mapping. That is the
+same shape as the fault 0041 fixed, in a query whose honest answer is `FALSE`.
+
+**One correction to the record while it is being closed.** The item was written
+down as an unbounded *search*. There is no search: the function is a single
+indexed bitmap load, `page_size` is a compile-time constant
+(`unix_private.h:153`) so the divide is a shift, and what is unbounded is the
+index. Nobody should go looking for a loop to cap.
+
+The bound is `arm64ec_map_pages`, set from the size `alloc_arm64ec_map` actually
+handed to `map_view` rather than recomputed from `address_space_limit`. That
+distinction is the expensive half of 0041 -- its first version derived a bound
+from `NtQueryVirtualMemory`, got one region instead of the whole reservation,
+and made real EC addresses report as not-EC, which killed Metro 2033. A bound
+taken from the allocation cannot come out short. The long form of all of this is
+in the comment the patch adds, where the next reader will be.
+
+Not for upstream: the fault it prevents is reachable here because FEX drives
+ARM64EC contexts, and the argument above is about this stack.
+
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -472,10 +472,69 @@
+             (char *)sp <= (char *)get_syscall_frame());
+ }
+ 
++extern ULONG_PTR arm64ec_map_pages;
++
++/* Vessel: the unix twin of RtlIsEcCode, bounded for the same reason and by a
++ * different quantity.
++ *
++ * patches/wine/0041 bounded the PE-side RtlIsEcCode after an unbounded index into
++ * Peb->EcCodeBitMap raised an access violation inside a query whose honest answer
++ * is FALSE -- 34 deliveries of one fault at one address, 7200 bytes of guest stack
++ * each, until the stack was gone. That patch deliberately left this copy alone,
++ * and said why: "identical shape, identical hazard, but nothing has been observed
++ * faulting there and it is an inline on a hot path this change has not been
++ * measured against."
++ *
++ * **The second half of that reason was wrong, and correcting it is what makes the
++ * bound obviously affordable rather than a thing to measure.** This inline is not
++ * on a hot path. It has exactly one caller -- signal_set_full_context
++ * (unix/signal_arm64.c:366), which asks whether the pc it is about to resume is EC
++ * code and redirects the thread to KiUserEmulationDispatcher when it is not -- and
++ * that function is reached from exactly two places: NtContinueEx
++ * (unix/server.c:875) and signal_start_thread (unix/signal_arm64.c:1558). So this
++ * runs once per NtContinue and once per thread start: syscall granularity, order
++ * thousands per session, and nothing per frame or per branch target. The
++ * per-branch-target query FEX makes from BranchTargetInMultiblockRange goes to the
++ * exported RtlIsEcCode, which is the copy 0041 already pays a comparison on. The
++ * hot path that note was protecting does not run through here.
++ *
++ * What the bound costs is therefore one compare and one predictable branch on a
++ * path that has just performed a syscall (NtSetContextThread) and may have taken
++ * pthread_sigmask. What it prevents is a read up to (ptr >> 15) bytes past the end
++ * of the map, from a value the guest owns: the pc tested is frame->pc as
++ * NtSetContextThread has just written it out of a caller-supplied CONTEXT, so an
++ * NtContinue with a wild Pc is enough. There is no measurement in which the first
++ * outweighs the second, which is the "Done when" this closes.
++ *
++ * **Note also what this is not: there is no search here to bound.** The function
++ * is a single indexed load -- page_size is a compile-time constant
++ * (unix_private.h:153), so ptr / page_size is a shift -- and it was recorded as
++ * "unbounded" meaning the *index* is unbounded, not that anything scans. A reader
++ * looking for a loop to cap will not find one, and capping an iteration count is
++ * not the fix.
++ *
++ * **The bound is the map's own extent, and that choice is the part of 0041 that
++ * cost a build.** Its first version derived the limit from NtQueryVirtualMemory,
++ * which answers about one region rather than the whole reservation; the bound came
++ * out short, real EC addresses began reporting as not-EC, and Metro 2033 went from
++ * working to dying in an unrepairable write fault. A wrong FALSE is a bigger lie
++ * than the read it prevents -- it tells the emulator that native ARM64EC code is
++ * x86-64 to translate. arm64ec_map_pages is not a query about the allocation: it
++ * is the size alloc_arm64ec_map() passed to map_view (unix/virtual.c:3052) times
++ * eight, so it is exact by construction and cannot come out short. map_view may
++ * round the mapping further up and never down, and the pages between the two lie
++ * above address_space_limit, where nothing can be code anyway.
++ *
++ * The map check is separate from the page check on purpose: a process that has
++ * loaded no EC image has no map at all, and NULL with a zero bound would otherwise
++ * dereference before the comparison could save it. */
+ static inline BOOL is_ec_code( ULONG_PTR ptr )
+ {
+     const UINT64 *map = (const UINT64 *)peb->EcCodeBitMap;
+     ULONG_PTR page = ptr / page_size;
++
++    if (!map) return FALSE;
++    if (page >= arm64ec_map_pages) return FALSE;
+     return (map[page / 64] >> (page & 63)) & 1;
+ }
+ 
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -329,6 +329,13 @@
+ static void *host_addr_space_limit;  /* top of the host virtual address space */
+ 
+ static struct file_view *arm64ec_view;
++/* Vessel: how many pages arm64ec_view covers, which is the bound for is_ec_code().
++ * Taken from the size actually handed to map_view rather than recomputed from
++ * address_space_limit, so it cannot disagree with the allocation. The comment on
++ * is_ec_code() in unix_private.h says why a bound that comes out short is worse
++ * than no bound at all. Zero until alloc_arm64ec_map() runs, which is correct:
++ * with no map, no address is EC code. */
++ULONG_PTR arm64ec_map_pages = 0;
+ static const ptrdiff_t max_try_map_step = 0x40000000;
+ static BOOL increase_try_map_step = TRUE;
+ 
+@@ -3059,6 +3066,7 @@
+         exit(1);
+     }
+     peb->EcCodeBitMap = arm64ec_view->base;
++    arm64ec_map_pages = size * 8;  /* Vessel: one bit per page, so eight pages per byte */
+ }
+ 
+ 

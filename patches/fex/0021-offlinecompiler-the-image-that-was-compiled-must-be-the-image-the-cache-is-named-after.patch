@@ -1,0 +1,360 @@
+offlinecompiler: the image that was compiled must be the image the cache is named after.
+
+`patches/fex/0011` closed this section with "binding a cache to the bytes it was
+built from — not implemented", and named the question that would come back:
+nothing in the cache format ties a cache to image contents. This is the answer,
+and the answer is narrower than the question. **The runtime side is sound. The
+generator side had no binding at all.**
+
+WHAT THE KEY COVERS TODAY.
+
+A cache file on the device is named
+`advapi32.dll-e40a14e11a79bc89-0000000000000000`. The three fields:
+
+| Field | Where | What |
+|---|---|---|
+| `advapi32.dll` | `FEXCore/Source/Interface/Core/CodeCache.cpp:83-85` | `GetBaseFilename` — the basename of `ExecutableFileInfo::Filename` |
+| `e40a14e11a79bc89` | `Source/Windows/Common/ImageTracker.cpp:39-42` | `FileId` = `XXH3_64bits(tolower(basename)) ^ (SizeOfImage << 32 | TimeDateStamp)` |
+| `0000000000000000` | `Source/Windows/Common/ImageTracker.cpp:336` and `Source/Tools/FEXOfflineCompiler/Main.cpp:971-972` | `CodeCacheConfigId`, `uint64_t CodeCacheConfigId = 0; // TODO` — hardcoded zero on both the load and the generate side |
+
+The `TimeDateStamp` and `SizeOfImage` are read from the PE headers of the image
+as it was mapped (`ImageTracker.cpp:123`, `Nt->FileHeader.TimeDateStamp` and
+`Nt->OptionalHeader.SizeOfImage`). The cache header itself carries no content
+digest either — `CodeCacheHeader` (`CodeCache.cpp:285-301`) is `Magic`,
+`FormatVersion`, `FEXVersion` (the FEX git hash), `NumBlocks`, `NumCodePages`,
+`CodeBufferSize`, `NumRelocations`, `SerializedBaseAddress`, and nothing else.
+
+The third field is not a gap Vessel has to close in FEX: `fexCacheKey`
+(`app/src/main/java/app/vessel/core/SessionEnvironment.kt:790`) hashes the FEX
+package identity and every `FEX_*` variable into the cache *directory* name, so
+a codegen-affecting configuration change lands in a different directory. That is
+already documented there and is not touched here.
+
+THE HAZARD AS POSED — SELF-MODIFYING CODE — IS NOT REAL, AND HERE IS WHY.
+
+The concern was that a Denuvo-style image decrypts itself and FEX then executes
+translations of the encrypted bytes. Two independent facts rule it out.
+
+**First, the cache is installed at a moment when it is provably in agreement with
+memory.** `ImageTracker::HandleImageMap` runs inside the guest's
+`NtMapViewOfSection` (`Source/Windows/ARM64EC/Module.cpp:955-963`), before the
+call returns and therefore before the guest has executed one instruction of the
+new image. The bytes at that instant are the file's bytes, which is exactly what
+`FEXOfflineCompiler` compiled — it maps the same file with `SEC_IMAGE`
+(`Main.cpp:323`). So the cache is correct when it is published, and every later
+divergence is a *write*.
+
+**Second, every write is tracked, and the cache's blocks are invalidated by the
+same mechanism as JIT blocks.** `EnableLoadedSection` registers cached
+translations through the ordinary `LookupCache` API — `AddBlockMapping` and
+`AddBlockExecutableRange` (`CodeCache.cpp:969` and `:992`) — into
+`CTX.GetLatest()->LookupCache` (`:956-959`). `InvalidationTracker` funnels every
+write path into `InvalidateIntervalInternalLocked` →
+`ContextImpl::InvalidateCodeBuffersCodeRange` (`Core.cpp:969-983`) →
+`GuestToHostMap::InvalidateRange` (`LookupCache.h:125-137`), which erases
+entries by walking `CodePages` — the same map `AddBlockExecutableRange` just
+populated. It cannot tell a cached block from a compiled one, which is the
+property that matters.
+
+The write paths, all of them:
+
+| Path | Where |
+|---|---|
+| `NtProtectVirtualMemory` | `ARM64EC/Module.cpp:940-953` → `HandleMemoryProtectionNotification` |
+| `NtAllocateVirtualMemory` | `ARM64EC/Module.cpp:909-923` |
+| `NtFreeVirtualMemory` | `ARM64EC/Module.cpp:925-938` |
+| `NtUnmapViewOfSection` | `ARM64EC/Module.cpp:969-983` |
+| `NtReadFile` into guest memory | `ARM64EC/Module.cpp:1012-1035` |
+| `BTCpu64FlushInstructionCache` / `NotifyMemoryDirty` | `ARM64EC/Module.cpp:994-1010` |
+| a plain store to an RWX page | `InvalidationTracker.cpp:308-445`, `HandleRWXAccessViolation` |
+
+A `.text` section is mapped `PAGE_EXECUTE_READ`, so a decryptor must call
+`NtProtectVirtualMemory` before it can write — row one — and that alone
+invalidates the range before a single decrypted byte lands. With `DisableDEP`
+(`patches/fex/0002`) the net is wider still: `HandleMemoryProtectionNotification`
+treats any readable page as executable (`InvalidationTracker.cpp:145-146`), so
+even a plain `PAGE_READWRITE` transition invalidates.
+
+So the decryption case self-heals: the cache is dropped before the decrypted code
+can run, and the block is retranslated from the bytes that are actually there.
+`0011` was right that the theory could not be that crash; it is also not a
+correctness bug on the load path.
+
+THE ON-DISK CASE IS COVERED TOO, AND THE EVIDENCE IS MEASURABLE.
+
+`(basename, TimeDateStamp, SizeOfImage)` is the tuple Windows itself uses as a
+binary's identity — it is the symbol-server key — and any relink moves the
+timestamp. Measured on Vessel's own shipped artifacts, every PE carries a real
+per-build timestamp, seconds apart within one build:
+
+```
+wine-10.13   aarch64  advapi32.dll   TimeDateStamp=0x6a75be93  SizeOfImage=0xe0000
+wine-11.14   aarch64  advapi32.dll   TimeDateStamp=0x6a7d8054  SizeOfImage=0xf0000
+wine-10.13   aarch64  ntdll.dll      TimeDateStamp=0x6a75be97  SizeOfImage=0x1b0000
+wine-11.14   aarch64  ntdll.dll      TimeDateStamp=0x6a7d805b  SizeOfImage=0x1b0000   <- same size
+wine-10.13   aarch64  user32.dll     TimeDateStamp=0x6a75be97  SizeOfImage=0x2e0000
+wine-11.14   aarch64  user32.dll     TimeDateStamp=0x6a7d805c  SizeOfImage=0x2e0000   <- same size
+dxvk-2.7.1   x86-64   d3d11.dll      TimeDateStamp=0x6a7a9bf7  SizeOfImage=0x3ef000
+vkd3d-3.0.1  x86-64   d3d12core.dll  TimeDateStamp=0x6a8119ec  SizeOfImage=0x4ee000
+```
+
+Note `ntdll.dll` and `user32.dll`: `SizeOfImage` is page-granular and is
+*identical* across two Wine releases eight days apart. The timestamp is the only
+field carrying the distinction. That matters for the next section.
+
+WHERE THE BINDING IS ACTUALLY MISSING: THE GENERATOR NEVER CHECKS WHAT IT OPENED.
+
+`TryMapImage` (`Main.cpp:313-348`) takes
+
+```
+static std::optional<uint64_t> TryMapImage(… , const FEXCore::CodeMapFileId& ID, FEXCore::ExecutableFileInfo& Info)
+```
+
+and **never reads `ID`**. It opens `Info.Filename` — a path recorded in a code
+map, possibly weeks earlier — maps it, and returns. The caller then compiles the
+block offsets that code map recorded and writes the result as
+`{basename}-{ID:016x}-0000000000000000` (`Main.cpp:596`, with `ID` coming from
+the code map at `:731-732`). Nothing anywhere compares the id of the image that
+was actually opened against the id the output is named after.
+`ProcessAll`'s only freshness test (`Main.cpp:1011`) compares `last_write_time`
+of the cache against `last_write_time` of the code map and never looks at the
+image at all.
+
+**This produces a cache that describes bytes that were never at those addresses,
+and it needs no Denuvo.** The path in a code map is a *guest* path —
+`c:\windows\system32\advapi32.dll` for a Wine builtin. Vessel ships four Wine
+builds (`dist/wine-10.13`, `wine-11.14`, `wine-proton-11.0`,
+`wine-proton-exp-11.0`), each installing a different `advapi32.dll` at that path.
+`fexCacheKey` keys the cache directory on the FEX package and the `FEX_*`
+environment — deliberately not on the Wine package, see
+`SessionEnvironment.kt:742-800` — so switching Wine inside a container keeps
+`codemap/ready/` and `cache/` exactly where they were, and changes the bytes
+behind that path. The sequence:
+
+1. Session on wine-10.13 records `codemap/ready/advapi32.dll-<id10.13>`, holding
+   block offsets into 10.13's `advapi32.dll` and the guest path.
+2. User switches the container to wine-11.14. Cache directory unchanged.
+3. `process-all` finds that code map, opens the path, gets **11.14's**
+   `advapi32.dll`, compiles 10.13's block offsets out of it, and writes
+   `cache/advapi32.dll-<id10.13>-0000000000000000`.
+4. User switches back to wine-10.13. The runtime computes `<id10.13>` from the
+   mapped image, finds that file, loads it, and executes it.
+
+Every block in it is an entry point into the middle of an unrelated instruction
+stream. Nothing on the load path can notice: `LoadCache`'s validation
+(`patches/fex/0011`) checks the cache file's internal structure, which is
+perfectly well-formed, and the invalidation machinery only reacts to writes,
+which never happen — the bytes were already wrong when the cache was installed.
+This is the one case where the second fact in the "not real" section above does
+not hold, because the premise it rests on — that the compiler saw the same file —
+is false.
+
+The same shape reaches a game patch that rewrites a DLL and a user restoring a
+backup; the Wine swap is simply the one Vessel makes a first-class operation.
+
+THE FIX, AND WHY IT IS THE CHEAP ONE.
+
+`ImageTracker::HandleImageMap` **already computes** the id of the image it just
+mapped, from that image's own headers, and returns it in the
+`ExecutableFileSectionInfo` it hands back. It is the same value the runtime will
+compute when it goes looking for a cache. So the binding costs one comparison of
+two `uint64_t` that are already in hand: no hashing of image bytes, no extra
+I/O, nothing that scales with a 60 MB `libxess.dll`. On mismatch the compile is
+refused; `GenerateSingleCache` returns `std::nullopt` and the child exits 1,
+which is a path `ProcessAll` already handles.
+
+A second, redundant check goes in `ProcessAll` itself, reading `TimeDateStamp`
+and `SizeOfImage` straight out of the file's headers. It is not there for
+correctness — the child's check is authoritative, because it sees the image as
+mapped and relocated. It is there for cost: without it, a replaced image is
+retried on *every* run forever, because the refusal means no cache file is
+written, so the `last_write_time` test never becomes true, so the next
+`process-all` spawns the same doomed child again for every affected module —
+and Vessel runs `process-all` beside every session. Reading two `uint32_t` from
+a file beats spawning a process. `SizeOfImage` sits at optional-header offset 56
+in PE32 and PE32+ alike (PE32's extra 4-byte `BaseOfData` is exactly offset by
+PE32+'s wider `ImageBase`), so one reader serves both bitnesses, which the
+parent needs because it handles modules of both before choosing a child.
+
+Refusal rather than renaming the output to the mapped image's id: the block
+offsets come from the *old* image's code map, so compiled against the new image
+they are not a valid cache for either. The correct code map for the new image is
+produced by the next session that runs it, which is the only source that can
+know.
+
+WHAT THIS DELIBERATELY DOES NOT DO.
+
+It binds a generated cache to the image *identity* the runtime checks, not to the
+image *bytes*. Two distinct byte-streams sharing a basename, a `TimeDateStamp`
+and a `SizeOfImage` still pass. A content digest in `CodeCacheHeader` would close
+that, and it was rejected on cost: it has to be recomputed at every module load,
+on every launch, for every cached module, and the cost is not the hash — XXH3
+runs at several GB/s — but the paging. Verifying a digest means touching every
+code page of the image, which forces a 60 MB module fully resident at load time
+and defeats the demand paging that makes a large module cheap to map on a phone.
+That is a real, permanent, per-launch tax to defend against a collision that
+requires a second-accurate timestamp match, and the measurements above say Vessel
+ships nothing that produces one. `0011`'s other candidate — refusing to cache any
+image with writable executable sections — is not needed at all now that the
+invalidation argument above is written down.
+
+If a title is ever found where this matters, the cheap escalation is to digest
+only the PE headers plus the first and last page of each executable section,
+which is bounded by section count rather than by image size. It is not correct in
+general and so is not shipped speculatively.
+
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 4530c6322..7e9e74b0f 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -342,7 +342,63 @@
+     LogMan::Msg::IFmt("Mapped image: {} @ {:X}", Info.Filename, BaseAddress);
+ 
+     InvalidationTracker.HandleImageMap(FEX::Windows::BaseName(Info.Filename), BaseAddress);
+-    ImageTracker.HandleImageMap(Info.Filename, BaseAddress, false /* unused during cache generation */);
++    const auto Section = ImageTracker.HandleImageMap(Info.Filename, BaseAddress, false /* unused during cache generation */);
++
++    /* Vessel: the image that was opened has to be the image the cache is filed
++     * under, and until now nobody asked.
++     *
++     * `ID` is the FileId the code map recorded, and it is the name
++     * `GenerateSingleCache` will write the output under (Main.cpp:596). It
++     * arrived here as a parameter and was **never read**. This function opened
++     * whatever file happens to live at `Info.Filename` *today*, mapped it, and
++     * the caller then compiled the block offsets the code map recorded against a
++     * possibly different image out of it -- and filed the result under the old
++     * image's name.
++     *
++     * `ImageTracker::HandleImageMap` already recomputes the id from the headers
++     * of the image it just mapped (ImageTracker.cpp:123 -> :39-42: lowercased
++     * basename hashed and XORed with `TimeDateStamp` and `SizeOfImage`), and
++     * that is exactly the value the *runtime* computes when it goes looking for
++     * a cache. So the check is a comparison of two uint64 that are already
++     * computed: no hashing of image bytes, no extra I/O, nothing that scales
++     * with the 60 MB modules this has to survive.
++     *
++     * **This is not hypothetical on Vessel.** The recorded path is a guest path
++     * -- `c:\windows\system32\advapi32.dll` for a Wine builtin -- and Vessel
++     * ships four Wine builds that each install a different `advapi32.dll` there.
++     * `fexCacheKey` (app/src/main/java/app/vessel/core/SessionEnvironment.kt:790)
++     * keys the cache *directory* on the FEX package and the `FEX_*` environment,
++     * deliberately not on the Wine package, so switching Wine inside a container
++     * keeps `codemap/ready/` and `cache/` while changing the bytes behind that
++     * path. Measured on the shipped artifacts: `advapi32.dll` has TimeDateStamp
++     * 0x6a75be93 in wine-10.13-canoe.wcp and 0x6a7d8054 in wine-11.14-canoe.wcp.
++     * So `process-all` after a swap compiled 11.14's bytes into
++     * `advapi32.dll-<10.13 id>-0000000000000000`, and the runtime loads and
++     * executes that file the moment 10.13 is selected again. Note that
++     * `ntdll.dll` and `user32.dll` have *identical* `SizeOfImage` across those
++     * two builds (0x1b0000 and 0x2e0000): the timestamp is the only field
++     * carrying the distinction, which is why it has to be checked rather than
++     * assumed.
++     *
++     * **A refusal rather than renaming the output to the mapped id.** The block
++     * offsets come from the code map and describe the *old* image; compiled
++     * against the new one they are entry points into the middle of unrelated
++     * instructions, so the result is not a valid cache for either image. The
++     * code map for the new image is rebuilt by the next session that runs it,
++     * which is the only source that can produce correct offsets.
++     *
++     * **What this does not claim to do.** It binds the compiled cache to the
++     * image *identity* the runtime will check, not to the image bytes. Two
++     * distinct byte-streams sharing a basename, a `TimeDateStamp` and a
++     * `SizeOfImage` would still pass -- see patches/fex/README.md for why a
++     * content digest was not the fix chosen here. */
++    if (Section.FileInfo.FileId != ID) {
++      LogMan::Msg::EFmt("Refusing to compile {}: the file at that path is image {:016x}, but the code map and the "
++                        "cache name say {:016x}. The image was replaced after the code map was recorded, so a cache "
++                        "built from it would describe bytes that are not at those addresses.",
++                        Info.Filename, Section.FileInfo.FileId, ID);
++      return std::nullopt;
++    }
+ 
+     return BaseAddress;
+   }
+@@ -932,6 +988,63 @@
+   }
+ }
+ 
++#ifdef _WIN32
++/* Vessel: the identity of the file that is at this path *now*, read from its
++ * headers rather than by mapping it.
++ *
++ * The authoritative check is in `TryMapImage`, against the image as mapped. This
++ * one exists so that check does not cost a process: without it an image that was
++ * replaced after its code map was recorded is retried on *every* run.
++ * `GenerateSingleCache` refuses, so no cache file is written, so the
++ * `last_write_time` test below never becomes true, so the next run spawns the
++ * same doomed child again -- for every affected module. Vessel runs
++ * `process-all` beside every session (`SessionRuntime.start`), so "every run"
++ * means every launch, forever.
++ *
++ * From the file and not from a mapping, because this runs in the *parent*, which
++ * handles modules of both bitnesses before deciding which compiler to spawn.
++ * `SizeOfImage` sits at optional-header offset 56 in PE32 and PE32+ alike --
++ * PE32 has an extra 4-byte `BaseOfData` there, and PE32+ spends those same 4
++ * bytes on the wider `ImageBase`, so the two layouts realign -- which means one
++ * reader serves both without caring. `TimeDateStamp` is at COFF-header offset 4,
++ * i.e. NT-header offset 8, for both.
++ *
++ * Windows only. On Linux the images are ELF and the id comes from
++ * `CodeCache::ComputeCodeMapId` (CodeCache.cpp:275-283), which hashes the path
++ * and nothing else -- there is no header field to compare and nothing here would
++ * transfer. */
++static std::optional<FEXCore::CodeMapFileId> ImageIdOnDisk(std::string_view Path) {
++  std::ifstream File(std::string {Path}, std::ios_base::binary);
++
++  uint32_t NtOffset;
++  File.seekg(0x3c);
++  File.read(reinterpret_cast<char*>(&NtOffset), sizeof(NtOffset));
++  if (!File) {
++    return std::nullopt;
++  }
++
++  char Signature[4];
++  File.seekg(NtOffset);
++  File.read(Signature, sizeof(Signature));
++  if (!File || Signature[0] != 'P' || Signature[1] != 'E' || Signature[2] || Signature[3]) {
++    return std::nullopt;
++  }
++
++  uint32_t TimeDateStamp;
++  File.seekg(NtOffset + 8);
++  File.read(reinterpret_cast<char*>(&TimeDateStamp), sizeof(TimeDateStamp));
++
++  uint32_t SizeOfImage;
++  File.seekg(NtOffset + 24 + 56);
++  File.read(reinterpret_cast<char*>(&SizeOfImage), sizeof(SizeOfImage));
++  if (!File) {
++    return std::nullopt;
++  }
++
++  return FEX::Windows::ComputeCodeMapId(FEX::Windows::BaseName(Path), TimeDateStamp, SizeOfImage);
++}
++#endif
++
+ static int ProcessAll() {
+   const auto CacheDirectory = FEX::Config::GetCacheDirectory();
+   const std::string NewCodeMapDirectory = fmt::format("{}codemap/new", CacheDirectory);
+@@ -1008,6 +1121,21 @@
+         continue;
+       }
+ 
++#ifdef _WIN32
++      /* Vessel: an image that is no longer the image this code map describes must
++       * not be compiled under this code map's name. See `TryMapImage` for the
++       * argument and for the Wine-swap case that produces it; this is the same
++       * test taken from the parent, where refusing costs a header read instead of
++       * a process. The child still checks -- it sees the image as mapped and
++       * relocated, and it is the side that actually gates the write, so a file
++       * replaced between these two points is still caught. */
++      if (const auto CurrentId = ImageIdOnDisk(Contents.Filename); CurrentId != FileId) {
++        fmt::println("  Skipping {}: {} is now image {:016x}, not the one this code map describes", BinaryName, Contents.Filename,
++                     CurrentId.value_or(0));
++        continue;
++      }
++#endif
++
+       if (std::filesystem::last_write_time(GetCacheFilename(File), ec) > LastCodeMapUpdate && !ec) {
+         fmt::println("  Cache up to date: {}", BinaryName);
+         continue;
