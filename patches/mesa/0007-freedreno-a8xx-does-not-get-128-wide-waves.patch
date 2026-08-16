@@ -1,0 +1,79 @@
+freedreno: a8xx does not get 128-wide waves, and upstream never gave it them.
+
+Resident Evil Requiem hung its GPU on a `256x1x1` compute dispatch. vkd3d
+breadcrumbs named the command; the shader dump showed a wave-aggregated
+allocation loop — ballot for the active count, an exclusive scan for this lane's
+index, one lane doing the `atomicAdd`, `WaveReadLaneFirst` to share the base
+back, loop while the index is in range. Its exit depends on every lane agreeing
+about the wave, so when they disagree the index stops advancing and the dispatch
+never retires: `VK_ERROR_DEVICE_LOST`, then a critical section held by the thread
+that noticed, then a frozen loading screen. **33 of the 2,867 shaders one session
+compiled carry the same loop.**
+
+**THE SHADER IS SIZE-AGNOSTIC, AND THAT IS THE POINT.** It hardcodes no wave
+width; it is written against ballots and scans, which are width-independent by
+contract. So the usual reading — "a game assuming a 64-wide desktop wave" — is
+not this. The driver is wrong, not the title.
+
+`a8xx_base` sets both `supports_double_threadsize` and `has_dual_wave_dispatch`.
+`freedreno_dev_info.h:235-241` says they are alternatives, not companions:
+
+    /* Dual-wave dispatch replaces THREAD128 (supports_double_threadsize)
+     * on newer devices.
+     *
+     * This has some implications for marking join-points (jp), because
+     * while a wave may not diverge, a pair of waves might, for example
+     * subgroup-ops.
+     */
+
+The second paragraph is the bug, written down in the tree before anyone hit it:
+**a pair of waves can diverge where a single wave cannot, and subgroup ops are
+named as the case.** That is a ballot-driven loop across a dual-wave pair.
+
+**Upstream does not enable this.** `supports_double_threadsize` was flipped to
+True for a8xx by `7e0c63c3f51` ("freedreno/common: update a8xx family configs",
+2026-04-15) on the `turnip/gen8` fork this component is built from — a one-line
+change inside a commit about GMEM sizes and tile alignment, whose message never
+mentions subgroups. Upstream added `has_dual_wave_dispatch = True` to the same
+struct and deliberately left the other False.
+
+**Restricting to 64 is not a reduction.** `threadsize_base` defaults to 64
+(`freedreno_dev_info.py:108`) and a8xx does not override it, so 64 is the native
+width and 128 is the opt-in. `minSubgroupSize` is already 64 unconditionally
+(`tu_device.cc:1111`). What this removes is a mode the chip was never configured
+for here.
+
+**Watched on the device.** Reaching the same state through the drirc route —
+`tu_restrict_subgroup_size_64=true`, which is defined as the negation of this
+very flag (`tu_device.cc:1796`) — the title survived 600 s with `vr -4` at zero
+and five swapchains created, **with no shader overrides at all**. Without it, it
+never reached a loading screen.
+
+A per-shader `VKD3D_SHADER_OVERRIDE` was built first, and it worked: all 33 loops
+rewritten to a per-lane `atomicAdd`, each assembled and `spirv-val` clean. It is
+the wrong fix and is not kept. It covers only shaders already compiled, rewrites
+the game's own algorithm, needs redoing after any game update, and forces
+`pipeline_library_ignore_spirv`, which takes the PSO cache out of the picture.
+
+Preferred over the drirc option for the same reason: the option is a per-title
+workaround for a defect that is not per-title. This is the defect.
+
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index 63253ffb618..a8ce24c9de5 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -1366,7 +1366,13 @@ a8xx_base = GPUProps(
+         has_dp2acc = False,
+         reg_size_vec4 = 96,
+         has_rt_workaround = False,
+-        supports_double_threadsize = True,
++        # Vessel: a8xx does not get 128-wide waves. Upstream never gave it
++        # them, this fork did, and `freedreno_dev_info.h` says why they are
++        # mutually exclusive: "Dual-wave dispatch replaces THREAD128
++        # (supports_double_threadsize) on newer devices" -- and warns, in the
++        # same comment, that "while a wave may not diverge, a pair of waves
++        # might, for example subgroup-ops." That is exactly the failure.
++        supports_double_threadsize = False,
+         has_dual_wave_dispatch = True,
+         round_robin_errata = False,
+         max_texel_buffer_range_elements = (1 << 29) - 1,

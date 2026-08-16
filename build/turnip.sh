@@ -520,12 +520,17 @@ write_provenance "$STAGE/provenance.json" "$COMPONENT" "$VERSION"
 # installing one would overwrite the other in components/Turnip/<code>/ with
 # nothing said anywhere. The ICD takes the next code up so the two can sit side
 # by side in the store, which is what makes comparing them on one device possible.
-TURNIP_VERSION_CODE="$(VESSEL_V="$VERSION" VESSEL_COMMON="$COMMON_SH_DIR" python3 -c "
+TURNIP_VERSION_CODE="$(VESSEL_V="$VERSION" VESSEL_COMMON="$COMMON_SH_DIR" VESSEL_TURNIP_REVISION="${TURNIP_REVISION:-0}" python3 -c "
 import os, sys
 sys.path.insert(0, os.environ['VESSEL_COMMON'])
 from package_wcp import version_code
 v = os.environ['VESSEL_V']
-print(version_code(v) + (1 if v.endswith('-icd') else 0))
+# Vessel's patch revision, times two so it cannot land on the ICD's +1.
+# Without it a rebuild carrying a new patch keeps the old code and the store
+# silently serves the previous build -- the collision this file already warns
+# about between the two variants, in its other direction.
+rev = int(os.environ.get('VESSEL_TURNIP_REVISION', '0'))
+print(version_code(v) + (1 if v.endswith('-icd') else 0) + 2 * rev)
 ")"
 [ -n "$TURNIP_VERSION_CODE" ] || die "could not derive a version code for $VERSION"
 

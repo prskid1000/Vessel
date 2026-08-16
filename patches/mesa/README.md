@@ -207,3 +207,49 @@ Worth benchmarking once the driver runs on device:
 `u_gralloc` UBWC change is already committed, and three of the seven exist only
 to repair damage a fourth one causes. Neither whitebelyash nor DiskDVD uses
 them.
+
+## `0007-freedreno-a8xx-does-not-get-128-wide-waves`
+
+**This fork enables a mode upstream disables on this chip, and it is the whole
+of Requiem's GPU hang.**
+
+`a8xx_base` in `freedreno_devices.py` sets both `supports_double_threadsize` and
+`has_dual_wave_dispatch`. `freedreno_dev_info.h:235-241` says they are
+alternatives — *"Dual-wave dispatch replaces THREAD128
+(supports_double_threadsize) on newer devices"* — and the same comment names the
+failure before anyone hit it: *"while a wave may not diverge, a pair of waves
+might, for example subgroup-ops."*
+
+That is exactly what broke. Requiem hung on a `256x1x1` compute dispatch;
+breadcrumbs named the command and the shader dump showed a wave-aggregated
+allocation loop whose exit depends on every lane agreeing about the wave —
+ballot, exclusive scan, one lane's `atomicAdd`, `WaveReadLaneFirst` to share the
+base back. Across a dual-wave pair they stop agreeing, the index stops
+advancing, and the dispatch never retires. 33 of the 2,867 shaders one session
+compiled carry the same loop.
+
+**The shader is size-agnostic, so "a game assuming 64 lanes" is not the
+diagnosis.** It hardcodes no width. The driver is wrong, not the title. That
+distinction is why this is a patch here rather than a per-title drirc entry.
+
+Blamed to `7e0c63c3f51` ("freedreno/common: update a8xx family configs",
+2026-04-15) on `turnip/gen8` — one line inside a commit about GMEM sizes and
+tile alignment, whose message never mentions subgroups.
+
+**64 is not a reduction.** `threadsize_base` defaults to 64
+(`freedreno_dev_info.py:108`) and a8xx does not override it, so 64 is the native
+width and 128 is the opt-in. `minSubgroupSize` is already 64 unconditionally
+(`tu_device.cc:1111`).
+
+*Watched on the device by the equivalent route, not yet by this patch.*
+`tu_restrict_subgroup_size_64=true` is defined as the negation of this same flag
+(`tu_device.cc:1796`); with it, Requiem survived 600 s with `vr -4` at zero, five
+swapchains created and no shader overrides at all. Without it, it never reached a
+loading screen. This patch reaches the same state at the source, and until it has
+had its own run that is an inference rather than an observation.
+
+**`TURNIP_REVISION` exists because of this patch.** Turnip's version code is
+derived from the Mesa version string alone, so a rebuild carrying a new patch
+produced the code already in the store and the old driver kept being served —
+the collision `build/turnip.sh` already warns about between its two variants, in
+the other direction.
