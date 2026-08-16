@@ -162,6 +162,46 @@ data class ContainerDiagnostics(
 
     // — the environment table, addressed by index for the same reason ----------
 
+    /**
+     * The record with the legacy [env] list folded into [rows] as `env`-typed rows.
+     *
+     * **One list, because they were always one thing.** `EnvSetting(name, value)`
+     * is `DiagnosticSetting(name, level, type = "env")` with the fields renamed —
+     * the two existed because the row model could only express two families, not
+     * because a typed variable is a different kind of object from a Wine channel.
+     * The screen showed that as three tables and the question "which of these do
+     * I use?" had no good answer.
+     *
+     * Called on read rather than migrating the stored document, so a container
+     * written by an older build keeps working and a downgrade does not lose the
+     * rows. Everything written from here on goes to [rows]; [env] only ever
+     * shrinks.
+     */
+    fun normalised(): ContainerDiagnostics =
+        if (env.isEmpty()) {
+            this
+        } else {
+            copy(
+                rows = rows + env.map { DiagnosticSetting(name = it.name, level = it.value, type = ENV_FAMILY) },
+                env = emptyList(),
+            )
+        }
+
+    /** Add a row in [type], which is what the type column's Add uses. */
+    fun withRowAdded(type: String): ContainerDiagnostics =
+        normalised().let { it.copy(rows = it.rows + DiagnosticSetting(type = type)) }
+
+    /**
+     * Re-type a row, and reset its level for the same reason [withRowNamed] does.
+     *
+     * A level is a word in one subsystem's vocabulary: `on` means something to a
+     * `TU_DEBUG` member and nothing to `VKD3D_DEBUG`, and carrying it across a
+     * family change would leave a row displaying a stop its new family does not
+     * have. The name goes too — a channel name is not a variable name.
+     */
+    fun withRowTyped(index: Int, type: String): ContainerDiagnostics =
+        mapRow(index) { DiagnosticSetting(type = type.trim()) }
+
     fun withEnvAdded(): ContainerDiagnostics = copy(env = env + EnvSetting())
 
     fun withEnvRemoved(index: Int): ContainerDiagnostics =
@@ -185,8 +225,9 @@ data class ContainerDiagnostics(
      * building an environment.
      */
     fun environmentOverrides(): Map<String, String> =
-        env.asSequence()
-            .map { it.name.trim() to it.value }
+        normalised().rows.asSequence()
+            .filter { it.resolvedType == ENV_FAMILY }
+            .map { it.name.trim() to it.level }
             .filter { (name, _) -> name.isNotEmpty() && name !in RESERVED_SESSION_ENV }
             .toMap()
 
@@ -210,8 +251,8 @@ data class ContainerDiagnostics(
      * it means that no environment variable can express.
      */
     fun traceSpec(): TraceSpec =
-        env.lastOrNull { it.name.trim() == TRACE_SPEC_ENV }
-            ?.let { parseTraceSpec(it.value) }
+        normalised().rows.lastOrNull { it.name.trim() == TRACE_SPEC_ENV }
+            ?.let { parseTraceSpec(it.level) }
             ?: TraceSpec.EMPTY
 
     private fun mapRow(index: Int, block: (DiagnosticSetting) -> DiagnosticSetting) =
@@ -656,6 +697,15 @@ val FAMILIES: List<DiagnosticFamily> = listOf(
         secondary = "Any variable, typed by name and value. Reserved names are refused.",
     ),
 )
+
+/**
+ * The family a plain environment variable belongs to.
+ *
+ * Named because three things have to agree about it — the row that stores it,
+ * `environmentOverrides` which composes it, and the screen's type column — and a
+ * literal in three places is how they drift.
+ */
+const val ENV_FAMILY: String = "env"
 
 /** The family called [wire], or null — which is what makes the column free text. */
 fun familyFor(wire: String): DiagnosticFamily? =
@@ -1653,8 +1703,21 @@ data class DiagnosticRow(
     val removable: Boolean,
     /** True when the name is typed and Wine would not register it. */
     val nameIsInvalid: Boolean,
-    /** Which table draws this. See [Loggable.isTurnipFlag]. */
-    val isTurnipFlag: Boolean = false,
+    /**
+     * The [DiagnosticFamily.wire] this row belongs to — column one.
+     *
+     * **This replaced a boolean called `isTurnipFlag` that decided which of three
+     * tables drew the row.** Three tables was never a fact about the stack: it
+     * was the row model only being able to express two families plus a free-text
+     * escape hatch, and the screen inheriting that shape. One list with a type
+     * column says the same thing without asking the reader which table a knob
+     * they have never heard of lives in.
+     */
+    val type: String,
+    /** [DiagnosticFamily.label], or the raw wire for a family nobody declared. */
+    val typeLabel: String,
+    /** False for a fixed row: the declaration decides its family, not the user. */
+    val typeEditable: Boolean = true,
 )
 
 /**
@@ -1687,12 +1750,16 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             levelEditable = false,
             removable = false,
             nameIsInvalid = false,
-            isTurnipFlag = loggable.isTurnipFlag,
+            type = loggable.family,
+            typeLabel = familyFor(loggable.family)?.label ?: loggable.family,
+            typeEditable = false,
         )
     }
 
-    val added = diagnostics.rows.mapIndexed { index, row ->
-        val loggable = loggableFor(row.name, row.turnip)
+    // `normalised()` folds any legacy `env` list in as `env`-typed rows, so the
+    // screen renders one list and never has to ask which of three it is in.
+    val added = diagnostics.normalised().rows.mapIndexed { index, row ->
+        val loggable = loggableFor(row)
         DiagnosticRow(
             index = index,
             name = row.name,
@@ -1712,14 +1779,23 @@ fun diagnosticRows(diagnostics: ContainerDiagnostics): List<DiagnosticRow> {
             // caution saying what is missing.
             levelEditable = row.name.isNotEmpty() && row.isAllowed(diagnostics),
             removable = true,
-            // Wine's channel grammar does not apply to a driver flag, and
-            // checking one against the other would flag every valid TU_DEBUG
-            // member that happens to contain an underscore.
+            // **Only Wine channels are checked against Wine's grammar.**
+            //
+            // It used to be "not a Turnip flag", which was the same rule with a
+            // smaller vocabulary, and the moment there were more families it
+            // started lying: `VKD3D_SHADER_DUMP_PATH` in an `env` row was drawn
+            // in the error tone for failing a channel-name test that has nothing
+            // to do with environment variables. Every family except `wine`
+            // names something whose grammar this layer does not know — a driver
+            // flag, a comma-set member, a variable nobody has curated — so the
+            // honest answer for those is no claim at all, which is what the
+            // caution on the row already says.
             nameIsInvalid = row.name.isNotEmpty() &&
-                !row.turnip && !isLoggableName(row.name),
+                row.resolvedType == "wine" && !isLoggableName(row.name),
             // The stored origin wins for an unnamed row, which has no name to
             // ask; once named the two agree. See `DiagnosticSetting.turnip`.
-            isTurnipFlag = row.turnip || loggable.isTurnipFlag,
+            type = row.resolvedType,
+            typeLabel = familyFor(row.resolvedType)?.label ?: row.resolvedType,
         )
     }
 

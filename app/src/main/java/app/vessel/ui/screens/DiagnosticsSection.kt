@@ -15,8 +15,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
-import app.vessel.core.ADDABLE_LOG_LOGGABLES
-import app.vessel.core.ADDABLE_TURNIP_LOGGABLES
+import app.vessel.core.ADDABLE_LOGGABLES
+import app.vessel.core.FAMILIES
 import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.EnvSetting
 import app.vessel.core.KNOWN_ENV
@@ -32,7 +32,7 @@ import app.vessel.ui.components.VComboField
 import app.vessel.ui.components.VTextField
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VConfirmSheet
-import app.vessel.ui.components.VDiagnosticRow
+import app.vessel.ui.components.VDiagnosticEntry
 import app.vessel.ui.components.VDialogCard
 import app.vessel.ui.components.VDisclosure
 import app.vessel.ui.components.VDropdownField
@@ -120,127 +120,66 @@ fun DiagnosticsPanel(
         }
     }
 
-    // Split on the one property that already distinguishes them: a baseline row
-    // cannot be removed. The fixed rows are the majority and none of them can be
-    // changed here, so flat they were eight read-only rows to scroll past before
-    // reaching the first control that does anything.
+    // **One list, and the type column is what made three into one.**
+    //
+    // There were three: *What to log* for Wine channels and scalars, *Graphics
+    // driver* for TU_DEBUG members, and *Environment variables* for anything
+    // else. That partition was never a fact about the stack — it was the row
+    // model expressing a single boolean, `turnip`, and this screen inheriting
+    // its shape. It cost a real question with no good answer: which of three
+    // tables does a knob you have never heard of live in? Picking wrong was
+    // silent, and it *was* silent — `VKD3D_CONFIG=breadcrumbs` typed into the
+    // environment table did nothing at all, because that table drops every
+    // reserved name, and a device run went into finding out.
+    //
+    // Now the family is column one, `diagnosticRows` folds the legacy env list
+    // in as `env`-typed rows, and there is one Add.
     val (added, fixed) = rows.partition { it.removable }
 
-    // **Two tables, because TU_DEBUG is not a logging variable.**
-    //
-    // Half its members change how the frame is drawn — `nolrz` turns off
-    // low-resolution depth, `gmem` and `sysmem` pick a rendering mode — and
-    // listing those under *What to log* said they were logging choices, which is
-    // the one thing they are not. The split is derived from `emit`, so a flag
-    // cannot be drawn in one table and sent through the other.
-    val (turnipFixed, logFixed) = fixed.partition { it.isTurnipFlag }
-    val (turnipAdded, logAdded) = added.partition { it.isTurnipFlag }
+    // Every declared family, plus any type the reader has already typed that is
+    // not one — so a row keeps offering its own value back rather than looking
+    // like a mistake.
+    val typeOptions = remember(added) {
+        (FAMILIES.map { it.wire } + added.map { it.type }).filter { it.isNotBlank() }.distinct()
+    }
 
     Column(modifier.fillMaxWidth()) {
-        VSectionHeader("What to log")
+        VSectionHeader("Diagnostics")
         VDisclosure(
             "Always on",
             expanded = baselineExpanded,
             onToggle = { baselineExpanded = !baselineExpanded },
-            summary = "${logFixed.size} Vessel always sends",
+            summary = "${fixed.size} Vessel always sends",
         ) {
-            logFixed.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+            fixed.forEach { row -> InventoryRow(row, diagnostics, typeOptions, ::propose, onChange) }
         }
-        logAdded.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
+        added.forEach { row -> InventoryRow(row, diagnostics, typeOptions, ::propose, onChange) }
 
         VButton(
             "Add",
-            { onChange(diagnostics.withRowAdded(turnip = false)) },
+            { onChange(diagnostics.withRowAdded(FAMILIES.first().wire)) },
             style = VButtonStyle.Primary,
             icon = VIcons.Plus,
             modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
         )
         Text(
-            "Rows you add are written after the ones above, and a later term wins. " +
-                "Changes here are kept as you make them — there is no Save for this " +
-                "panel — but the environment is composed when a session starts, so a " +
-                "container that is already running keeps what it launched with.",
+            "Pick the subsystem in the first column, the flag in the second, and what to " +
+                "set it to in the third. All three take anything you type as well as what " +
+                "they offer, so a variable Vessel has never heard of is a row like any " +
+                "other — choose the “Environment variable” type for those. " +
+                "Names this app owns are refused rather than applied, because they point " +
+                "at this container’s own files.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),
         )
-
-        /*
-         * The graphics-driver table.
-         *
-         * Its own header, its own fixed row (`startup`, which Vessel always
-         * sends and nothing can remove) and its own Add — the same shape as the
-         * logging table above, which is what makes it read as a peer rather than
-         * an appendix.
-         *
-         * Two things are true of these and not of the rows above, and the header
-         * text has to carry both: several change *rendering* rather than output,
-         * and the opposing pairs must not be switched on together.
-         */
-        VSectionHeader("Graphics driver")
-        VDisclosure(
-            "Always on",
-            expanded = turnipBaselineExpanded,
-            onToggle = { turnipBaselineExpanded = !turnipBaselineExpanded },
-            summary = "${turnipFixed.size} Vessel always sends",
-        ) {
-            turnipFixed.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
-        }
-        turnipAdded.forEach { row -> InventoryRow(row, diagnostics, ::propose, onChange) }
-
-        VButton(
-            "Add",
-            { onChange(diagnostics.withRowAdded(turnip = true)) },
-            style = VButtonStyle.Primary,
-            icon = VIcons.Plus,
-            modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
-        )
         Text(
-            "These are TU_DEBUG flags. The ones that only report need the driver " +
-                "logger on and say so; the rest change how a frame is drawn, which is " +
-                "measured on the frame counter rather than read in a log. Switch on one " +
-                "at a time — the driver resolves a contradictory pair silently.",
-            style = Vessel.type.bodySmall,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.padding(top = Vessel.metrics.s6),
-        )
-
-        /*
-         * The environment table.
-         *
-         * Below the two curated ones, because it is the thing you reach for when
-         * neither of them has what you want — and above "How much to keep",
-         * because it is still about what a session does rather than about logs.
-         */
-        VSectionHeader("Environment variables")
-        diagnostics.env.forEachIndexed { index, row ->
-            EnvRow(
-                row = row,
-                // Every other row's name, so this one can neither offer a
-                // duplicate nor stay quiet about one that was typed.
-                taken = diagnostics.env
-                    .filterIndexed { i, _ -> i != index }
-                    .map { it.name }
-                    .filter { it.isNotBlank() }
-                    .toSet(),
-                onName = { onChange(diagnostics.withEnvName(index, it)) },
-                onValue = { onChange(diagnostics.withEnvValue(index, it)) },
-                onRemove = { onChange(diagnostics.withEnvRemoved(index)) },
-            )
-        }
-        VButton(
-            "Add",
-            { onChange(diagnostics.withEnvAdded()) },
-            style = VButtonStyle.Primary,
-            icon = VIcons.Plus,
-            modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
-        )
-        Text(
-            "Set anything the driver, the translator or the D3D layer reads. These are " +
-                "applied last, so they win over every setting above. Vessel knows nothing " +
-                "about what you type here and cannot warn you about it — a name it does " +
-                "own is refused rather than applied, because those point at this " +
-                "container's own files.",
+            "Rows you add are written after the ones above, and a later term wins. Some " +
+                "flags change how a frame is drawn rather than what is logged, and say so; " +
+                "switch those on one at a time, because a driver resolves a contradictory " +
+                "pair silently. Changes here are kept as you make them — there is no " +
+                "Save for this panel — but the environment is composed when a session " +
+                "starts, so a container that is already running keeps what it launched with.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),
@@ -315,46 +254,50 @@ fun DiagnosticsPanel(
 private fun InventoryRow(
     row: DiagnosticRow,
     diagnostics: ContainerDiagnostics,
+    typeOptions: List<String>,
     propose: (ContainerDiagnostics, Int) -> Unit,
     onChange: (ContainerDiagnostics) -> Unit,
 ) {
-    VDiagnosticRow(
-        name = row.name,
-        // Only this table's names, and only the ones not already on a row.
-        // Offering all of them would let a graphics flag be named into the
-        // logging table, where it would be drawn under a header that describes
-        // it wrongly; offering one that is already there invites a second row
+    VDiagnosticEntry(
+        type = row.type,
+        typeLabel = row.typeLabel,
+        typeOptions = typeOptions,
+        onType = { onChange(diagnostics.normalised().withRowTyped(row.index, it)) },
+        typeEditable = row.typeEditable,
+        flag = row.name,
+        // Only this family's flags, and only the ones no other row holds.
+        // Offering every declared name would let a Turnip flag be picked into a
+        // vkd3d row, where it would be composed into the wrong variable and
+        // ignored in silence; offering one already present invites a second row
         // for a setting that can only have one value.
-        nameOptions = (
-            if (row.isTurnipFlag) ADDABLE_TURNIP_LOGGABLES else ADDABLE_LOG_LOGGABLES
-        ).map { it.name }.filter { name ->
-            name == row.name || diagnostics.rows.none { it.name == name }
-        },
-        onName = { propose(diagnostics.withRowNamed(row.index, it), row.index) },
-        levels = row.levels,
-        levelLabel = { row.levelLabels[it] ?: it },
+        flagOptions = ADDABLE_LOGGABLES
+            .filter { it.family == row.type }
+            .map { it.name }
+            .filter { name -> name == row.name || diagnostics.normalised().rows.none { it.name == name } },
+        onFlag = { propose(diagnostics.normalised().withRowNamed(row.index, it), row.index) },
+        flagEditable = row.nameEditable,
+        flagIsInvalid = row.nameIsInvalid,
         level = row.level,
+        levelOptions = row.levels,
+        levelLabel = { row.levelLabels[it] ?: it },
         levelIsMachine = row.levelIsMachine,
-        onLevel = { propose(diagnostics.withRowLevel(row.index, it), row.index) },
+        onLevel = { propose(diagnostics.normalised().withRowLevel(row.index, it), row.index) },
+        levelEditable = row.levelEditable,
         oneSession = row.oneSession,
         onRemove = if (row.removable) {
-            { onChange(diagnostics.withRowRemoved(row.index)) }
+            { onChange(diagnostics.normalised().withRowRemoved(row.index)) }
         } else {
             null
         },
-        // The volume rides on the secondary line rather than getting a column
-        // or a tone of its own. It belongs next to the description because it
-        // *is* part of the description — "every exception raised" and "191,000
-        // lines a session" are one fact about this stop, and separating them is
-        // how the second half stopped being read. Only present where a real
-        // number exists; see `Loggable.volumes`.
+        // The volume rides on the secondary line rather than getting a column or
+        // a tone of its own. It belongs next to the description because it *is*
+        // part of the description — "every exception raised" and "191,000 lines a
+        // session" are one fact about this stop, and separating them is how the
+        // second half stopped being read.
         secondary = listOfNotNull(row.secondary, row.volume?.let { "Expect $it." })
             .joinToString(" ")
             .ifBlank { null },
         caution = row.caution,
-        nameEditable = row.nameEditable,
-        levelEditable = row.levelEditable,
-        nameIsInvalid = row.nameIsInvalid,
     )
 }
 
@@ -659,9 +602,11 @@ private fun DiagnosticsPanelPreview() {
                     // Out of the declaration rather than typed here: no name
                     // from LOGGABLES appears as a literal in this layer, and a
                     // preview is not an excuse to be the first.
-                    diagnostics = ContainerDiagnostics()
-                        .withRowAdded()
-                        .withRowNamed(0, ADDABLE_LOG_LOGGABLES.first { it.caution != null }.name),
+                    diagnostics = ADDABLE_LOGGABLES.first { it.caution != null }.let { pick ->
+                        ContainerDiagnostics()
+                            .withRowAdded(pick.family)
+                            .withRowNamed(0, pick.name)
+                    },
                     usageLabel = "14.2 MB",
                     usageFraction = 0.03f,
                     ceilingLabel = "10 sessions · 480 MB at these limits",
