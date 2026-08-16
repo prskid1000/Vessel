@@ -1,0 +1,176 @@
+wineoss: tee what reaches the device, because every layer above it is eliminated.
+
+Requiem buzzes. Metro does not. Both go through this driver, on this device, and
+the two traces are statistically the same driver doing the same thing:
+
+    burst / capacity / client buffer   868 / 1736 / 2604   in both
+    held   (client data waiting)       mean 1870  vs 1909
+    in_oss (queued in the device)      mean 1106  vs 1144
+    partial writes                     41%        vs 40%
+    AAudio xrun count                  0          vs 0
+
+Neither end starves; the device never reported an underrun; the partial-write
+path is correct (`in_oss_frames` advances by what AAudio accepted, not by what
+was offered, and 40% partial turns out to be ordinary). Requiem does not even
+reach the float-to-i16 conversion — it asks for int16 and gets it.
+
+So the frames arriving here are already wrong, and **no counter can say in what
+way**. That is what this patch is for.
+
+FOUR THEORIES DIED BEFORE IT, and they are listed so none is retried:
+
+  * breadcrumb instrumentation starving the audio thread -- the buzz survived
+    removing it;
+  * the 24 fps limit starving the buffer -- the timer loop tops up every 10 ms
+    regardless of frame rate, so the frame interval never enters into it;
+  * partial writes dropping samples -- see above, and Metro partials identically;
+  * relaxed memory ordering corrupting Wwise's SIMD mixing -- closing all three
+    of FEX's remaining knobs did not change the buzz and stopped the title
+    reaching a frame at all. Recorded at STRICT_MEMORY_ORDERING.
+
+Three failures sound alike and want different fixes, which is the argument for a
+capture rather than another counter: broadband noise says the samples are being
+*computed* wrong, periodic gaps or repeats say the guest's mixer is missing its
+deadline, and flat-topped peaks say something is clipping. One look at a
+waveform separates them. No amount of line counting will.
+
+Off unless `VESSEL_AUDIO_DUMP` is set. Opened once, appended to, and never
+retried after a failed open -- a diagnostic that could itself fail a stream would
+be worse than the bug it is chasing.
+
+`1`, `on` or `true` means "somewhere the container owns", and that spelling is
+the whole reason this is usable from the Diagnostics screen: the container's
+scratch directory has a UUID in it, so a user asked to type an absolute path
+could not know one, and a row that can only be filled in wrongly is not a
+control. Three spellings because three layers write it — the Diagnostics row
+sends `on`, a script sends `1`. Any other value is taken as a literal path,
+which is what a shell session wants; `0`, `off`, `false` and the empty string
+are off, so the row has a real Off.
+
+Raw interleaved frames, in whatever format the stream negotiated, with the rate,
+channel count and sample width on the TRACE line that reports the open. No WAV
+header deliberately: a header written by the driver currently under suspicion for
+producing wrong samples is one more thing to have to trust, and `ffmpeg -f s16le
+-ar <rate> -ac <ch>` costs nothing to type.
+
+Both write sites are teed. The second is the wrap case -- the tail of the ring
+written after the head -- and a capture missing it would show a periodic
+discontinuity that the device never heard, which is exactly the artefact this is
+meant to identify.
+
+diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
+--- a/dlls/wineoss.drv/oss.c
++++ b/dlls/wineoss.drv/oss.c
+@@ -40,6 +40,9 @@
+ #endif
+ 
+ #include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <fcntl.h>
+@@ -906,6 +909,84 @@ static void handle_disconnect(struct oss_stream *stream)
+         stream->reopen_backoff = DISCONNECT_RETRY_PASSES;
+ }
+ 
++/* Vessel: tee what is actually handed to the device, so a buzz can be looked at.
++ *
++ * **Every layer above the samples has been eliminated and the buzz survived.**
++ * Requiem buzzes, Metro does not, and the two traces are statistically the same
++ * driver: burst 868, capacity 1736, client buffer 2604 in both; `held` mean 1870
++ * against 1909; `in_oss` 1106 against 1144; 41% against 40% partial writes; and
++ * zero AAudio xruns in either. Neither end starves. So the frames arriving here
++ * are already wrong, and no counter can say in what way.
++ *
++ * Three failures sound alike and want different fixes, which is the whole reason
++ * this exists: broadband noise says the samples are being computed wrong
++ * (miscompiled DSP), periodic gaps or repeats say the guest's mixer is missing
++ * its deadline, and flat-topped peaks say something is clipping. A capture tells
++ * them apart in one look; a line count never will.
++ *
++ * Off unless `VESSEL_AUDIO_DUMP` is set, opened once, appended to, and never
++ * checked again after a failed open -- a diagnostic that could itself fail a
++ * stream would be worse than the bug. Raw interleaved frames in whatever format
++ * the stream negotiated, which the header line records, because a WAV header
++ * written by a driver that is being blamed for wrong samples is one more thing
++ * to doubt. */
++static void vessel_audio_dump(struct oss_stream *stream, const void *buf, UINT32 frames)
++{
++    static int fd = -2;   /* -2 unopened, -1 disabled */
++
++    if(fd == -1)
++        return;
++
++    if(fd == -2){
++        const char *path = getenv("VESSEL_AUDIO_DUMP");
++        char fallback[1024];
++
++        if(!path || !*path || !strcmp(path, "0") || !strcmp(path, "off") ||
++           !strcmp(path, "false")){
++            fd = -1;
++            return;
++        }
++
++        /* A switch, not a path. The container's scratch directory has a UUID in
++         * it, so a settings screen cannot name it and a user asked to type it
++         * could not know it -- and a control that can only be filled in wrongly
++         * is worse than no control. TMPDIR is that directory and is cleared when
++         * the container is reset. Three spellings because three layers write
++         * this: the Diagnostics row sends `on`, a script sends `1`, and `true`
++         * costs nothing to accept. Anything else is a literal path, which is
++         * what a shell session wants. */
++        if(!strcmp(path, "1") || !strcmp(path, "on") || !strcmp(path, "true")){
++            const char *tmp = getenv("TMPDIR");
++
++            snprintf(fallback, sizeof(fallback), "%s/vessel-audio.pcm",
++                     tmp && *tmp ? tmp : "/tmp");
++            path = fallback;
++        }
++
++        fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
++        if(fd < 0){
++            WARN("audio dump: cannot open %s: %s\n", path, strerror(errno));
++            fd = -1;
++            return;
++        }
++        TRACE("audio dump: %s, %u Hz, %u ch, %u bits, block %u\n", path,
++              (unsigned int)stream->fmt->nSamplesPerSec,
++              (unsigned int)stream->fmt->nChannels,
++              (unsigned int)stream->fmt->wBitsPerSample,
++              (unsigned int)stream->fmt->nBlockAlign);
++    }
++
++    if(frames){
++        /* The return is deliberately ignored and deliberately not retried. A
++         * short write loses samples the device did hear, which is a hole in the
++         * capture and not a fault in the stream; a retry loop here would put the
++         * audio thread's deadline in the hands of a diagnostic file. */
++        ssize_t ignored = write(fd, buf, frames * stream->fmt->nBlockAlign);
++
++        (void)ignored;
++    }
++}
++
+ static void oss_write_data(struct oss_stream *stream)
+ {
+     UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
+@@ -1007,6 +1088,7 @@ static void oss_write_data(struct oss_stream *stream)
+     if(stream->convert_to_i16 && !(buf = (BYTE *)convert_to_i16_frames(stream, buf, to_write_frames)))
+         return;
+ 
++    vessel_audio_dump(stream, buf, to_write_frames);
+     written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
+     if(written < 0){
+         /* A disconnect is recoverable and nothing else here is: an argument
+@@ -1086,7 +1168,8 @@ static void oss_write_data(struct oss_stream *stream)
+         if(stream->convert_to_i16 && !(buf = (BYTE *)convert_to_i16_frames(stream, buf, to_write_frames)))
+             return;
+ 
+-        written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
++        vessel_audio_dump(stream, buf, to_write_frames);
++        written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
+         if(written < 0){
+             if(written == AAUDIO_ERROR_DISCONNECTED)
+                 handle_disconnect(stream);
