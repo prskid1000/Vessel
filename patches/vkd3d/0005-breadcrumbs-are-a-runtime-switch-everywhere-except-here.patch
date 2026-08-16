@@ -1,0 +1,86 @@
+breadcrumbs are a runtime switch everywhere except here, and here shouts 46,591 times.
+
+vkd3d has two independent breadcrumb switches and they are not the same thing:
+
+  * `VKD3D_ENABLE_BREADCRUMBS`, a **compile-time** define, decides whether the
+    code exists at all;
+  * `VKD3D_CONFIG_FLAG_BREADCRUMBS`, a **runtime** flag from `VKD3D_CONFIG`,
+    decides whether it does anything.
+
+Thirty-six of the thirty-seven `#ifdef VKD3D_ENABLE_BREADCRUMBS` sites check the
+runtime flag inside the ifdef -- the placed-resource registration eleven lines
+below this one is the closest example, and `d3d12_resource_destroy` does the same
+on the way out. This one does not. It sets
+`initial_layout_transition_validate_only` on every placed RTV and DSV the moment
+the build has breadcrumbs compiled in, whether or not anybody asked for a trace.
+
+What that flag does is turn `vk_image_memory_barrier_for_initial_transition` into
+a reporting function: it logs and returns false instead of filling in a barrier.
+The `false` is correct and matches the release path -- see the comment right
+above, which is upstream's reason for not transitioning placed render targets
+itself: on hardware with DCC/HTILE the initialization would clobber other buffers
+aliased into the same heap. The logging is not correct, because nothing turned it
+on.
+
+**Measured on Resident Evil Requiem, 2026-08-16: 46,591 lines in one session,
+93% of the log**, all of them this one message, at ERR so no severity setting
+quiets it. Two separate costs, and the second is the one that matters:
+
+  * a formatted `ERR` with a `debug_dxgi_format` call per placed resource per
+    submission, on the render thread;
+  * **it hid a real graphics bug in plain sight.** With 93% of the log one
+    repeated line, the session was unreadable, and the message that says
+    *"this resource was never initialized"* -- next to screenshots of a flat
+    white quad where geometry should be -- read as noise rather than as the
+    answer.
+
+So gate it on the runtime flag like every other site. A build with breadcrumbs
+compiled in then behaves exactly like a release build until `VKD3D_CONFIG`
+contains `breadcrumbs`, which is what makes the whole instrument usable from a
+settings screen instead of from a second build nobody has.
+
+**That is the point of this patch, and it is worth stating plainly.**
+`build/vkd3d.sh` logs "diagnostic build, not for shipping" when `VKD3D_BREADCRUMBS=1`,
+and it was right to: the build was unusable as a default because of this line.
+With it fixed the remaining cost of shipping breadcrumbs is `-Denable_trace=true`,
+which is binary size rather than output -- every TRACE is still gated behind
+`VKD3D_DEBUG`, which Vessel pins at `fixme`. In exchange, the one instrument in
+the stack that can explain a `VK_ERROR_DEVICE_LOST` stops requiring a rebuild at
+the moment somebody needs it, which is always the worst moment to need one.
+
+Note this changes no rendering. Both branches leave the resource untransitioned
+-- `initial_layout_transition = 0` makes the callers skip it, `validate_only`
+makes the barrier builder decline it -- so the only difference is whether a line
+is printed. `force_initial_transition` remains the switch that changes behaviour,
+and it is checked before either.
+
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -4614,11 +4614,25 @@
+     if (desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+     {
+         if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_FORCE_INITIAL_TRANSITION))
+         {
+ #ifdef VKD3D_ENABLE_BREADCRUMBS
+-            object->initial_layout_transition_validate_only = true;
++            /* Vessel: the runtime flag, not merely the compile-time one.
++             *
++             * Every other breadcrumb site in this file checks it -- the placed
++             * resource registration eleven lines down, and the unregister in
++             * d3d12_resource_destroy. Without it a build with breadcrumbs
++             * compiled in reports every placed RTV and DSV on every submission
++             * whether or not a trace was asked for: 46,591 lines and 93% of one
++             * Requiem session, at ERR, where they buried the graphics bug they
++             * were describing. Behaviour is identical either way -- both
++             * branches leave the resource untransitioned -- so this only decides
++             * whether the line is printed. */
++            if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_BREADCRUMBS)
++                object->initial_layout_transition_validate_only = true;
++            else
++                object->initial_layout_transition = 0;
+ #else
+             object->initial_layout_transition = 0;
+ #endif
+         }
+     }

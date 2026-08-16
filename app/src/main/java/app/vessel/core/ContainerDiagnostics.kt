@@ -1353,6 +1353,29 @@ val LOGGABLES: List<Loggable> = listOf(
         caution = "Needs a component built with VKD3D_BREADCRUMBS=1; on a normal " +
             "build the word parses and does nothing.",
     ),
+    // **The one flag here that changes what is drawn rather than what is said.**
+    //
+    // D3D12 requires a placed render target or depth buffer to be initialized by
+    // the application before first use, and vkd3d deliberately does not do it —
+    // on hardware with DCC/HTILE the initialization clobbers other resources
+    // aliased into the same heap (`resource.c:4607`). A title that forgets shows
+    // uninitialized memory: flat white where geometry should be, and depth that
+    // sorts wrongly against the sky.
+    //
+    // Upstream ships a table of titles that forget — Lost Judgment, Spider-Man,
+    // Miles Morales, Deus Ex: Mankind Divided, FFXVI (`device.c:641-666`) — and
+    // Requiem is too new to be in it. That table is the reason this is offered
+    // rather than guessed at: it is a known shape of bug with a known fix, and
+    // the Adreno objection does not apply, because there is no DCC or HTILE here
+    // to clobber.
+    vkd3dConfigFlag(
+        flag = "force_initial_transition",
+        secondary = "Initialise placed render targets and depth buffers, which D3D12 " +
+            "says the game must do and some games do not.",
+        caution = "Costs a transition per placed resource. Try it when geometry is " +
+            "flat white or sorts through walls; it does nothing for a title that " +
+            "already initialises correctly.",
+    ),
     vkd3dConfigFlag(
         flag = "breadcrumbs_sync",
         secondary = "As above, and stall after every command so the report names the " +

@@ -151,15 +151,41 @@ EOF
   # Requiem currently loses the device during vkd3d's memory transfer queue,
   # before a swapchain exists, and nothing in Turnip's own log mentions it.
   #
-  # What it costs, and why it is not the default: `-Denable_trace=true` also
-  # compiles in every TRACE message (they stay gated at runtime by
-  # `VKD3D_DEBUG`, so this is binary size rather than output), and breadcrumbs
-  # add per-command instrumentation. This is a diagnostic build; ship the
-  # default one.
-  VKD3D_TRACE_FLAG="-Denable_trace=false"
-  if [ "${VKD3D_BREADCRUMBS:-0}" = "1" ]; then
-    log "breadcrumbs enabled -- diagnostic build, not for shipping"
-    VKD3D_TRACE_FLAG="-Denable_trace=true"
+  # **On by default since 2026-08-16, and the paragraph that used to be here
+  # explaining why not is kept below, because it was right about the build it
+  # described.** It said: "this is a diagnostic build; ship the default one."
+  # What made that true was a single line, and `patches/vkd3d/0005` fixes it.
+  #
+  # `resource.c:4618` armed `initial_layout_transition_validate_only` on every
+  # placed render target and depth buffer whenever breadcrumbs were *compiled
+  # in*, without checking the runtime `VKD3D_CONFIG_FLAG_BREADCRUMBS` that the
+  # other thirty-six sites in the file all check. The result was 46,591 ERR
+  # lines in one Requiem session -- 93% of the log -- on a build nobody had
+  # asked for a trace from. That is what made the diagnostic build unshippable,
+  # and it was never the instrumentation itself.
+  #
+  # Audited before flipping this, rather than assumed: every `#ifdef
+  # VKD3D_ENABLE_BREADCRUMBS` block in `libs/` that can emit was checked for the
+  # runtime gate. Two came back ungated. `command.c:24471`'s per-command-list
+  # INFO is a false positive -- its producer at `:22032` allocates
+  # `breadcrumb_indices` only under `VKD3D_CONFIG_FLAG_BREADCRUMBS_TRACE`, so the
+  # count is zero and the loop never runs. `resource.c:4618` was the real one.
+  #
+  # What remains is `-Denable_trace=true` compiling in every TRACE message. They
+  # stay gated at runtime by `VKD3D_DEBUG`, which Vessel pins at `fixme`, so it
+  # is binary size and not output: measured at 2.8 MiB against 2.6 MiB for the
+  # release build, on a 78.9 MiB Wine package. That is the whole price.
+  #
+  # What it buys is that the instrument stops needing a rebuild at the moment
+  # somebody needs it, which is always the worst moment to need one -- and the
+  # Diagnostics screen's `breadcrumbs` row stops being a control that parses and
+  # does nothing.
+  #
+  # Set VKD3D_BREADCRUMBS=0 for a build without it.
+  VKD3D_TRACE_FLAG="-Denable_trace=true"
+  if [ "${VKD3D_BREADCRUMBS:-1}" = "0" ]; then
+    log "breadcrumbs disabled -- the instrument will not be available at runtime"
+    VKD3D_TRACE_FLAG="-Denable_trace=false"
   fi
 
   meson setup "$BUILD" "$SRC" \
