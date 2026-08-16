@@ -178,3 +178,93 @@ worse than that because each event prints four to six lines.
 **Policy.** Vessel's patch on Vessel's build. Defensible upstream as written,
 since it is a plain inconsistency in vkd3d's own treatment of the field.
 AI-authored in full.
+
+## `0006-resource-the-placed-resource-compression-rule-fires-for-committed-too`
+
+`resource.c:774-785` disables compression for every image that is neither
+`ALLOW_RENDER_TARGET` nor `ALLOW_DEPTH_STENCIL`. Its own comment justifies that
+with D3D12's **placed**-resource initialization rules, but the test reads
+`desc->Flags` alone and never `resource->flags`, so committed and reserved
+resources get it too. This patch exempts committed, non-shared resources.
+
+**vkd3d already answers the aliasing question the other way, twice.**
+`vkd3d_check_subresource_overlap` opens with *"No aliasing possible if either
+resource is committed"* (`command.c:5525-5527`), and
+`vkd3d_get_image_create_info` itself grants `VK_IMAGE_CREATE_ALIAS_BIT` only to
+placed resources (`resource.c:1051`). Committed suballocations are padded to
+`bufferImageGranularity` *"to prevent resource aliasing"* (`resource.c:4300-4303`).
+
+**Why it matters on this stack.** Turnip has no
+`VK_EXT_image_compression_control`, so the intended mechanism (`resource.c:861-869`)
+never engages and the only thing `disable_compression` does here is the fallback
+at `:832-833` — set `MUTABLE_FORMAT`, zero the format list. Turnip's
+`format_list_ubwc_possible` fails closed on exactly that
+(`tu_image.cc:506-507`), and on a8xx that check is the sole gate
+(`tu_image.cc:658-662`, via `ubwc_all_formats_compatible` inherited from
+`a7xx_gen3`). Every non-RT, non-DS D3D12 image loses UBWC, and silently — the
+`perf_debug` calls for this live in the other branch.
+
+**The AMD/NVIDIA reasoning does not transfer**, and the header says why at
+length: upstream's hazard is a DCC/HTILE metadata *write* on the transition out
+of `UNDEFINED`, and Turnip performs no metadata write there at all — that path is
+a CCU flush and nothing else (`tu_cmd_buffer.cc:9997-10011`). Turnip's mirror of
+the hazard is *reading* a previous tenant's bytes as flag data, which is why it
+refuses UBWC under sparse residency (`tu_image.cc:338-343`) — a reason to keep
+placed and reserved exactly as they are, since Turnip never inspects
+`VK_IMAGE_CREATE_ALIAS_BIT` and vkd3d's rule is their only guard.
+
+### No measurement is claimed
+
+There is no readable DRAM bandwidth counter on this device (`docs/BANDWIDTH.md`
+§3), so the header quotes no percentage and neither does this.
+
+**And the obvious instrument does not reach it.** `MESA_GPU_TRACES=print_csv`
+with `MESA_LOG=file` gives a per-render-pass `ubwc` y/n
+(`tu_cmd_buffer.cc:3001-3006`) — but only per *attachment*, and attachments are
+precisely the images this patch does not touch. The neighbouring
+`avgPerSampleBandwidth` field does not rescue it either: it sums
+`color_bandwidth_per_sample`, which is `total_bpp / 8` over the pipeline's
+attachment formats (`tu_pipeline.cc:3137`), so it is format-derived and **not
+UBWC-aware**. Checked before being proposed, and it should not be quoted for
+this.
+
+### How to confirm it anyway
+
+1. **Count first — this is the real unknown, and it costs no device time.** The
+   win is bounded by how many textures a title creates *committed* rather than
+   placed out of a heap, and RE Engine may do most of its intermediates the
+   placed way, in which case this patch changes little. Add a counting `TRACE` at
+   the exemption site, split by whether the resource would have received a format
+   list, and read it off one launch. Do this before believing any frame-time
+   delta. It is the same question that should have closed §4 candidate 3.
+2. **Use the attachment trace as a falsification control, not as a measurement.**
+   Capture `MESA_GPU_TRACES=print_csv` on both builds. Every render pass's `ubwc`
+   string should be **identical**, because no attachment's create-info changes.
+   A flip anywhere means the exemption reached further than intended. Free, and
+   it is the only thing the trace can honestly answer here.
+3. **Bracket the frame-time A/B.** Three sessions — unpatched, patched, and
+   patched with `TU_DEBUG=noubwc` in the container's `TU_DEBUG`
+   (`ContainerDiagnostics.kt:681-687`; it is start-time only, see
+   `docs/BANDWIDTH.md` §2). The third turns UBWC off for everything and gives a
+   floor, so the patched-vs-unpatched gap can be read against a known-large
+   effect rather than against nothing. `docs/OPTIMIZATION.md` §7's ±10% spread
+   applies to all of it, which is why step 1 comes first.
+
+### Supersedes `docs/BANDWIDTH.md` §4 candidate 3
+
+That candidate names the castable-format truncation at `resource.c:373-381`.
+It was investigated and is unreachable — it needs an application to pass castable
+formats *and* a format family that fills `VKD3D_MAX_COMPATIBLE_FORMAT_COUNT`.
+This is the common path instead: no castable formats, no unusual family, only a
+resource that is not a render target.
+
+### Not compiled
+
+Generated against the working tree with `0001`-`0005` applied and verified with
+`git apply --check` from inside `native/vkd3d`. No vkd3d build has been run
+against it.
+
+**Policy.** Vessel's patch on Vessel's build. Defensible upstream as written,
+since it is a plain inconsistency between this rule and
+`vkd3d_check_subresource_overlap`, but the performance case is Turnip's and has
+not been measured on any other driver. AI-authored in full.

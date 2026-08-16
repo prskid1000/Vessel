@@ -1,0 +1,267 @@
+resource: the placed-resource compression rule fires for committed resources too, and on Turnip that costs UBWC on every non-render-target image.
+
+`resource.c:774-785` decides whether to give up on lossless bandwidth compression
+for an image. Its comment is explicit about what it is protecting against:
+
+    /* D3D12 rules for placed resources are such that only RTV / DSV usage
+     * requires initialization. ... */
+
+That is a real hazard and this patch does not dispute it. A *placed* resource
+shares heap bytes with whatever else the application chooses to place there, and
+D3D12 only obliges the application to initialize a placed resource when it has
+RTV or DSV usage. Everything else is left uninitialized by contract, so a
+compression metadata buffer belonging to one tenant of those bytes can be read or
+written through another tenant's alias. Disabling compression is the pragmatic
+answer, and upstream says so.
+
+**The rule is applied far wider than its own justification reaches.** The test is
+
+    if (!(desc->Flags & (ALLOW_DEPTH_STENCIL | ALLOW_RENDER_TARGET)))
+        disable_compression = true;
+
+which reads `desc->Flags` and nothing else. `resource->flags` is in scope — this
+same function reads it four lines later at `:923` and again at `:1051` and
+`:1127` — and it is never consulted here. So a committed resource, a placed
+resource and a reserved resource are treated identically, and only one of the
+three can alias.
+
+**vkd3d has already decided this question, in its own code, the other way.**
+`vkd3d_check_subresource_overlap` — the function that answers "can these two
+resources be the same memory?" for aliasing barriers — opens with
+(`libs/vkd3d/command.c:5525-5527`):
+
+    /* No aliasing possible if either resource is committed */
+    if ((a->flags | b->flags) & VKD3D_RESOURCE_COMMITTED)
+        return false;
+
+and the same file's next two branches say sparse can alias anything and placed
+aliases by heap-range overlap. `vkd3d_get_image_create_info` agrees with itself
+elsewhere too: `VK_IMAGE_CREATE_ALIAS_BIT` is granted at `:1051` only when the
+resource is placed or absent, never when it is committed. The compression rule is
+the one place in the file that ignores that answer.
+
+The memory backs it up. A committed texture takes its size from
+`vkGetImageMemoryRequirements2` on its own image (`resource.c:4213`) and binds
+that image and no other to the result. When the allocator is allowed to
+suballocate it, `resource.c:4300-4303` pads both alignment and size up to
+`bufferImageGranularity` with the comment *"to prevent resource aliasing"*. There
+is no neighbour inside a committed resource's range to clobber, and nothing to
+inherit from a previous tenant.
+
+## What it costs here
+
+`disable_compression` has two consumers. One is `VkImageCompressionControlEXT`
+(`:861-869`), which is the mechanism the code actually wants. The other is the
+branch at `:805-835`, which is the fallback:
+
+    image_info->flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    memset(compat_list, 0, sizeof(*compat_list));
+
+**On this stack only the fallback ever runs.** Turnip does not implement
+`VK_EXT_image_compression_control` — there is not one reference to it anywhere
+under `native/mesa/src/freedreno/` — so
+`d3d12_device_should_use_image_compression_control` (`:662-669`) is false and the
+proper mechanism never engages. Mutable-format-with-no-list is the whole of what
+happens.
+
+And that shape is exactly what Turnip fails closed on.
+`format_list_ubwc_possible` (`native/mesa/src/freedreno/vulkan/tu_image.cc:497-519`)
+opens with
+
+    /* If there is no format list, we may have to assume that a
+     * UBWC-incompatible format may be used.
+     * TODO: limit based on compatiblity class
+     */
+    if (!fmt_list || !fmt_list->viewFormatCount)
+       return false;
+
+Its three sibling helpers — `format_list_reinterprets_r8g8_r16` (`:447`),
+`format_list_has_swaps` (`:469`), `format_list_has_uncompressed_format` (`:486`)
+— all fail *open*. This one does not. Adreno 830 is A8XX and inherits
+`ubwc_all_formats_compatible = True` from `a7xx_gen3`
+(`freedreno_devices.py:880`, `:1502-1506`), which puts it on the branch at
+`tu_image.cc:658-662` where that fail-closed check is the *only* gate:
+
+    } else {
+       is_mutable = true;
+       if (!format_list_ubwc_possible(device, fmt_list, pCreateInfo))
+          ubwc_enabled = false;
+    }
+
+So every D3D12 image that is neither a render target nor a depth target is
+created with UBWC off, on a part where it did not have to be, on a
+bandwidth-bound tiler.
+
+**It is silent.** The three `perf_debug` calls for mutable-format UBWC loss
+(`tu_image.cc:618`, `:631`, `:640`) sit in the NV12 branch and the
+`!mutable_ubwc_fc` legacy branch. The a8xx branch above has none, so
+`TU_DEBUG=perf` reports nothing and never would have.
+
+## Why the AMD and NVIDIA reasoning does not transfer
+
+The hazard upstream is describing is a compression metadata **write**: a DCC or
+HTILE initialization performed on the transition away from `UNDEFINED`, landing on
+bytes a neighbouring alias owns. `resource.c:4608-4613` states it plainly for
+placed render targets — *"extremely dangerous ... the initialization will clobber
+other aliased buffers when clearing DCC/HTILE state"*.
+
+**Turnip performs no such write.** The entire `UNDEFINED` handling in the barrier
+path is a cache flush and nothing else
+(`native/mesa/src/freedreno/vulkan/tu_cmd_buffer.cc:9997-10011`):
+
+       /* The underlying memory for this image may have been used earlier
+        * within the same queue submission for a different image ... so we
+        * need to flush the CCU. */
+       if (vk_format_is_depth_or_stencil(image->vk.format)) {
+          src_flags |= TU_ACCESS_CCU_DEPTH_INCOHERENT_WRITE;
+       } else {
+          src_flags |= TU_ACCESS_CCU_COLOR_INCOHERENT_WRITE;
+       }
+
+The render-pass equivalent (`tu_pass.cc:384-396`) does the same and its comment
+says so: *"We currently only care about undefined layouts, because we have to
+flush/invalidate CCU for those."* There is no metadata initialization anywhere in
+the driver. The flag buffer is defined by the first full write to the image, and
+every write path programs the destination flag-buffer base
+(`tu_clear_blit.cc:528`, `:1575`, `:1583`).
+
+**Turnip has the mirror of the problem instead, and it points the same way.** The
+flag buffer is not written on transition, so a UBWC image placed over reused
+memory *reads* the previous tenant's bytes as flag data. Turnip states this
+itself, and its response is to refuse UBWC rather than to initialize anything
+(`tu_image.cc:338-343`):
+
+    /* UBWC isn't possible with sparse residency, because unbound blocks may
+     * have leftover fast-clear data and therefore may show up as non-zero. */
+
+That is a reason to leave placed resources exactly as they are — Turnip never
+inspects `VK_IMAGE_CREATE_ALIAS_BIT` at all, so vkd3d's rule is the only thing
+protecting a placed resource on this driver — and no reason whatsoever to
+disable compression on a committed one.
+
+## What the patch does and does not touch
+
+Committed, non-shared resources are exempted. Everything else keeps the old
+behaviour:
+
+- **Placed** (`VKD3D_RESOURCE_PLACED`, `:4463`) — the case the rule was written
+  for. Unchanged. Note this covers borrowed/external resources too, which
+  `d3d12_resource_create_borrowed` flags as placed (`:4145`).
+- **Reserved / sparse** (`VKD3D_RESOURCE_RESERVED`, `:4716`) — these carry
+  `VK_IMAGE_CREATE_SPARSE_ALIASED_BIT` unconditionally (`:878-880`) and aliasing
+  is the point of them. Unchanged, and Turnip would refuse UBWC anyway per the
+  quote above.
+- **The allocation-info query** (`vkd3d_get_image_allocation_info`, `:1233`,
+  which passes `resource == NULL`). Unchanged, and this matters more than it
+  looks: the query exists to size a heap for a placed resource, so it has to
+  answer identically to the placed creation that follows or the application
+  allocates a heap too small for the flag buffer. Treating `NULL` as placed is
+  the same choice `:1051` and `:1127` already make.
+- **`D3D12_HEAP_FLAG_SHARED`** — excluded, because the memory is exported and
+  vkd3d does not control what the importer creates over it. It costs one term
+  and removes the question.
+- **The `VKD3D_CONFIG` overrides** (`:790-801`) run after this and still win, so
+  `disable_uav_compression`, `disable_color_compression` and
+  `disable_depth_compression` behave exactly as before.
+
+Unconditional rather than driver-gated, on the 0004 and 0005 pattern. The
+argument is not "Turnip is special" — it is that the code's own stated premise is
+about placed resources and vkd3d's own aliasing predicate already excludes
+committed ones. Upstream's comment concedes the AMD side is inert as it stands
+(*"On RADV at least, compression is not enabled for pure STORAGE images anyway,
+so this is mostly to avoid future regressions"*), and NVIDIA is excluded from the
+compression-control mechanism by design at `:664-668`.
+
+## Not measured, and it cannot be measured directly
+
+**No number is claimed.** This device exposes no DRAM bandwidth or DDR clock
+counter to an application or to the shell (`docs/BANDWIDTH.md` §3), so there is
+no honest percentage to quote and none is given here.
+
+The one working instrument is `MESA_GPU_TRACES=print_csv` with `MESA_LOG=file`,
+whose `render_pass` record carries a per-attachment `ubwc` y/n
+(`tu_cmd_buffer.cc:3001-3006`). **It reports attachments only**, which are by
+construction the images this patch does not change — a render target already had
+`ALLOW_RENDER_TARGET` and already kept its format list. So it cannot observe the
+effect head-on. How to confirm it anyway is in `patches/vkd3d/README.md`.
+
+## Relationship to `docs/BANDWIDTH.md` §4 candidate 3
+
+That candidate names the castable-format truncation at `resource.c:373-381`
+(*"Too many formats to expect compression, just use plain mutable"*) as the hole.
+It was investigated and is unreachable: it requires an application to pass
+`num_castable_formats` and a format family that fills
+`VKD3D_MAX_COMPATIBLE_FORMAT_COUNT`. This is the common path instead, and it
+needs no castable formats and no unusual format family — only a resource that is
+not a render target. Candidate 3 should be closed and replaced by this.
+
+## Not compiled
+
+Generated against the working tree with `0001`-`0005` applied and verified with
+`git apply --check` from inside `native/vkd3d`. No vkd3d build has been run
+against it.
+
+**Policy.** Vessel's patch on Vessel's build. Defensible upstream as written,
+since it is a plain inconsistency between this rule and `vkd3d_check_subresource_overlap`,
+but the performance case for it is Turnip's and has not been measured on any
+other driver. AI-authored in full.
+
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -784,6 +784,55 @@
+     if (!(desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)))
+         disable_compression = true;
+
++    /* Vessel: a committed resource cannot alias, and vkd3d says so itself.
++     *
++     * The rule above is stated for placed resources -- its comment opens with
++     * D3D12's placed-resource initialization rules -- but it is applied to every
++     * resource kind, because it keys off desc->Flags alone and never reads
++     * resource->flags. vkd3d has already answered the aliasing question
++     * elsewhere, and answered it the other way: vkd3d_check_subresource_overlap
++     * opens with "No aliasing possible if either resource is committed"
++     * (command.c:5525-5527), and this very function grants
++     * VK_IMAGE_CREATE_ALIAS_BIT to placed resources only. A committed texture's
++     * memory belongs to that image alone -- suballocated ones have their size and
++     * alignment padded to bufferImageGranularity expressly "to prevent resource
++     * aliasing" -- so there is no neighbour to clobber and no stale metadata to
++     * inherit.
++     *
++     * Placed, reserved and shared resources keep the old behaviour, and so does
++     * the allocation-info query, which passes no resource: it exists to size a
++     * heap for a placed resource, so it must answer exactly as the placed
++     * creation will or the heap comes out too small. The VKD3D_CONFIG overrides
++     * below deliberately still win over this.
++     *
++     * On this stack the cost of not doing it is total. disable_compression's only
++     * effect here is the branch below, which sets MUTABLE_FORMAT and then throws
++     * the format compatibility list away. Turnip does not implement
++     * VK_EXT_image_compression_control, so d3d12_device_should_use_image_compression_control
++     * is false and that side effect is the whole of what happens -- and Turnip's
++     * format_list_ubwc_possible fails closed on precisely that shape
++     * (tu_image.cc:506-507), on the one branch a8xx takes
++     * (tu_image.cc:658-662), which carries no perf_debug. So every non-RT,
++     * non-DS D3D12 image on this device loses UBWC, silently, on a
++     * bandwidth-bound tiler.
++     *
++     * The AMD/NVIDIA hazard does not transfer. It is a DCC/HTILE *clear* on the
++     * transition out of UNDEFINED writing metadata over a neighbour's bytes;
++     * Turnip writes no metadata there at all, that path being a CCU flush and
++     * nothing else (tu_cmd_buffer.cc:9997-10011). Turnip's mirror of the problem
++     * is a UBWC image *reading* a previous tenant's bytes as flag data, which is
++     * why it refuses UBWC under sparse residency in its own words, "unbound
++     * blocks may have leftover fast-clear data" (tu_image.cc:338-343). That is a
++     * reason to leave placed alone -- Turnip never inspects
++     * VK_IMAGE_CREATE_ALIAS_BIT, so vkd3d is the only guard a placed resource has
++     * here -- and no reason to disable a committed one.
++     *
++     * Not measured: this device exposes no bandwidth counter. See
++     * patches/vkd3d/README.md for how to confirm it anyway. */
++    if (disable_compression && resource && (resource->flags & VKD3D_RESOURCE_COMMITTED) &&
++            !(resource->heap_flags & D3D12_HEAP_FLAG_SHARED))
++        disable_compression = false;
++
+     /* Can be a performance tweak, or app workaround.
+      * On AMD native drivers, UAV + RTV usage tends to disable compression, but RADV tends to enable it.
+      * This is another source of application bugs. Give us an escape hatch as needed. */
