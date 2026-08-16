@@ -746,7 +746,7 @@ class SessionRuntime @Inject constructor(
         // launch.
         layout.cacheDirectories.forEach { if (!it.isDirectory) it.mkdirs() }
 
-        // **Before the stale-lock sweep below, and before the environment is
+        // **Before the promotion below, and before the environment is
         // handed to Wine.** vkd3d is given VKD3D_CACHE_DOS_PATH
         // (`C:\vessel\vkd3dcache\`), not the unix `caches/vkd3d` that Mesa and
         // DXVK get — see that constant for why a unix path there fails the
@@ -754,33 +754,58 @@ class SessionRuntime @Inject constructor(
         // before the guest starts, the same way [linkFexCache] does for FEX.
         linkVkd3dCache(layout.prefix, File(layout.caches, "vkd3d"), log)
 
-        // **A `.cache.write` left by a killed session stops the next one caching
-        // at all.** vkd3d-proton opens its stream archive with `_O_CREAT |
-        // _O_EXCL` (native/vkd3d/libs/vkd3d-common/file_utils.c:93), so the open
-        // fails outright if the file is already there, and it reports
+        // **`.cache.write` is the pipeline cache, not a lock, and this used to
+        // delete it on every launch.**
         //
-        //     vkd3d-proton:vkd3d_pipeline_library_disk_cache_notify_blob_insert:
-        //     Failed to open stream archive write file exclusively: …cache.write
+        // It was read as a lock because of what vkd3d does *later*: the stream
+        // archive is opened `_O_CREAT | _O_EXCL`
+        // (native/vkd3d/libs/vkd3d-common/file_utils.c:93) on the first blob
+        // insert, so a file already sitting there fails the open and the session
+        // reports `Failed to open stream archive write file exclusively`. Since
+        // Vessel's sessions are killed rather than closed, a leftover looked
+        // like the permanent state, and deleting it looked like the fix.
         //
-        // and then compiles every pipeline again, every launch. Its own comment
-        // calls the exclusive open safe because "this doesn't really happen in
-        // practice" — one process per application. That reasoning holds for a
-        // desktop and not for Vessel: sessions here are killed rather than
-        // closed, so the file outlives the process that made it routinely
-        // rather than never. Resident Evil Requiem compiles 3,025 shaders on
-        // each start, so the cost of getting this wrong is the whole startup.
+        // It is not, because the open is not the first thing that touches the
+        // file. `vkd3d_pipeline_library_disk_cache_initial_setup` runs first on
+        // the same disk thread and calls `..._merge`, whose very first act is
+        // `rename_no_replace(write_path, read_path)` — *this* is how a written
+        // cache becomes a readable one (cache.c:3037). Delete the file and that
+        // promotion has nothing to promote; the session then logs, in order,
         //
-        // Deleted at start rather than at teardown for the same reason the file
-        // is there at all: teardown is the code path that does not run.
+        //     removed a stale vkd3d shader cache lock (…cache.write)
+        //     No write cache exists. No need to merge any disk caches.
+        //     Failed to map read-only cache: …cache
+        //
+        // which is Requiem compiling all 3,025 pipelines on every start while
+        // writing 6.4 MB it will never read. Measured on 2026-08-16, on the
+        // second consecutive launch, with the cache file present beforehand.
+        //
+        // The exclusive-open failure that motivated the delete has a different
+        // cause and was already fixed: before `linkVkd3dCache` above, the DOS
+        // path resolved to nothing and *every* open there failed — see
+        // VKD3D_CACHE_DOS_PATH, which records the same error string.
+        //
+        // So promote instead of deleting, which is the same handoff the FEX
+        // cache uses. Only when there is nothing to overwrite: when both files
+        // exist, vkd3d's own merge is the thing that knows how to fold one into
+        // the other and delete the leftover, and a rename here would throw away
+        // whichever half it did not pick.
         runCatching {
             File(layout.caches, "vkd3d").listFiles()
                 ?.filter { it.isFile && it.name.endsWith(".cache.write") }
-                ?.forEach { stale ->
-                    if (stale.delete()) {
+                ?.forEach { written ->
+                    val promoted = File(written.parentFile, written.name.removeSuffix(".write"))
+                    // Read before the rename: afterwards `written` names nothing
+                    // and would report a cache of zero bytes, which is the one
+                    // number this line exists to distinguish from a real one.
+                    val kib = written.length() / 1024
+
+                    if (!promoted.exists() && written.renameTo(promoted)) {
                         log.line(
                             LogSource.VESSEL,
                             LogLevel.INFO,
-                            "removed a stale vkd3d shader cache lock (${stale.name})",
+                            "promoted the vkd3d shader cache from the last session " +
+                                "(${promoted.name}, $kib KiB)",
                         )
                     }
                 }
