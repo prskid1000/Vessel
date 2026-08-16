@@ -33,11 +33,57 @@ public class PresentExtension extends Extension {
     private static final int FAKE_INTERVAL = 1000000 / 60;
 
     public enum Kind {PIXMAP, MSC_NOTIFY}
+
+    /**
+     * VESSEL: presentproto's completion modes. {@code COPY} is the only one this
+     * server ever reports, and this is the record of why — so that "the enum
+     * declares FLIP, just send FLIP" is not tried a third time.
+     *
+     * <p><b>{@code FLIP} is not reachable from where the pixels currently live.</b>
+     * Flipping means the presented pixmap's own buffer <em>becomes</em> what the
+     * compositor scans out, with no copy. Here a DRI3 pixmap is not a GPU object
+     * at all: {@code DRI3Extension.pixmapFromFd} consumes the client's dma-buf
+     * with a plain CPU {@code mmap} ({@code DRI3Extension.java:286},
+     * {@code sysvshared_memory.c:77}) and then explicitly sets the drawable's
+     * texture to null ({@code DRI3Extension.java:301}). Meanwhile the window's
+     * content is an {@link GPUImage} — one AHardwareBuffer, allocated once,
+     * CPU-locked for its whole life and bound to a GL texture through an
+     * {@code EGLImageKHR} ({@code GPUImage.java:31-43}). The compositor samples
+     * that one texture object every frame. There is nothing to flip *to*.
+     *
+     * <p><b>What FLIP would actually require</b>, in order:
+     * <ol>
+     *   <li>An importer for a client-supplied dma-buf fd as an
+     *       {@code EGLImageKHR} — {@code EGL_EXT_image_dma_buf_import} with
+     *       {@code EGL_LINUX_DMA_BUF_EXT}, fourcc, stride, offset and modifier.
+     *       <b>No such code exists anywhere in this tree.</b> The only
+     *       {@code eglCreateImageKHR} call is {@code gpu_image.c:29-46} and it
+     *       imports {@code EGL_NATIVE_BUFFER_ANDROID} from an AHardwareBuffer —
+     *       the outbound direction, not the inbound one.</li>
+     *   <li>Rebinding the window's renderable texture per present, which means
+     *       the GL thread owning the swap rather than the X request thread.</li>
+     *   <li>Deferring {@link PresentIdleNotify} until the compositor has finished
+     *       with that image, instead of sending it the moment the copy returns.
+     *       Today "idle" is honest because the server took a copy; under FLIP the
+     *       server still holds the client's buffer and telling it otherwise
+     *       corrupts the frame.</li>
+     * </ol>
+     * That is a feature, not an adjustment, and item (1) is the load-bearing part
+     * — until an inbound dma-buf importer exists, {@code FLIP} cannot be told
+     * truthfully and this server must keep saying {@code COPY}.
+     *
+     * <p>{@code SKIP} is likewise never sent: it reports a present the server
+     * dropped because a later one overtook it, and nothing here queues presents
+     * to overtake.
+     */
     public enum Mode {COPY, FLIP, SKIP}
     private final SparseArray<Event> events = new SparseArray<>();
     private SyncExtension syncExtension;
 
-    // VESSEL: see presentPixmap. Touched only from the X request thread.
+    // VESSEL: see presentPixmap. Unsynchronised, and that is still correct after
+    // the render-lock narrowing there: every present runs under the server-wide
+    // `WINDOW_MANAGER` lock (handleRequest), so no two presents overlap even
+    // though each connection has its own OS thread.
     private static final int COPY_REPORT_EVERY = 120;
     private long copyNanos;
     private long copyMaxNanos;
@@ -177,35 +223,105 @@ public class PresentExtension extends Extension {
         Drawable content = window.getContent();
         if (pixmap != null && content.visual.depth != pixmap.drawable.visual.depth) throw new BadMatch();
 
-        synchronized (content.renderLock) {
-            if (pixmap != null) {
-                // VESSEL: time the copy, because nothing else can see it.
-                //
-                // The 0.560 ms `x11present` reports is the *client's*
-                // vkQueuePresentKHR round trip, and with three swapchain images
-                // the client is usually not waiting on this copy when it
-                // returns. So the one number that decides whether item 27
-                // (GPU-backing the drawable to delete this memcpy) is worth
-                // building has never been visible from either end. Sampled
-                // rather than logged per present: at 60 Hz a line a frame is
-                // itself a cost.
-                long t0 = System.nanoTime();
-                content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
-                long dt = System.nanoTime() - t0;
-                copyNanos += dt;
-                if (dt > copyMaxNanos) copyMaxNanos = dt;
-                if (++copyCount % COPY_REPORT_EVERY == 0) {
-                    Log.d(XRequestError.PROTO_TAG, "Present copyArea x" + copyCount
-                            + " mean=" + (copyNanos / copyCount / 1000) + "us"
-                            + " max=" + (copyMaxNanos / 1000) + "us"
-                            + " last=" + (dt / 1000) + "us"
-                            + " " + pixmap.drawable.width + "x" + pixmap.drawable.height);
-                }
-                sendIdleNotify(window, pixmap, serial, idleFence);
-            }
-            else content.forceUpdate();
-            sendCompleteNotify(window, serial, Kind.PIXMAP, Mode.COPY, 0, 0);
+        // VESSEL: the compositor must not wait behind this copy, and on the DRI3
+        // path it does not have to.
+        //
+        // **What the lock was costing.** `content.copyArea` below is a
+        // synchronous CPU copy of the whole presented image — 1920x1080x4 is 8 MB
+        // a present — and it ran inside `synchronized (content.renderLock)`. The
+        // GL thread takes that same monitor once per window per composited frame
+        // (`GLRenderer.renderWindowDrawable`, GLRenderer.java:335), and it is the
+        // thread that has to meet vblank. Its own hold is microseconds; what it
+        // pays is the *wait*. A render request can arrive from anywhere at any
+        // time — pointer motion alone posts one (GLRenderer.java:311) and a game
+        // with mouse-look posts them continuously — so the GL thread lands on
+        // this monitor mid-copy routinely rather than rarely, and each time it
+        // does it misses a frame deadline by however long the memcpy has left.
+        // Intermittent, scheduling-dependent, and exactly the shape of "run,
+        // freeze, run".
+        //
+        // **Why dropping it is safe here and not in general.** The monitor's real
+        // job is to keep a pixel writer away from the compositor while the
+        // compositor is *reading those pixels* — which it does in
+        // `Texture.updateFromDrawable()`, whose `glTexSubImage2D` uploads
+        // straight out of `drawable.getData()` (Texture.java:152). That read does
+        // not exist for a `GPUImage`: its `updateFromDrawable()` allocates once
+        // and then only clears `needsUpdate` (GPUImage.java:46-49), because the
+        // pixels live in an AHardwareBuffer the GPU samples directly through an
+        // EGLImage. And a presenting window's content is *always* a `GPUImage` —
+        // `selectInput` below converts it (PresentExtension.java:222-225) before
+        // Mesa can send its first `PresentPixmap`. So on the path that matters
+        // the monitor excludes the compositor from a read the compositor never
+        // performs.
+        //
+        // **What it was never protecting, so nothing is lost.** It is tempting to
+        // read this lock as keeping the destination buffer alive across the copy.
+        // It does not: `Texture.destroy()` and `GPUImage.destroy()` take no lock
+        // at all (Texture.java:236, GPUImage.java:74) and run on the GL thread via
+        // `queueEvent(texture::destroy)` — so that race was already open, both
+        // before and after this change. What actually keeps the window's content
+        // alive across the copy is the `WINDOW_MANAGER` lock this request already
+        // holds (handleRequest below), which is why that one is deliberately left
+        // in place even though it is the coarser of the two: dropping it would
+        // convert a compositor stall into a use-after-free.
+        //
+        // Nor was it preventing tearing. `glDrawArrays` only enqueues; the GPU
+        // samples the AHardwareBuffer some time after the monitor is released, so
+        // a present landing in the same buffer could always tear against a frame
+        // in flight. Unchanged by this.
+        //
+        // The non-GPUImage branch keeps the original behaviour verbatim, for the
+        // `pixmap == null` / plain-`Texture` cases where the compositor really
+        // does read `drawable.getData()`.
+        if (content.getTexture() instanceof GPUImage) {
+            presentToContent(window, content, pixmap, serial, xOff, yOff, idleFence);
         }
+        else synchronized (content.renderLock) {
+            presentToContent(window, content, pixmap, serial, xOff, yOff, idleFence);
+        }
+    }
+
+    /** VESSEL: the body of {@link #presentPixmap}, extracted so the two locking
+     * regimes above share one implementation rather than two copies of it. */
+    private void presentToContent(Window window, Drawable content, Pixmap pixmap, int serial,
+                                  short xOff, short yOff, int idleFence) {
+        if (pixmap != null) {
+            // VESSEL: time the copy, because nothing else can see it.
+            //
+            // The 0.560 ms `x11present` reports is the *client's*
+            // vkQueuePresentKHR round trip, and with three swapchain images
+            // the client is usually not waiting on this copy when it
+            // returns. So the one number that decides whether item 27
+            // (GPU-backing the drawable to delete this memcpy) is worth
+            // building has never been visible from either end. Sampled
+            // rather than logged per present: at 60 Hz a line a frame is
+            // itself a cost.
+            //
+            // VESSEL: read this number first when presentation stutters. The
+            // source is an `mmap` of the client's dma-buf with no
+            // `DMA_BUF_IOCTL_SYNC` around it (`sysvshared_memory.c:77`), so if
+            // the kernel handed back a write-combine mapping the *read* side of
+            // this memcpy runs at uncached speed and `mean` will be tens of
+            // milliseconds rather than the low single digits an 8 MB cached
+            // copy costs. That distinction decides whether the remaining work
+            // is "make the copy cheaper" or "delete the copy", and it is one
+            // logcat line away — nothing else in this tree can tell them apart.
+            long t0 = System.nanoTime();
+            content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
+            long dt = System.nanoTime() - t0;
+            copyNanos += dt;
+            if (dt > copyMaxNanos) copyMaxNanos = dt;
+            if (++copyCount % COPY_REPORT_EVERY == 0) {
+                Log.d(XRequestError.PROTO_TAG, "Present copyArea x" + copyCount
+                        + " mean=" + (copyNanos / copyCount / 1000) + "us"
+                        + " max=" + (copyMaxNanos / 1000) + "us"
+                        + " last=" + (dt / 1000) + "us"
+                        + " " + pixmap.drawable.width + "x" + pixmap.drawable.height);
+            }
+            sendIdleNotify(window, pixmap, serial, idleFence);
+        }
+        else content.forceUpdate();
+        sendCompleteNotify(window, serial, Kind.PIXMAP, Mode.COPY, 0, 0);
     }
 
     private void selectInput(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {

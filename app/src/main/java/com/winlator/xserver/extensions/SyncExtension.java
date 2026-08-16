@@ -1,5 +1,6 @@
 package com.winlator.xserver.extensions;
 
+import android.util.Log;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
 
@@ -134,6 +135,11 @@ public class SyncExtension extends Extension {
                 unmapFence(owned[i]);
                 fences.delete(owned[i]);
             }
+            // VESSEL: a fence that has gone away is not a fence that will never
+            // trigger — it is a BadFence, and awaitFence re-checks membership on
+            // every wakeup so that it reports one instead of waiting out its
+            // timeout. Same reasoning in destroyFence.
+            fences.notifyAll();
         }
     }
 
@@ -152,6 +158,12 @@ public class SyncExtension extends Extension {
             else XShmFence.reset(info.page);
         }
         fences.put(id, triggered);
+        // VESSEL: wake anything parked in awaitFence. Every caller of this
+        // method already holds the monitor (setTriggered, triggerFence,
+        // resetFence), which is what makes the notify legal here rather than at
+        // each call site. See awaitFence for why the waiter is on this monitor
+        // at all instead of spinning on it.
+        fences.notifyAll();
     }
 
     /** VESSEL: drops a fence's page, if it has one. Callers hold {@code fences}. */
@@ -208,32 +220,125 @@ public class SyncExtension extends Extension {
             if (fences.indexOfKey(id) < 0) throw new BadFence(id);
             unmapFence(id); // VESSEL: the mapping goes with the fence.
             fences.delete(id);
+            fences.notifyAll(); // VESSEL: see freeClientResources.
         }
     }
 
+    /**
+     * VESSEL: how long a client thread may sit in {@link #awaitFence} before the
+     * server gives up on it, and how often it re-reads the shared pages while it
+     * waits.
+     *
+     * <p><b>Why there is a timeout at all</b>, when X's AwaitFence has none and a
+     * real server is entitled to block a client forever: a blocked client here is
+     * a blocked <em>OS thread</em>, because {@code XServerDisplay.kt:1175} calls
+     * {@code setMultithreadedClients(true)} and {@code xconnector_epoll.c:292}
+     * gives every connection its own {@code pollThread}. Tearing a connection
+     * down runs {@code XConnectorEpoll_killConnection}, which does
+     * {@code requestShutdown(shutdownFd)} then {@code pthread_join(pollThread)}
+     * ({@code xconnector_epoll.c:238-243}) — and a thread parked in Java inside
+     * {@code handleExistingConnection} never returns to {@code waitForSocketRead}
+     * to notice the shutdown fd. An unbounded wait therefore does not merely hang
+     * one client, it hangs session teardown on a {@code pthread_join} that can
+     * never complete. Five seconds is far past any legitimate fence wait and far
+     * short of a user deciding the app is dead.
+     *
+     * <p><b>Why it polls as well as waiting on the monitor.</b> The monitor
+     * notify in {@link #putTriggered} covers every fence this server triggers.
+     * It does not cover a page-backed fence the <em>client</em> triggers through
+     * its own mapping with {@code xshmfence_trigger}, which writes memory and
+     * issues a futex wake that no Java monitor hears. The poll is the safety net
+     * for that case only; the notify is what makes the common case immediate.
+     */
+    private static final long AWAIT_POLL_MILLIS = 4;
+    private static final long AWAIT_TIMEOUT_NANOS = 5_000_000_000L;
+
+    /**
+     * VESSEL: SYNC {@code AwaitFence}, rewritten because the version it replaces
+     * could not terminate.
+     *
+     * <p><b>The defect.</b> Upstream held {@code synchronized (fences)} across a
+     * {@code do { ... Thread.yield(); } while (!anyTriggered)} spin.
+     * {@code Thread.yield()} does not release a monitor — only {@code wait()}
+     * does — so the waiting thread kept the one lock every possible releaser
+     * needs. There are exactly two ways a fence becomes triggered in this server
+     * and both take that monitor first: {@link #triggerFence} (a client's
+     * {@code TriggerFence}) and {@link #setTriggered} (called from
+     * {@code PresentExtension.sendIdleNotify} on the present path). So the loop's
+     * exit condition could only ever be satisfied by a fence that was
+     * <em>already</em> triggered when the request arrived. Anything else was a
+     * hard deadlock: the awaiting client's thread spun at 100% of a core forever,
+     * and because {@code fences} is one lock shared by every connection, every
+     * other client's SYNC request and every {@code PresentPixmap} carrying an
+     * idle fence blocked behind it for the rest of the session.
+     *
+     * <p><b>What this is not.</b> Nothing in the current stack sends this
+     * request — a grep of all of {@code native/} for {@code sync_await_fence},
+     * {@code XSyncAwait} and {@code xcb_sync_await} finds no call site in Mesa,
+     * Wine, DXVK, vkd3d or FEX. Mesa's X11 WSI waits on its <em>own</em> mapping
+     * with {@code xshmfence_await} ({@code wsi_common_x11.c:2253}) and never asks
+     * the server to wait for it. So this fix is not the cause of any stutter
+     * observed today and must not be reported as one; it is a loaded gun that
+     * fires the first time any client uses a request this server advertises.
+     *
+     * <p><b>The lock discipline now.</b> The request body is drained first, on
+     * this connection's own thread, before anything can block — a wait with an
+     * unconsumed request in the buffer would leave the stream mis-framed for the
+     * rest of the session. Then the monitor is taken, and inside it the loop
+     * alternates between checking under the lock and {@code fences.wait(...)},
+     * which <em>releases</em> the monitor for the duration of the wait. That is
+     * the whole of the fix: the releaser can now get in. Membership is re-checked
+     * on every wakeup rather than once at entry, so a fence destroyed while a
+     * client waits on it answers {@code BadFence} instead of timing out.
+     */
     private void awaitFence(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
+        // Drained before the monitor is taken and before anything can block.
+        // Counted rather than decremented to zero: upstream's `while (length !=
+        // 0) length -= 4` walks past the end of `ids` on any length that is not a
+        // multiple of four, which is a client-controlled ArrayIndexOutOfBounds
+        // and therefore a dropped connection.
+        int length = client.getRemainingRequestLength();
+        int count = length / 4;
+        int[] ids = new int[count];
+        for (int i = 0; i < count; i++) ids[i] = inputStream.readInt();
+        inputStream.skip(length - count * 4);
+
+        // AwaitFence over an empty fence list has nothing to wait for and
+        // returns. Upstream's do/while evaluated its condition on an
+        // `anyTriggered` no loop body had touched, so an empty list was the
+        // second way to spin forever.
+        if (count == 0) return;
+
+        final long deadline = System.nanoTime() + AWAIT_TIMEOUT_NANOS;
         synchronized (fences) {
-            int length = client.getRemainingRequestLength();
-            int[] ids = new int[length / 4];
-            int i = 0;
-
-            while (length != 0) {
-                ids[i++] = inputStream.readInt();
-                length -= 4;
-            }
-
-            boolean anyTriggered = false;
-            do {
+            while (true) {
                 for (int id : ids) {
                     if (fences.indexOfKey(id) < 0) throw new BadFence(id);
-                    anyTriggered = isTriggered(id); // VESSEL: was fences.get(id).
-                    if (anyTriggered) break;
+                    if (isTriggered(id)) return; // VESSEL: reads the page, was fences.get(id).
                 }
 
-                Thread.yield();
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0) break;
+                try {
+                    // Never zero, which would mean "wait forever".
+                    fences.wait(Math.min(AWAIT_POLL_MILLIS, remainingNanos / 1000000L + 1));
+                }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
-            while (!anyTriggered);
         }
+
+        // Deliberately WARN and deliberately outside the monitor. AwaitFence has
+        // no reply, so returning here is indistinguishable on the wire from a
+        // fence that triggered — which is a lie, and the log line is the only
+        // record that it was told. If this ever appears, the fence in question
+        // has a triggerer nobody has written yet.
+        Log.w(XRequestError.PROTO_TAG, "SYNC AwaitFence gave up after "
+                + (AWAIT_TIMEOUT_NANOS / 1000000L) + "ms on " + count
+                + " fence(s), first 0x" + Integer.toHexString(ids[0])
+                + " — returning as if triggered");
     }
 
     @Override
