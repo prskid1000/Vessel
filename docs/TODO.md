@@ -173,49 +173,11 @@ Written, shipped, and not yet watched. This section exists because the file's
 top rule makes "fixed" and "proven" different words, and mixing them is how a
 regression gets attributed to the wrong change three days later.
 
-- [~] **#42 — the PSO compatibility hash mismatch was `node_mask`, and the field
-  is named.** *Its "Done when" — "the mismatching field is named" — is met.*
+- [x] **#42 — the PSO compatibility hash mismatch was `node_mask`. `patches/vkd3d/0004`.** Confirmed on device 2026-08-16: **zero** mismatches and zero rejected blobs across a 21,956-line Requiem session, against 45-50 per launch before. The cache maps in 0.29 ms and parses in 19.9 ms, and `.cache.write` stays at its 264-byte header through hard rendering — a warm cache with nothing left to compile.
 
-  Measured across two runs: **45 mismatches in one, 50 in the next**, roughly 1.5%
-  of 3,025 shaders, and not trending to zero the way a self-healing cache would.
-  `patches/vkd3d/0002` made a rejection say *what* mismatched, and what it said
-  named the field by arithmetic rather than by guessing. Every rejection reported
-  `shaders identical` and `flags 0`, and in **every** observed case the two hashes
-  differed by exactly `0x100000001b3` — the FNV-1 64-bit prime.
+  The field was named by arithmetic, not by guessing: every rejection reported `shaders identical` and `flags 0`, with the two hashes differing by exactly `0x100000001b3`, the FNV-1 64-bit prime. In `h = (h * P) ^ v` with `flags` zero, a whole-prime difference can only mean the penultimate input — `node_mask` — differed in bit 0. vkd3d already treats 0 and 1 as the same device everywhere else (`debug_ignored_node_mask` only complains when `mask && mask != 1`), so `0004` normalises rather than removes and existing blobs keep their hashes.
 
-  The hash is `h = (h * P) ^ v` and the last two inputs are `node_mask` then
-  `flags`. With `flags` zero the final XOR is a no-op and the last step is a pure
-  multiply by P, so a whole-prime difference means the **penultimate** input
-  differed by one in bit 0. Nothing else produces that signature: a differing
-  `flags` gives a difference of one, and anything earlier is multiplied by P again
-  on the way out.
-
-  **vkd3d already treats 0 and 1 as the same device everywhere except here.**
-  `debug_ignored_node_mask` only complains when `mask && mask != 1`, and every
-  entry point taking a NodeMask discards it after that check —
-  `CreateRootSignature`, `GetCustomHeapProperties`, `GetResourceAllocationInfo3`,
-  `CreateCommandList`. Pipeline creation never reads it; `state.c` only copies it
-  out of the descriptor. D3D12 treats them as equivalent on a single-adapter
-  device. Then the raw value went into the cache compatibility key, so an engine
-  passing 0 down one path and 1 down another is refused here and matches on
-  Windows.
-
-  `patches/vkd3d/0004` normalises rather than removes — `H32(desc->node_mask ?
-  desc->node_mask : 1)` at `native/vkd3d/libs/vkd3d/cache.c:2810` in the patched
-  tree (pristine hunk `@@ -2773,7`; a mask of 1 hashes exactly as before, so
-  existing valid blobs keep their hashes). Ruled out first, both by measurement:
-  not a stale cache — a differing `vkd3d_build` is rejected earlier with
-  `D3D12_ERROR_DRIVER_VERSION_MISMATCH` rather than `E_INVALIDARG`, and
-  `VKD3D_REVISION` is Vessel packaging outside `vkd3d_build` — and not an unstable
-  hash, the function being pure in the descriptor.
-
-  **What it cost was compile time, not correctness**, which is why this was
-  correctly ranked below the render blockers all along.
-
-  *Now done when:* two consecutive RE9 runs on a build carrying `0004` — the
-  first writes the pipeline cache, the second compares against it — and the second
-  reports **zero** `PSO compatibility hash mismatch` lines. One run cannot answer
-  this; a cold cache has nothing to mismatch against.
+  **Two things had to be fixed before this was even testable, and that is the lesson.** The vkd3d disk cache was deleted on every launch by Vessel's own "stale lock" sweep, so "do the keys match across runs" had nothing to match against. A fix whose test needs a working cache cannot be verified while the cache is being thrown away, and neither bug was visible from the other's symptoms.
 
 - [x] **FEX cache content hash.** The Denuvo half was never real — the cache is installed inside `NtMapViewOfSection` before the guest runs, and every later divergence is a write that invalidates. The real hole was `TryMapImage` never checking the id it was handed. `patches/fex/0021`.
 ---

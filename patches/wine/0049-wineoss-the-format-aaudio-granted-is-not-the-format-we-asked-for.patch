@@ -1,0 +1,158 @@
+wineoss: the format AAudio granted is not the format we asked for, and nobody checked.
+
+`finish_aaudio_stream` validates two of the three things that make a stream
+interpretable and skips the third:
+
+    if(AAudioStream_getSampleRate(aas) != fmt->nSamplesPerSec ||
+            AAudioStream_getChannelCount(aas) != fmt->nChannels){
+
+Rate and channels, never format. `AAudioStreamBuilder_setFormat` is documented
+as a *request*: AAudio is free to open the stream in another format, and
+`AAudioStream_getFormat` on the opened stream is the only way to learn what was
+granted. The whole driver already knows this about the other two fields -- the
+comment on the sharing-mode fallback says the mode granted is "logged rather than
+believed" -- and then believes the format.
+
+**What that costs is not a warning, it is noise.** `convert_to_i16` is decided
+before the stream exists, on the guest's format alone
+(`open_aaudio_stream`): the float branch sets it after asking for an exclusive
+int16 stream, and the fallback path leaves it FALSE because it asked for float.
+If that fallback open returns an int16 stream instead -- the ordinary outcome
+when the HAL's only stereo/48k profile is `AUDIO_FORMAT_PCM_16_BIT`, which is
+exactly what this device's `audio_policy_configuration.xml` says -- then the
+driver writes IEEE-754 float bytes into a stream that reads them as PCM_16.
+
+Sign bit, exponent and mantissa are then interpreted as two signed samples per
+float. Ordinary audio lives in the -1.0..1.0 range, whose exponent bits are
+mostly 0x3F80-ish patterns flipping constantly, so the result is not distorted
+audio: it is broadband noise at the right level and the right rate, with the
+stride wrong by a factor of two on top. **That is a complete buzz with the music
+still nominally playing underneath**, and every counter in the driver reads
+perfect while it happens -- which is what made this so hard to see. Requiem
+buzzes end to end; Metro, whose stream is int16 and never reaches this branch,
+does not.
+
+FIVE THEORIES DIED BEFORE THIS ONE, and they are listed so none is retried:
+breadcrumb instrumentation starving the audio thread; the 24 fps limit starving
+the buffer; partial writes dropping samples; relaxed memory ordering corrupting
+Wwise's mixing; and the two Wwise DSP plugins (`AkConvolutionReverb`,
+`AkReflect`) being miscompiled under FEX. The first four were measured dead. The
+fifth is the one this replaces: it was reached by elimination, and it was the
+wrong answer to the right question -- *what does Requiem's audio do that Metro's
+does not* -- because the answer turned out to be one branch in this file rather
+than anything in the guest.
+
+**The measurement that pointed here, and the reading error that hid it.** The
+`aaudio:` line reports `format 1` = `AAUDIO_FORMAT_PCM_I16`, and that was read as
+"Requiem asks for int16 and gets it", which retired the format question on
+2026-08-16. It does not say that. `format` there is what AAudio granted, and it
+is `I16` on *both* paths -- the converted-float one and the native-int16 one.
+The line that distinguishes them is a `TRACE` on a channel Vessel's default
+`WINEDEBUG` does not print. So the one fact that separated the two games was
+observable, printed, and ambiguous.
+
+So: reconcile after opening rather than before. The format the stream actually
+has decides whether the conversion runs, which makes the two impossible to
+disagree -- and a granted format that is neither the guest's nor int16-for-float
+is refused with a line naming both, rather than played as noise.
+
+`finish_aaudio_stream` takes the flag because it is the function that already
+owns "did we get what we asked for", and both callers route through it. The
+float branch's unconditional `*convert_to_i16 = TRUE` goes: it was correct only
+by assuming its own request was honoured, which is the assumption this patch
+exists to delete.
+
+diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
+--- a/dlls/wineoss.drv/oss.c
++++ b/dlls/wineoss.drv/oss.c
+@@ -273,11 +273,11 @@
+     TRACE("burst %d, capacity %d, client buffer %u, asked for %u, buffer size set to %d\n",
+           burst, capacity, stream->bufsize_frames, want,
+           AAudioStream_getBufferSizeInFrames(stream->aas));
+ }
+ 
+-static HRESULT finish_aaudio_stream(AAudioStream *aas, const WAVEFORMATEX *fmt)
++static HRESULT finish_aaudio_stream(AAudioStream *aas, const WAVEFORMATEX *fmt, BOOL *convert_to_i16)
+ {
+     /* The one line that says whether the latency below is going to be small.
+      * ERR so it survives a session log at its default level: a burst this
+      * driver did not expect is the first thing to look at when audio is rough,
+      * and it costs one line per stream. */
+@@ -291,12 +291,53 @@
+     if(AAudioStream_getSampleRate(aas) != (int32_t)fmt->nSamplesPerSec ||
+             AAudioStream_getChannelCount(aas) != fmt->nChannels){
+         WARN("stream opened at %d Hz x%d, wanted %u Hz x%u\n",
+                 AAudioStream_getSampleRate(aas), AAudioStream_getChannelCount(aas),
+                 (unsigned)fmt->nSamplesPerSec, fmt->nChannels);
+         AAudioStream_close(aas);
+         return AUDCLNT_E_UNSUPPORTED_FORMAT;
+     }
+ 
++    /* **The format is decided here because here is where it is known.**
++     *
++     * The two fields above are checked against what was asked for; the format
++     * was not checked at all, and `convert_to_i16` was decided by the caller
++     * before this stream existed. `AAudioStreamBuilder_setFormat` is a request
++     * -- AAudio may open the stream in another format and say so only through
++     * `AAudioStream_getFormat` -- so a float guest whose fallback open quietly
++     * returned int16 had float bytes written into an int16 stream. That is not
++     * a distortion, it is broadband noise: the exponent bits of ordinary
++     * -1.0..1.0 samples read as PCM are pure hash, at the right level and the
++     * right rate, which is a buzz over audio that is otherwise still there.
++     *
++     * Deciding it from the granted format instead makes the flag and the stream
++     * impossible to disagree, which is the only property that matters -- the
++     * old code was correct exactly when its request happened to be honoured. */
++    {
++        aaudio_format_t granted = AAudioStream_getFormat(aas);
++        aaudio_format_t wanted = get_aaudio_format(fmt);
++
++        if(granted == wanted){
++            *convert_to_i16 = FALSE;
++        }else if(granted == AAUDIO_FORMAT_PCM_I16 && wanted == AAUDIO_FORMAT_PCM_FLOAT){
++            /* The pairing this driver knows how to bridge, and the one it goes
++             * looking for: MMAP NOIRQ takes int16 and nothing else on this
++             * device, so an int16 stream for a float guest is the good outcome
++             * rather than a fallback. It just has to be observed rather than
++             * assumed. */
++            MESSAGE("aaudio: int16 stream for a float guest; converting on the way out\n");
++            *convert_to_i16 = TRUE;
++        }else{
++            /* Neither the guest's format nor a pair we can bridge. Refusing is
++             * the only honest option: writing the guest's bytes into it would
++             * produce noise, and mmdevapi can still fall back to a format this
++             * device does take. */
++            MESSAGE("aaudio: stream opened as format %d, wanted %d, and there is no "
++                    "conversion between them\n", granted, wanted);
++            AAudioStream_close(aas);
++            return AUDCLNT_E_UNSUPPORTED_FORMAT;
++        }
++    }
++
+     return S_OK;
+ }
+ 
+@@ -348,13 +389,12 @@
+         if(AAudioStreamBuilder_openStream(builder, out) == AAUDIO_OK){
+             HRESULT hr;
+ 
+             TRACE("exclusive int16 stream for a float guest; converting on the way out\n");
+             AAudioStreamBuilder_delete(builder);
+-            if(FAILED(hr = finish_aaudio_stream(*out, fmt))){
++            if(FAILED(hr = finish_aaudio_stream(*out, fmt, convert_to_i16))){
+                 *out = NULL;
+                 return hr;
+             }
+-            *convert_to_i16 = TRUE;
+             return S_OK;
+         }
+         TRACE("no exclusive int16 stream; keeping the guest's own format\n");
+@@ -401,7 +441,7 @@
+     {
+-        HRESULT hr = finish_aaudio_stream(*out, fmt);
++        HRESULT hr = finish_aaudio_stream(*out, fmt, convert_to_i16);
+ 
+         if(FAILED(hr)) *out = NULL;
+         return hr;
+     }
+ }

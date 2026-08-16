@@ -71,10 +71,33 @@ diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
  #include <sys/types.h>
  #include <sys/stat.h>
  #include <fcntl.h>
-@@ -906,6 +909,84 @@ static void handle_disconnect(struct oss_stream *stream)
+@@ -906,6 +909,118 @@ static void handle_disconnect(struct oss_stream *stream)
          stream->reopen_backoff = DISCONNECT_RETRY_PASSES;
  }
  
++/* Bytes per frame *in the buffer being handed to AAudio*, which is not always
++ * the guest's.
++ *
++ * **`nBlockAlign` is the guest's stride and using it here was a read off the end
++ * of the conversion buffer.** When `convert_to_i16` is set, `buf` no longer
++ * points into the guest's ring: it is `stream->conv_buffer`, sized at
++ * `frames * nChannels * sizeof(INT16)` by `convert_to_i16_frames`. For a float
++ * guest that is half of `frames * nBlockAlign`, so the tee would have read —
++ * and written into the capture — twice the bytes that exist, from a buffer
++ * allocated by `NtAllocateVirtualMemory` with nothing promised after it.
++ *
++ * Caught by reading the write path rather than by running it, and it would have
++ * fired on precisely the case this instrument was built to investigate: the
++ * float guest. A diagnostic that faults the process it is observing is worse
++ * than the bug it is chasing, which this patch says elsewhere and did not
++ * honour here. */
++static UINT32 vessel_audio_stride(const struct oss_stream *stream)
++{
++    if(stream->convert_to_i16)
++        return stream->fmt->nChannels * sizeof(INT16);
++    return stream->fmt->nBlockAlign;
++}
++
 +/* Vessel: tee what is actually handed to the device, so a buzz can be looked at.
 + *
 + * **Every layer above the samples has been eliminated and the buzz survived.**
@@ -95,7 +118,17 @@ diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
 + * stream would be worse than the bug. Raw interleaved frames in whatever format
 + * the stream negotiated, which the header line records, because a WAV header
 + * written by a driver that is being blamed for wrong samples is one more thing
-+ * to doubt. */
++ * to doubt.
++ *
++ * **`MESSAGE` and not `TRACE`/`WARN`, and that cost a device run.** Vessel's
++ * default is `WINEDEBUG=-all,err+all,...`, so nothing below ERR on the `oss`
++ * channel is printed -- which made both the header line and a failed open
++ * silent. A capture that does not happen then looks exactly like a capture that
++ * happened and found nothing. The `aaudio:` line a few hundred lines above uses
++ * `MESSAGE` for the same reason, and this is one line per process, not per
++ * stream: `fd` is static, so the first write does the reporting and the rest are
++ * a load and a branch. Silence now means the variable was not set, which is a
++ * different fault with a different place to look. */
 +static void vessel_audio_dump(struct oss_stream *stream, const void *buf, UINT32 frames)
 +{
 +    static int fd = -2;   /* -2 unopened, -1 disabled */
@@ -131,15 +164,16 @@ diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
 +
 +        fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
 +        if(fd < 0){
-+            WARN("audio dump: cannot open %s: %s\n", path, strerror(errno));
++            MESSAGE("audio dump: cannot open %s: %s\n", path, strerror(errno));
 +            fd = -1;
 +            return;
 +        }
-+        TRACE("audio dump: %s, %u Hz, %u ch, %u bits, block %u\n", path,
++        MESSAGE("audio dump: %s, %u Hz, %u ch, %u bits, block %u%s\n", path,
 +              (unsigned int)stream->fmt->nSamplesPerSec,
 +              (unsigned int)stream->fmt->nChannels,
-+              (unsigned int)stream->fmt->wBitsPerSample,
-+              (unsigned int)stream->fmt->nBlockAlign);
++              stream->convert_to_i16 ? 16u : (unsigned int)stream->fmt->wBitsPerSample,
++              (unsigned int)vessel_audio_stride(stream),
++              stream->convert_to_i16 ? " (converted from float)" : "");
 +    }
 +
 +    if(frames){
@@ -147,7 +181,7 @@ diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
 +         * short write loses samples the device did hear, which is a hole in the
 +         * capture and not a fault in the stream; a retry loop here would put the
 +         * audio thread's deadline in the hands of a diagnostic file. */
-+        ssize_t ignored = write(fd, buf, frames * stream->fmt->nBlockAlign);
++        ssize_t ignored = write(fd, buf, frames * vessel_audio_stride(stream));
 +
 +        (void)ignored;
 +    }
@@ -156,7 +190,7 @@ diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
  static void oss_write_data(struct oss_stream *stream)
  {
      UINT32 written_frames, in_oss_frames, write_limit, max_period, write_offs_frames, new_frames;
-@@ -1007,6 +1088,7 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -1007,6 +1122,7 @@ static void oss_write_data(struct oss_stream *stream)
      if(stream->convert_to_i16 && !(buf = (BYTE *)convert_to_i16_frames(stream, buf, to_write_frames)))
          return;
  
@@ -164,7 +198,7 @@ diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
      written = AAudioStream_write(stream->aas, buf, to_write_frames, 0);
      if(written < 0){
          /* A disconnect is recoverable and nothing else here is: an argument
-@@ -1086,7 +1168,8 @@ static void oss_write_data(struct oss_stream *stream)
+@@ -1086,7 +1202,8 @@ static void oss_write_data(struct oss_stream *stream)
          if(stream->convert_to_i16 && !(buf = (BYTE *)convert_to_i16_frames(stream, buf, to_write_frames)))
              return;
  
