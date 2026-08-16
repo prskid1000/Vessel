@@ -938,9 +938,68 @@ class SessionEnvironmentTest {
         // `WINEPREFIX` and `ADRENOTOOLS_DRIVER_NAME`.
         assertTrue(DIAGNOSTIC_SESSION_ENV.all { it in RESERVED_SESSION_ENV })
         assertTrue(DIAGNOSTIC_SESSION_ENV.size < RESERVED_SESSION_ENV.size)
-        // The two whose whole purpose is an absence and a fixed value.
+        // The one whose whole purpose is an absence. `MESA_VK_WSI_DEBUG` was
+        // asserted here too and is deliberately no longer: it had a *fixed
+        // value*, which is a different thing, and the value was fixed only
+        // because half of Mesa's X11 WSI was not compiled. See the entry in
+        // DIAGNOSTIC_SESSION_ENV.
         assertFalse("VKD3D_LOG_FILE" in DIAGNOSTIC_SESSION_ENV)
-        assertFalse("MESA_VK_WSI_DEBUG" in DIAGNOSTIC_SESSION_ENV)
+    }
+
+    // — the present path -------------------------------------------------------
+
+    @Test
+    fun `the present path is sent as a value, never as an absence`() {
+        // `if (!ZERO_COPY_PRESENT) environment[…] = "sw"` was the old shape and
+        // it made the switch one-way: the diagnostics stage can only rewrite
+        // keys, so on the DRI3 side there would be no key to rewrite and no way
+        // back. The key is therefore always present, and empty means DRI3 — a
+        // property of `parse_debug_string`, which returns 0 for "" and for NULL
+        // alike.
+        val environment = env(driver = turnip)
+        assertTrue("MESA_VK_WSI_DEBUG" in environment)
+        assertEquals(FIXED_MESA_VK_WSI_DEBUG, environment["MESA_VK_WSI_DEBUG"])
+    }
+
+    @Test
+    fun `a container can pick either present path, and the default picks neither`() {
+        // The whole point of the row: reachable without a rebuild, in both
+        // directions, and silent until somebody uses it.
+        val dri3 = container().copy(
+            diagnostics = ContainerDiagnostics(
+                rows = listOf(DiagnosticSetting(name = "MESA_VK_WSI_DEBUG", level = WSI_DRI3)),
+            ),
+        )
+        assertEquals(
+            WSI_DRI3,
+            sessionEnvironment(dri3, fexManifest, paths, turnip, fex)["MESA_VK_WSI_DEBUG"],
+        )
+
+        val software = container().copy(
+            diagnostics = ContainerDiagnostics(
+                rows = listOf(DiagnosticSetting(name = "MESA_VK_WSI_DEBUG", level = WSI_SOFTWARE)),
+            ),
+        )
+        assertEquals(
+            WSI_SOFTWARE,
+            sessionEnvironment(software, fexManifest, paths, turnip, fex)["MESA_VK_WSI_DEBUG"],
+        )
+        // …and a row sitting where the session already is contributes nothing,
+        // which is what keeps the golden map above true for a fresh container.
+        assertTrue(diagnosticEnvironment(software.diagnostics).isEmpty())
+    }
+
+    @Test
+    fun `the present row's baseline is what the session sends, whichever way the constant points`() {
+        // The failure this pins is silent rather than loud: a baseline that
+        // disagreed with the assignment would put `MESA_VK_WSI_DEBUG` in the
+        // diagnostics map for a container nobody has touched, and the golden
+        // environment test would be the only thing to notice.
+        assertEquals(
+            FIXED_MESA_VK_WSI_DEBUG,
+            LOGGABLES.first { it.name == "MESA_VK_WSI_DEBUG" }.baseline,
+        )
+        assertEquals(if (ZERO_COPY_PRESENT) WSI_DRI3 else WSI_SOFTWARE, FIXED_MESA_VK_WSI_DEBUG)
     }
 
     @Test
@@ -1093,6 +1152,37 @@ class SessionEnvironmentTest {
         assertNull(mb("0"))
         assertNull(mb("lots"))
         assertNull(mb("6 gigabytes"))
+    }
+
+    @Test
+    fun `a flag this build does not declare still reaches its own variable`() {
+        // **The free-text escape hatch was silently broken and nothing said so.**
+        // `emitted` resolved each row by *name*, and the name-only overload
+        // resolves in the wine family — so an undeclared `TU_DEBUG` flag became a
+        // Wine channel, `on` failed the Wine ladder, and `inForce` dropped it.
+        // Declared flags were unaffected, because a declared name is matched
+        // before the family is consulted, so everything anybody had tried worked.
+        //
+        // Measured on device: `nolrz` and `noubwc`, both declared, produced
+        // `TU_DEBUG=0xa1`. `flushall`, which this build does not declare,
+        // produced `TU_DEBUG=0x1` — startup and nothing else — and a session was
+        // spent reading the result of a bisect that never ran.
+        val typed = container().copy(
+            diagnostics = ContainerDiagnostics()
+                // Type first: `withRowTyped` deliberately clears the name,
+                // because a name means something different in each family.
+                .withRowAdded().withRowTyped(0, "turnip")
+                .withRowNamed(0, "flushall").withRowLevel(0, "on"),
+        )
+        val environment = sessionEnvironment(typed, fexManifest, paths)
+        assertTrue(
+            "TU_DEBUG was ${environment["TU_DEBUG"]}",
+            environment["TU_DEBUG"].orEmpty().split(",").contains("flushall"),
+        )
+        // And the base member survives: it is the ground truth that Turnip loaded.
+        assertTrue(environment["TU_DEBUG"].orEmpty().split(",").contains(TU_DEBUG_STARTUP))
+        // It must not have leaked into WINEDEBUG, which is where it used to go.
+        assertFalse(environment["WINEDEBUG"].orEmpty().contains("flushall"))
     }
 
     @Test

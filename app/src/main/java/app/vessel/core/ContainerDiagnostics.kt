@@ -140,15 +140,34 @@ data class ContainerDiagnostics(
      */
     fun withRowNamed(index: Int, name: String): ContainerDiagnostics {
         if (index !in rows.indices) return this
-        val loggable = loggableFor(name, rows[index].turnip)
+        val existing = rows[index]
+        // **The row's own family, and the row's own family kept.** Both halves of
+        // this line were wrong and they failed together.
+        //
+        // It resolved through `loggableFor(name, turnip)`, which knows only
+        // `wine` and `turnip`, so a name typed into a row the user had already
+        // typed as `vkd3dconfig` or `mesa` was measured against the Wine ladder
+        // and got a Wine channel's `addAt` as its level. And it then rebuilt the
+        // row with `DiagnosticSetting(name, level, turnip)`, whose `type`
+        // defaults to empty — so **typing a name erased the type the user had
+        // just chosen**.
+        //
+        // The two together made the free-text escape hatch inert for every
+        // family except the two the old boolean could name. It is invisible from
+        // the screen, because the row keeps the name and the level and only the
+        // invisible field is lost, and it is invisible from a session, because a
+        // driver ignores a flag it does not recognise. `TU_DEBUG=flushall` was
+        // set through this path, reached the guest as `TU_DEBUG=0x1`, and cost a
+        // device session that read a bisect which had never run.
+        val loggable = loggableIn(name, existing.resolvedType)
         return copy(
             rows = rows.mapIndexed { i, row ->
                 if (i != index) {
                     row
                 } else {
                     // The origin is carried, not recomputed: renaming within a
-                    // table must not move the row to the other one.
-                    DiagnosticSetting(name, loggable.addAt, turnip = row.turnip)
+                    // table must not move the row to another one.
+                    DiagnosticSetting(name, loggable.addAt, turnip = row.turnip, type = row.type)
                 }
             },
         )
@@ -448,11 +467,22 @@ data class DiagnosticSetting(
      * A property of the level and not of the thing: `DXVK_LOG_LEVEL` at `warn` is
      * ordinary and at `trace` is a firehose, and the row has to tell them apart.
      */
-    val isOneSession: Boolean get() = loggableFor(name, turnip).isOneSession(level)
+    val isOneSession: Boolean get() = loggableFor(this).isOneSession(level)
 
-    /** False while the row's gate is unmet, which is when it must contribute nothing. */
+    /**
+     * False while the row's gate is unmet, which is when it must contribute
+     * nothing.
+     *
+     * **Resolved through [resolvedType], and it used to be resolved through
+     * [turnip] alone.** That older reading knew only two families, so a row typed
+     * as anything else — `turnip` for an undeclared `TU_DEBUG` flag,
+     * `vkd3dconfig` for a config word — was measured against the *Wine* ladder.
+     * `on` is not a Wine level, so [isRealValue] returned false and `inForce`
+     * dropped the row before it could compose anything. Silent, and
+     * indistinguishable from a flag the driver ignored.
+     */
     fun isAllowed(diagnostics: ContainerDiagnostics): Boolean {
-        val loggable = loggableFor(name, turnip)
+        val loggable = loggableFor(this)
         if (!loggable.isRealValue(level)) return false
         val gate = loggable.gate ?: return true
         val gated = LOGGABLES.firstOrNull { it.id == gate } ?: return true
@@ -685,11 +715,17 @@ val FAMILIES: List<DiagnosticFamily> = listOf(
         variable = "TU_DEBUG",
         baseMembers = listOf(TU_DEBUG_STARTUP),
     ),
+    // The secondary said "Which logger the driver uses, and its severity floor"
+    // and had to widen: `MESA_VK_WSI_DEBUG` files itself here by prefix
+    // ([familyOfVariable]) and is not a logger — it picks the present path. A
+    // family label that describes two of its three members is the kind of quiet
+    // inaccuracy this screen exists to remove.
     DiagnosticFamily(
         wire = "mesa",
         label = "Mesa",
         shape = DiagnosticFamily.Shape.SCALAR,
-        secondary = "Which logger the driver uses, and its severity floor.",
+        secondary = "The driver's logger and its severity floor — and how a frame reaches " +
+            "the window.",
     ),
     DiagnosticFamily(
         wire = "fex",
@@ -1139,6 +1175,68 @@ val LOGGABLES: List<Loggable> = listOf(
             "where Vessel cannot read it.",
         addAt = "file",
         levelIsMachine = true,
+    ),
+
+    // **The one row on this surface that changes the frame rather than the log,
+    // and the only one whose wrong stop can stop a session drawing at all.**
+    //
+    // `docs/BANDWIDTH.md` item 7: DRI3 zero-copy present is the single
+    // *measured* frame-time win in this stack that is switched off — 0.602 ms
+    // against 2.143 ms, mean over 300 frames at 1280x720
+    // (`patches/mesa/README.md`). On the software path a present costs a GPU
+    // `vkCmdCopyImageToBuffer` of the whole frame plus an `xcb_put_image` of
+    // 3.6 MB through a socket; on DRI3 the swapchain image *is* the window's
+    // buffer and neither happens.
+    //
+    // **Why it is a row and not just the constant it defaults to.** Flipping
+    // `ZERO_COPY_PRESENT` took a Gradle build, and the failure it guards
+    // against is immediate and total: a black window or no swapchain, not a
+    // slow one. That is a bad pairing — the way back from a dead session should
+    // not be a rebuild. Per container, so a container that breaks is the only
+    // one that does, and the way back is this dropdown.
+    //
+    // **What has and has not been proven, because the caution has to be
+    // honest.** Proven separately: `tools/gfx/wsiprobe.c` had Turnip importing
+    // this server's dma-buf and binding a `TILING_LINEAR` image at rowPitch
+    // 5120, and `tools/gfx/x11present.c` ran a real Vulkan swapchain against
+    // this app's own X server on the DRI3 path and produced the table above.
+    // Not proven: the same path under a *guest* — winex11 holding the X
+    // connection, vkd3d or DXVK driving the swapchain, Turnip reached through
+    // win32u's ICD under FEX. That join has never been run, which is why
+    // [ZERO_COPY_PRESENT] is still false and this row exists to answer it one
+    // container at a time.
+    //
+    // The 2026-08-10 session that died with this on is *not* evidence about the
+    // server as it stands: its cause was found 104 minutes later and was the
+    // missing XFIXES extension, which libxcb answers by tearing the connection
+    // down client-side before a request is even sent. [ZERO_COPY_PRESENT] has
+    // the whole chronology.
+    //
+    // `levelIsMachine` is off deliberately — the wire values are `sw` and the
+    // empty string, and a mono `""` is not a control anybody can read, so the
+    // stops are labelled in English instead.
+    Loggable(
+        name = "MESA_VK_WSI_DEBUG",
+        emit = Emit.Variable("MESA_VK_WSI_DEBUG", FIXED_MESA_VK_WSI_DEBUG),
+        // Safe stop first, matching every other ladder here: moving right always
+        // means asking for more. Here "more" is speed rather than output, and
+        // the risk moves with it.
+        levels = listOf(WSI_SOFTWARE, WSI_DRI3),
+        labels = mapOf(
+            WSI_SOFTWARE to "Copy each frame  (sw)",
+            WSI_DRI3 to "Zero-copy  (DRI3)",
+        ),
+        baseline = FIXED_MESA_VK_WSI_DEBUG,
+        secondary = "How a finished frame reaches the window. Zero-copy hands the driver " +
+            "the window's own buffer instead of copying the whole frame twice. It " +
+            "measured 3.5x cheaper on this phone, and it has never been run under a game.",
+        caution = "If it does not work the window is black or the session ends at once, " +
+            "not slow — there is no in-between. Come back here and pick the copying " +
+            "one; nothing else needs undoing.",
+        // Added armed, like every other cautioned row: adding this one *is* the
+        // deliberate act and the confirmation carries the caution. Turning it
+        // off is the dropdown, which is the whole point of it being here.
+        addAt = WSI_DRI3,
     ),
 
     // The one row here that produces a *file* rather than lines in this log, and
@@ -1803,6 +1901,65 @@ const val FIXED_MESA_LOG: String = ""
 const val FIXED_MESA_LOG_LEVEL: String = ""
 
 /**
+ * `MESA_VK_WSI_DEBUG=sw` — the whole-frame CPU copy, and today's default.
+ *
+ * Named rather than spelled `"sw"` because it is now a *stop on a ladder* as
+ * well as a value the session sends, and the two must not drift: an
+ * [Emit.Variable] whose baseline disagreed with what `sessionEnvironment` wrote
+ * would put this variable in the diagnostics map for a container nobody has
+ * touched — and "an untouched record composes nothing" is the one property that
+ * whole stage is asserted to have.
+ *
+ * `sw` and not `sw,linear`: forcing a linear swapchain image removes a blit on
+ * paper and measured ~14% *worse* on the mean, because rendering into a linear
+ * image makes the GMEM resolve write an untiled, uncompressed layout. The
+ * numbers are at the `MESA_VK_WSI_DEBUG` assignment in `SessionEnvironment.kt`,
+ * and `docs/BANDWIDTH.md` §1 cites them as the clearest case in this repo of
+ * bandwidth arithmetic losing to a tiler measurement. Do not re-derive it.
+ */
+const val WSI_SOFTWARE: String = "sw"
+
+/**
+ * The empty value, which is DRI3 — and empty is *exactly* unset here.
+ *
+ * `native/mesa/src/vulkan/wsi/wsi_common.c:80` reads the variable through
+ * `parse_debug_string` (`native/mesa/src/util/u_debug.c`), whose loop is
+ * `for (; n = strcspn(s, ", \n"), *s; …)`. On `""` the body never runs and it
+ * returns 0 — bit for bit what it returns for `NULL`. So this is not "an empty
+ * flag list that happens to behave like absence"; there is no flag whose
+ * absence differs from its not being named.
+ *
+ * A stop rather than a removal because the diagnostics stage can only *write*
+ * keys. See the assignment in `SessionEnvironment.kt` for the two properties
+ * that buys, and for the one place empty and unset genuinely differ — Mesa's
+ * Android system-property fallback, which fires only on a NULL `getenv`.
+ */
+const val WSI_DRI3: String = ""
+
+/**
+ * What the session actually sends: [ZERO_COPY_PRESENT] read as a value.
+ *
+ * Derived rather than written down twice. The constant is the *default* and
+ * this is the row's baseline; if they ever disagreed, a fresh container would
+ * silently carry a diagnostics override nobody asked for.
+ *
+ * **A getter and not a stored `val`, and the compiler is what says so.** Every
+ * other `FIXED_*` here is a `const val`, which is inlined at each use site and
+ * so has no initialisation order at all. This one cannot be — Kotlin's
+ * compile-time constant evaluator does not fold an `if` — and a plain `val`
+ * declared in this section is initialised *after* [LOGGABLES], which reads it.
+ * That is `Variable 'FIXED_MESA_VK_WSI_DEBUG' must be initialized`, caught at
+ * compile time here; the same shape reached at runtime would have been a null
+ * baseline and a row that emitted on every untouched container.
+ *
+ * Moving the declaration above [LOGGABLES] would also work and is worse: it
+ * puts one constant a thousand lines from the eight it belongs with, to encode
+ * an ordering nothing in the file states.
+ */
+val FIXED_MESA_VK_WSI_DEBUG: String
+    get() = if (ZERO_COPY_PRESENT) WSI_DRI3 else WSI_SOFTWARE
+
+/**
  * The five Wine rows above, as the exact terms [WINEDEBUG_CHANNELS] is made of.
  *
  * Display cannot be derived from the constant by a generic composer — the fixed
@@ -2118,7 +2275,24 @@ private fun emitted(diagnostics: ContainerDiagnostics): EmittedEnvironment {
     val out = EmittedEnvironment()
     applyTraceSpec(diagnostics.traceSpec(), out)
     diagnostics.inForce().rows.forEach { row ->
-        loggableFor(row.name).emit.apply(row.level, out)
+        // **The row, not the row's name.** `loggableFor(String)` resolves in the
+        // *wine* family, because that is the only thing a bare name can mean; a
+        // row knows its own type and `loggableFor(DiagnosticSetting)` uses it.
+        //
+        // With the name-only overload an undeclared flag typed as `turnip`
+        // became a Wine channel, so `TU_DEBUG=flushall` composed into
+        // `WINEDEBUG` — where Wine ignores a channel it has never heard of and
+        // the flag looks like it did nothing. That is the exact failure
+        // [loggableIn] was written to end, arrived at through the one call site
+        // that never got the second argument.
+        //
+        // It hid because *declared* flags are matched by name before the family
+        // is consulted, so every row anybody had tried worked. `nolrz` and
+        // `noubwc` reached the driver and were measured; `flushall`, which this
+        // build does not declare, silently did not — and a driver flag that does
+        // nothing is indistinguishable from a driver flag that changed nothing.
+        // One device session was spent reading a bisect that never ran.
+        loggableFor(row).emit.apply(row.level, out)
     }
     return out
 }
