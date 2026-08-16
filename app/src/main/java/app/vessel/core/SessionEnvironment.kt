@@ -437,20 +437,52 @@ const val MANAGED_DESKTOP: Boolean = true
  * `GPUImage`, i.e. only when the compositor genuinely reads those pixels. See
  * that method.
  *
- * **Still not proven, and the row is why that is acceptable.** The copy itself is
- * unchanged; only the compositor's blocking on it is gone. Its magnitude has
- * never been captured — the `Present copyArea` sampling log has existed for
- * weeks and nothing in this repo records its output. If the kernel hands back a
- * write-combine mapping for the client's dma-buf, the read side runs at uncached
- * speed and the mean is tens of milliseconds rather than low single digits, and
- * this default should come back off until the copy is cheaper or gone.
+ * **And then it was measured, and it goes back off. 2026-08-16.** The
+ * `Present copyArea` sampler had existed for weeks with nothing in this repo
+ * recording its output; the first capture of it reads
+ *
+ *     Present copyArea x6720 mean=19114us max=385490us last=69539us 1280x720
+ *
+ * **19 ms per present**, for 3.7 MB — about 154 MB/s, which is uncached read
+ * speed, not the several GB/s a cached memcpy manages on this SoC. So the
+ * write-combine hypothesis this note dismissed was right, and the reasoning that
+ * dismissed it — that Turnip's exportable images come from the kernel's system
+ * dma-heap, whose `mmap` leaves `vm_page_prot` alone — was a code-reading
+ * argument that lost to a number.
+ *
+ * What it costs, from two sessions of Requiem at a 24 fps cap, 47 samples
+ * against 44:
+ *
+ *     | metric        | DRI3    | sw      |
+ *     |---------------|---------|---------|
+ *     | GPU mean      |  15.5%  |  57.3%  |
+ *     | GPU peak      |    96%  |    96%  |
+ *     | CPU mean      |  26.8%  |  19.7%  |
+ *     | GPU temp mean | 45.7 C  | 48.3 C  |
+ *
+ * The GPU does **3.7x less work per unit time** and the CPU does 36% more. The
+ * cooler GPU is the tell: it is idle, waiting on a core that is memcpying an
+ * uncached buffer. Zero-copy at the Vulkan layer bought a copy at the X layer
+ * that is far more expensive than the one it removed.
+ *
+ * **None of this retracts that DRI3 works.** It negotiates, six dma-bufs import
+ * through the full guest stack, and no session lost a device. The X server bugs
+ * found under it are real and stay fixed: the present copy no longer holds the
+ * compositor's `renderLock`, and `awaitFence` no longer spins holding the
+ * monitor its own releaser needs. What is not yet true is that it is *faster*.
+ *
+ * *Done when:* the copy is cheap. Uncached reads are latency-bound rather than
+ * bandwidth-bound, so splitting the frame into row bands across a worker pool —
+ * joined before the copy returns, so every ordering, lifetime and idle-notify
+ * property is unchanged — should scale close to linearly on eight cores. Get
+ * `mean` under about 3 ms and re-run the table above.
  *
  * `MESA_VK_WSI_DEBUG` is in [DIAGNOSTIC_SESSION_ENV], so that is one row and no
  * rebuild: Diagnostics, `MESA_VK_WSI_DEBUG`, *Copy each frame (sw)*. The failure
  * mode this guards is total and instant — a black window or no swapchain, never
  * a slow one — so it is unmistakable and the way back is unambiguous.
  */
-const val ZERO_COPY_PRESENT: Boolean = true
+const val ZERO_COPY_PRESENT: Boolean = false
 
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"
