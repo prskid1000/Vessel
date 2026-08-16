@@ -163,23 +163,10 @@ fun DiagnosticsPanel(
             modifier = Modifier.fillMaxWidth().padding(top = Vessel.metrics.s8),
         )
         Text(
-            "Pick the subsystem in the first column, the flag in the second, and what to " +
-                "set it to in the third. All three take anything you type as well as what " +
-                "they offer, so a variable Vessel has never heard of is a row like any " +
-                "other — choose the “Environment variable” type for those. " +
-                "Names this app owns are refused rather than applied, because they point " +
-                "at this container’s own files.",
-            style = Vessel.type.bodySmall,
-            color = Vessel.colors.textMuted,
-            modifier = Modifier.padding(top = Vessel.metrics.s6),
-        )
-        Text(
-            "Rows you add are written after the ones above, and a later term wins. Some " +
-                "flags change how a frame is drawn rather than what is logged, and say so; " +
-                "switch those on one at a time, because a driver resolves a contradictory " +
-                "pair silently. Changes here are kept as you make them — there is no " +
-                "Save for this panel — but the environment is composed when a session " +
-                "starts, so a container that is already running keeps what it launched with.",
+            "Every field takes what you type as well as what it offers. Reserved " +
+                "names are refused. A later row wins over an earlier one, and the " +
+                "environment is composed at launch, so a running container keeps what " +
+                "it started with.",
             style = Vessel.type.bodySmall,
             color = Vessel.colors.textMuted,
             modifier = Modifier.padding(top = Vessel.metrics.s6),

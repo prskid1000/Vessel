@@ -1,16 +1,28 @@
 package app.vessel.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -94,27 +106,74 @@ fun VDiagnosticEntry(
     levelIsMachine: Boolean = false,
     oneSession: Boolean = false,
 ) {
+    // A row with no flag yet is the one the reader just added and came here to
+    // fill in, so it opens itself. Everything else starts shut.
+    var open by remember { mutableStateOf(flag.isBlank()) }
+
     Column(
         modifier
             .fillMaxWidth()
-            .padding(top = Vessel.metrics.s8)
+            .padding(top = Vessel.metrics.s6)
+            .background(Vessel.colors.surface, Vessel.metrics.shapeMd)
             .border(Vessel.metrics.hairline, Vessel.colors.divider, Vessel.metrics.shapeMd)
-            .padding(Vessel.metrics.s8),
+            .padding(horizontal = Vessel.metrics.s8, vertical = Vessel.metrics.s3),
     ) {
-        // The remove control sits on its own line above the fields rather than
-        // beside one of them. Beside a field it would have to steal width from
-        // that field alone, which is what made the previous row asymmetric — and
-        // it belongs to the whole entry, not to the flag.
+        // **The header is the whole entry when it is closed**, so it has to
+        // carry what the three fields say: which subsystem, which flag, and what
+        // it is set to. A list of open cards is unreadable past about four of
+        // them — each is five lines plus a description — and the reason to open
+        // this screen is usually to change one row, not to read all of them.
         Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .heightIn(min = Vessel.metrics.touchTarget),
+            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                if (onRemove == null) "Always on" else typeLabel.ifBlank { "Setting" },
-                style = Vessel.type.label,
-                color = Vessel.colors.textMuted,
+            Column(Modifier.weight(1f)) {
+                Text(
+                    // The type, then the flag. A row that has neither yet says
+                    // so rather than rendering an empty line with a separator
+                    // floating in it.
+                    listOf(typeLabel.ifBlank { type }, flag)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · ")
+                        .ifBlank { "New setting" },
+                    style = Vessel.type.monoSmall,
+                    color = Vessel.colors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!open && level.isNotEmpty()) {
+                    Text(
+                        levelLabel(level),
+                        style = Vessel.type.bodySmall,
+                        color = Vessel.colors.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // A caution is the one thing that must survive the card being shut:
+            // it says this row costs something or cannot act, and a closed card
+            // that hides that is how a warning stops being read.
+            if (!open && caution != null) {
+                Icon(
+                    VIcons.Warning,
+                    contentDescription = "Has a caution",
+                    tint = Vessel.colors.warn,
+                    modifier = Modifier.size(Vessel.metrics.iconSm),
+                )
+            }
+            Icon(
+                VIcons.CaretDown,
+                contentDescription = null,
+                tint = Vessel.colors.textMuted,
+                modifier = Modifier.size(Vessel.metrics.iconSm).rotate(if (open) 180f else 0f),
             )
+            // On the header rather than beside a field: it acts on the whole
+            // entry, and beside a field it would steal width from that one alone.
             if (onRemove != null) {
                 VIconButton(
                     VIcons.X,
@@ -127,47 +186,51 @@ fun VDiagnosticEntry(
             }
         }
 
-        Field("Type") {
-            VComboField(
-                value = type,
-                options = typeOptions,
-                onValueChange = onType,
-                placeholder = "subsystem",
-                enabled = typeEditable,
-            )
-        }
-        Field("Flag") {
-            VComboField(
-                value = flag,
-                options = flagOptions,
-                onValueChange = onFlag,
-                placeholder = "name",
-                enabled = flagEditable,
-                isError = flagIsInvalid,
-            )
-        }
-        Field(if (levelOptions.isEmpty()) "Value" else "Level") {
-            VComboField(
-                value = levelLabel(level).takeIf { level.isNotEmpty() }.orEmpty(),
-                options = levelOptions.map(levelLabel),
-                // Back through the label map, because the list shows labels and
-                // the record keeps wire values. A typed value matching no label
-                // is itself the wire, which is the free-text case a variable with
-                // no ladder needs.
-                onValueChange = { shown ->
-                    onLevel(levelOptions.firstOrNull { levelLabel(it) == shown } ?: shown)
-                },
-                placeholder = if (levelOptions.isEmpty()) "value" else "level",
-                enabled = levelEditable,
-            )
+        AnimatedVisibility(open) {
+            Column(Modifier.fillMaxWidth()) {
+                Field("Type") {
+                    VComboField(
+                        value = type,
+                        options = typeOptions,
+                        onValueChange = onType,
+                        placeholder = "subsystem",
+                        enabled = typeEditable,
+                    )
+                }
+                Field("Flag") {
+                    VComboField(
+                        value = flag,
+                        options = flagOptions,
+                        onValueChange = onFlag,
+                        placeholder = "name",
+                        enabled = flagEditable,
+                        isError = flagIsInvalid,
+                    )
+                }
+                Field(if (levelOptions.isEmpty()) "Value" else "Level") {
+                    VComboField(
+                        value = levelLabel(level).takeIf { level.isNotEmpty() }.orEmpty(),
+                        options = levelOptions.map(levelLabel),
+                        // Back through the label map, because the list shows
+                        // labels and the record keeps wire values. A typed value
+                        // matching no label is itself the wire, which is the
+                        // free-text case a variable with no ladder needs.
+                        onValueChange = { shown ->
+                            onLevel(levelOptions.firstOrNull { levelLabel(it) == shown } ?: shown)
+                        },
+                        placeholder = if (levelOptions.isEmpty()) "value" else "level",
+                        enabled = levelEditable,
+                    )
+                }
+            }
         }
 
-        if (oneSession) {
+        if (open && oneSession) {
             Box(Modifier.padding(top = Vessel.metrics.s6)) {
                 VTag("one session", tone = VTagTone.Neutral)
             }
         }
-        if (secondary != null) {
+        if (open && secondary != null) {
             Text(
                 secondary,
                 style = Vessel.type.bodySmall,
@@ -179,7 +242,7 @@ fun VDiagnosticEntry(
                 modifier = Modifier.padding(top = Vessel.metrics.s6),
             )
         }
-        if (caution != null) VCaution(caution)
+        if (open && caution != null) VCaution(caution)
     }
 }
 
@@ -193,47 +256,17 @@ fun VDiagnosticEntry(
  */
 @Composable
 private fun Field(label: String, content: @Composable () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s6)) {
-        Text(label, style = Vessel.type.label, color = Vessel.colors.textMuted)
-        Box(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s3)) { content() }
-    }
-}
-
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421)
-@Composable
-private fun VDiagnosticEntryPreview() {
-    VesselTheme {
-        Column(Modifier.padding(Vessel.metrics.s11)) {
-            VDiagnosticEntry(
-                type = "vkd3dconfig",
-                typeLabel = "vkd3d config",
-                typeOptions = listOf("wine", "vkd3d", "vkd3dconfig", "turnip", "env"),
-                onType = {},
-                flag = "breadcrumbs",
-                flagOptions = listOf("breadcrumbs", "breadcrumbs_sync"),
-                onFlag = {},
-                level = "on",
-                levelOptions = listOf("off", "on"),
-                levelLabel = { it.replaceFirstChar(Char::uppercase) },
-                onLevel = {},
-                onRemove = {},
-                secondary = "VKD3D_CONFIG — on device loss, name the last command the GPU acknowledged.",
-            )
-            VDiagnosticEntry(
-                type = "env",
-                typeLabel = "Environment variable",
-                typeOptions = listOf("wine", "vkd3d", "env"),
-                onType = {},
-                flag = "VKD3D_SHADER_DUMP_PATH",
-                flagOptions = emptyList(),
-                onFlag = {},
-                level = "C:\\vessel\\shaderdump",
-                levelOptions = emptyList(),
-                levelLabel = { it },
-                onLevel = {},
-                onRemove = {},
-                secondary = "A variable this build has no description for.",
-            )
-        }
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s3),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            style = Vessel.type.label,
+            color = Vessel.colors.textMuted,
+            modifier = Modifier.width(Vessel.metrics.diagnosticLabelWidth),
+        )
+        Box(Modifier.weight(1f)) { content() }
     }
 }

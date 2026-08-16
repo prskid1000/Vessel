@@ -476,6 +476,17 @@ data class VMetrics(
      */
     val diagnosticControlWidth: Dp = 126.dp,
 
+    /**
+     * The label gutter in a diagnostic card — *Type*, *Flag*, *Level*.
+     *
+     * Wide enough for the longest of those three at `label` size and no wider:
+     * the control beside it is where the long text lives, and every dp here is
+     * one the control does not get. At 52 dp the field still clears 300 dp on a
+     * 421 dp sheet, which is half as much again as the widest variable name in
+     * the stack needs.
+     */
+    val diagnosticLabelWidth: Dp = 52.dp,
+
     /** A dialog's mono evidence block, before it scrolls. */
     val evidenceMaxHeight: Dp = 180.dp,
 
