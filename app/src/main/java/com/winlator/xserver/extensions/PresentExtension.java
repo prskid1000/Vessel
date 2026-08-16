@@ -89,6 +89,19 @@ public class PresentExtension extends Extension {
     private long copyMaxNanos;
     private long copyCount;
 
+    // VESSEL: the floor, which the recorded history has no term for and needs.
+    //
+    // `mean=19114us max=385490us` is a mean with a tail twenty times its own
+    // size in it, and a mean like that cannot distinguish the two readings that
+    // matter here. A copy that is *steadily* 19 ms is a bandwidth or
+    // cache-maintenance cost and scales with the frame. A copy that is usually
+    // 1 ms and occasionally 400 ms is something blocking — a lock, a fence, or
+    // this thread being descheduled — and no amount of copying faster touches
+    // it. `min` separates them in one line: if it lands near the arithmetic for
+    // a cached 3.5 MB copy (docs/BANDWIDTH.md §9.6) while the mean stays at 19,
+    // the cost is not in the copy at all.
+    private long copyMinNanos = Long.MAX_VALUE;
+
     // VESSEL: the same total, decomposed. `copyNanos` above spans the whole of
     // `Drawable.copyArea`, which is the two DMA_BUF_IOCTL_SYNC calls *plus* the
     // pixel copy *plus* the rewinds and `forceUpdate` — and the 19.1 ms in the
@@ -424,15 +437,29 @@ public class PresentExtension extends Extension {
             // mapping's memory type, so this log line remains the only
             // instrument that can tell the two apart.
             //
-            // VESSEL: it told them apart, and the prediction above lost.
+            // VESSEL: it produced a number, and the number was then
+            // misattributed for a day. Both halves are worth keeping.
             //
             //     Present copyArea x6720 mean=19114us max=385490us last=69539us 1280x720
             //
-            // 19.1 ms for 3.5 MB is ~154 MB/s — the uncached case, not the low
-            // single digits the dma-heap reasoning predicted. That number is
-            // why `copyPoolCopyRows` exists (`cpp/winlator/src/copy_pool.c`)
-            // and why splitting it across cores is expected to work: an
-            // uncached read stalls on latency, and stalls overlap.
+            // 19.1 ms for 3.5 MB is ~154 MB/s, which sits squarely in the
+            // write-combine read band, so the reasoning above was read as
+            // refuted and `copyPoolCopyRows` (`cpp/winlator/src/copy_pool.c`)
+            // was built on "the mapping is uncached, and uncached reads are
+            // latency-bound, so bands across cores will overlap their stalls".
+            //
+            // **That inference is now dead, killed by measurement.** The device
+            // exposes no uncached dma-heap at all — `ls /dev/dma_heap/` on it
+            // lists `qcom,system` and `system` and nothing matching *uncached*
+            // — so there was never an uncached heap for Turnip to have landed
+            // on. The reasoning in the paragraph above was right and 154 MB/s
+            // is not explained by the memory type. See docs/BANDWIDTH.md §9,
+            // which carries the device output and what it does and does not
+            // settle.
+            //
+            // The pool stays: it is correct, it is joined, and it costs nothing
+            // when it is not the bottleneck. What is no longer true is that it
+            // is known to be aimed at the bottleneck.
             //
             // So what this sampler now measures is the *split* copy, and its
             // successor to the line above has not been captured yet. Read
@@ -458,6 +485,7 @@ public class PresentExtension extends Extension {
             long dt = System.nanoTime() - t0;
             copyNanos += dt;
             if (dt > copyMaxNanos) copyMaxNanos = dt;
+            if (dt < copyMinNanos) copyMinNanos = dt;
 
             // VESSEL: the split. `Drawable.copyArea` is the only code that sees
             // the boundary between the sync ioctls and the copy, so it records
@@ -485,6 +513,7 @@ public class PresentExtension extends Extension {
             if (++copyCount % COPY_REPORT_EVERY == 0) {
                 Log.d(XRequestError.PROTO_TAG, "Present copyArea x" + copyCount
                         + " mean=" + (copyNanos / copyCount / 1000) + "us"
+                        + " min=" + (copyMinNanos / 1000) + "us"
                         + " max=" + (copyMaxNanos / 1000) + "us"
                         + " last=" + (dt / 1000) + "us"
                         + " " + pixmap.drawable.width + "x" + pixmap.drawable.height

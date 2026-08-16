@@ -11,21 +11,35 @@
  *
  *     Present copyArea x6720 mean=19114us max=385490us last=69539us 1280x720
  *
- * 19.1 ms for a 3.5 MB frame is about 154 MB/s. A cached memcpy on this SoC
- * runs at several GB/s, so the mapping is not cached — and that is the whole
- * justification for this file rather than an accident of it. An uncached read
- * is *latency*-bound, not bandwidth-bound: the core stalls waiting for each
- * line rather than saturating a bus. Latency-bound misses overlap, so several
- * cores each stalling on their own band cost about what one core stalling on
- * one band costs, and the split is expected to scale close to linearly. On a
- * cached buffer, where the single thread already saturates memory, it would
- * buy nothing.
+ * 19.1 ms for a 3.5 MB frame is about 154 MB/s.
  *
- * **Expected, not measured.** The commit that added this file could not run
- * the guest stack on a device. What is measured is the 19.1 ms above and the
- * 154 MB/s it implies. The post-split mean is unmeasured; the instrumentation
- * in PresentExtension.presentToContent that produced the line above is
- * deliberately still there to produce its successor.
+ * **The reason this file was written has since been refuted, and the file is
+ * kept anyway. Read this before assuming it is the fix for that number.**
+ *
+ * The original argument was: 154 MB/s is write-combine read speed, so the
+ * mapping is uncached; an uncached read is *latency*-bound rather than
+ * bandwidth-bound, because the core stalls on each line instead of saturating
+ * a bus; latency-bound stalls issued from different cores overlap; therefore
+ * row bands scale close to linearly. Every step of that is sound *given the
+ * premise*, and the premise is false. The device exposes no uncached DMA-BUF
+ * heap at all — its `/dev/dma_heap/` holds `qcom,system` and `system` and
+ * nothing matching *uncached* — so there was never an uncached heap for Turnip
+ * to have allocated from. docs/BANDWIDTH.md §9 has the device output.
+ *
+ * So this pool is **not known to be aimed at the cost it was built for**, and
+ * on a cached buffer, where one thread already saturates memory, splitting the
+ * copy buys little. It stays because it is correct, because it is joined before
+ * it returns and therefore changes no ordering, lifetime or idle-notify
+ * property, and because below the threshold and on a second concurrent caller
+ * it does not run at all — the cost of being wrong about it is close to zero.
+ * It would be deleted, not defended, if it ever cost anything.
+ *
+ * **Where the cost actually is, is open.** The 19.1 ms spans two
+ * DMA_BUF_IOCTL_SYNC calls as well as this copy, and on a *cached* mapping
+ * those do real cache maintenance across every attachment.
+ * PresentExtension.presentToContent now reports the phases separately and their
+ * floor; §9.6 of that document has the arithmetic, which fits none of the
+ * candidates cleanly and is the most interesting thing about the number.
  *
  * **Why C and a pool, and not Java or a thread per frame.** Workers must never
  * see a JNIEnv, so the calling thread resolves both direct-buffer addresses
