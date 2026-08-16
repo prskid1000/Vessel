@@ -203,6 +203,13 @@ public class Drawable extends XResource {
         // AHardwareBuffer is locked once for its whole life — GPUImage.java:31-43),
         // and DMA_BUF_SYNC_WRITE on a buffer nothing has written would be a
         // cache clean for no reader.
+        //
+        // VESSEL: the bracket still spans the whole read now that the native
+        // copy is internally parallel. `copyArea` below splits the rectangle
+        // into row bands across a worker pool (cpp/winlator/src/copy_pool.c)
+        // and joins them before it returns, so there is exactly one START/END
+        // pair per copy and no band outlives it. That is the property the pool
+        // is joined for; it is not an incidental one.
         drawable.beginDmaBufRead();
         try {
             if (gcFunction == GraphicsContext.Function.COPY) {

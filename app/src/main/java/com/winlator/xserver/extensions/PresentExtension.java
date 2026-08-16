@@ -343,15 +343,23 @@ public class PresentExtension extends Extension {
      * stop holding {@code WINDOW_MANAGER} across the copy, which is a narrowing
      * of {@link #handleRequest} and not an async copy.
      *
-     * <p><b>Where the remaining cost really is.</b> The copy is already a
-     * per-row {@code memcpy} and a single whole-buffer one when the strides
-     * match ({@code drawable.c:88-110}), so it is memory-bandwidth bound on one
-     * core. The change with a real number behind it is to make T smaller —
-     * splitting the frame into row bands across a small worker pool, joined
-     * before this method returns. That keeps every ordering, lifetime and
-     * idle-notify property on this page exactly as it is, because the request
-     * thread still owns the copy from start to finish. Not done here; recorded
-     * so the next attempt starts from the useful end.
+     * <p><b>Where the remaining cost really is, and what was done about it.</b>
+     * T is now split rather than removed. {@code Drawable.copyArea} hands the
+     * rectangle to {@code copyPoolCopyRows} ({@code cpp/winlator/src/copy_pool.c}),
+     * which divides it into row bands across a persistent pthread pool — the
+     * calling thread takes the smallest band itself and joins the rest before
+     * returning. Every property argued for above survives untouched, and that
+     * is the reason the pool is joined rather than left running: this request
+     * thread still owns the copy from its first byte to its last, so
+     * {@link #sendIdleNotify} below still fires exactly at copy completion, the
+     * source mapping is still alive for the whole read under the same
+     * {@code WINDOW_MANAGER}+{@code PIXMAP_MANAGER} pair, and no lock is added.
+     * The 154 MB/s the sampler measured is uncached-read speed, and uncached
+     * reads are latency-bound rather than bandwidth-bound, so the bands overlap
+     * their stalls instead of queueing for a saturated bus — which is why this
+     * split is expected to pay and why it would not on a cached buffer. The
+     * post-split mean is <em>unmeasured</em>; the sampler below is what will
+     * measure it.
      */
     private void presentToContent(Window window, Drawable content, Pixmap pixmap, int serial,
                                   short xOff, short yOff, int idleFence) {
@@ -398,6 +406,24 @@ public class PresentExtension extends Extension {
             // Predicts, not proves: nothing readable on the device reports a
             // mapping's memory type, so this log line remains the only
             // instrument that can tell the two apart.
+            //
+            // VESSEL: it told them apart, and the prediction above lost.
+            //
+            //     Present copyArea x6720 mean=19114us max=385490us last=69539us 1280x720
+            //
+            // 19.1 ms for 3.5 MB is ~154 MB/s — the uncached case, not the low
+            // single digits the dma-heap reasoning predicted. That number is
+            // why `copyPoolCopyRows` exists (`cpp/winlator/src/copy_pool.c`)
+            // and why splitting it across cores is expected to work: an
+            // uncached read stalls on latency, and stalls overlap.
+            //
+            // So what this sampler now measures is the *split* copy, and its
+            // successor to the line above has not been captured yet. Read
+            // `mean` first, as before; the target set when the default flipped
+            // is under about 3 ms. The single line `copy pool: N participants`
+            // logged once at startup under this same tag says how many cores
+            // it actually got, which is the first thing to check if `mean` has
+            // not moved.
             long t0 = System.nanoTime();
             content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
             long dt = System.nanoTime() - t0;

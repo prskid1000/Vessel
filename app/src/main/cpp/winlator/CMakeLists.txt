@@ -21,7 +21,11 @@ include_directories(include)
 # server half of the xshmfence ABI, needed by DRI3 FenceFromFD. Upstream
 # implements neither that request nor SYNC fences over an fd, so it has nothing
 # to map. See the file's own header for the layout and where it was read from.
+# VESSEL: src/copy_pool.c is likewise new — the row-band worker pool that
+# drawable.c's copyArea runs the present copy through. Upstream has no DRI3 and
+# so nothing that copies a frame out of a client mapping every vblank.
 add_library(winlator SHARED
+            src/copy_pool.c
             src/drawable.c
             src/gpu_image.c
             src/sysvshared_memory.c

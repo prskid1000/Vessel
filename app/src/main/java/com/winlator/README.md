@@ -590,6 +590,56 @@ The modifications, in the order they were made:
    through `DRAWABLE_MANAGER` (`GLRenderer.renderWindows`), which is the bug
    the `renderLock` narrowing had just removed.
 
+28. **The `copyArea` copy split into row bands across a worker pool — a new
+   file `cpp/winlator/src/copy_pool.c` with its header, plus
+   `cpp/winlator/src/drawable.c`, `CMakeLists.txt`, `Drawable`, and
+   `PresentExtension`.** Upstream's `Java_..._Drawable_copyArea` is a single
+   `memcpy` when the strides match and a per-row loop when they do not, both on
+   the calling thread. That is the right shape for upstream, which has no DRI3
+   and so nothing that copies a whole frame out of a client's mapping every
+   vblank. On the path item 27 describes it is not: with the source an `mmap` of
+   Mesa's dma-buf, `PresentExtension`'s timer measured `mean=19114us` for a
+   1280x720 frame — about 154 MB/s, which is uncached read speed rather than
+   the several GB/s a cached `memcpy` reaches on this part.
+
+   So the rectangle is now handed to `copyPoolCopyRows`, which divides it into
+   row bands across a persistent pthread pool. Four participants by default on
+   this eight-core device, clamped down by `sysconf(_SC_NPROCESSORS_ONLN)` and
+   overridable at run time with the `debug.vessel.copy_threads` system property,
+   read once when the pool is created. Payloads under 256 KB — which is nearly
+   all ordinary X `CopyArea` traffic, since plain requests land in this same
+   function — skip the pool entirely, and so does a second concurrent caller,
+   which falls back to the single-threaded path rather than queue behind the
+   first. Both of upstream's shapes survive intact *per band*: a band whose
+   strides match is still one `memcpy`.
+
+   **Why splitting is expected to pay here and would not on a cached buffer.**
+   An uncached read is latency-bound, not bandwidth-bound — the core stalls
+   waiting for each line rather than saturating a bus — and stalls issued from
+   different cores overlap. On a cached copy the single thread already saturates
+   memory and the split would buy nothing. The post-split number is **not
+   measured**; the timer that produced the 19 ms is deliberately still in
+   `presentToContent` to produce its successor.
+
+   The pool is *joined* before `copyPoolCopyRows` returns, and that is the
+   load-bearing property rather than an implementation detail. It keeps the copy
+   synchronous on the request thread, so everything item 27 records stays true
+   without re-argument: one `DMA_BUF_IOCTL_SYNC` `START`/`END` pair spans every
+   byte read, `PresentIdleNotify` still fires exactly at copy completion, the
+   source mapping is alive for the whole read under the locks the request
+   already holds, and no new lock is taken. Workers never see a `JNIEnv` — the
+   calling thread resolves both direct-buffer addresses once and hands over raw
+   pointers — so there is no `AttachCurrentThread` anywhere in it. The pool is
+   created on first use and never torn down; the X server outlives anything that
+   would tear it down.
+
+   One deliberate arithmetic divergence in `drawable.c`: byte counts are
+   computed in `int` where upstream does `width *= 4` on a `jshort`. The two
+   differ only above 8191 pixels of width or stride, where upstream overflows to
+   a negative `short` and hands `memcpy` a length that converts to an enormous
+   `size_t`. That is a crash, not a copy, so nothing the widening changes is an
+   input upstream survived.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -613,7 +663,7 @@ fails the build.
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
-| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27 |
+| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21 |
@@ -627,9 +677,12 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
 | `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
-| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28 |
 | `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
-| `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23 |
+| `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23, 28 |
+| `app/src/main/cpp/winlator/include/copy_pool.h` | 28 |
+| `app/src/main/cpp/winlator/src/copy_pool.c` | 28 |
+| `app/src/main/cpp/winlator/src/drawable.c` | 28 |
 | `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 | `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |

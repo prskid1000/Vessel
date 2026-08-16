@@ -7,6 +7,8 @@
 #include <android/bitmap.h>
 #include <android/log.h>
 
+#include "copy_pool.h"
+
 #define WHITE 0xffffff
 #define BLACK 0x000000
 
@@ -97,20 +99,27 @@ Java_com_winlator_xserver_Drawable_copyArea(JNIEnv *env, jclass obj, jshort srcX
     srcDataAddr += (srcX + srcY * srcStride) * 4;
     dstDataAddr += (dstX + dstY * dstStride) * 4;
 
-    if (width == srcStride && width == dstStride) {
-        memcpy(dstDataAddr, srcDataAddr, width * height * 4);
-    }
-    else {
-        width *= 4;
-        srcStride *= 4;
-        dstStride *= 4;
-
-        for (int16_t y = 0; y < height; y++) {
-            memcpy(dstDataAddr, srcDataAddr, width);
-            srcDataAddr += srcStride;
-            dstDataAddr += dstStride;
-        }
-    }
+    /*
+     * VESSEL: the whole-rectangle memcpy and the per-row loop that used to be
+     * written out here now live in copy_pool.c, which additionally splits the
+     * rows across a worker pool once the payload is large enough to pay for it.
+     * Both of the original shapes survive intact inside `copyBand` — the
+     * contiguous case is still one memcpy, per band — and the call is still
+     * synchronous, so `Drawable.copyArea`'s dma-buf sync bracket still spans
+     * every byte read and every ordering property above this frame is unchanged.
+     *
+     * This is the copy that measured 19.1 ms per present at 1280x720 on the
+     * DRI3 path; copy_pool.c's header comment carries the number and the
+     * latency-versus-bandwidth argument for why splitting it should help.
+     *
+     * One deliberate divergence from the code it replaces: the byte counts are
+     * computed in `int` where the original did `width *= 4` on a jshort. That
+     * only differs above 8191 pixels of width or stride, where the original
+     * overflowed to a negative short and handed memcpy a length that converts
+     * to an enormous size_t — a crash, not a copy. Nothing this widening
+     * changes is an input the original survived.
+     */
+    copyPoolCopyRows(dstDataAddr, dstStride * 4, srcDataAddr, srcStride * 4, width * 4, height);
 }
 
 JNIEXPORT void JNICALL
