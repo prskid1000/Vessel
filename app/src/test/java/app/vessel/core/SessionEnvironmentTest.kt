@@ -136,7 +136,7 @@ class SessionEnvironmentTest {
 
     @Test
     fun `WINEDEBUG is exactly the documented string, in the documented order`() {
-        assertEquals("-all,err+all,warn+module,+winediag,+loaddll,+debugstr", env()["WINEDEBUG"])
+        assertEquals("-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr", env()["WINEDEBUG"])
     }
 
     @Test
@@ -738,7 +738,7 @@ class SessionEnvironmentTest {
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
                 "WINEESYNC" to "1",
-                "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,+debugstr",
+                "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
                 // No Win32 caption on any top-level window. Measured before the
@@ -786,9 +786,6 @@ class SessionEnvironmentTest {
                 // export does not exist in Wine 11.14, so FEX's own attempt is
                 // guarded out and the option keeps its `false` default.
                 "tu_override_uncached_as_cache_coherent" to "true",
-                // Pins Adreno subgroups to 64. Shaders that assume that width
-                // hang the GPU at 128; see the assignment for the Requiem case.
-                "tu_restrict_subgroup_size_64" to "true",
                 "VESSEL_VULKAN_ICD" to File(turnip.driverDir, turnip.libraryName).absolutePath,
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,

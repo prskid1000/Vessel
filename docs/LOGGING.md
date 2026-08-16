@@ -30,7 +30,7 @@ would erase the prefix, so neither direction is something a row may do.
 ## The configuration
 
 ```sh
-WINEDEBUG=-all,err+all,warn+module,+winediag,+loaddll,+debugstr
+WINEDEBUG=-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr
 
 DXVK_LOG_LEVEL=info
 DXVK_LOG_PATH=none                 # routes, does not silence — see below
@@ -119,6 +119,7 @@ it only as insurance for the case where `__wine_dbg_output` fails to resolve.
 | `err+all` | yes, when healthy | Every error on every channel, including channels never named — `__wine_dbg_get_channel_flags` seeds unlisted channels from `default_flags`, and lazy channel init picks it up mid-run. Includes the missing-library `ERR` at `dlls/ntdll/loader.c:1179`, which is how an absent VC++ runtime appears. |
 | `warn+module` | yes | The missing-*export* case, which nothing else catches. See below. |
 | `+winediag` | yes, init only | 58 sites, 55 of them `ERR_(winediag)`: no Vulkan library, no display driver, broken .NET, missing codecs. Also the renderer-selection line, `"Using the Vulkan renderer."` / `"Using the OpenGL renderer."` — which tells you whether you landed on wined3d at all. |
+| `warn+debugstr` | yes | The program's own voice, and measured entirely at WARN — see below. |
 | `+loaddll` | yes, 6 sites | The DLL inventory. Successful whole-module loads only, so it complements rather than duplicates `err+all`. |
 
 ### `warn+module` — why WARN and not just ERR
@@ -155,6 +156,18 @@ seconds and exited **cleanly** — no unhandled exception, no tombstone, no
 non-zero exit anybody could see. The session log's last line was a DLL load. A
 program that exits deliberately has a reason, and this is the channel it would
 have said the reason on.
+
+**`warn+debugstr` and not `+debugstr`, on measurement.** Two full sessions were
+counted by severity: Requiem emitted 63 lines on this channel and Metro 1,977,
+and **every one of them, in both, was at the WARN tier** — nothing at FIXME or
+TRACE. The plain `+debugstr` was therefore buying two tiers this channel has
+never used, on the one channel whose volume is set by a program we do not
+control. `warn` inherits ERR from `err+all` the same way `warn+module` does, so
+nothing observed is lost and a chatty engine can no longer hand us a TRACE
+firehose.
+
+That is a bound rather than a saving, and worth saying plainly: on these two
+sessions the change removes zero lines.
 
 Cheap, unlike the excluded ones below: a program only pays for the strings it
 chooses to emit, and most emit none.

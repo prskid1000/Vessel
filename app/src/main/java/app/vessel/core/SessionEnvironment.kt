@@ -16,7 +16,7 @@ import java.security.MessageDigest
  * `docs/LOGGING.md` is the source of truth for every term here and why it earns
  * its place. Change that document first.
  */
-const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+loaddll,+debugstr"
+const val WINEDEBUG_CHANNELS: String = "-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr"
 
 /**
  * The Direct3D and WGL DLLs that must resolve to the shipped native builds.
@@ -191,7 +191,15 @@ const val STRICT_MEMORY_ORDERING: Boolean = false
  * *Done when:* either a measurement says the cost is acceptable, or Turnip's
  * 128-lane subgroup path is fixed and this goes back to false.
  */
-const val RESTRICT_SUBGROUP_SIZE_64: Boolean = true
+/*
+ * **Off since `patches/mesa/0007`, which fixes the cause instead of negating
+ * it.** That patch clears `supports_double_threadsize` for `a8xx_base`, which is
+ * the flag this option exists to negate (`tu_device.cc:1796`) — so with a driver
+ * built from it, this is a no-op that would only ever hide whether the patch
+ * worked. Kept rather than deleted because it is the fastest way to put a stock
+ * driver back into the fixed state if 0007 ever has to be dropped.
+ */
+const val RESTRICT_SUBGROUP_SIZE_64: Boolean = false
 
 /**
  * The only variables `wineboot` and `regedit` are given while a prefix is being

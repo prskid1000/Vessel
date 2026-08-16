@@ -957,6 +957,15 @@ val LOGGABLES: List<Loggable> = listOf(
     wineChannel(
         channel = "winediag",
         secondary = "Wine's report on its own health, and which renderer it chose.",
+        // **Stays at EVERYTHING, and the measurement that looked like a case for
+        // lowering it is the reason not to.** Two sessions produced 1 line and 0
+        // lines, both at ERR, which `err+all` already covers -- so the term
+        // looks free to delete. It is not: `docs/LOGGING.md` counts 58 sites,
+        // 55 of them `ERR_(winediag)`, which leaves three that only a higher
+        // tier reaches. Removing it would trade three init-time diagnostics --
+        // no Vulkan library, broken .NET, missing codecs -- for nothing
+        // measurable, because the channel already costs about one line a
+        // session.
         fixed = WineChannelLevel.EVERYTHING,
     ),
     wineChannel(
@@ -967,7 +976,18 @@ val LOGGABLES: List<Loggable> = listOf(
     wineChannel(
         channel = "debugstr",
         secondary = "What the program itself chose to print.",
-        fixed = WineChannelLevel.EVERYTHING,
+        // **WARNINGS, because that is where every line of it actually is.**
+        // Measured: 63 lines in Requiem and 1,977 in Metro, and 100% of them at
+        // the WARN tier in both -- nothing above. EVERYTHING was therefore
+        // buying the TRACE tier of a channel that is a program's own
+        // `OutputDebugString`, which on a chatty engine is unbounded and on
+        // these two is empty.
+        //
+        // It stays on rather than dropping to ERRORS because it is the layer we
+        // have least other visibility into: this is what carried Requiem's
+        // `[streamline][error]` lines and its XeSS output, and a title's own
+        // account of why it failed is often the only one.
+        fixed = WineChannelLevel.WARNINGS,
     ),
     // **`DXVK_LOG_PATH=none` is still sent and is deliberately not a row.**
     // `SessionEnvironment.kt:1158` sets it unconditionally from
@@ -1657,7 +1677,7 @@ val BASELINE_WINE_TERMS: List<Pair<String, List<String>>> = listOf(
     "module" to listOf("warn+module"),
     "winediag" to listOf("+winediag"),
     "loaddll" to listOf("+loaddll"),
-    "debugstr" to listOf("+debugstr"),
+    "debugstr" to listOf("warn+debugstr"),
 )
 
 // — the display list ----------------------------------------------------------
