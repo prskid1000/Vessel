@@ -125,6 +125,46 @@ const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
 const val STRICT_MEMORY_ORDERING: Boolean = false
 
 /**
+ * Whether Adreno's subgroups are pinned to 64 lanes instead of a possible 128.
+ *
+ * **On, because at 128 Resident Evil Requiem hangs the GPU — and a constant
+ * rather than a bare assignment because the cost has never been measured.**
+ *
+ * What it does: clears Turnip's `expose_double_threadsize`
+ * (`tu_device.cc:1796`), so `maxSubgroupSize` becomes `threadsize_base` rather
+ * than twice it.
+ *
+ * **What it fixes, watched on the device.** Requiem hung on a `256x1x1` compute
+ * dispatch; vkd3d breadcrumbs named the command and the shader dump showed a
+ * wave-aggregated allocation loop — ballot for the active count, an exclusive
+ * scan for this lane's index, one lane doing the `atomicAdd`, a broadcast to
+ * share the base back, loop while the index is in range. With this on and **no
+ * shader overrides at all**, the title survived 600 s with `vr -4` at zero and
+ * five swapchains created. With it off it never reached a loading screen.
+ *
+ * **The diagnosis in Mesa's own words may not be ours.** The option is described
+ * as working around "games assuming desktop GPU 32/64 sizes", and Turnip ships
+ * it on for No Man's Sky. But the shader here **hardcodes no wave width** — it
+ * is written against ballots and scans, which are size-agnostic by contract. So
+ * either the title relies on a reconvergence guarantee Vulkan does not give, or
+ * Turnip's 128-lane path is itself wrong; a ballot is a `uvec4`, exactly 128
+ * bits, which is where an off-by-one would live. **That is unresolved**, and it
+ * matters: if it is a driver defect then the right fix is in Turnip and this
+ * restriction is a tax paid for nothing.
+ *
+ * **The cost is unmeasured and that is the point of this constant.** Half the
+ * lanes per wave sounds expensive and may be nothing — Turnip already chooses 64
+ * for many shaders on its own. It cannot be measured on Requiem, which does not
+ * run with it off. It *can* be measured on a title that runs either way: flip
+ * this, rebuild, and compare the frame counter on the same scene. Until someone
+ * does that, nobody should claim this is free or that it is expensive.
+ *
+ * *Done when:* either a measurement says the cost is acceptable, or Turnip's
+ * 128-lane subgroup path is fixed and this goes back to false.
+ */
+const val RESTRICT_SUBGROUP_SIZE_64: Boolean = true
+
+/**
  * The only variables `wineboot` and `regedit` are given while a prefix is being
  * built.
  *
@@ -408,6 +448,11 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // with FEX's store-release behaviour, and FEX would try to set it itself if
     // it could. See where it is assigned.
     "tu_override_uncached_as_cache_coherent",
+    // Same reason as its neighbour, and a sharper one: this pins Adreno's
+    // subgroup width to 64 because shaders that assume it hang the GPU
+    // otherwise. A container that could turn it off would get a freeze that
+    // looks like the game hanging, with nothing on screen to say why.
+    "tu_restrict_subgroup_size_64",
     "ADRENOTOOLS_DRIVER_PATH",
     "ADRENOTOOLS_HOOKS_PATH",
     "ADRENOTOOLS_DRIVER_NAME",
@@ -1526,6 +1571,49 @@ fun sessionEnvironment(
     // **Unmeasured** — it needs an x86-64 D3D title, so it cannot be attributed
     // by `presentbench`, which runs no guest x86 at all.
     environment["tu_override_uncached_as_cache_coherent"] = "true"
+
+    /*
+     * **Adreno's subgroups are 128 wide and a great many shipped shaders assume
+     * 64. This is the option Mesa ships for exactly that, and it is not a
+     * setting.**
+     *
+     * Turnip exposes `minSubgroupSize = threadsize_base` and `maxSubgroupSize =
+     * threadsize_base * 2` when the part supports the double size
+     * (`tu_device.cc:1111-1113`), so a dispatch can get 64 or 128. A shader
+     * written against a desktop GPU's fixed 32 or 64 gets whichever it is given.
+     * `tu_restrict_subgroup_size_64` pins it to 64 — the option's own
+     * description in `tu_drirc_gen.py:99-101` is "work around games assuming
+     * desktop GPU 32/64 sizes", and `00-turnip-defaults.conf` already turns it
+     * on for No Man's Sky, whose comment describes a lighting compute shader
+     * that "does a write once per subgroup (assuming 64)" and bands vertically
+     * at 128.
+     *
+     * **Measured here, and it is the whole of a blocker.** Resident Evil Requiem
+     * hung its GPU on a `256x1x1` compute dispatch. vkd3d breadcrumbs named the
+     * command; the shader dump showed a wave-aggregated allocation loop —
+     * `WaveActiveBallot` for the active count, an exclusive scan for this lane's
+     * index, one lane doing the `atomicAdd`, `WaveReadLaneFirst` to share the
+     * base back, loop while the index is in range. Its exit depends on every
+     * lane agreeing about the wave, so at the wrong width the index stops
+     * advancing and the dispatch never retires: `VK_ERROR_DEVICE_LOST`, then a
+     * critical section held by the thread that noticed, then a frozen loading
+     * screen. **33 of the 2,867 shaders that one session compiled carry the same
+     * loop**, so it was never going to be one shader.
+     *
+     * *A per-shader `VKD3D_SHADER_OVERRIDE` was built first and works — it is in
+     * this file's history — and it is the wrong fix.* It covers only shaders
+     * already seen, rewrites the game's own algorithm, needs redoing after a game
+     * update, and forces `pipeline_library_ignore_spirv`, which takes the PSO
+     * cache out of the picture. This costs nothing per command and covers every
+     * shader, including ones nobody has compiled yet.
+     *
+     * **Reserved rather than offered**, like its neighbour above: a subgroup
+     * width is not a preference, and a container that turned this off would get
+     * a GPU hang that looks like the game freezing. The cost is real and is
+     * accepted — half the lanes per wave on parts that could do 128 — because a
+     * title that renders slower is worth more than one that does not render.
+     */
+    if (RESTRICT_SUBGROUP_SIZE_64) environment["tu_restrict_subgroup_size_64"] = "true"
 
     // Setting these three is what makes win32u open the adrenotools handle
     // instead of `dlopen`ing the platform loader, and for one cycle they were

@@ -786,6 +786,9 @@ class SessionEnvironmentTest {
                 // export does not exist in Wine 11.14, so FEX's own attempt is
                 // guarded out and the option keeps its `false` default.
                 "tu_override_uncached_as_cache_coherent" to "true",
+                // Pins Adreno subgroups to 64. Shaders that assume that width
+                // hang the GPU at 128; see the assignment for the Requiem case.
+                "tu_restrict_subgroup_size_64" to "true",
                 "VESSEL_VULKAN_ICD" to File(turnip.driverDir, turnip.libraryName).absolutePath,
                 "ADRENOTOOLS_DRIVER_PATH" to turnip.driverDir.absolutePath + File.separator,
                 "ADRENOTOOLS_HOOKS_PATH" to turnip.hooksDir.absolutePath + File.separator,
