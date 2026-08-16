@@ -114,6 +114,53 @@ avoid.
   identical lines into one digest and burying the real entries, which is exactly
   what `0043` exists to prevent.
 
+- [ ] **#55 — Requiem's loading screen is one compute shader hanging the GPU.**
+  **The live blocker, and it is now named.** vkd3d breadcrumbs, on a build made
+  with `VKD3D_BREADCRUMBS=1`, localised it to a single command:
+
+  ```
+  Found pending command list context 24064 in executable state,
+      TOP_OF_PIPE marker 85, BOTTOM_OF_PIPE marker 84.
+  ...
+  ===== Potential crash region BEGIN =====
+    Command: top_marker  marker: 85
+      Set arg: 256 (#100)     threadgroups X
+      Set arg: 1   (#1)       Y
+      Set arg: 1   (#1)       Z
+    Command: dispatch
+    Command: bottom_marker  marker: 85
+  ===== Potential crash region END =====
+  ```
+
+  The GPU started marker 85 and retired only through 84. The shader bound for it
+  is set at marker 84: **`hash: 07051afbddeed881, stage: 20`** — `0x20` is
+  `VK_SHADER_STAGE_COMPUTE_BIT`. So **one compute shader, dispatched 256×1×1,
+  never retires**, and everything downstream is consequence:
+  `vkd3d_wait_for_gpu_timeline_semaphore … vr -4`, `d3d12_device_mark_as_removed`,
+  and then the deadlock in #54 because the thread that observed the loss was
+  holding a Requiem critical section.
+
+  *What this rules out, each on its own evidence:*
+
+  | theory | how it died |
+  |---|---|
+  | memory pressure | 3.3 GB free, 8.6 GB swap free, RSS flat at the moment of death |
+  | an Android kill | no `lmkd`, no tombstone, no signal; `app.vessel` survives with the same pid |
+  | the FEX AOT cache | quarantined re9's 322 MB cache and the failure reproduced identically |
+  | a Wine or FEX fault | no unhandled exception in ~500k lines, and CPU is 748% idle at the hang |
+  | the vkd3d warnings | alignment and DSV both shown benign against vkd3d's own conformance test |
+
+  *Done when:* the shader is in hand and the behaviour is attributed. Next step
+  is `VKD3D_SHADER_DUMP_PATH` for hash `07051afbddeed881`, which needs the same
+  treatment `VKD3D_CONFIG` just got — it names a path, so it belongs to the app
+  rather than to a container document. `VKD3D_SHADER_OVERRIDE` is the other half:
+  it replaces a shader by hash, which is a workaround as well as a bisect.
+
+  *Do not chase the SMC thrash for this.* 3,656 self-modifying-code handles were
+  measured in the same run, 79% of them two PCs writing one address — real, and
+  documented in `InvalidationTracker.cpp` as the code-and-data-share-a-page
+  shape. It costs CPU, and at the hang there was none being spent.
+
 - [ ] **#54 — the session ends when the X server goes away.** The live blocker,
   and it is not a Wine or FEX fault. Every run now ends with
 

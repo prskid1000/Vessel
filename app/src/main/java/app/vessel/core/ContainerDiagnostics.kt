@@ -351,16 +351,50 @@ data class DiagnosticSetting(
     /**
      * Which table added this row.
      *
-     * **A row that has just been added has no name**, so nothing about it says
-     * which list it belongs in — and `loggableFor("")` synthesises a Wine channel,
-     * so a row added from the graphics table appeared under logging. Remembering
-     * the origin is the only thing that can answer for an empty row; once named,
-     * the name agrees with it because each table's picker offers only its own.
+     * **Superseded by [type], and kept only so a document written before it
+     * still parses.** This was the whole discrimination: one bit, meaning
+     * "graphics table" or "logging table", because those were the only two
+     * lists. [resolvedType] reads it when [type] is empty and nothing writes it
+     * any more.
      *
      * Defaulted, so every container document written before this parses.
      */
     val turnip: Boolean = false,
+    /**
+     * The [DiagnosticFamily.wire] this row belongs to — the *type* column.
+     *
+     * **Free text on purpose.** A name that matches no declared family is not an
+     * error: it composes as a plain environment variable, which is the same
+     * escape hatch the free-text table always was, and it is what stops the
+     * curated list from being a ceiling. Everything the list *does* contain is
+     * offered, so typing is the exception rather than the interface.
+     *
+     * **Stored rather than derived, and only because an unnamed row has nothing
+     * to derive from.** Once a row has a name, [Loggable.family] is authoritative
+     * — it is read off the `Emit`, so a row cannot claim one family and be sent
+     * through another's variable. This field answers for the moment between
+     * "add row" and "type a name", which is exactly the job [turnip] had.
+     *
+     * Defaulted, so every container document written before this parses.
+     */
+    val type: String = "",
 ) {
+    /**
+     * The family this row belongs to, preferring what the *name* proves.
+     *
+     * Order matters and it is the safety property: a declared name decides, so a
+     * hand-edited document that says `type: "wine"` next to `name: "breadcrumbs"`
+     * composes a `VKD3D_CONFIG` member and not a Wine channel called
+     * `breadcrumbs` that Wine would ignore in silence. [type] is consulted only
+     * when the name proves nothing, and [turnip] only when neither does.
+     */
+    val resolvedType: String
+        get() {
+            val declared = LOGGABLES.firstOrNull { it.name == name }?.family
+            if (!declared.isNullOrEmpty()) return declared
+            if (type.isNotBlank()) return type.trim()
+            return if (turnip) "turnip" else "wine"
+        }
     /**
      * Whether this row is loud enough to be spent after one launch.
      *
@@ -1270,12 +1304,79 @@ private const val MESA_LOG_VAR = "MESA_LOG"
  * costs.
  */
 fun loggableFor(name: String, turnip: Boolean = false): Loggable =
-    LOGGABLES.firstOrNull { it.name == name }
-        ?: if (turnip) {
-            unknownTurnipFlag(name)
-        } else {
-            wineChannel(name, "A Wine debug channel this build has no description for.")
-        }
+    loggableIn(name, if (turnip) "turnip" else "wine")
+
+/** The entry for a row, resolved in its own family. */
+fun loggableFor(row: DiagnosticSetting): Loggable = loggableIn(row.name, row.resolvedType)
+
+/**
+ * The declared entry for [name], or one synthesised **in the shape [type]
+ * implies**.
+ *
+ * **The shape is the whole point, and getting it wrong is silent.** Every
+ * unknown name used to become a Wine channel, so a `TU_DEBUG` flag typed into
+ * the wrong table was composed into `WINEDEBUG`, where Wine ignores a channel it
+ * does not know and the user concludes the flag did nothing. That is the failure
+ * `unknownTurnipFlag` was added for, and it generalises: a `VKD3D_CONFIG` member
+ * written as a scalar would overwrite the variable and drop `nodxr`; a scalar
+ * written as a list member would compose a comma list nothing reads.
+ *
+ * An unrecognised [type] is not an error — it is the free-text case, and it
+ * lands on [DiagnosticFamily.Shape.RAW], the same plain variable the environment
+ * table always was and subject to the same reserved-name refusal.
+ */
+fun loggableIn(name: String, type: String): Loggable {
+    LOGGABLES.firstOrNull { it.name == name }?.let { return it }
+    val family = familyFor(type)
+    return when (family?.shape) {
+        DiagnosticFamily.Shape.CHANNEL, null ->
+            if (family == null && type.isNotBlank() && !type.equals("wine", ignoreCase = true)) {
+                unknownVariable(name, type)
+            } else {
+                wineChannel(name, "A Wine debug channel this build has no description for.")
+            }
+        DiagnosticFamily.Shape.LIST -> unknownListMember(name, family)
+        DiagnosticFamily.Shape.SCALAR, DiagnosticFamily.Shape.RAW -> unknownVariable(name, family.wire)
+    }
+}
+
+/**
+ * A member of a comma-joined variable that this build has no description for.
+ *
+ * Generalised from `unknownTurnipFlag`, which said the same thing about
+ * `TU_DEBUG` alone. The caution is the same warning for the same reason: every
+ * one of these variables is parsed by a flag table that ignores a word it does
+ * not recognise, so a typo and a flag that did nothing are indistinguishable.
+ */
+private fun unknownListMember(flag: String, family: DiagnosticFamily) = Loggable(
+    name = flag,
+    emit = Emit.ListMember(family.variable, flag),
+    levels = ON_OFF,
+    labels = ON_OFF_LABELS,
+    baseline = Emit.OFF,
+    secondary = "${family.variable} — a flag this build has no description for.",
+    addAt = Emit.ON,
+    caution = "Vessel does not know this flag. ${family.label} ignores one it does " +
+        "not recognise, so a typo looks exactly like a flag that did nothing.",
+)
+
+/**
+ * A variable of its own that this build has no description for.
+ *
+ * No ladder, because there is nothing to know about one: the level is whatever
+ * the user typed, sent verbatim. That is the honest position for a variable
+ * nobody has curated, and it is what the free-text environment table did.
+ */
+private fun unknownVariable(variable: String, family: String) = Loggable(
+    name = variable,
+    emit = Emit.Variable(variable, ""),
+    levels = emptyList(),
+    baseline = "",
+    secondary = if (family.isBlank()) "A variable this build has no description for."
+    else "$family — a variable this build has no description for.",
+    caution = "Vessel does not know this variable, so nothing here can say what it " +
+        "costs or whether the value is one it accepts.",
+)
 
 /**
  * A `TU_DEBUG` member this build has no description for, typed by the user.
