@@ -212,7 +212,7 @@ index 4530c6322..7e9e74b0f 100644
  
      InvalidationTracker.HandleImageMap(FEX::Windows::BaseName(Info.Filename), BaseAddress);
 -    ImageTracker.HandleImageMap(Info.Filename, BaseAddress, false /* unused during cache generation */);
-+    const auto Section = ImageTracker.HandleImageMap(Info.Filename, BaseAddress, false /* unused during cache generation */);
++    const auto MappedSection = ImageTracker.HandleImageMap(Info.Filename, BaseAddress, false /* unused during cache generation */);
 +
 +    /* Vessel: the image that was opened has to be the image the cache is filed
 +     * under, and until now nobody asked.
@@ -262,11 +262,11 @@ index 4530c6322..7e9e74b0f 100644
 +     * distinct byte-streams sharing a basename, a `TimeDateStamp` and a
 +     * `SizeOfImage` would still pass -- see patches/fex/README.md for why a
 +     * content digest was not the fix chosen here. */
-+    if (Section.FileInfo.FileId != ID) {
++    if (MappedSection.FileInfo.FileId != ID) {
 +      LogMan::Msg::EFmt("Refusing to compile {}: the file at that path is image {:016x}, but the code map and the "
 +                        "cache name say {:016x}. The image was replaced after the code map was recorded, so a cache "
 +                        "built from it would describe bytes that are not at those addresses.",
-+                        Info.Filename, Section.FileInfo.FileId, ID);
++                        Info.Filename, MappedSection.FileInfo.FileId, ID);
 +      return std::nullopt;
 +    }
  
