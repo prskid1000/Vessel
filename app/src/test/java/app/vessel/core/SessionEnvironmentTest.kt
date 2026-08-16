@@ -753,6 +753,15 @@ class SessionEnvironmentTest {
                 // it write `<exe>_dxgi.log` beside the session log while the session
                 // log itself got nothing. Measured on a real game launch.
                 "DXVK_LOG_PATH" to "none",
+                // Adreno has one memory heap and it is device-local, so DXVK
+                // finds nothing to report as shared memory and copies the device
+                // figure into it instead of reporting none — and a title that
+                // adds the two sizes its pools to twice the heap that exists.
+                // Requiem's own options screen read 7.98 GB against a 3.98 GiB
+                // heap and died on a 16 MB allocation. Capped for every
+                // container, because the heap is one heap on every device this
+                // runs on.
+                "DXVK_CONFIG" to FIXED_DXVK_MAX_SHARED_MEMORY,
                 // The D3D counter snapshot, in the container's scratch. Always
                 // set: it is what makes draw calls, submissions and vidmem
                 // graphable without a per-game `dxvk.conf` and a screenshot.

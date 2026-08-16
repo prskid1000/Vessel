@@ -429,6 +429,14 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "DISPLAY",
     "DXVK_LOG_LEVEL",
     "DXVK_LOG_PATH",
+    // Reserved the day the session started sending a value of its own. It used
+    // to be an ordinary free-text environment row, which was fine while Vessel
+    // set nothing: a row there *replaces* the variable, so the moment
+    // [FIXED_DXVK_MAX_SHARED_MEMORY] went in, anyone who typed a d3d11 option
+    // would have handed the doubled memory report back to the guest without a
+    // word about it. `VKD3D_CONFIG` above cost a device run to learn exactly
+    // this. Reachable now through the `dxvkconfig` family, which composes.
+    "DXVK_CONFIG",
     "VKD3D_DEBUG",
     "VKD3D_SHADER_DEBUG",
     "VKD3D_LOG_FILE",
@@ -475,6 +483,15 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // preference anyone wants to be able to express, and the graphs are not
     // improved by being able to move their own source.
     "VESSEL_GFX_STATS",
+    // Where the audio driver tees what it hands the device — `patches/wine/0047`.
+    // Reserved for the same reason as its neighbour and with one addition: this
+    // one is *written to* rather than read, at ten writes a second for as long
+    // as the session lasts, so a container document that could point it at
+    // `/sdcard/…` would have Wine filling a directory outside the container with
+    // a file nothing prunes. The value the Diagnostics switch sends is `1`, and
+    // the driver resolves that to `$TMPDIR/vessel-audio.pcm` — inside the
+    // container's own scratch, cleared with it.
+    "VESSEL_AUDIO_DUMP",
     // Reserved rather than offered, because a caption is not a preference here:
     // Vessel's taskbar is the only window control on a phone and the shell draws
     // the move/resize borders itself. A container that turned this off would get
@@ -623,6 +640,27 @@ val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     // not a lie. Turnip does support the `VK_AMD_buffer_marker` the tracer
     // needs (`tu_device.cc`), so on the diagnostic build it really reports.
     "VKD3D_CONFIG",
+    // Here for the same reason as its neighbour and with the same shape: the
+    // session sends one line in it, a diagnostics row composes rather than
+    // replaces, and the three d3d11 options worth trying on a shared-memory part
+    // are only reachable this way now that the variable is reserved.
+    "DXVK_CONFIG",
+    // **The only instrument left for the buzz, and the reason is that every
+    // cheaper one has already been spent.**
+    //
+    // Requiem buzzes and Metro does not, through the same driver on the same
+    // device, and the two traces are the same numbers: burst 868, capacity 1736,
+    // client buffer 2604 in both; `held` 1870 against 1909; `in_oss` 1106
+    // against 1144; 41% against 40% partial writes; zero AAudio xruns in either.
+    // Neither end starves and the device never reported an underrun, so the
+    // frames are already wrong when they arrive — and a counter cannot say in
+    // what way. Noise, gaps and clipping sound alike and want different fixes.
+    //
+    // On this surface rather than a manifest param for the reason the reserved
+    // set gives at the name: it writes a file, ten times a second, for as long
+    // as the session runs. That is a thing to switch on for one session while
+    // looking at a bug, which is exactly what this surface is.
+    "VESSEL_AUDIO_DUMP",
 )
 
 /**
@@ -1293,6 +1331,26 @@ fun sessionEnvironment(
     // and the two layers now behave the same way.
     environment["DXVK_LOG_PATH"] = FIXED_DXVK_LOG_PATH
 
+    // **Stop telling the guest it has twice the memory that exists.** Adreno has
+    // one heap and it is device-local, so DXVK finds nothing to report as shared
+    // and copies the device figure into it rather than reporting none — see
+    // [FIXED_DXVK_MAX_SHARED_MEMORY] for the code and for the measurement that
+    // says a title adds the two.
+    //
+    // Set for every container rather than only for the ones that hit it, because
+    // there is nothing container-specific about the fault: the heap is one heap
+    // on every device this runs on, and a container that has not been diagnosed
+    // is precisely the one whose owner will not know to add the line. It is also
+    // *narrowing* — it lowers a number that was invented, and a title that reads
+    // the D3D12 budget API instead sees no change at all.
+    //
+    // Both halves together, so the two figures the guest adds sum to the
+    // container's own `hardware.vram` rather than to something near it. See
+    // [HardwareLimits.dxvkMemoryConfig] for why the margin is taken off the
+    // dedicated side.
+    val dxvkConfig = hardware?.dxvkMemoryConfig ?: listOf(FIXED_DXVK_MAX_SHARED_MEMORY)
+    environment["DXVK_CONFIG"] = dxvkConfig.joinToString(";")
+
     // **The D3D layer's own counters, permanently on, into a file this app
     // reads.**
     //
@@ -1722,7 +1780,13 @@ fun sessionEnvironment(
     // append new ones in a new position: `LinkedHashMap` keeps a key's original
     // insertion point on reassignment, so the environment's order is the same
     // whether or not anything here is switched on.
-    for ((key, value) in diagnosticEnvironment(profile.diagnostics, tuDebugFlags(profile, manifest))) {
+    for (
+        (key, value) in diagnosticEnvironment(
+            profile.diagnostics,
+            tuDebugFlags(profile, manifest),
+            dxvkConfig,
+        )
+    ) {
         if (key !in DIAGNOSTIC_SESSION_ENV) continue
         environment[key] = value
     }
@@ -2036,6 +2100,45 @@ data class HardwareLimits(
             val want = vramMb ?: return null
             if (deviceRamMb <= 0 || want <= 0 || want >= deviceRamMb) return null
             return ((want.toDouble() / deviceRamMb) * 1000.0).toInt() / 1000.0
+        }
+
+    /**
+     * The `DXVK_CONFIG` lines that make the guest's memory report add up to
+     * [vramMb], in order, and never empty.
+     *
+     * **Two numbers, because the guest adds them.** `DXGI_ADAPTER_DESC` carries
+     * dedicated and shared separately and RE Engine's *Max VRAM* readout is the
+     * sum, so capping only one of them leaves a total that is still not the
+     * setting. Setting `hardware.vram` to 4 GB and being told 7.98 GB is what
+     * this fixes; the split is 3,968 + 128.
+     *
+     * The shared side is [FIXED_DXVK_SHARED_MEMORY_MB] and the dedicated side is
+     * whatever is left, rather than the other way around, because the shared
+     * figure is the invented one — Adreno has a single device-local heap and
+     * DXVK copies the device size into `sharedMemory` only so that games allergic
+     * to a zero are not handed one (`dxgi_adapter.cpp:455`). The margin comes out
+     * of the number that is real precisely so the total is the number that was
+     * asked for.
+     *
+     * Both options only ever *lower* what the heaps report (`:480-486`), so a
+     * setting larger than the device can back is inert rather than a lie in the
+     * other direction — which is the safe way round for this to be wrong.
+     *
+     * Falls back to the shared cap alone when there is no [vramMb] to split, or
+     * when it is so small that the dedicated side would not be positive. The
+     * doubling is wrong at every size, so the half of the fix that needs no
+     * setting is not made conditional on one.
+     */
+    val dxvkMemoryConfig: List<String>
+        get() {
+            val want = vramMb
+            if (want == null || want <= FIXED_DXVK_SHARED_MEMORY_MB) {
+                return listOf(FIXED_DXVK_MAX_SHARED_MEMORY)
+            }
+            return listOf(
+                "dxgi.maxDeviceMemory = ${want - FIXED_DXVK_SHARED_MEMORY_MB}",
+                FIXED_DXVK_MAX_SHARED_MEMORY,
+            )
         }
 
     /** True when nothing here differs from the machine underneath. */

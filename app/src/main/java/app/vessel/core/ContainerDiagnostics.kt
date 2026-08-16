@@ -366,14 +366,20 @@ val KNOWN_ENV: List<KnownEnv> = listOf(
             "while it runs, so read the shape and not the fps.",
         values = listOf("print_csv", "print", "print_json"),
     ),
-    KnownEnv(
-        name = "DXVK_CONFIG",
-        secondary = "Passed straight to DXVK, one 'key = value' per line. Three worth " +
-            "trying, none proven: d3d11.cachedDynamicResources = a (this phone shares " +
-            "memory between CPU and GPU, so the memory type DXVK avoids costs nothing " +
-            "here), d3d11.relaxedBarriers = True, d3d11.relaxedGraphicsBarriers = True.",
-        placeholder = "d3d11.cachedDynamicResources = a",
-    ),
+    // **`DXVK_CONFIG` was here and is now the `dxvkconfig` family.** It could
+    // stay a free-text environment row only while Vessel sent nothing of its
+    // own: a row here *replaces* the variable, and the session now sends
+    // [FIXED_DXVK_MAX_SHARED_MEMORY] in it. Anyone who typed a d3d11 option
+    // would have quietly handed the guest back a memory report of twice the
+    // heap — the exact failure `VKD3D_CONFIG` was declared to stop, one device
+    // run after it was not.
+    //
+    // The three options that used to be named here are still worth trying and
+    // are typed as members of that family instead:
+    // `d3d11.cachedDynamicResources = a` (this phone shares memory between CPU
+    // and GPU, so the memory type DXVK avoids costs nothing here),
+    // `d3d11.relaxedBarriers = True`, `d3d11.relaxedGraphicsBarriers = True`.
+    // None is proven.
 )
 
 /** The declaration for [name], or null when Vessel has nothing to say about it. */
@@ -576,6 +582,18 @@ data class DiagnosticFamily(
     val secondary: String,
     val variable: String = "",
     val baseMembers: List<String> = emptyList(),
+    /**
+     * What joins the members of a [Shape.LIST] variable.
+     *
+     * Declared rather than assumed, because the assumption was wrong the moment
+     * a third list appeared. `TU_DEBUG` and `VKD3D_CONFIG` are comma-joined and
+     * the composer hardcoded a comma; `DXVK_CONFIG` holds whole `key = value`
+     * lines and splits on `;`
+     * (native/dxvk/src/util/config/config.cpp:1690), so a comma there produces
+     * one unparseable line rather than two settings — and DXVK's parser skips
+     * what it cannot read without saying so, which is a silent loss of both.
+     */
+    val separator: String = ",",
 ) {
     enum class Shape {
         /** A channel inside `WINEDEBUG`. The row's name is the channel. */
@@ -638,6 +656,26 @@ val FAMILIES: List<DiagnosticFamily> = listOf(
         label = "DXVK",
         shape = DiagnosticFamily.Shape.SCALAR,
         secondary = "The Direct3D 9/10/11 translator's log level.",
+    ),
+    // Separate from `dxvk` for the reason `vkd3dconfig` is separate from `vkd3d`
+    // — a different shape, not a different component — and separate from *both*
+    // in one further way: its members are whole `key = value` lines rather than
+    // single words, and DXVK splits them on `;` rather than `,`.
+    //
+    // It became a family the day the session started sending a value of its own.
+    // Free text in the environment table could not carry
+    // [FIXED_DXVK_MAX_SHARED_MEMORY]: a row there *replaces* the variable, so
+    // anyone who typed a d3d11 option would have silently handed the guest back
+    // the doubled memory report — which is exactly the failure `VKD3D_CONFIG`
+    // was declared to stop, one device run later.
+    DiagnosticFamily(
+        wire = "dxvkconfig",
+        label = "DXVK config",
+        shape = DiagnosticFamily.Shape.LIST,
+        secondary = "Config lines, added to the ones Vessel already sends.",
+        variable = "DXVK_CONFIG",
+        baseMembers = listOf(FIXED_DXVK_MAX_SHARED_MEMORY),
+        separator = ";",
     ),
     DiagnosticFamily(
         wire = "turnip",
@@ -748,6 +786,11 @@ private fun familyOfVariable(variable: String): String {
 internal fun listBaseMembers(): Map<String, List<String>> =
     FAMILIES.filter { it.shape == DiagnosticFamily.Shape.LIST && it.variable.isNotEmpty() }
         .associate { it.variable to it.baseMembers }
+
+/** What joins each list variable's members, derived the same way and for the same reason. */
+internal fun listSeparators(): Map<String, String> =
+    FAMILIES.filter { it.shape == DiagnosticFamily.Shape.LIST && it.variable.isNotEmpty() }
+        .associate { it.variable to it.separator }
 
 /**
  * One thing that can be logged, and everything the screen and the composer need
@@ -1096,6 +1139,35 @@ val LOGGABLES: List<Loggable> = listOf(
             "where Vessel cannot read it.",
         addAt = "file",
         levelIsMachine = true,
+    ),
+
+    // The one row here that produces a *file* rather than lines in this log, and
+    // it is here because every line-producing instrument for the buzz has been
+    // spent. Requiem buzzes, Metro does not, and `oss` at trace says the same
+    // numbers for both: burst 868, capacity 1736, client buffer 2604; `held`
+    // 1870 against 1909; `in_oss` 1106 against 1144; 41% against 40% partial
+    // writes; zero xruns in either. Neither end starves, so the samples are
+    // already wrong on arrival, and noise, gaps and clipping sound alike in a
+    // log and want different fixes. A waveform separates them in one look.
+    //
+    // `1` and not a path, deliberately: `patches/wine/0047` resolves it against
+    // `TMPDIR`, which is the container's own scratch. The directory has a UUID
+    // in it, so a text field asking for an absolute path could only ever be
+    // filled in wrongly, and a control that cannot be used correctly is worse
+    // than no control. A typed path still works for a shell session, which is
+    // why the driver accepts one; the screen just does not ask for it.
+    Loggable(
+        name = "VESSEL_AUDIO_DUMP",
+        emit = Emit.Variable("VESSEL_AUDIO_DUMP", Emit.OFF),
+        levels = ON_OFF,
+        labels = ON_OFF_LABELS,
+        baseline = Emit.OFF,
+        secondary = "Writes every frame handed to the speaker to a file in the container, " +
+            "so a buzz can be looked at instead of counted.",
+        caution = "About 350 kB a second, appended for the whole session and never pruned. " +
+            "One session, then turn it off.",
+        addAt = Emit.ON,
+        oneSessionFrom = Emit.ON,
     ),
 
     // — Turnip flags that only *say* something. Gated on the driver logger, ----
@@ -1547,6 +1619,51 @@ private const val CHANNEL_NAME_STRUCTURE = ",+-:"
  */
 const val FIXED_DXVK_LOG_LEVEL: String = "info"
 const val FIXED_DXVK_LOG_PATH: String = "none"
+
+/**
+ * **The game is told it has twice the memory that exists, and this is the half
+ * that is imaginary.**
+ *
+ * Adreno has one memory heap and it is `DEVICE_LOCAL`, so DXVK's loop over the
+ * heaps finds nothing to put in `sharedMemory` and then does this
+ * (`native/dxvk/src/dxgi/dxgi_adapter.cpp:455`):
+ *
+ *     // This can happen on integrated GPUs with one memory heap, over-report
+ *     // here since some games may be allergic to reporting no shared memory.
+ *     if (!sharedMemory)
+ *       sharedMemory = deviceMemory;
+ *
+ * `DXGI_ADAPTER_DESC` then carries the same figure twice, and a title that adds
+ * the two — RE Engine's *Max VRAM* readout is `dedicated + shared` — sizes its
+ * streaming pools to double the heap. Measured on 2026-08-16 with
+ * `hardware.vram = 4`: the log says `Heap 0: 3.98 GiB` and `Budget: 3.48 GiB`,
+ * Requiem's own options screen says **7.98 GB**, and the session ends at
+ * `vkd3d_allocate_device_memory: Failed to allocate device memory (size
+ * 16777216)` — a 16 MB request refused.
+ *
+ * **128 MB, and zero is not expressible.** `dxgi.maxSharedMemory = 0` is the one
+ * value that does the opposite of what it reads like: DXVK gates the cap on
+ * `if (options->maxSharedMemory > 0 && ...)` (`:484`), so zero means *do not cap*
+ * and leaves the doubled figure exactly as it was. 1 is the smallest value that
+ * caps anything, and a byte-exact zero would need a patch to the fallback at
+ * `:455`.
+ *
+ * 128 MB rather than that 1 MB floor, because the comment quoted above records a
+ * real hazard and not a hypothetical one: some titles refuse an adapter that
+ * reports no shared memory at all, and that failure costs a session to recognise
+ * because it looks like a launch problem rather than a memory one. The
+ * arithmetic this exists to fix is unaffected — 128 MB is 3% of a 4 GB heap,
+ * inside the noise of what the budget moves during a session and far too little
+ * to size a streaming pool from — so the margin is bought for nothing.
+ *
+ * The D3D12 budget API is not touched by this and never was: `QueryVideoMemoryInfo`
+ * sums only heaps matching the requested segment (`:287-295`), so `NON_LOCAL`
+ * already reports zero here. This corrects the older `DXGI_ADAPTER_DESC` path,
+ * which is the one Requiem reads.
+ */
+const val FIXED_DXVK_SHARED_MEMORY_MB: Int = 128
+const val FIXED_DXVK_MAX_SHARED_MEMORY: String =
+    "dxgi.maxSharedMemory = $FIXED_DXVK_SHARED_MEMORY_MB"
 /**
  * **`fixme`, which is `vkd3d`'s own default — and it used to be `warn`, which
  * was 62% of a session.**
@@ -1909,6 +2026,13 @@ fun composeWineDebug(diagnostics: ContainerDiagnostics): String =
 fun diagnosticEnvironment(
     diagnostics: ContainerDiagnostics,
     turnipBaseFlags: List<String> = listOf(TU_DEBUG_STARTUP),
+    /**
+     * What the session already put in `DXVK_CONFIG`, passed in for the same
+     * reason [turnipBaseFlags] is: half of it is derived from the container's
+     * `hardware.vram` and so cannot be a declared constant. The declared base
+     * member is the fallback for a caller with no container to hand.
+     */
+    dxvkBaseConfig: List<String> = listOf(FIXED_DXVK_MAX_SHARED_MEMORY),
 ): Map<String, String> {
     val out = LinkedHashMap<String, String>()
     val emitted = emitted(diagnostics)
@@ -1925,19 +2049,30 @@ fun diagnosticEnvironment(
     // composed `breadcrumbs,startup` — Turnip's ground-truth flag written into
     // vkd3d's config, where it means nothing, and `nodxr` silently dropped.
     //
-    // `TU_DEBUG` still takes its base from the parameter rather than from
-    // [FAMILIES], because the manifest contributes flags to that one and this
-    // stage adds to them; the declared base is the fallback for a caller that
-    // passes nothing.
+    // `TU_DEBUG` and `DXVK_CONFIG` still take their bases from parameters rather
+    // than from [FAMILIES], because something outside this file contributes to
+    // both and this stage adds to what it finds: the manifest contributes Turnip
+    // flags, and `hardware.vram` decides half of the DXVK memory pair. The
+    // declared base is the fallback for a caller that passes nothing.
     val bases = listBaseMembers()
+    val separators = listSeparators()
     for ((variable, members) in emitted.lists) {
         if (members.isEmpty()) continue
-        val base = if (variable == "TU_DEBUG") turnipBaseFlags else bases[variable].orEmpty()
+        val base = when (variable) {
+            "TU_DEBUG" -> turnipBaseFlags
+            "DXVK_CONFIG" -> dxvkBaseConfig
+            else -> bases[variable].orEmpty()
+        }
         // The added flags first and the base last, so `startup` stays where it
         // is: it is the ground truth for whether Turnip loaded and nothing may
         // displace it. The same ordering serves `nodxr` for the same reason —
         // what the session already chose is not something a diagnostic may move.
-        out[variable] = (members + base).distinct().joinToString(",")
+        //
+        // The separator comes from the family and not from here: `DXVK_CONFIG`
+        // splits on `;` and the other two on `,`, and a comma in a DXVK config
+        // makes one line that its parser drops in silence.
+        out[variable] = (members + base).distinct()
+            .joinToString(separators[variable] ?: ",")
     }
     return out
 }
