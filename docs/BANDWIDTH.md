@@ -866,6 +866,64 @@ a throughput figure was the right instinct and it produced the wrong answer,
 which is the argument for §9.7's direct measurement over any amount of further
 reading.
 
+### 9.3a It is not an inference any more — `heapbench` ran, 2026-08-16
+
+§9.3 below is kept because its reasoning is sound and worth having, but its
+conclusion is now measured rather than inferred, and §9.6's arithmetic is
+measured too. `tools/bench/heapbench.c` on the device, uid 2000
+(`u:r:shell:s0`), 3.52 MB, 10 repeats:
+
+```
+control malloc->malloc     warm= 45949.3 MB/s  cold= 24944.5 MB/s
+heap qcom,system              open FAILED errno=13 (Permission denied)
+heap system                   warm= 24359.4 MB/s  cold= 25891.9 MB/s  ratio_vs_control=1.038
+                              syncStart=0.000 ms  syncEnd=0.000 ms
+                              bracketed(start+copy+end) cold=0.142 ms
+heap qcom,display             open FAILED errno=13 (Permission denied)
+```
+
+**Three results, in descending order of what they settle.**
+
+1. **The mapping is cached. Measured, not deduced.** `ratio_vs_control=1.038`
+   against a `malloc` buffer in the same process leaves no room for it to be
+   anything else; a write-combine mapping reads one to two orders of magnitude
+   slower. §9.2's obituary for the write-combine theory is now backed by a
+   stopwatch as well as by `ls`.
+
+2. **The `DMA_BUF_IOCTL_SYNC` bracket is free here — 0.000 ms on both halves.**
+   That was the leading candidate after write-combine died. **It survives only
+   in the narrow form given below**, because this buffer has no importer
+   attached and `qcom_sg_dma_buf_begin_cpu_access` walks every attachment. The
+   real swapchain buffer has KGSL attached. So this measures the floor of the
+   sync cost, not the swapchain's, and the gap between them is exactly what the
+   `syncIn=`/`syncOut=` split in the present log will report.
+
+3. **The entire operation costs 0.142 ms cold.** Sync in, copy 3.5 MB, sync out.
+   The measured present copy is **19.1 ms — 135x that.** §9.6's estimate said
+   the parts sum to about a fifth of the whole; the measurement says they sum to
+   about **one hundred and thirty-fifth** of it. The gap is far larger than that
+   section assumed, and it is not a bandwidth gap, a page-protection gap, or a
+   cache-maintenance gap.
+
+**What this leaves.** Candidate (c) in §9.6 — *something blocks* — is now the
+only one standing, and `max=385490us` against a 0.142 ms floor is its shape.
+Two things this run cannot see, both of which matter and neither of which is a
+reason to doubt the three results above:
+
+- **It ran on an idle phone.** The 19.1 ms was measured with Requiem driving
+  every core through FEX. Contention for a core, not for memory, is a candidate
+  this benchmark is constitutionally unable to test.
+- **It ran as `shell`, not as the app.** `qcom,system` and `qcom,display` both
+  refused `open` with `EACCES`, so no cross-heap comparison was possible from
+  this domain. Cacheability is a property of the heap's `mmap` op and does not
+  depend on the caller, so result 1 transfers to the app; nothing else about
+  those two heaps was learned.
+
+`min` was added to the present sampler alongside `mean` and `max` for this
+reason: a mean of 19.1 ms with a 385 ms tail cannot distinguish "steadily 19 ms"
+from "usually a millisecond, occasionally four hundred". Against a 0.142 ms
+floor, the second is now much the likelier, and `min` says so in one line.
+
 ### 9.3 "Cached" is the surviving inference, and it is an inference
 
 Two independent mechanisms both predict a cached, writeback mapping for

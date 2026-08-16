@@ -444,14 +444,38 @@ const val MANAGED_DESKTOP: Boolean = true
  *     Present copyArea x6720 mean=19114us max=385490us last=69539us 1280x720
  *
  * **19 ms per present**, for 3.7 MB — about 154 MB/s, which is uncached read
- * speed, not the several GB/s a cached memcpy manages on this SoC. So the
- * write-combine hypothesis this note dismissed was right, and the reasoning that
- * dismissed it — that Turnip's exportable images come from the kernel's system
- * dma-heap, whose `mmap` leaves `vm_page_prot` alone — was a code-reading
- * argument that lost to a number.
+ * speed rather than the several GB/s a cached memcpy manages on this SoC.
  *
- * What it costs, from two sessions of Requiem at a 24 fps cap, 47 samples
- * against 44:
+ * **That inference was wrong, and the correction is measured. 2026-08-16,
+ * later the same day.** `tools/bench/heapbench.c`, run on the phone, allocates
+ * from `/dev/dma_heap/system` — the heap Turnip actually opens — maps it, and
+ * times a copy out against a `malloc`-to-`malloc` control in the same process:
+ *
+ *     control malloc->malloc  warm=45949 MB/s  cold=24944 MB/s
+ *     heap system             warm=24359 MB/s  cold=25892 MB/s  ratio=1.038
+ *                             syncStart=0.000 ms  syncEnd=0.000 ms
+ *                             bracketed(start+copy+end) cold=0.142 ms
+ *
+ * **The mapping is cached** — a ratio of 1.038 against a `malloc` buffer leaves
+ * no room for it to be anything else — and the whole operation this note blames,
+ * sync in, copy 3.5 MB, sync out, costs **0.142 ms**. The measured present copy
+ * is 19.1 ms, which is **135x** that. So the code-reading argument that was
+ * called "an argument that lost to a number" was right after all, and the number
+ * it lost to was being read as a bandwidth figure when it is not one. Neither
+ * page protection nor memory bandwidth explains this copy, and neither does the
+ * `DMA_BUF_IOCTL_SYNC` bracket that replaced them as the favourite.
+ *
+ * One limit on that, stated because it is the obvious next objection: the
+ * benchmark's buffer has no importer attached, and
+ * `qcom_sg_dma_buf_begin_cpu_access` walks every attachment. The real swapchain
+ * buffer has KGSL attached to it, so `syncStart=0.000` is honest for an
+ * unattached buffer and not yet proof for the attached one. `docs/BANDWIDTH.md`
+ * §9 carries the rest; the `syncIn=/copy=/syncOut=` split now in the present
+ * log is what closes it, and it costs one session.
+ *
+ * What the switch appeared to cost, from two sessions of Requiem at a 24 fps
+ * cap, 47 samples against 44 — **read the caveat under the table before using
+ * these numbers**:
  *
  *     | metric        | DRI3    | sw      |
  *     |---------------|---------|---------|
@@ -460,10 +484,19 @@ const val MANAGED_DESKTOP: Boolean = true
  *     | CPU mean      |  26.8%  |  19.7%  |
  *     | GPU temp mean | 45.7 C  | 48.3 C  |
  *
- * The GPU does **3.7x less work per unit time** and the CPU does 36% more. The
- * cooler GPU is the tell: it is idle, waiting on a core that is memcpying an
- * uncached buffer. Zero-copy at the Vulkan layer bought a copy at the X layer
- * that is far more expensive than the one it removed.
+ * That was read as "the GPU does 3.7x less work and the CPU does 36% more,
+ * because the GPU is idle waiting on a core memcpying an uncached buffer".
+ *
+ * **The GPU half of that reading is withdrawn.** The two paths do different
+ * amounts of *GPU* work by construction: on the software path the server
+ * uploads each frame with `glTexSubImage2D` (`Texture.updateFromDrawable`),
+ * and on DRI3 the content is a `GPUImage` sampled straight from an
+ * AHardwareBuffer and that upload does not happen at all. So the software arm's
+ * 57.3% includes per-frame texture uploads DRI3 never pays, and a GPU
+ * utilisation figure cannot separate useful work from overhead. The CPU column
+ * stands and favours the software path; the GPU column proves nothing either
+ * way. The buffer is not uncached, so that clause of the original reading is
+ * false outright.
  *
  * **None of this retracts that DRI3 works.** It negotiates, six dma-bufs import
  * through the full guest stack, and no session lost a device. The X server bugs
