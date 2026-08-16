@@ -1,0 +1,84 @@
+ntdll: a fault that names nothing should at least name where it came from.
+
+`patches/wine/0043` made an unrepaired fault say *what* was touched:
+
+    virtual:virtual_handle_fault unrepaired write fault at 0x100, no view covers it
+
+That was enough for `0044`, where the address itself was the answer -- a stale
+ntdll base plus `0x3c` named a relocated module. It is not enough for the one
+Requiem is producing now. `0x100` is a null pointer plus an offset, which says
+only "somebody dereferenced NULL"; every field of every structure in the process
+is a candidate, and the address cannot narrow it further.
+
+**Measured 2026-08-16: 92 faults from a single thread, 87 of the last 200 lines
+of the session**, all at `0x100`, starting the instant the title's upscaler stack
+finishes loading -- FidelityFX, XeSS with frame generation, and NVIDIA
+Streamline, each probing for a vendor extension that correctly is not there.
+Three candidate culprits, one address, and no way to tell them apart. Disabling
+upscaling and frame generation in the game's own options did not stop it, which
+kills the obvious guess and leaves nothing else to reason from.
+
+So print the faulting instruction. `rec->ExceptionAddress` is the natural place
+and it is empty here: `segv_handler` zeroes the record, fills in only the fault
+kind and the fault address, and `setup_exception` sets the PC *after*
+`virtual_handle_fault` has already run and returned (`signal_arm64.c:782`
+against `:1126`). One assignment moved earlier gives the fault handler the same
+value the exception would have carried, and `setup_exception` then writes the
+identical value over it, so nothing downstream can observe the difference.
+
+The result is one line that a reader can act on, because Vessel's default log
+already carries `loaddll` at warning:
+
+    unrepaired write fault at 0x100 from 0x6ff3ab1234, no view covers it
+    ...
+    Loaded L"D:\Games\...\libxess_fg.dll" at 0000006FF3AB0000: native
+
+Subtract, and the module and its offset fall out. That is the difference between
+"something wrote through NULL" and knowing which of three upscalers did it --
+and, on a stripped third-party DLL, an offset is still what a disassembler needs.
+
+ARM64 only, deliberately. This is the architecture the guest faults on, the other
+three handlers are untouched, and a change that has to be right on four
+architectures to be tested on one is a change that gets reverted.
+Diagnostic-only: no behaviour, one `%p` on a path that already formats a string
+and is already rate-limited by the fault itself.
+
+diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -1120,8 +1120,17 @@
+     rec.NumberParameters = 2;
+     if ((esr & 0xf0000000) == 0x80000000) rec.ExceptionInformation[0] = EXCEPTION_EXECUTE_FAULT;
+     else if (esr & 0x40) rec.ExceptionInformation[0] = EXCEPTION_WRITE_FAULT;
+     else rec.ExceptionInformation[0] = EXCEPTION_READ_FAULT;
+     rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
++    /* Vessel: the faulting PC, before the handler that wants to report it runs.
++     *
++     * setup_exception assigns exactly this at :782, but only after
++     * virtual_handle_fault has already decided and logged -- so the one report
++     * that fires for an unrepairable fault had a zero here and could name only
++     * the address touched. For a null-plus-offset fault that is no information
++     * at all. Overwritten below with the same value, so this is visibility and
++     * not a change. */
++    rec.ExceptionAddress = (void *)PC_sig(context);
+     if (!virtual_handle_fault( &rec, (void *)SP_sig(context) )) return;
+     if (handle_syscall_fault( context, &rec )) return;
+     setup_exception( context, &rec );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5074,8 +5074,13 @@
+     if (ret == STATUS_ACCESS_VIOLATION)
+     {
+         struct file_view *view = find_view( addr, 0 );
+         const char *how = (err == EXCEPTION_WRITE_FAULT) ? "write" :
+                           (err == EXCEPTION_EXECUTE_FAULT) ? "exec" : "read";
+ 
+-        if (!view) ERR( "unrepaired %s fault at %p, no view covers it\n", how, addr );
++        /* The faulting PC as well as the faulting address, because an address
++         * like 0x100 is a null dereference and names nothing on its own. The
++         * PC minus the nearest `loaddll` base is the module and the offset, and
++         * that line is already in this log at its default level. */
++        if (!view) ERR( "unrepaired %s fault at %p from %p, no view covers it\n",
++                        how, addr, rec->ExceptionAddress );
+         else if (WARN_ON(virtual))

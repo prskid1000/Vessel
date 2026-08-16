@@ -1,0 +1,101 @@
+wineoss: the shared-mode mix format is float on Windows, and Requiem believed it.
+
+`oss_get_mix_format` reported 48 kHz stereo **signed 16-bit**, with this reason:
+
+    /* 48 kHz stereo signed 16-bit: the native rate of effectively every
+     * Android device, and AAUDIO_FORMAT_PCM_I16 needs no conversion. */
+
+Both halves of that are true about the device and neither is true about the
+contract. `IAudioClient::GetMixFormat` reports the format the *Windows audio
+engine* mixes in, and in shared mode that has been 32-bit IEEE float since
+Vista, on every machine, without exception. Every other driver in this tree
+agrees: `winealsa.drv` asks the hardware and prefers `SND_PCM_FORMAT_FLOAT_LE`,
+falling back to S16 only when float is unavailable (`alsa.c:1974-1978`);
+`winepulse.drv` reports float whenever the server is float (`pulse.c:904`). This
+driver is the only one that never offers it.
+
+**What that costs is not a rejected format, it is silence about a lie.** An
+engine that calls `GetMixFormat`, initialises shared with what it was given, and
+then writes 32-bit float anyway -- because "shared mode is float" is an
+invariant it has never once seen violated -- gets no error from anywhere. Wine
+takes the buffer, the driver writes it to AAudio as int16, and the exponent bits
+of ordinary -1.0..1.0 samples are read as PCM.
+
+**Measured, from the capture `patches/wine/0047` exists to take.** 363 MB of
+Requiem's own output, read back two ways:
+
+    as int16   L peak 32768, rms -4.8 dBFS, zero crossings 0.500 per sample
+               (0.5 is the theoretical maximum -- the sign flips on every
+               sample), L/R correlation -0.002, R DC offset -1140
+    as float32 -0.009837 -0.009986 -0.011165 -0.012749 -0.014255 ...
+               100.00% of samples inside +/-1.5, zero denormals
+
+The second is a clean waveform envelope. The byte histogram settles it beyond
+argument: `0x3c` 5.9%, `0xbc` 5.8%, `0x3b` 3.7%, `0x3d` 2.6% -- float32 exponent
+bytes for values around 0.01 to 0.1, which is exactly what game audio looks like
+in float. The samples were never wrong. They were never int16.
+
+That also explains why Metro is fine on the identical driver with identical
+counters: it honours the format it is handed. Requiem does not, and it is right
+not to have to.
+
+So report what Windows reports. The conversion this comment was avoiding already
+exists, is already the *preferred* path, and is the one that gets the good
+latency: `open_aaudio_stream` responds to a float guest by asking for an
+exclusive int16 stream, because MMAP NOIRQ on this device takes
+`AUDIO_FORMAT_PCM_16_BIT` and nothing else, and that drops the burst from 868
+frames to about 192. The int16 mix format was not avoiding a conversion -- it was
+skipping the branch that asks for the low-latency path at all.
+
+Nothing else needs changing. `get_aaudio_format` already maps 32-bit float to
+`AAUDIO_FORMAT_PCM_FLOAT` (`oss.c:197-201`), `check_format` already accepts it,
+`convert_to_i16_frames` already exists and is exercised, and `patches/wine/0049`
+already reconciles the granted format against the guest's so the conversion flag
+cannot disagree with the stream.
+
+SIX THEORIES DIED BEFORE THIS ONE. Breadcrumb instrumentation starving the audio
+thread; the 24 fps limit starving the buffer; partial writes dropping samples;
+relaxed memory ordering corrupting Wwise's mixing; the `AkConvolutionReverb` and
+`AkReflect` plugins being miscompiled under FEX; and AAudio granting a format
+other than the one requested. The last of those is `0049`, which is a real bug
+that was really unchecked -- it just was not this one. Each was reached by
+elimination, and elimination kept producing the right question with the wrong
+answer, because the one measurement that could separate them was a capture
+nobody had taken yet.
+
+diff --git a/dlls/wineoss.drv/oss.c b/dlls/wineoss.drv/oss.c
+--- a/dlls/wineoss.drv/oss.c
++++ b/dlls/wineoss.drv/oss.c
+@@ -1667,8 +1667,28 @@
+-    /* 48 kHz stereo signed 16-bit: the native rate of effectively every
+-     * Android device, and AAUDIO_FORMAT_PCM_I16 needs no conversion. */
++    /* **48 kHz stereo 32-bit float, because that is what Windows reports and
++     * what applications are entitled to assume.**
++     *
++     * This said 16-bit, on the reasoning that it is the device's native format
++     * and needs no conversion. Both facts are true and neither is about this
++     * function: `GetMixFormat` describes the *Windows* audio engine, which has
++     * mixed in 32-bit float in shared mode since Vista. `winealsa.drv` prefers
++     * float and falls back to S16 only when the hardware cannot
++     * (`alsa.c:1974`); `winepulse.drv` reports float whenever the server is
++     * (`pulse.c:904`). This driver was the only one that never offered it.
++     *
++     * An engine that trusts the invariant then writes float into a buffer this
++     * driver hands to AAudio as int16, and nothing anywhere reports an error.
++     * Requiem's own captured output read as float is a clean waveform
++     * (-0.0098, -0.0100, -0.0112, ...) and as int16 is full-scale noise with
++     * 0.500 zero crossings per sample -- the theoretical maximum. Metro is
++     * unaffected on the identical path because it honours what it is told.
++     *
++     * The conversion the old comment avoided is the *preferred* path anyway:
++     * a float guest makes `open_aaudio_stream` ask for an exclusive int16
++     * stream, which is the only thing MMAP NOIRQ accepts here, and the burst
++     * drops from 868 frames to about 192. */
+     fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+-    fmt->Format.wBitsPerSample = 16;
+-    fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
++    fmt->Format.wBitsPerSample = 32;
++    fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+     fmt->Format.nChannels = 2;
+     fmt->Format.nSamplesPerSec = 48000;
+     fmt->dwChannelMask = get_channel_mask(fmt->Format.nChannels);
