@@ -640,6 +640,42 @@ The modifications, in the order they were made:
    `size_t`. That is a crash, not a copy, so nothing the widening changes is an
    input upstream survived.
 
+29. **The present copy timed in phases rather than as one number — `Drawable`
+   and `PresentExtension`.** The `Present copyArea` sampler item 27 describes
+   spans the whole of `Drawable.copyArea`, and that is two
+   `DMA_BUF_IOCTL_SYNC` calls as well as the pixel copy. The 19.1 ms in this
+   file's history was therefore never attributed: "the read is slow" and "the
+   cache maintenance is slow" both produce it, and they want opposite fixes —
+   the first a cached mapping and a parallel copy, the second a narrower sync.
+   Item 28 was built on the first reading without the second having been ruled
+   out.
+
+   So `Drawable.copyArea` now records the three phases it is the only code to
+   see the boundaries of — `syncIn`, the native copy, `syncOut` — plus a
+   `DmaBufSync` state, and `presentToContent` accumulates them into the same
+   sampled line beside the unchanged total. The residual (`other`) is the
+   clamping, the rewinds and `forceUpdate`, which runs the window's on-draw
+   listener and is not automatically small.
+
+   The `DmaBufSync` state is the part that makes the line interpretable rather
+   than merely more detailed. `syncIn=0` otherwise has two readings — the
+   exporter's `begin_cpu_access` is nearly free, or no ioctl was issued at all
+   — and they are opposite conclusions. `NONE` says the source held no
+   descriptor, `REFUSED` says it refused the ioctl once and the bracket is
+   latched off, `LIVE` says both halves ran and a zero is a real measurement.
+
+   Cost: four `System.nanoTime()` calls per `copyArea`, unconditionally rather
+   than only for dma-buf sources. On this platform that is a vDSO
+   `clock_gettime` each, tens of nanoseconds, against an X request that has
+   already cost microseconds in protocol handling. Not conditional, because a
+   present from an MIT-SHM pixmap wants the copy phase measured too and the
+   branch would cost about what the call does.
+
+   Unmeasured: no device was attached when this landed, so the split line has
+   never been captured and item 28's premise is still formally open.
+   `docs/BANDWIDTH.md` carries what is known about the cacheability half of the
+   question.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -663,7 +699,7 @@ fails the build.
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
-| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28 |
+| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28, 29 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21 |
@@ -677,7 +713,7 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
 | `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
-| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28, 29 |
 | `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23, 28 |
 | `app/src/main/cpp/winlator/include/copy_pool.h` | 28 |

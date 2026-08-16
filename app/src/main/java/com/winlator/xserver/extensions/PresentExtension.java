@@ -89,6 +89,23 @@ public class PresentExtension extends Extension {
     private long copyMaxNanos;
     private long copyCount;
 
+    // VESSEL: the same total, decomposed. `copyNanos` above spans the whole of
+    // `Drawable.copyArea`, which is the two DMA_BUF_IOCTL_SYNC calls *plus* the
+    // pixel copy *plus* the rewinds and `forceUpdate` — and the 19.1 ms in the
+    // history was never separated into those. Accumulated in the same sampled
+    // window and printed on the same line, so the parts and the total can be
+    // read against each other and against that history.
+    //
+    // `syncOtherNanos` is the residual, not a fourth measurement: total minus
+    // the three phases the drawable reports. It is the clamping, the two
+    // `rewind`s and `forceUpdate` — and `forceUpdate` runs the window's
+    // on-draw listener, so it is not automatically small and is worth seeing
+    // rather than silently folding into the copy.
+    private long syncInNanos;
+    private long copyOnlyNanos;
+    private long syncOutNanos;
+    private long syncOtherNanos;
+
     private static abstract class ClientOpcodes {
         private static final byte QUERY_VERSION = 0;
         private static final byte PRESENT_PIXMAP = 1;
@@ -424,17 +441,58 @@ public class PresentExtension extends Extension {
             // logged once at startup under this same tag says how many cores
             // it actually got, which is the first thing to check if `mean` has
             // not moved.
+            //
+            // VESSEL: and the 19.1 ms was never separated into its parts, which
+            // is the gap the phase means below close. That number is the whole
+            // of `copyArea`, and `copyArea` is two `DMA_BUF_IOCTL_SYNC` calls as
+            // well as the copy. On a *cached* mapping a `begin_cpu_access` walks
+            // the scatterlist and invalidates every line of 3.5 MB — roughly 900
+            // pages — which is not free, so "the copy costs 19 ms" and "the
+            // cache maintenance costs 19 ms" were never distinguished by the
+            // instrument that produced it. They want opposite fixes: the first
+            // is the row-band pool and a cached heap, the second is a narrower
+            // sync. Unresolved until the split line below is captured on a
+            // device; do not spend anything on either answer before then.
             long t0 = System.nanoTime();
             content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
             long dt = System.nanoTime() - t0;
             copyNanos += dt;
             if (dt > copyMaxNanos) copyMaxNanos = dt;
+
+            // VESSEL: the split. `Drawable.copyArea` is the only code that sees
+            // the boundary between the sync ioctls and the copy, so it records
+            // the three phases and they are read back here.
+            //
+            // What each term decides, since that is the point of separating
+            // them. **syncIn large** means the cost is cache maintenance, the
+            // mapping is cached, and the row-band pool is parallelising the
+            // wrong half — the fix would be to invalidate less (a narrower
+            // sync, or none where the exporter is already coherent), not to
+            // copy faster. **copy large with syncIn near zero and sync=LIVE**
+            // means the read itself is slow, which at ~154 MB/s means an
+            // uncached or write-combine mapping, and the fix is upstream of
+            // this server entirely: allocate the swapchain image from a cached
+            // heap. See docs/BANDWIDTH.md. **sync=REFUSED** invalidates the
+            // first reading — the zeros are an absence, not a measurement.
+            long syncIn = content.getLastSyncStartNanos();
+            long copyOnly = content.getLastCopyNanos();
+            long syncOut = content.getLastSyncEndNanos();
+            syncInNanos += syncIn;
+            copyOnlyNanos += copyOnly;
+            syncOutNanos += syncOut;
+            syncOtherNanos += Math.max(0, dt - syncIn - copyOnly - syncOut);
+
             if (++copyCount % COPY_REPORT_EVERY == 0) {
                 Log.d(XRequestError.PROTO_TAG, "Present copyArea x" + copyCount
                         + " mean=" + (copyNanos / copyCount / 1000) + "us"
                         + " max=" + (copyMaxNanos / 1000) + "us"
                         + " last=" + (dt / 1000) + "us"
-                        + " " + pixmap.drawable.width + "x" + pixmap.drawable.height);
+                        + " " + pixmap.drawable.width + "x" + pixmap.drawable.height
+                        + " means syncIn=" + (syncInNanos / copyCount / 1000) + "us"
+                        + " copy=" + (copyOnlyNanos / copyCount / 1000) + "us"
+                        + " syncOut=" + (syncOutNanos / copyCount / 1000) + "us"
+                        + " other=" + (syncOtherNanos / copyCount / 1000) + "us"
+                        + " sync=" + content.getLastDmaBufSync());
             }
             sendIdleNotify(window, pixmap, serial, idleFence);
         }

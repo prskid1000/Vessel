@@ -52,6 +52,63 @@ public class Drawable extends XResource {
      */
     private boolean dmaBufSyncable = true;
 
+    /**
+     * VESSEL: what the dma-buf bracket actually did on the most recent
+     * {@link #copyArea}, recorded so that a phase timing of zero can be told
+     * apart from a phase that never ran.
+     *
+     * <p>Without this the split timings below are ambiguous in the one direction
+     * that matters: {@code syncIn=0} could mean the exporter's
+     * {@code begin_cpu_access} is nearly free, or it could mean no ioctl was
+     * issued at all. Those lead to opposite conclusions about where the present
+     * cost lives, and the difference is not otherwise visible in the sampled
+     * line — the one-shot refusal log fires once per drawable and is long gone
+     * by the time a mean is printed.
+     */
+    public enum DmaBufSync {
+        /** The source held no descriptor. MIT-SHM segments, {@code GPUImage},
+         *  and the constructor's {@code allocateDirect} all land here: no ioctl
+         *  was issued and none was owed. */
+        NONE,
+        /** Both halves were issued. A near-zero timing under this state is a
+         *  measurement of a cheap {@code begin_cpu_access}, not an absence. */
+        LIVE,
+        /** The descriptor refused the ioctl and the bracket is latched off for
+         *  the life of the drawable — see {@link #dmaBufSyncable}. Reads of it
+         *  are uncoordinated, and the sync timings are therefore zero because
+         *  no cache maintenance is being done, not because it is free. */
+        REFUSED
+    }
+
+    /**
+     * VESSEL: the most recent {@link #copyArea} split into its three phases, in
+     * nanoseconds, plus what the bracket did.
+     *
+     * <p><b>Why this is here and not at the one hot call site.</b>
+     * {@code PresentExtension.presentToContent} times the whole of
+     * {@code copyArea} and has done since before the copy was ever measured —
+     * that is where the 19.1 ms in the history comes from. But its timer spans
+     * the two {@code DMA_BUF_IOCTL_SYNC} calls as well as the copy, and on a
+     * cached mapping a {@code begin_cpu_access} walks the scatterlist and
+     * invalidates every line of a 3.5 MB buffer, which is not free. So a single
+     * combined number cannot say whether the cost is the read or the cache
+     * maintenance, and those want opposite fixes. Only this method sees the
+     * boundaries, so the split is taken here and read back by the caller.
+     *
+     * <p>Recorded on the <em>destination</em>, which is the receiver of
+     * {@link #copyArea} and therefore the object the caller already holds. The
+     * bracket itself belongs to the source; {@link #lastDmaBufSync} carries the
+     * source's state across so one object answers the whole question.
+     *
+     * <p>Not synchronised, for the reason {@link #dmaBufSyncable} gives: a
+     * present runs under {@code WINDOW_MANAGER} and the values are read
+     * immediately after the call that wrote them, on the thread that wrote them.
+     */
+    private long lastSyncStartNanos;
+    private long lastCopyNanos;
+    private long lastSyncEndNanos;
+    private DmaBufSync lastDmaBufSync = DmaBufSync.NONE;
+
     static {
         System.loadLibrary("winlator");
     }
@@ -210,7 +267,18 @@ public class Drawable extends XResource {
         // and joins them before it returns, so there is exactly one START/END
         // pair per copy and no band outlives it. That is the property the pool
         // is joined for; it is not an incidental one.
+        //
+        // VESSEL: the bracket is timed apart from the copy — see the fields this
+        // writes. Four extra `nanoTime` calls per copyArea, unconditionally
+        // rather than only for dma-buf sources, because a present from an
+        // MIT-SHM pixmap wants the copy phase measured just as much and the
+        // branch would cost about what the call does. On this platform
+        // `nanoTime` is a vDSO `clock_gettime`, tens of nanoseconds; an X
+        // CopyArea request costs microseconds in protocol handling before it
+        // reaches here.
+        long t0 = System.nanoTime();
         drawable.beginDmaBufRead();
+        long t1 = System.nanoTime();
         try {
             if (gcFunction == GraphicsContext.Function.COPY) {
                 copyArea(srcX, srcY, dstX, dstY, width, height, drawable.getStride(), this.getStride(), drawable.data, this.data);
@@ -218,7 +286,20 @@ public class Drawable extends XResource {
             else copyAreaOp(srcX, srcY, dstX, dstY, width, height, drawable.getStride(), this.getStride(), drawable.data, this.data, gcFunction.ordinal());
         }
         finally {
+            long t2 = System.nanoTime();
             drawable.endDmaBufRead();
+            long t3 = System.nanoTime();
+
+            lastSyncStartNanos = t1 - t0;
+            lastCopyNanos = t2 - t1;
+            lastSyncEndNanos = t3 - t2;
+            // Read after `beginDmaBufRead`, deliberately: a descriptor that
+            // refuses the ioctl on this very frame latches during that call, and
+            // reporting REFUSED for the frame that discovered it is the honest
+            // answer — its syncIn includes the failed ioctl and its syncOut is
+            // zero because the END half is correctly skipped.
+            lastDmaBufSync = drawable.dmaBufFd < 0 ? DmaBufSync.NONE
+                    : drawable.dmaBufSyncable ? DmaBufSync.LIVE : DmaBufSync.REFUSED;
         }
 
         this.data.rewind();
@@ -257,6 +338,32 @@ public class Drawable extends XResource {
     private void endDmaBufRead() {
         if (dmaBufFd < 0 || !dmaBufSyncable) return;
         SysVSharedMemory.dmaBufSyncRead(dmaBufFd, false);
+    }
+
+    /**
+     * VESSEL: the {@code DMA_BUF_IOCTL_SYNC(START | READ)} half of the most
+     * recent {@link #copyArea}, in nanoseconds. See {@link #lastSyncStartNanos}.
+     */
+    public long getLastSyncStartNanos() {
+        return lastSyncStartNanos;
+    }
+
+    /**
+     * VESSEL: the pixel copy alone — the native call and nothing either side of
+     * it — from the most recent {@link #copyArea}, in nanoseconds.
+     */
+    public long getLastCopyNanos() {
+        return lastCopyNanos;
+    }
+
+    /** VESSEL: the {@code END | READ} half, in nanoseconds. */
+    public long getLastSyncEndNanos() {
+        return lastSyncEndNanos;
+    }
+
+    /** VESSEL: what the bracket did, so a zero above can be read correctly. */
+    public DmaBufSync getLastDmaBufSync() {
+        return lastDmaBufSync;
     }
 
     public void fillColor(int color) {
