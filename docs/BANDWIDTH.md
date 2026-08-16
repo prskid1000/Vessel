@@ -862,7 +862,74 @@ device-tree heaps — `qcom_dt_parser.c` takes the name from `qcom,dma-heap-name
 and cacheability from a `qcom,uncached-heap` boolean — or flip Kconfigs.
 Unverified on device; §9.5 says what would verify it.
 
-### 9.2 The one path that would be uncached, and it is not ruled out
+### 9.1a Measured on the device, 2026-08-16 — §9.1 confirmed, §9.2 closed
+
+§9.1 and §9.2 were written from vendor source and a reference config, with no
+phone attached. A device was then connected over wireless ADB and the checks
+§9.5 asks for were run on it. **The source reading was right, and the ION
+question §9.2 leaves open is answered: it cannot be the cause.**
+
+Device: motorola signature (`vantage`), SM8845, Android 16, kernel
+`6.12.38-android16-5-gdda2539c405d-ab14915528-4k`.
+
+```
+$ ls /dev/dma_heap/
+qcom,display  qcom,qseecom  qcom,qseecom-ta
+qcom,secure-non-pixel  qcom,secure-pixel  qcom,system  system
+
+$ ls /dev/dma_heap/ | grep -i uncach
+(nothing)
+
+$ ls -lZ /dev/dma_heap/system
+cr--r--r-- 1 system system u:object_r:dmabuf_system_heap_device:s0 249,1
+
+$ ls /dev/ion
+No such file or directory
+
+$ zcat /proc/config.gz | grep -iE 'QCOM_DMABUF_HEAPS|DMABUF_HEAPS_SYSTEM'
+# CONFIG_DMABUF_HEAPS_SYSTEM is not set
+```
+
+Four things follow, in descending order of how firmly:
+
+1. **`/dev/ion` does not exist, so §9.2's uncached path is unreachable.**
+   `tu_knl_kgsl_load` opens `/dev/dma_heap/system` first and only falls back to
+   ION if that `open` fails (`tu_knl_kgsl.cc:2711-2724`). The dma-heap node is
+   present and world-readable, and Turnip opens it `O_RDONLY`, so the fallback
+   cannot be reached on this device whatever its flags would have been. **The
+   `ION_FLAG_CACHED` omission is real and is not what is happening here.**
+
+2. **`CONFIG_DMABUF_HEAPS_SYSTEM is not set`, so the node is not mainline's.**
+   This is the config line §9.1 predicted and is the strongest single result
+   here: the `system` name exists while the kernel option that would create it
+   does not, which leaves the QCOM module's alias as the only thing that can have
+   registered it — `qcom_system_heap_create("qcom,system", "system", false)`,
+   third argument `uncached`. Hence a cached, writeback mapping.
+
+3. **There is no uncached heap to have chosen by mistake, and none to move to.**
+   `qcom,system-uncached` is absent from `/dev/dma_heap/`, consistent with
+   `CONFIG_QCOM_DMABUF_HEAPS_SYSTEM_UNCACHED` being unset. §9.1's conclusion —
+   that a heap-switching patch would be wrong — is therefore not merely
+   unnecessary but impossible to write.
+
+4. **`CONFIG_DMABUF_SYSFS_STATS=y`, but `/sys/kernel/dmabuf/buffers/` listed
+   nothing as the shell user.** Root would settle which heap a live swapchain BO
+   came from. It is the one §9.5 check still unrun, and it is now a confirmation
+   rather than a question.
+
+**What this does not establish.** No `dmesg` (not readable without root), and no
+micro-benchmark: nothing here measures the mapping's actual read speed, so
+"cached" remains an inference from the config and the vendor source rather than a
+timing. The gap matters because a cached 3.5 MB `memcpy` cannot take 19 ms —
+§9.4 is now the whole of the remaining question, and `patches/mesa/0008`'s
+`VESSEL-KGSL dma_type=…` line will confirm point 1 from the session log without
+a shell at all.
+
+### 9.2 The one path that would be uncached — ruled out on the device by §9.1a
+
+*Kept as written because the defect it names is real and will bite a device that
+has no dma-heap node; only its status has changed. `/dev/ion` does not exist on
+this handset, so the fallback below cannot run here.*
 
 Turnip's ION fallbacks pass `.flags = 0` — **without** `ION_FLAG_CACHED` — in
 both `bo_init_new_ion` (`tu_knl_kgsl.cc:203-227`) and `bo_init_new_ion_legacy`
