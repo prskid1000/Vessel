@@ -122,6 +122,35 @@ const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
  * "ordering was eliminated" is only worth anything if the next person can
  * re-run the thing that eliminated it.
  */
+/*
+ * **Asked a second time, for audio, and answered no again. 2026-08-16.**
+ *
+ * The first run (below) was about a deadlock. This one was about the buzz:
+ * Requiem buzzes and Metro does not, and the delivery path had already been
+ * eliminated — the two `wineoss` traces are statistically identical (burst 868,
+ * capacity 1736, client buffer 2604; `held` mean 1870 vs 1909; `in_oss` 1106 vs
+ * 1144; 41% vs 40% partial writes; **zero AAudio xruns in either**). Same
+ * driver, same numbers, one buzzes. So the samples Requiem hands us are already
+ * wrong, and Wwise's DSP is exactly the SIMD-heavy multi-threaded code a relaxed
+ * 128-bit store would corrupt.
+ *
+ * All three closed, verified in the guest's own `/proc/<pid>/environ` rather
+ * than assumed: `FEX_VECTORTSOENABLED=1`, `FEX_MEMCPYSETTSOENABLED=1`,
+ * `FEX_VOLATILEMETADATA=0`.
+ *
+ * **It did not fix the buzz. It stopped the game reaching a frame at all** —
+ * `vkd3d_wait_for_gpu_timeline_semaphore ... vr -4` and
+ * `d3d12_command_queue_execute: Failed to submit queue(s), vr -4`, with the CPU
+ * at 1.1% and the GPU at 0.2%, i.e. everything idle. `tu_restrict_subgroup_size_64`
+ * was confirmed still applied and acknowledged by Turnip nine times in the same
+ * session, so this was not the subgroup hang returning. Turning the constant
+ * back off restored a running game.
+ *
+ * So ordering is eliminated for the audio question too, and the mechanism is
+ * somewhere else: FEX's SIMD codegen itself, or the game's mixer starved of CPU.
+ * The next instrument is capturing the PCM to see whether the buzz is noise,
+ * repetition or clipping — three different bugs that sound alike.
+ */
 const val STRICT_MEMORY_ORDERING: Boolean = false
 
 /**
