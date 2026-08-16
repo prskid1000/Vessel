@@ -281,8 +281,78 @@ public class PresentExtension extends Extension {
         }
     }
 
-    /** VESSEL: the body of {@link #presentPixmap}, extracted so the two locking
-     * regimes above share one implementation rather than two copies of it. */
+    /**
+     * VESSEL: the body of {@link #presentPixmap}, extracted so the two locking
+     * regimes above share one implementation rather than two copies of it.
+     *
+     * <p><b>The copy stays synchronous, on the request thread. This is the
+     * record of why, so the "obviously it should be async" change is not
+     * attempted a second time.</b> It was investigated properly; it is not
+     * unsafe so much as <em>pointless</em>, and the reason is not visible from
+     * this file.
+     *
+     * <p><b>1. The client's throttle point is idle-notify, not this thread.</b>
+     * Mesa's X11 WSI on DRI3 marks a swapchain image free only when
+     * {@code XCB_PRESENT_EVENT_IDLE_NOTIFY} arrives — that handler is the sole
+     * producer for {@code chain->acquire_queue}
+     * ({@code native/mesa/src/vulkan/wsi/wsi_common_x11.c:1664-1676}), and
+     * {@code x11_acquire_next_image} is its sole consumer. {@code PresentPixmap}
+     * itself has no reply: {@code x11_queue_present} pushes to
+     * {@code present_queue} and a WSI-owned manager thread sends the request and
+     * flushes, so the application thread never waits on this server at all.
+     *
+     * <p>Now put those together with the constraint that makes async hard in the
+     * first place. {@link #sendIdleNotify} may not be sent until the copy has
+     * actually finished — send it at request time and the client starts
+     * overwriting a buffer the server is still reading, which is tearing that
+     * will be blamed on a driver. So idle must fire at copy-completion under
+     * <em>either</em> design. Present N at t0, copy costing T: idle fires at
+     * t0+T synchronously, and at t0+T asynchronously. The client is unblocked at
+     * the same instant. With a single copy thread the queued case is identical
+     * too — the copies are serialised by the same memory bandwidth either way,
+     * so a backlog drains at exactly the rate it drains at today. There is no
+     * frame-pacing gain to collect.
+     *
+     * <p><b>2. The lock discipline that would make it safe costs more than it
+     * buys.</b> What excludes teardown across the copy today is the
+     * {@code WINDOW_MANAGER}+{@code PIXMAP_MANAGER} pair held by
+     * {@link #handleRequest}. Hand the copy to another thread and those drop at
+     * request return, while the copy is still reading
+     * {@code pixmap.drawable.getData()} — a mapping that
+     * {@code DRI3Extension}'s destroy listener munmaps, and whose destination is
+     * a {@code GPUImage} the GL thread can free. {@code FreePixmap} runs under
+     * {@code PIXMAP_MANAGER}+{@code DRAWABLE_MANAGER}
+     * ({@code XClientRequestHandler.java:313}) and client disconnect under
+     * {@code lockAll()}, so the copy thread would have to hold at least that
+     * pair to keep the source alive. But {@code DRAWABLE_MANAGER} is exactly the
+     * lock the compositor takes for its whole window pass
+     * ({@code GLRenderer.renderWindows}, GLRenderer.java:479) — which the
+     * present path deliberately does <em>not</em> take today, and which is why
+     * narrowing {@code renderLock} above was enough to get the compositor out
+     * from behind this memcpy. Taking it on a copy thread would put the GL
+     * thread back behind the copy through a different monitor: the same bug,
+     * re-entered by the back door. Avoiding that needs a per-drawable pin with
+     * deferred munmap and a matching pin on {@code GPUImage.destroy}, i.e. real
+     * machinery, bought with nothing from (1) to pay for it.
+     *
+     * <p><b>3. What async would actually have bought</b>, for completeness: the
+     * request thread returns to its socket sooner, and {@code WINDOW_MANAGER} is
+     * released sooner — which matters only to {@code XServer.injectPointerMove}
+     * and friends, i.e. input latency on the host's input thread, not frame
+     * pacing. If input stalls turn out to be the observed stutter, the fix is to
+     * stop holding {@code WINDOW_MANAGER} across the copy, which is a narrowing
+     * of {@link #handleRequest} and not an async copy.
+     *
+     * <p><b>Where the remaining cost really is.</b> The copy is already a
+     * per-row {@code memcpy} and a single whole-buffer one when the strides
+     * match ({@code drawable.c:88-110}), so it is memory-bandwidth bound on one
+     * core. The change with a real number behind it is to make T smaller —
+     * splitting the frame into row bands across a small worker pool, joined
+     * before this method returns. That keeps every ordering, lifetime and
+     * idle-notify property on this page exactly as it is, because the request
+     * thread still owns the copy from start to finish. Not done here; recorded
+     * so the next attempt starts from the useful end.
+     */
     private void presentToContent(Window window, Drawable content, Pixmap pixmap, int serial,
                                   short xOff, short yOff, int idleFence) {
         if (pixmap != null) {
@@ -298,14 +368,36 @@ public class PresentExtension extends Extension {
             // itself a cost.
             //
             // VESSEL: read this number first when presentation stutters. The
-            // source is an `mmap` of the client's dma-buf with no
-            // `DMA_BUF_IOCTL_SYNC` around it (`sysvshared_memory.c:77`), so if
-            // the kernel handed back a write-combine mapping the *read* side of
-            // this memcpy runs at uncached speed and `mean` will be tens of
-            // milliseconds rather than the low single digits an 8 MB cached
-            // copy costs. That distinction decides whether the remaining work
-            // is "make the copy cheaper" or "delete the copy", and it is one
-            // logcat line away — nothing else in this tree can tell them apart.
+            // source is an `mmap` of the client's dma-buf, and it is now
+            // bracketed with `DMA_BUF_IOCTL_SYNC(START|READ)` /
+            // `(END|READ)` — `Drawable.copyArea` calls
+            // `beginDmaBufRead`/`endDmaBufRead`, which reach
+            // `SysVSharedMemory.dmaBufSyncRead` and
+            // `sysvshared_memory.c`'s `dmaBufSyncRead`.
+            //
+            // That bracket does not change what this number means, and the
+            // difference is worth stating because it is easy to assume
+            // otherwise: the sync ioctl drives the exporter's
+            // begin/end_cpu_access ops, which do *cache maintenance*. It cannot
+            // change the memory type of the mapping — that was fixed by the
+            // exporter's mmap op setting vm_page_prot and no ioctl revisits it.
+            // So if `mean` is tens of milliseconds rather than the low single
+            // digits an 8 MB cached copy costs, the mapping is uncached or
+            // write-combine and the bracket will not have helped; if anything
+            // an invalidate over a few megabytes costs a little more.
+            //
+            // What the exporter is, since it decides the answer: the guest's
+            // Turnip does not allocate exportable images from KGSL at all. It
+            // opens `/dev/dma_heap/system` and allocates there
+            // (`native/mesa/src/freedreno/vulkan/tu_knl_kgsl.cc`,
+            // `bo_init_new_dmaheap` at :173, heap path at :2706), then imports
+            // the result into KGSL. So the exporter is the kernel's system
+            // dma-heap, whose mmap leaves `vm_page_prot` alone — a cached,
+            // writeback mapping — which predicts the low-single-digit case and
+            // makes this bracket a correctness fix rather than a speed one.
+            // Predicts, not proves: nothing readable on the device reports a
+            // mapping's memory type, so this log line remains the only
+            // instrument that can tell the two apart.
             long t0 = System.nanoTime();
             content.copyArea((short)0, (short)0, xOff, yOff, pixmap.drawable.width, pixmap.drawable.height, pixmap.drawable);
             long dt = System.nanoTime() - t0;

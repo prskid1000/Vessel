@@ -64,6 +64,16 @@ public class DRI3Extension extends Extension {
     private final Callback<Drawable> onDestroyDrawableListener = (drawable) -> {
         ByteBuffer data = drawable.getData();
         SysVSharedMemory.unmapSHMSegment(data, data.capacity());
+        // VESSEL: and the descriptor the mapping was synced through. It is the
+        // server's own dup (see pixmapFromFd), not the client's — the client's
+        // was closed the moment its request returned — so nothing else is
+        // holding it and leaking it here would pin the whole dma-buf for the
+        // life of the session, one swapchain image at a time.
+        int dmaBufFd = drawable.getDmaBufFd();
+        if (dmaBufFd >= 0) {
+            drawable.setDmaBufFd(-1);
+            XConnectorEpoll.closeFd(dmaBufFd);
+        }
     };
 
     private static abstract class ClientOpcodes {
@@ -298,6 +308,25 @@ public class DRI3Extension extends Extension {
             throw new BadIdChoice(pixmapId);
         }
         drawable.setData(buffer);
+        // VESSEL: keep a descriptor for the buffer, not just the mapping.
+        //
+        // Every CPU read of these pixels — PresentExtension's per-frame copyArea
+        // above all — is required by the dma-buf userspace ABI to be bracketed
+        // with DMA_BUF_IOCTL_SYNC, and that ioctl takes an fd. This server did
+        // no bracketing at all until now, which is a coherency bug and not a
+        // style point: without a begin/READ the CPU may read cache lines that
+        // predate the GPU's writes into the swapchain image, and the resulting
+        // stale or half-stale frame is indistinguishable from a driver fault.
+        //
+        // Our own dup, because the caller closes the client's descriptor in its
+        // `finally` as soon as this returns (pixmapFromBuffer above) — the
+        // mapping survives that, an fd does not. Ownership passes to the
+        // drawable; onDestroyDrawableListener closes it.
+        //
+        // A failed dup is not fatal. -1 simply means the drawable falls back to
+        // the unbracketed behaviour this code had before, which is what every
+        // frame did until this change.
+        drawable.setDmaBufFd(SysVSharedMemory.dupFd(fd));
         drawable.setTexture(null);
         drawable.setOnDestroyListener(onDestroyDrawableListener);
         Pixmap pixmap = xServer.pixmapManager.createPixmap(drawable);

@@ -547,6 +547,49 @@ The modifications, in the order they were made:
    as nothing at all. Kept rather than reverted after the answer arrives,
    because the answer changes the moment a client stops using Present.
 
+27. **`DMA_BUF_IOCTL_SYNC` around the CPU read of a DRI3 pixmap —
+   `sysvshared_memory.c`, `SysVSharedMemory`, `Drawable`, `DRI3Extension`,
+   `PresentExtension`.** Upstream maps the client's dma-buf and reads it. That
+   is not the dma-buf userspace ABI: a CPU accessor must bracket every access
+   with `DMA_BUF_IOCTL_SYNC`, `START` before and `END` after, which is what
+   drives the exporter's `begin_cpu_access` / `end_cpu_access` ops and
+   therefore the cache maintenance. Without the `START | READ` the CPU may read
+   lines that predate the GPU's writes into the swapchain image, and a stale or
+   half-stale frame looks exactly like a driver fault.
+
+   The pieces: `dmaBufSyncRead()` in `sysvshared_memory.c` issues the ioctl
+   (`<linux/dma-buf.h>` **is** in the NDK r27 sysroot, so nothing is declared
+   locally); `dupFd()` next to it exists because the ioctl needs a descriptor
+   and `DRI3Extension` closes the client's as soon as the request returns, so
+   the mapping outlives it and an fd would not. `Drawable` carries that dup and
+   brackets the **source** side of `copyArea` — the pixels are touched there,
+   so no future reader can forget it — with the answer latched off after the
+   first refusal, since a `-ENOTTY` fd answers the same way sixty times a
+   second.
+
+   **It buys coherency, not cacheability, and the difference is the whole
+   reason it is not a stutter fix.** The mapping's memory type is fixed at
+   `mmap` time by the exporter's `.mmap` op setting `vm_page_prot`; the sync
+   ioctl never touches the vma. If the read side is slow because it is
+   uncached, this does not help and an invalidate over a few megabytes costs a
+   little more. What the exporter is says the mapping is *cached*: the guest's
+   Turnip does not allocate exportable images from KGSL at all but from
+   `/dev/dma_heap/system` (`tu_knl_kgsl.cc`, `bo_init_new_dmaheap`, heap path
+   at `:2706`), and the kernel's system dma-heap leaves `vm_page_prot` alone.
+   Inference, not measurement — nothing readable on the device reports a
+   mapping's memory type, and `PresentExtension`'s copy timer is still the only
+   instrument that can separate the two.
+
+   `PresentExtension.presentToContent` also carries, in the same change, the
+   record of why the copy stays **synchronous on the request thread**: Mesa's
+   DRI3 swapchain frees an image only on `PresentIdleNotify`
+   (`wsi_common_x11.c:1664`), idle may not be sent before the copy completes
+   under any design, so an async copy unblocks the client at the same instant a
+   synchronous one does — while the lock discipline needed to keep the source
+   mapping alive across it would put the compositor back behind the memcpy
+   through `DRAWABLE_MANAGER` (`GLRenderer.renderWindows`), which is the bug
+   the `renderLock` narrowing had just removed.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -567,9 +610,10 @@ fails the build.
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
-| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6 |
+| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
+| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21 |
@@ -580,12 +624,13 @@ fails the build.
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
 | `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
-| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27 |
 | `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23 |
+| `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 | `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |
 

@@ -139,4 +139,30 @@ public class SysVSharedMemory {
     public static native ByteBuffer mapSHMSegment(int fd, long size, int offset, boolean readonly);
 
     public static native void unmapSHMSegment(ByteBuffer data, long size);
+
+    /**
+     * VESSEL: {@code fcntl(fd, F_DUPFD_CLOEXEC)}. See the native side
+     * ({@code sysvshared_memory.c}) — a mapping outlives the request that
+     * carried its descriptor, but {@link #dmaBufSyncRead} needs a descriptor,
+     * so the DRI3 path keeps one of its own.
+     *
+     * @return the new descriptor, or -1.
+     */
+    public static native int dupFd(int fd);
+
+    /**
+     * VESSEL: {@code DMA_BUF_IOCTL_SYNC} with {@code DMA_BUF_SYNC_READ} and
+     * either {@code _START} or {@code _END}.
+     *
+     * <p>Read the native comment before using this. The one-line version:
+     * it is required by the dma-buf userspace ABI around any CPU access, it
+     * buys <em>coherency</em> and not cacheability, and a {@code false} return
+     * most often means "this fd is not a dma-buf" rather than "the sync
+     * failed".
+     *
+     * @param start true for {@code START} (before the read), false for
+     *              {@code END} (after it).
+     * @return whether the kernel performed the sync.
+     */
+    public static native boolean dmaBufSyncRead(int fd, boolean start);
 }
