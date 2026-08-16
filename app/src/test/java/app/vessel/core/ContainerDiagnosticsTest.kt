@@ -439,13 +439,20 @@ class ContainerDiagnosticsTest {
         // halves, and the second is the one that could rot quietly: picking the
         // *other* path must compose, and sitting where the session already is
         // must compose nothing at all.
+        //
+        // **Written against the constant rather than against `sw`.** Both
+        // assertions used to name the paths outright and both broke the day
+        // `ZERO_COPY_PRESENT` flipped, though nothing they were testing had
+        // changed. The property is "the baseline is silent, the other side is
+        // not", and it holds whichever way the default points.
+        val other = if (ZERO_COPY_PRESENT) WSI_SOFTWARE else WSI_DRI3
         assertEquals(
-            mapOf("MESA_VK_WSI_DEBUG" to WSI_DRI3),
-            diagnosticEnvironment(row("MESA_VK_WSI_DEBUG", WSI_DRI3)),
+            mapOf("MESA_VK_WSI_DEBUG" to other),
+            diagnosticEnvironment(row("MESA_VK_WSI_DEBUG", other)),
         )
         assertEquals(
             emptyMap<String, String>(),
-            diagnosticEnvironment(row("MESA_VK_WSI_DEBUG", WSI_SOFTWARE)),
+            diagnosticEnvironment(row("MESA_VK_WSI_DEBUG", FIXED_MESA_VK_WSI_DEBUG)),
         )
         // Naming the row arms it — the same shape as every other cautioned row
         // on this surface, and the confirmation dialog is what stands between

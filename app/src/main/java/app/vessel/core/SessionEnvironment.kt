@@ -410,25 +410,47 @@ const val MANAGED_DESKTOP: Boolean = true
  * and `kgsl_bo_export_dmabuf` was never reached"* — the fd from `Open` is not
  * what carries the buffer, `BufferFromPixmap` is, and Turnip imports that.
  *
- * **So why is this still false?** Because what was proven is
- * `tools/gfx/x11present.c` — a native Vulkan client making a swapchain against
- * this X server in this app's process. The guest stack is not that. A session is
- * Wine's `winex11` holding the X connection, vkd3d/DXVK driving the swapchain,
- * and Turnip reached through win32u's ICD path under FEX. **Joining them has
- * never been run**, which is the same sentence the `MESA_VK_WSI_DEBUG`
- * assignment has carried all along, and one prior flip of exactly this constant
- * took a device session down. The default does not move on inference.
+ * **The join has now been run, and this is why the default moved.** Everything
+ * proven before 2026-08-16 was `tools/gfx/x11present.c` — a native Vulkan client
+ * making a swapchain against this X server in this app's process — and the guest
+ * stack is not that. A session is Wine's `winex11` holding the X connection,
+ * vkd3d/DXVK driving the swapchain, and Turnip reached through win32u's ICD path
+ * under FEX. That combination ran on 2026-08-16 with the Diagnostics row at
+ * `WSI_DRI3`, on Resident Evil Requiem, and it drew:
  *
- * What changed is that it no longer takes a rebuild to find out. This constant
- * is the **default** now, not the decision: `MESA_VK_WSI_DEBUG` is in
- * [DIAGNOSTIC_SESSION_ENV], so a container can pick either path from
- * Diagnostics and pick it back if the window comes up black. See
- * [FIXED_MESA_VK_WSI_DEBUG] and the assignment in [sessionEnvironment].
+ *     VESSEL-WSI image_init image_type=0 dma_buf_fd=348 num_planes=1
+ *                modifier=0xffffffffffffff row_pitch=7936 size=8794112
  *
- * *Done when:* a real title runs a session with the Diagnostics row at
- * `WSI_DRI3` and draws. Then this flips and the row becomes the way back.
+ * Six of those, three per swapchain across a 1920x1080 and a 1280x720
+ * reallocation — Turnip importing the server's own dma-buf through the guest
+ * stack. Zero device losses in that session. The prior flip that took a session
+ * down was `5cdb54a`, which predates the diagnosis of its own cause by 104
+ * minutes: `186390f`, *"implement XFIXES — the actual cause of the DRI3
+ * failure"*, landed the same afternoon and nobody came back to this constant.
+ *
+ * **What the first run also found, and what had to be fixed before flipping.**
+ * The session stuttered. `PresentExtension.presentPixmap` did its 8 MB
+ * `copyArea` inside the window's `renderLock`, which the GL thread takes once per
+ * composited frame and must hold to meet vblank — so the compositor blocked on
+ * the present copy whenever it woke mid-copy, which with mouse-look is
+ * continuously. That lock is now taken only when the content is not a
+ * `GPUImage`, i.e. only when the compositor genuinely reads those pixels. See
+ * that method.
+ *
+ * **Still not proven, and the row is why that is acceptable.** The copy itself is
+ * unchanged; only the compositor's blocking on it is gone. Its magnitude has
+ * never been captured — the `Present copyArea` sampling log has existed for
+ * weeks and nothing in this repo records its output. If the kernel hands back a
+ * write-combine mapping for the client's dma-buf, the read side runs at uncached
+ * speed and the mean is tens of milliseconds rather than low single digits, and
+ * this default should come back off until the copy is cheaper or gone.
+ *
+ * `MESA_VK_WSI_DEBUG` is in [DIAGNOSTIC_SESSION_ENV], so that is one row and no
+ * rebuild: Diagnostics, `MESA_VK_WSI_DEBUG`, *Copy each frame (sw)*. The failure
+ * mode this guards is total and instant — a black window or no swapchain, never
+ * a slow one — so it is unmistakable and the way back is unambiguous.
  */
-const val ZERO_COPY_PRESENT: Boolean = false
+const val ZERO_COPY_PRESENT: Boolean = true
 
 /** Turnip's own startup channel, and the ground truth for whether it loaded at all. */
 const val TU_DEBUG_STARTUP: String = "startup"

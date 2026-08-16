@@ -789,7 +789,7 @@ class SessionEnvironmentTest {
                 // incomparable.
                 "TU_DEBUG_FILE" to File(tmp, TU_DEBUG_FILE_NAME).absolutePath,
                 "MESA_GPU_TRACEFILE" to File(tmp, GPU_TRACE_FILE_NAME).absolutePath,
-                "MESA_VK_WSI_DEBUG" to "sw",
+                "MESA_VK_WSI_DEBUG" to FIXED_MESA_VK_WSI_DEBUG,
                 // A Turnip driconf option delivered as an env var, because FEX
                 // asks Turnip for it through `__wine_set_unix_env` and that
                 // export does not exist in Wine 11.14, so FEX's own attempt is
@@ -986,7 +986,20 @@ class SessionEnvironmentTest {
         )
         // …and a row sitting where the session already is contributes nothing,
         // which is what keeps the golden map above true for a fresh container.
-        assertTrue(diagnosticEnvironment(software.diagnostics).isEmpty())
+        //
+        // **Asserted against whichever side the default is on, not against
+        // `sw`.** These two assertions used to name the paths directly, and they
+        // both broke the day `ZERO_COPY_PRESENT` flipped — for no reason except
+        // that they had hardcoded which of the two was the baseline. What the
+        // test is actually about is that a row *at* the baseline is silent and a
+        // row *away* from it is not, and that is true in both directions.
+        val atBaseline = if (ZERO_COPY_PRESENT) software else dri3
+        val awayFromBaseline = if (ZERO_COPY_PRESENT) dri3 else software
+        assertTrue(diagnosticEnvironment(awayFromBaseline.diagnostics).isEmpty())
+        assertEquals(
+            mapOf("MESA_VK_WSI_DEBUG" to if (ZERO_COPY_PRESENT) WSI_SOFTWARE else WSI_DRI3),
+            diagnosticEnvironment(atBaseline.diagnostics),
+        )
     }
 
     @Test
