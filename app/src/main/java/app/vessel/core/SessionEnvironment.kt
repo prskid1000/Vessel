@@ -358,39 +358,75 @@ const val MANAGED_DESKTOP: Boolean = true
  *
  * *No X protocol error was logged*, which rules out the obvious first guess —
  * an unimplemented request coming back as an error reply — and left the cause
- * unproven.
+ * unproven at the time.
  *
- * **The gap that explained it has since been closed, and this note was wrong
- * about it twice.** It said the server implemented five opcodes and was missing
- * `GetSupportedModifiers` (4), `FenceFromFD` (5) and `FDFromFence` (6). Those
- * numbers are not the protocol's: `FenceFromFD` is 4, `FDFromFence` is 5 and
- * `GetSupportedModifiers` is 6. And `FenceFromFD` is no longer missing —
- * `DRI3Extension.ClientOpcodes` carries it, `fenceFromFD` is implemented
- * against `SyncExtension`, and `app/src/main/cpp/winlator/src/xshmfence.c`
- * backs it with a real futex rather than the stub this note said would be
- * dishonest. That was written after the failed attempt, so the 2026-08-10
- * result predates the fix and is not evidence about the current server.
+ * **It is not unproven any more, and the note that lived here was three
+ * corrections behind the tree.** The failure is `5cdb54a`, 2026-08-10 11:29.
+ * Every cause it named was then found and fixed *the same afternoon*, and
+ * nobody came back to this constant. In commit order:
  *
+ *  - **11:29 `5cdb54a`** — this constant set false. Cause unknown.
+ *  - **13:13 `186390f`** — *"implement XFIXES — the actual cause of the DRI3
+ *    failure"*. Mesa creates an XFIXES region per swapchain image on the DRI3
+ *    path, unguarded, with `has_xfixes` sitting beside it unconsulted
+ *    (`x11_image_init`, `wsi_common_x11.c`). Against a server that does not
+ *    advertise XFIXES, **libxcb tears the connection down client-side** with
+ *    `XCB_CONN_CLOSED_EXT_NOTSUPPORTED` before sending anything — so no request
+ *    arrives, no protocol error exists, and nothing on this side can see it.
+ *    That is exactly the "connection broken, no X error" above, and the commit
+ *    says so. The software path was unaffected because `x11_image_init` returns
+ *    one line before the region is created, which is why `sw` passed and `dri3`
+ *    did not through identical code. Probe: `conn_err=0 then conn_err=2` before,
+ *    `conn_err=0 then conn_err=0` after.
+ *  - **14:40 `b418feb`** — *"DRI3 present works"*, with the real blocker named
+ *    (`patches/mesa/0006`: the DRM image backend was gated on
+ *    `dep_libdrm.found()`, so the DRI3 half was compiled with a CPU image
+ *    behind it) and **measured on this device**: mean 0.602 ms against
+ *    2.143 ms, 300 frames at 1280x720, `dma_buf_fd=6, size=3686400`.
+ *  - **16:22 `65bfea7`** — `FenceFromFD` implemented, backed by a real futex in
+ *    `app/src/main/cpp/winlator/src/xshmfence.c`.
+ *  - **16:54 `a9a4d89`** — the idle fence measured free (+0.010 ms, inside the
+ *    spread of four control runs) *and counted*: the server served exactly 3
+ *    fences with it on and 0 with it off, which is what makes the null result
+ *    mean something rather than being Mesa quietly not asking.
+ *
+ * So the 2026-08-10 result does not merely "predate the `FenceFromFD` fix", as
+ * `patches/mesa/README.md` puts it — it predates the diagnosis of its own
+ * cause by 104 minutes. It is evidence about a server that no longer exists.
+ *
+ * **The old note was also wrong about the opcode numbers, twice.** It said
+ * `GetSupportedModifiers` (4), `FenceFromFD` (5), `FDFromFence` (6). The
+ * protocol's are `FenceFromFD` 4, `FDFromFence` 5, `GetSupportedModifiers` 6.
  * What the server answers today is version 1.0 with opcodes 0, 1, 2, 3, 4 and
  * 7 — QueryVersion, Open, PixmapFromBuffer, BufferFromPixmap, FenceFromFD and
- * PixmapFromBuffers. At 1.0 Mesa asks for no more than that: modifiers and
+ * PixmapFromBuffers. At 1.0 Mesa asks for no more: modifiers and
  * `BuffersFromPixmap` are 1.2 features it will not reach for, so `FDFromFence`
  * and `GetSupportedModifiers` being absent is not a gap at the version we
  * advertise.
  *
- * So this is worth retrying, and `tools/gfx/run-presentbench.sh` is how —
- * it fixes `MESA_VK_WSI_DEBUG` from outside the app and puts both paths side by
- * side in one run, without reinstalling anything or needing a game.
+ * **The `pseudo-drm` question is answered too.** This note used to ask whether
+ * Mesa's DRM-shaped WSI could work over KGSL, where `xcb_dri3_open` has no DRM
+ * device to hand back. `b418feb` settles it: *"The DRI3 version was fine at 1.0,
+ * and `kgsl_bo_export_dmabuf` was never reached"* — the fd from `Open` is not
+ * what carries the buffer, `BufferFromPixmap` is, and Turnip imports that.
  *
- * There is also a deeper question this attempt did not answer. Mesa's DRI3 WSI
- * is written against DRM, which is what `HAVE_X11_DRM` names; Turnip here talks
- * to KGSL and there is no DRM device to hand back from `xcb_dri3_open`. Whether
- * the `pseudo-drm` platform is sufficient for a *Vulkan* driver, or only ever
- * carried Zink, is the thing to establish before writing any server code.
+ * **So why is this still false?** Because what was proven is
+ * `tools/gfx/x11present.c` — a native Vulkan client making a swapchain against
+ * this X server in this app's process. The guest stack is not that. A session is
+ * Wine's `winex11` holding the X connection, vkd3d/DXVK driving the swapchain,
+ * and Turnip reached through win32u's ICD path under FEX. **Joining them has
+ * never been run**, which is the same sentence the `MESA_VK_WSI_DEBUG`
+ * assignment has carried all along, and one prior flip of exactly this constant
+ * took a device session down. The default does not move on inference.
  *
- * *Done when:* `tools/gfx/run-presentbench.sh` completes a run with this true.
- * That harness exists precisely so this can be answered without a game, and
- * using it first would have been the better order.
+ * What changed is that it no longer takes a rebuild to find out. This constant
+ * is the **default** now, not the decision: `MESA_VK_WSI_DEBUG` is in
+ * [DIAGNOSTIC_SESSION_ENV], so a container can pick either path from
+ * Diagnostics and pick it back if the window comes up black. See
+ * [FIXED_MESA_VK_WSI_DEBUG] and the assignment in [sessionEnvironment].
+ *
+ * *Done when:* a real title runs a session with the Diagnostics row at
+ * `WSI_DRI3` and draws. Then this flips and the row becomes the way back.
  */
 const val ZERO_COPY_PRESENT: Boolean = false
 
@@ -615,9 +651,16 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "MESA_SHADER_CACHE_DISABLE",
     "MESA_SHADER_CACHE_DIR",
 
-    // Not a tuning knob on this build: the Turnip we ship has only the software
-    // half of Mesa's X11 WSI compiled in, and clearing this sends every
-    // swapchain into an `UNREACHABLE`. The whole argument is at the assignment.
+    // **Reserved, and the reason changed underneath the name.** It used to be
+    // "this Turnip has only the software half of Mesa's X11 WSI compiled in, so
+    // clearing this sends every swapchain into an `UNREACHABLE`". That stopped
+    // being true with `patches/mesa/0004` and `0006`: both halves are compiled
+    // now and both work. It is reserved today because it selects between two
+    // *present paths* — one measured 3.5x cheaper, one that has never been run
+    // under a guest — and a manifest param is the wrong surface for a choice
+    // whose failure mode is a black window. It is in [DIAGNOSTIC_SESSION_ENV]
+    // below, which is the surface that is. The whole argument is at the
+    // assignment and at [ZERO_COPY_PRESENT].
     "MESA_VK_WSI_DEBUG",
     "VKD3D_SHADER_CACHE_PATH",
     "VKD3D_CONFIG",
@@ -656,9 +699,20 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
  *     [composeWineDebug], which starts from [WINEDEBUG_CHANNELS] and appends, so
  *     the fixed prefix cannot be deleted by anything on that screen. Same shape
  *     as [dllOverrides], same reason.
- *  3. **`VKD3D_LOG_FILE` and `MESA_VK_WSI_DEBUG` stay unreachable by any path**,
- *     because they are not here. The two variables whose whole purpose is an
- *     absence and a fixed value cannot be written by a param or by Diagnostics.
+ *  3. **`VKD3D_LOG_FILE` stays unreachable by any path**, because it is not
+ *     here. The variable whose whole purpose is an *absence* cannot be written
+ *     by a param or by Diagnostics.
+ *
+ *     *This clause used to name `MESA_VK_WSI_DEBUG` alongside it and no longer
+ *     does.* The two were never the same case and being listed together made
+ *     them look it: `VKD3D_LOG_FILE` must be absent or vkd3d's output leaves the
+ *     pipe the session log reads, whereas `MESA_VK_WSI_DEBUG` merely had a fixed
+ *     value, and it had that value because half of Mesa's X11 WSI was not
+ *     compiled. `patches/mesa/0004` and `0006` compiled it, and
+ *     `patches/mesa/README.md` measures the other path at 0.602 ms against
+ *     2.143 ms. A fixed value with a 3.5x alternative behind it is a setting
+ *     nobody had got round to exposing, not an invariant. See
+ *     [ZERO_COPY_PRESENT] for why the *default* still does not move.
  *  4. The set is assertable: ⊆ [RESERVED_SESSION_ENV], and an untouched record
  *     produces an empty diagnostics map. Two assertions, and they are in
  *     `SessionEnvironmentTest`.
@@ -730,6 +784,39 @@ val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     // as the session runs. That is a thing to switch on for one session while
     // looking at a bug, which is exactly what this surface is.
     "VESSEL_AUDIO_DUMP",
+    // **The only entry here that changes how the frame is presented rather than
+    // what gets said about it, and it is here because the alternative is a
+    // rebuild in the middle of a black screen.**
+    //
+    // `docs/BANDWIDTH.md` item 7 ranks DRI3 zero-copy present as the one
+    // *measured* frame-time win in the stack that is switched off: 0.602 ms
+    // against 2.143 ms, 300 frames at 1280x720, `patches/mesa/README.md`. The
+    // switch was [ZERO_COPY_PRESENT], a compile-time constant, and the failure
+    // mode of getting it wrong is stated at the assignment and confirmed once on
+    // the device — not a slow session, a dead one.
+    //
+    // A constant is the wrong shape for that. It means the way back from a black
+    // window is a Gradle build, which is exactly what you do not have when the
+    // thing you were measuring is a title that takes fourteen seconds to
+    // initialise. On this surface it is a dropdown, per container, and the
+    // container that broke is the only one affected.
+    //
+    // *Why not a manifest param, which is where a per-container setting normally
+    // lives.* Two reasons, and the second is the one that decides it. It fails
+    // the manifest's own law — "explainable in one plain sentence to someone who
+    // does not know what a translator is" (`assets/params-manifest.json:9-12`) —
+    // and unreserving it would let a *hand-edited container document* pick a
+    // present path, which is a document that can stop a session starting with no
+    // UI anywhere having offered the choice. Reserved-plus-declared keeps the
+    // only writer a control that shows the caution.
+    //
+    // *Why not `oneSessionFrom`, which would disarm it automatically after one
+    // launch.* Considered and rejected. `consumed()`'s contract is "every row
+    // loud enough to be one-session", i.e. it is about log *volume*, and
+    // borrowing it for risk would make the mechanism mean two things. It would
+    // also make the setting useless the day it starts working: a win you have to
+    // re-arm every launch is not a win you can ship.
+    "MESA_VK_WSI_DEBUG",
 )
 
 /**
@@ -1653,10 +1740,13 @@ fun sessionEnvironment(
     // implements. It is `|=` in Mesa, not a driver capability, so no Turnip
     // patch is needed.
     //
-    // **This is not a debug switch here, which is why it is not a setting.** On
-    // a Mesa built with DRI3 it would be one; on this one it is the difference
-    // between a present path and no present path. `MESA_VK_WSI_DEBUG` is in
-    // [RESERVED_SESSION_ENV] for exactly that reason.
+    // **This used to say "not a debug switch here, which is why it is not a
+    // setting" — the difference between a present path and no present path.**
+    // That is history: `patches/mesa/0004` and `0006` compiled the DRI3 half, so
+    // it is now a choice between two working paths. It stays in
+    // [RESERVED_SESSION_ENV] because a manifest param is the wrong surface for a
+    // choice whose failure mode is a black window, and it is in
+    // [DIAGNOSTIC_SESSION_ENV] because that surface is the right one.
     //
     // **`sw` and not `sw,linear`, and that is a measurement overturning an
     // argument rather than a default nobody questioned.**
@@ -1700,16 +1790,59 @@ fun sessionEnvironment(
     //
     // Both halves were proven separately before this: `tools/gfx/wsiprobe.c`
     // showed Turnip importing the server's dma-buf and binding a TILING_LINEAR
-    // image to it at rowPitch 5120, and the vendored server already answers
-    // DRI3 `BufferFromPixmap` over `SCM_RIGHTS` with `presentPixmap`'s flip
-    // branch in place. Joining them has never been run.
+    // image to it at rowPitch 5120, and the vendored server answers every DRI3,
+    // Present, XFIXES and SYNC request Mesa issues at the versions it advertises.
+    // Joining them under a *guest* has never been run.
+    //
+    // **One claim that used to be here is false and is corrected rather than
+    // deleted, because it was load-bearing for how much this buys.** It said
+    // `presentPixmap` had "the flip branch in place". It does not.
+    // `PresentExtension` declares `Mode.FLIP` and never uses it: `presentPixmap`
+    // does a synchronous CPU `copyArea` under the render lock and then sends
+    // `sendCompleteNotify(…, Mode.COPY, …)` unconditionally. So the DRI3 path as
+    // it stands removes the *client-side* copy — the 3.6 MB `xcb_put_image` and
+    // the whole-frame `vkCmdCopyImageToBuffer` — and still pays one server-side
+    // copy, which `patches/mesa/README.md` says in as many words and which is
+    // already inside the 0.602 ms. The flip branch is the next win after this
+    // one, not a prerequisite for it.
     //
     // So [ZERO_COPY_PRESENT] is a switch, not a deletion. If DRI3 does not
     // negotiate against this server the symptom will be immediate and total —
-    // a black window or no swapchain at all, not a slow one — and the way back
-    // is one line. The `sw,linear` measurement above stays because it is still
-    // the right answer for the software path.
-    if (!ZERO_COPY_PRESENT) environment["MESA_VK_WSI_DEBUG"] = "sw"
+    // a black window or no swapchain at all, not a slow one. The `sw,linear`
+    // measurement above stays because it is still the right answer for the
+    // software path.
+    //
+    // **Always assigned, where this used to be `if (!ZERO_COPY_PRESENT)`, and
+    // the difference is not cosmetic.** Two things fall out of it:
+    //
+    //  1. *The switch is symmetric.* The diagnostics stage below can only
+    //     rewrite keys, never remove them — `environment[key] = value` and
+    //     nothing else. With the key absent on the DRI3 side, a container could
+    //     turn zero-copy *on* and never turn it off again once
+    //     [ZERO_COPY_PRESENT] flips, because there would be no key to rewrite.
+    //     That is precisely the escape hatch this whole change exists to build,
+    //     failing in the direction it was built to protect.
+    //  2. *It is visible in `/proc/<pid>/environ`.* This project checks the
+    //     guest's own environ rather than trusting the map — three separate
+    //     notes in this file record doing exactly that. An absent variable and a
+    //     variable that never got written look identical there. `MESA_VK_WSI_DEBUG=`
+    //     is unambiguous.
+    //
+    // **Empty is unset, and that is a property of Mesa's parser rather than a
+    // hope.** `wsi_common.c:80` is
+    // `WSI_DEBUG = parse_debug_string(os_get_option("MESA_VK_WSI_DEBUG"), …)`,
+    // and `parse_debug_string` (`util/u_debug.c`) walks the string with
+    // `for (; n = strcspn(s, ", \n"), *s; …)` — on `""` the loop body never
+    // runs and it returns 0, the same value it returns for `NULL`. There is no
+    // flag whose absence means something different from its being unnamed.
+    //
+    // One real asymmetry, recorded because it is invisible and in our favour:
+    // `os_get_option_internal` (`util/os_misc.c`) falls back to
+    // `os_get_android_option(name)` **only when `getenv` returns NULL**. An
+    // empty value is not NULL, so setting this suppresses an Android system
+    // property that could otherwise supply a value nobody here chose. Nothing on
+    // this device sets one; the point is that unset was the weaker guarantee.
+    environment["MESA_VK_WSI_DEBUG"] = FIXED_MESA_VK_WSI_DEBUG
 
     // **FEX asks Turnip for this and cannot deliver it here, so Vessel does.**
     //

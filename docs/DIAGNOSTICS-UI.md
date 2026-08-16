@@ -122,9 +122,18 @@ while the prefix is being built.**
 
 ### Reserved but not diagnostic — do not offer these
 
-`MESA_VK_WSI_DEBUG=sw` (:663) is not a debug switch on this build: unset, the
-DRI3 branch is `__builtin_unreachable()` and a present measured 12.8 ms
-(:600-663). `VKD3D_CONFIG=nodxr` (:584) gates ray tracing.
+**`MESA_VK_WSI_DEBUG` moved onto this surface and is no longer in this
+paragraph.** It said "not a debug switch on this build: unset, the DRI3 branch is
+`__builtin_unreachable()` and a present measured 12.8 ms". That was true and
+stopped being: `patches/mesa/0004` and `0006` compiled the DRI3 half, and
+`patches/mesa/README.md` measures it at 0.602 ms against the software path's
+2.143 ms. It is a declared row in the `mesa` family now, with two stops — `sw`
+and the empty string, which is DRI3 — and it is the only row on this screen that
+changes the frame rather than the log. The default does not move; see
+`ZERO_COPY_PRESENT` in `SessionEnvironment.kt` for what is still unproven and why
+a per-container switch was the right first step.
+
+`VKD3D_CONFIG=nodxr` (:584) gates ray tracing.
 `MESA_SHADER_CACHE_DISABLE` / `_DIR` (:592-593), `DXVK_STATE_CACHE_PATH` (:594),
 `VKD3D_SHADER_CACHE_PATH` (:595) and `FEX_APP_CACHE_LOCATION` (:503) are cache
 locations. `tu_override_uncached_as_cache_coherent` (:688) is a
@@ -406,7 +415,8 @@ with a new constant beside the existing one:
 ```
 DIAGNOSTIC_SESSION_ENV ⊂ RESERVED_SESSION_ENV
   = { WINEDEBUG, DXVK_LOG_LEVEL, VKD3D_DEBUG, VKD3D_SHADER_DEBUG,
-      TU_DEBUG, FEX_SILENTLOG, MESA_LOG, MESA_LOG_LEVEL }
+      TU_DEBUG, FEX_SILENTLOG, MESA_LOG, MESA_LOG_LEVEL,
+      VKD3D_CONFIG, DXVK_CONFIG, VESSEL_AUDIO_DUMP, MESA_VK_WSI_DEBUG }
 ```
 
 Four properties this buys, and each is the answer to a way the obvious
@@ -422,10 +432,15 @@ alternatives fail:
    and a later entry wins, so a user who really does need `d3d9=b` to work
    around one program can have it without being able to break the defaults for
    everything else by accident" (`SessionEnvironment.kt:765-771`).
-3. **`VKD3D_LOG_FILE` and `MESA_VK_WSI_DEBUG` stay unreachable**, because they
-   are not in `DIAGNOSTIC_SESSION_ENV`. The two variables whose whole purpose is
-   an absence (`:212-216`) and a fixed value (`:600-663`) cannot be reached by
-   any path.
+3. **`VKD3D_LOG_FILE` stays unreachable**, because it is not in
+   `DIAGNOSTIC_SESSION_ENV`. The variable whose whole purpose is an absence
+   (`:212-216`) cannot be reached by any path.
+
+   *`MESA_VK_WSI_DEBUG` was named here too and is now in the set.* The two were
+   never the same case: one must be *absent* or vkd3d's output leaves the pipe
+   the session log reads, the other merely had a *fixed value* — fixed because
+   half of Mesa's X11 WSI was not compiled, which `patches/mesa/0004` and `0006`
+   fixed. See the entry in `DIAGNOSTIC_SESSION_ENV`.
 4. **The set is assertable.** A test that `DIAGNOSTIC_SESSION_ENV ⊆
    RESERVED_SESSION_ENV`, and that a diagnostics profile with everything off
    produces byte-for-byte the environment `SessionEnvironmentTest.kt:504-568`

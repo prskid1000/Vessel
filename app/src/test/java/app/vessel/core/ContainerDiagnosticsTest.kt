@@ -421,11 +421,45 @@ class ContainerDiagnosticsTest {
     }
 
     @Test
-    fun `no record can reach the two variables reserved for their absence`() {
+    fun `no record can reach the variables reserved for their absence`() {
         val keys = diagnosticEnvironment(everythingOn()).keys
         assertFalse("VKD3D_LOG_FILE" in keys)
-        assertFalse("MESA_VK_WSI_DEBUG" in keys)
         assertFalse("DXVK_LOG_PATH" in keys)
+        // `MESA_VK_WSI_DEBUG` was asserted here and is deliberately not any
+        // more. It was never in this company: those two must be *absent* or the
+        // D3D layers' output leaves the pipe the session log reads, whereas this
+        // one had a fixed value chosen because half of Mesa's X11 WSI was not
+        // compiled — and `patches/mesa/0004` and `0006` compiled it. It is a
+        // declared row now; the test below is the one that pins it.
+    }
+
+    @Test
+    fun `the present path is a row, and it is silent until somebody moves it`() {
+        // The row exists so a black window does not need a rebuild to undo. Two
+        // halves, and the second is the one that could rot quietly: picking the
+        // *other* path must compose, and sitting where the session already is
+        // must compose nothing at all.
+        assertEquals(
+            mapOf("MESA_VK_WSI_DEBUG" to WSI_DRI3),
+            diagnosticEnvironment(row("MESA_VK_WSI_DEBUG", WSI_DRI3)),
+        )
+        assertEquals(
+            emptyMap<String, String>(),
+            diagnosticEnvironment(row("MESA_VK_WSI_DEBUG", WSI_SOFTWARE)),
+        )
+        // Naming the row arms it — the same shape as every other cautioned row
+        // on this surface, and the confirmation dialog is what stands between
+        // the two. A row that had to be named *and then* switched on would read
+        // as broken the first time somebody added it.
+        assertEquals(WSI_DRI3, row("MESA_VK_WSI_DEBUG").rows[0].level)
+        // Not one-session: `consumed()` is about log volume, and a present path
+        // that disarmed itself every launch could never be shipped on.
+        assertFalse(row("MESA_VK_WSI_DEBUG").rows[0].isOneSession)
+        assertEquals(row("MESA_VK_WSI_DEBUG"), row("MESA_VK_WSI_DEBUG").consumed())
+        // It files itself under Mesa by prefix, with no declared type anywhere.
+        assertEquals("mesa", loggableFor("MESA_VK_WSI_DEBUG").family)
+        // And it carries a caution, which is what makes the screen ask first.
+        assertNotNull(loggableFor("MESA_VK_WSI_DEBUG").caution)
     }
 
     // — duration ---------------------------------------------------------------

@@ -470,12 +470,25 @@ for this device. They are also inert.
 ### 7. Retry DRI3 presentation — the one place with a measured 3.5× sitting unused
 
 **Status.** `ZERO_COPY_PRESENT` is still `false`
-(`app/src/main/java/app/vessel/core/SessionEnvironment.kt:395`), so every session
-takes the software present path. Its KDoc rests on a device failure from
-2026-08-10, and `patches/mesa/README.md` records — in the entry for the patch
-that fixed the actual blocker — that the failure predates the `FenceFromFD`
-implementation and that both paths were subsequently measured on this device,
-300 frames at 1280×720:
+(`app/src/main/java/app/vessel/core/SessionEnvironment.kt`), so every session
+*defaults* to the software present path — but it is no longer a rebuild to try
+the other one. `MESA_VK_WSI_DEBUG` is in `DIAGNOSTIC_SESSION_ENV` and has a
+declared row in the `mesa` family, so a container picks its present path from
+Diagnostics and picks it back if the window comes up black.
+
+**The failure the constant rested on is fully explained, and it was stale by
+104 minutes.** This document used to repeat the KDoc's "predates the
+`FenceFromFD` fix". It predates more than that. The failure is commit `5cdb54a`,
+2026-08-10 11:29; `186390f` at 13:13 the same day is titled *"implement XFIXES —
+the actual cause of the DRI3 failure"*, and its mechanism matches the recorded
+symptom exactly — Mesa creates an XFIXES region per swapchain image on the DRI3
+path unguarded, and against a server that does not advertise XFIXES libxcb tears
+the connection down **client-side** with `XCB_CONN_CLOSED_EXT_NOTSUPPORTED`
+before a byte is sent, which is why "X connection broken" appeared with no X
+protocol error. `b418feb` at 14:40 records *"DRI3 present works"* with the
+numbers below. The constant was simply never revisited.
+
+Both paths measured on this device, 300 frames at 1280×720:
 
 | path | mean | p50 | p95 |
 |---|---|---|---|
@@ -505,11 +518,23 @@ Adding those up is arithmetic, not a measurement: roughly 25–30 MB of DRAM
 traffic per presented frame at 720p that the DRI3 path does not spend. **The
 0.602-vs-2.143 ms figure above is the number to quote, not this one.**
 
-**The cheapest experiment.** `tools/gfx/run-presentbench.sh` fixes
-`MESA_VK_WSI_DEBUG` from outside the app and runs both paths in one session,
-without a game and without reinstalling anything — which is exactly what the
-constant's own KDoc names as the done-condition. Flipping the constant itself is
-a Kotlin-only rebuild.
+**The cheapest experiment, and it is no longer a rebuild.** Diagnostics → add a
+row → type `MESA_VK_WSI_DEBUG` → *Zero-copy (DRI3)*, then launch. Turning it back
+is the same dropdown. `tools/gfx/run-presentbench.sh` still fixes the variable
+from outside the app and runs both paths in one session without a game, and is
+the right instrument for a *number*; the row is the one that answers the question
+this item is actually blocked on.
+
+**What that question is.** Everything measured so far is
+`tools/gfx/x11present.c` — a native Vulkan client making a swapchain against
+this X server, in this app's process. A session is not that: it is Wine's
+`winex11` holding the X connection, vkd3d or DXVK driving the swapchain, and
+Turnip reached through win32u's ICD under FEX. **Joining the two halves has never
+been run.** Reading both sides says it should negotiate — the server implements
+every DRI3, Present, XFIXES and SYNC request Mesa issues at the versions it
+answers, and `xcb_dri3_open` answering `nfd = 0` is *handled*, not fatal
+(`wsi_common_x11.c:144-147` returns −1, `:173-175` then assumes a compatible
+local device) — but reading is not running.
 
 **Ranked seventh, not first, deliberately.** `docs/TODO.md:472-477` records that
 present-path work costs ~0.5 ms against frame times in the tens of milliseconds,

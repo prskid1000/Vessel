@@ -160,10 +160,15 @@ Two things about it are worth knowing:
   way through a `vkGetInstanceProcAddr` wrapper and resolves the device entry
   point from it on first use, which is always in time — a device cannot exist
   before the instance that made it.
-- **`MESA_VK_WSI_DEBUG=sw` is not optional.** This Turnip has only the software
-  half of Mesa's X11 WSI compiled in; without `sw` every swapchain reaches an
-  `__builtin_unreachable()`. It was already set for the same reason before any
-  of this.
+- **`MESA_VK_WSI_DEBUG=sw` *was* not optional, and now it is a choice.** This
+  Turnip had only the software half of Mesa's X11 WSI compiled in, so without
+  `sw` every swapchain reached an `__builtin_unreachable()`. `patches/mesa/0004`
+  put the build on the `pseudo-drm` platform and `0006` compiled the DRM image
+  backend behind it, and the DRI3 path then measured 0.602 ms against the
+  software path's 2.143 ms (`patches/mesa/README.md`). The session still sends
+  `sw` by default — `ZERO_COPY_PRESENT` in `SessionEnvironment.kt` says what
+  remains unproven — but it is a declared Diagnostics row per container now,
+  not a compile-time constant.
 
 `VESSEL_VULKAN_ICD` names the driver, and the host application sets it alongside
 the `ADRENOTOOLS_*` variables — both pointing at the same file. win32u decides
