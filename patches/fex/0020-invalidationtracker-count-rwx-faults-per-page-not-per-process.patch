@@ -1,0 +1,110 @@
+invalidationtracker: count RWX faults per page, because a global counter cannot
+name the offender.
+
+`0006`'s counter answered "is this happening at all" and returned zero, which is
+what it was for. This is the next question — *which pages*, and how fast — and
+the shape it had could not answer it.
+
+One counter for the whole process, printed every 4096th fault. A Requiem session
+took **3,656 RWX faults with 2,892 of them on one address**, `0x14FA2AFF0`, from
+two program counters. It printed one line, naming whichever page happened to be
+number 4096 — which was not the offender — and the thrash stayed invisible until
+an `x86:everything` trace was grepped by hand. That is a firehose and a device
+run to learn something the counter already had in it.
+
+Per page, and named on powers of two. A page that faults once says so and then
+goes quiet; one that climbs names itself at 1, 2, 4 … 2048, so the pathological
+case costs twelve lines rather than seven hundred. The interesting fact is which
+pages climb and how fast, not the total, and the total was the only thing the old
+shape could report.
+
+**It has to be able to return a negative**, which is why it stays silent for a
+title that never repeats a page rather than printing a periodic heartbeat. A
+session with nothing from this tag did not thrash, and that rules the mechanism
+out in one run instead of leaving it a standing suspicion — the same property the
+`EINTR` line in Vessel's X server was given for the same reason.
+
+A guarded map rather than an atomic, because it has to be a map. This path takes
+`CodeInvalidationMutex` three lines below and then makes an `NtProtectVirtualMemory`
+call; a short uncontended lock is not what makes an SMC fault expensive.
+
+**WHAT THIS DELIBERATELY DOES NOT DO IS FIX THE THRASH**, and the reason is worth
+recording so the next person does not repeat the reasoning. The obvious fix —
+"don't invalidate a whole page when the write is to data that shares it with
+code" — was investigated and is already done: `LookupCache::InvalidateRange`
+(`FEXCore/Source/Interface/Core/LookupCache.h:125`) keys on `CodePages`, which is
+per page, and no-ops when the page holds no translated block. So the cost is not
+a wasted invalidation. It is the fault round trip, a write lock per code buffer,
+and — the expensive part — the *recompilation* of everything on the page
+afterwards, which then re-arms the trap for the next write.
+
+Fixing that needs the overlap test at instruction granularity rather than page
+granularity, which needs block *extents* where `CodePages` currently stores entry
+addresses. That is a change to FEX's data structures, its failure mode is a stale
+translation executing silently, and it should not be attempted on a hunch. This
+patch is what makes the case for it measurable, and at the rate measured so far —
+around ten to twenty faults a second, three orders of magnitude below the
+"burns a core and renders nothing" bar in this file's own comment — the case is
+not yet made.
+
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 2628bdbc3..ec9552e06 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -1,7 +1,9 @@
+ // SPDX-License-Identifier: MIT
+ 
+ #include <FEXCore/Utils/LogManager.h>
++#include <FEXCore/fextl/map.h>
+ #include <atomic>
++#include <mutex>
+ #include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/Utils/SignalScopeGuards.h>
+ #include <FEXCore/Core/Context.h>
+@@ -325,14 +327,39 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+     //
+     // The page, not the fault address: what matters is whether a small set
+     // repeats, and two writes eight bytes apart are the same page and the
+-    // same recompile. One line in 4096 keeps a healthy title at the cost of
+-    // an increment.
++    // same recompile.
++    //
++    // **THE COUNT IS PER PAGE, AND IT USED TO BE GLOBAL.** The previous version
++    // held one counter for the whole process and printed every 4096th fault,
++    // which cannot answer the only question this instrument exists to ask. A
++    // Requiem session took 3,656 of these with 2,892 of them on a *single*
++    // address, and it printed one line -- naming whichever page happened to be
++    // number 4096, which was not the offender. The thrash was invisible until a
++    // full `x86:everything` trace was grepped by hand, which is a firehose and a
++    // device run to learn something a counter already had.
++    //
++    // Powers of two, so a page names itself at 1, 2, 4 … 2048 and a pathological
++    // one costs twelve lines rather than seven hundred. That keeps the shape
++    // legible — the interesting fact is *which* pages climb and how fast, not
++    // the total — and it stays silent for a title that never repeats a page,
++    // which is what lets this rule the thrash out as well as in.
++    //
++    // The map is guarded rather than atomic because it has to be a map: this
++    // path already takes CodeInvalidationMutex immediately below, so a short
++    // uncontended lock here is not what makes an SMC fault expensive.
+     {
+-      static std::atomic<uint64_t> RWXFaults {0};
+-      const uint64_t Seen = RWXFaults.fetch_add(1, std::memory_order_relaxed) + 1;
+-      if (Seen == 1 || (Seen % 4096) == 0) {
+-        LogMan::Msg::IFmt("RWX invalidation {} on page {:X} (pc {:X})", Seen,
+-                          FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, HostPc);
++      static std::mutex PageTallyLock;
++      static fextl::map<uint64_t, uint64_t> PageTally;
++      const uint64_t Page = FaultAddress & FEXCore::Utils::FEX_PAGE_MASK;
++
++      uint64_t Seen;
++      {
++        std::scoped_lock Lock(PageTallyLock);
++        Seen = ++PageTally[Page];
++      }
++
++      if ((Seen & (Seen - 1)) == 0) {
++        LogMan::Msg::IFmt("RWX invalidation {} on page {:X} (pc {:X})", Seen, Page, HostPc);
+       }
+     }
+ 

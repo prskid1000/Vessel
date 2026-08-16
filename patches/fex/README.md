@@ -1203,3 +1203,51 @@ process even though nothing invokes it directly.
 
 **Policy.** Not for upstream, for the reason at the top of this file. AI-authored
 in full.
+
+## `0020-invalidationtracker-count-rwx-faults-per-page-not-per-process`
+
+`0006`'s counter answered "is this happening at all" and returned zero, which is
+what it was for. This is the next question — *which* pages, and how fast — and the
+shape it had could not answer it.
+
+One counter for the whole process, printed every 4096th fault. A Requiem session
+took **3,656 RWX faults with 2,892 of them on one address**, `0x14FA2AFF0`, from
+two program counters. It printed a single line naming whichever page happened to
+be number 4096 — not the offender — and the thrash stayed invisible until an
+`x86:everything` trace was grepped by hand. That is a firehose and a device run
+to learn something the counter already had in it.
+
+Per page now, named on powers of two: a page that faults once says so and goes
+quiet, one that climbs names itself at 1, 2, 4 … 2048, so the pathological case
+costs twelve lines rather than seven hundred. The interesting fact is which pages
+climb and how fast; the total was the only thing the old shape could report.
+
+**It has to be able to return a negative**, which is why it stays silent for a
+title that never repeats a page rather than printing a heartbeat. A session with
+nothing from this tag did not thrash, and that rules the mechanism out in one run
+instead of leaving it a standing suspicion.
+
+A guarded map rather than an atomic, because it has to be a map. This path takes
+`CodeInvalidationMutex` three lines below and then makes an
+`NtProtectVirtualMemory` call; a short uncontended lock is not what makes an SMC
+fault expensive.
+
+**IT DELIBERATELY DOES NOT FIX THE THRASH, and the reasoning is recorded so it is
+not repeated.** The obvious fix — "don't invalidate a whole page when the write is
+to data sharing it with code" — was investigated and is already done:
+`LookupCache::InvalidateRange` (`FEXCore/Source/Interface/Core/LookupCache.h:125`)
+keys on `CodePages`, which is per page, and no-ops when the page holds no
+translated block. The cost is not a wasted invalidation. It is the fault round
+trip, a write lock per code buffer, and — the expensive part — *recompiling*
+everything on the page afterwards, which re-arms the trap for the next write.
+
+Fixing that needs the overlap test at instruction granularity rather than page
+granularity, which needs block *extents* where `CodePages` stores entry
+addresses. That is a change to FEX's data structures, its failure mode is a stale
+translation executing silently, and it should not be attempted on a hunch. This
+patch is what makes the case for it measurable, and at the rate measured so far —
+roughly ten to twenty faults a second, far below the "burns a core and renders
+nothing" bar in this file's own comment — the case is not yet made.
+
+**Policy.** Not for upstream, for the reason at the top of this file. AI-authored
+in full.

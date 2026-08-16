@@ -1,19 +1,16 @@
 package app.vessel.ui.components
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.ui.theme.Vessel
 import app.vessel.ui.theme.VesselTheme
@@ -37,15 +34,24 @@ import androidx.compose.material3.Text
  * So the family becomes a column. One list, one Add, and the type says which
  * subsystem is being addressed.
  *
- * **THE THREE CONTROLS ARE ON TWO LINES, AND THAT IS A MEASUREMENT RATHER THAN A
- * PREFERENCE.** The row this replaces recorded the arithmetic and it still
- * holds: on a 421 dp sheet the content column is 387 dp, so a level control at
- * 126 dp, a cross at 44 dp and two 6 dp gaps leave 205 dp for the flag — barely
- * enough to set `VKD3D_SHADER_DEBUG` in mono. Putting a third control on that
- * line takes the flag to 93 dp and ellipsizes it to `VKD3D_SHADE…`, destroying
- * the one thing the row exists to say. Type and flag therefore share the first
- * line, where the type is the narrow one because its vocabulary is short and
- * curated; the level sits on the second, indented under the flag it qualifies.
+ * **THE THREE CONTROLS ARE STACKED, EACH FULL WIDTH, INSIDE ONE BORDERED CARD.**
+ * The row this replaces put two of them side by side and recorded why a third
+ * would not fit: on a 421 dp sheet the content column is 387 dp, so a level
+ * control at 126 dp, a cross at 44 dp and two gaps leave 205 dp for the flag —
+ * barely enough for `VKD3D_SHADER_DEBUG` in mono, and a third control took it to
+ * 93 dp and ellipsized to `VKD3D_SHADE…`. Stacking removes the constraint rather
+ * than working around it: every field gets the whole width, nothing is ever
+ * truncated, and the longest variable name in the stack still fits.
+ *
+ * The border is what makes that readable. Three full-width boxes in a flat list
+ * give no way to see where one setting ends and the next begins — the card is
+ * the only thing saying "these three belong together", and it is why the remove
+ * control sits on the card's own header line rather than beside a field: it acts
+ * on the whole entry, not on the flag.
+ *
+ * Each field is labelled for the same reason. Side by side, position told you
+ * which control was which; stacked, three identical boxes do not, and a label
+ * costs one line of 11 sp text to remove the guess.
  *
  * **The level is a combo and not a dropdown**, which the old row could not be. A
  * declared thing has a ladder to pick from, and a plain environment variable has
@@ -88,78 +94,76 @@ fun VDiagnosticEntry(
     levelIsMachine: Boolean = false,
     oneSession: Boolean = false,
 ) {
-    Column(modifier.fillMaxWidth().padding(vertical = Vessel.metrics.s6)) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(top = Vessel.metrics.s8)
+            .border(Vessel.metrics.hairline, Vessel.colors.divider, Vessel.metrics.shapeMd)
+            .padding(Vessel.metrics.s8),
+    ) {
+        // The remove control sits on its own line above the fields rather than
+        // beside one of them. Beside a field it would have to steal width from
+        // that field alone, which is what made the previous row asymmetric — and
+        // it belongs to the whole entry, not to the flag.
         Row(
-            Modifier.fillMaxWidth().heightIn(min = Vessel.metrics.touchTarget),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.width(Vessel.metrics.diagnosticControlWidth)) {
-                VComboField(
-                    // The label rather than the wire, so the column reads
-                    // "Turnip" and not "turnip" — while what is stored and what
-                    // a user may type stays the wire, which is the thing the
-                    // container document keeps.
-                    value = if (typeEditable) type else typeLabel,
-                    options = typeOptions,
-                    onValueChange = onType,
-                    placeholder = "type",
-                    enabled = typeEditable,
+            Text(
+                if (onRemove == null) "Always on" else typeLabel.ifBlank { "Setting" },
+                style = Vessel.type.label,
+                color = Vessel.colors.textMuted,
+            )
+            if (onRemove != null) {
+                VIconButton(
+                    VIcons.X,
+                    contentDescription = "Remove $flag",
+                    onClick = onRemove,
+                    tint = Vessel.colors.textMuted,
                 )
-            }
-            Box(Modifier.weight(1f)) {
-                VComboField(
-                    value = flag,
-                    options = flagOptions,
-                    onValueChange = onFlag,
-                    placeholder = "flag",
-                    enabled = flagEditable,
-                    isError = flagIsInvalid,
-                )
-            }
-            // The column stays whether or not there is a cross in it, so the
-            // controls line up down the list rather than shifting sideways at
-            // the boundary between what is fixed and what is not.
-            Box(Modifier.size(Vessel.metrics.touchTarget), contentAlignment = Alignment.Center) {
-                if (onRemove != null) {
-                    VIconButton(
-                        VIcons.X,
-                        contentDescription = "Remove $flag",
-                        onClick = onRemove,
-                        tint = Vessel.colors.textMuted,
-                    )
-                }
+            } else {
+                Box(Modifier.size(Vessel.metrics.touchTarget))
             }
         }
 
-        Row(
-            Modifier.fillMaxWidth().padding(top = Vessel.metrics.s3),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // Indented to the flag column, so the level reads as qualifying the
-            // flag above it rather than as a third peer.
-            Spacer(Modifier.width(Vessel.metrics.diagnosticControlWidth))
-            Box(Modifier.weight(1f)) {
-                VComboField(
-                    value = levelLabel(level).takeIf { level.isNotEmpty() }.orEmpty(),
-                    options = levelOptions.map(levelLabel),
-                    // Back through the label map, because the list shows labels
-                    // and the record keeps wire values. A typed value that
-                    // matches no label is itself the wire — which is exactly the
-                    // free-text case a variable with no ladder needs.
-                    onValueChange = { shown ->
-                        onLevel(levelOptions.firstOrNull { levelLabel(it) == shown } ?: shown)
-                    },
-                    placeholder = if (levelOptions.isEmpty()) "value" else "level",
-                    enabled = levelEditable,
-                )
-            }
-            Box(Modifier.size(Vessel.metrics.touchTarget))
+        Field("Type") {
+            VComboField(
+                value = type,
+                options = typeOptions,
+                onValueChange = onType,
+                placeholder = "subsystem",
+                enabled = typeEditable,
+            )
+        }
+        Field("Flag") {
+            VComboField(
+                value = flag,
+                options = flagOptions,
+                onValueChange = onFlag,
+                placeholder = "name",
+                enabled = flagEditable,
+                isError = flagIsInvalid,
+            )
+        }
+        Field(if (levelOptions.isEmpty()) "Value" else "Level") {
+            VComboField(
+                value = levelLabel(level).takeIf { level.isNotEmpty() }.orEmpty(),
+                options = levelOptions.map(levelLabel),
+                // Back through the label map, because the list shows labels and
+                // the record keeps wire values. A typed value matching no label
+                // is itself the wire, which is the free-text case a variable with
+                // no ladder needs.
+                onValueChange = { shown ->
+                    onLevel(levelOptions.firstOrNull { levelLabel(it) == shown } ?: shown)
+                },
+                placeholder = if (levelOptions.isEmpty()) "value" else "level",
+                enabled = levelEditable,
+            )
         }
 
         if (oneSession) {
-            Box(Modifier.padding(top = Vessel.metrics.s3)) {
+            Box(Modifier.padding(top = Vessel.metrics.s6)) {
                 VTag("one session", tone = VTagTone.Neutral)
             }
         }
@@ -167,15 +171,31 @@ fun VDiagnosticEntry(
             Text(
                 secondary,
                 style = Vessel.type.bodySmall,
-                // Dimmed with the row it explains. Keyed on the *level*, which is
-                // the column that says whether this row is doing anything.
+                // Dimmed with the entry it explains. Keyed on the *level*, which
+                // is the field that says whether this entry is doing anything.
                 color = Vessel.colors.textMuted.let {
                     it.copy(alpha = it.alpha * if (levelEditable) 1f else Vessel.colors.disabledAlpha)
                 },
-                overflow = TextOverflow.Visible,
+                modifier = Modifier.padding(top = Vessel.metrics.s6),
             )
         }
         if (caution != null) VCaution(caution)
+    }
+}
+
+/**
+ * One labelled field, full width.
+ *
+ * The label is what a stacked layout buys and a side-by-side one cannot: three
+ * bare combos in a column are three identical boxes, and nothing on screen says
+ * which is the subsystem and which is the value. It costs a line of 11 sp text
+ * per field and removes the only thing the old layout was still guessing at.
+ */
+@Composable
+private fun Field(label: String, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s6)) {
+        Text(label, style = Vessel.type.label, color = Vessel.colors.textMuted)
+        Box(Modifier.fillMaxWidth().padding(top = Vessel.metrics.s3)) { content() }
     }
 }
 
