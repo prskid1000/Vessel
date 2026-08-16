@@ -125,6 +125,32 @@ data class MetricSample(
     val d3dSubmissionsPerFrame: Float? = null,
     val d3dGpuSyncsPerFrame: Float? = null,
     /**
+     * The D3D12-only counters, null for every D3D 8/9/10/11 run.
+     *
+     * There are two producers behind this family now and they do not overlap:
+     * DXVK's (`patches/dxvk/0001`) writes for D3D 8/9/10/11, vkd3d's
+     * (`patches/vkd3d/0007`) writes for D3D 12, and a title loads one or the
+     * other. So a null here is "this run was not D3D 12", not "the counter was
+     * unavailable" — which is why these four are separate fields rather than a
+     * reuse of the ones above.
+     *
+     * `ExecuteIndirect` is the one worth watching on this stack. Every session
+     * log carries `Not all relevant pipeline stages are supported by EXT_dgc.
+     * Skipping`, so vkd3d cannot use device-generated commands and lowers every
+     * indirect draw to a compute-shader patching pass instead. A title that
+     * draws its world indirectly and its props directly is then drawing the two
+     * halves of the frame through two different code paths, and this is the
+     * only counter that can say how much of the frame goes through the one that
+     * fell back.
+     *
+     * Calls and commands are both kept because neither implies the other: ten
+     * thousand commands in one call and ten thousand calls are the same
+     * workload described two ways, and only the pair distinguishes them.
+     */
+    val d3dExecuteIndirectsPerFrame: Float? = null,
+    val d3dExecuteIndirectCommandsPerFrame: Float? = null,
+    val d3dCommandListsPerFrame: Float? = null,
+    /**
      * How many pipelines exist, which is a population and not a rate.
      *
      * Absolute rather than per frame, and the producer treats it that way too: a
@@ -696,6 +722,18 @@ data class GfxStats(
     val barriersPerFrame: Float? = null,
     val submissionsPerFrame: Float? = null,
     val gpuSyncsPerFrame: Float? = null,
+    /**
+     * Written by the vkd3d producer only; absent from every DXVK snapshot.
+     *
+     * Absent rather than zero, and the difference is the whole reason they are
+     * nullable: `Json` here is configured with `ignoreUnknownKeys`, so a DXVK
+     * line that never mentions these leaves them null and the panel draws no
+     * card, whereas a zero would draw a flat line under a title that does not
+     * have the concept. See [MetricSample.d3dExecuteIndirectsPerFrame].
+     */
+    val executeIndirectsPerFrame: Float? = null,
+    val executeIndirectCommandsPerFrame: Float? = null,
+    val commandListsPerFrame: Float? = null,
     val pipelinesGraphics: Int? = null,
     val pipelineLibraries: Int? = null,
     val pipelinesCompute: Int? = null,

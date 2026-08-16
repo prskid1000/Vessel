@@ -502,12 +502,66 @@ private fun D3dCards(state: SessionMetricsState) {
         ),
     )
 
+    // **Indirect drawing, and only for D3D 12.** DXVK writes nothing for these,
+    // so this card is absent for every D3D 8/9/10/11 title rather than flat at
+    // zero — a title that has no such concept should not appear to be doing none
+    // of it.
+    //
+    // Why it is worth a card of its own rather than a stat on the draw-call one:
+    // an ExecuteIndirect is not a draw call on this stack. vkd3d logs `Not all
+    // relevant pipeline stages are supported by EXT_dgc. Skipping` on every
+    // launch here, so it cannot use device-generated commands and lowers each
+    // one to a compute pass that patches an argument buffer. Those are two
+    // different pipelines drawing two different halves of the frame, and
+    // averaging them into one line would hide exactly the split worth seeing.
+    //
+    // Commands share the calls' ceiling for the same reason passes share the
+    // draws' above: a call is a container for commands, so the gap between the
+    // lines is the batching.
+    val indirectPeak = maxOf(
+        history.peak { it.d3dExecuteIndirectsPerFrame.rounded() } ?: 0,
+        history.peak { it.d3dExecuteIndirectCommandsPerFrame.rounded() } ?: 0,
+    )
+    if (indirectPeak > 0) {
+        VMetricGraphCard(
+            title = "d3d · indirect",
+            axisStyle = { "$it" },
+            spanSeconds = history.spanSeconds,
+            value = sample.d3dExecuteIndirectsPerFrame?.let(::oneDecimal),
+            unit = "/frame",
+            stats = buildList {
+                addAll(history.stats { it.d3dExecuteIndirectsPerFrame.rounded() }.stats { "$it" })
+                history.mean { it.d3dExecuteIndirectCommandsPerFrame.rounded() }?.let {
+                    add(VMetricStat("commands", "$it"))
+                }
+                history.mean { it.d3dCommandListsPerFrame.rounded() }?.let {
+                    add(VMetricStat("lists", "$it"))
+                }
+            },
+            series = listOfNotNull(
+                history.seriesOrNull(indirectPeak, VSeriesTone.Primary, VSeriesForm.Area, "calls") {
+                    it.d3dExecuteIndirectsPerFrame.rounded()
+                },
+                history.seriesOrNull(indirectPeak, VSeriesTone.Secondary, VSeriesForm.Line, "commands") {
+                    it.d3dExecuteIndirectCommandsPerFrame.rounded()
+                },
+            ),
+        )
+    }
+
     // **Pipelines are numbers and not a line, and vidmem is the line they sit
     // under.** A pipeline count only ever goes up and then stops, so a graph of
     // one is a staircase that says less than the two numbers at its ends; what
     // is worth watching over time is the memory, which moves in both directions
     // and is the thing that ends a session when it runs out.
+    //
+    // Guarded, since the vkd3d producer landed. It writes neither the memory
+    // pair nor the pipeline counts — `patches/vkd3d/0007` says why for each —
+    // and this card is every one of those fields, so for a D3D 12 title it
+    // would render a titled box with an empty graph and no stats. An absent
+    // card reads as "not produced"; an empty one reads as "produced and zero".
     val vramPeak = history.peak { it.d3dMemAllocatedMb } ?: 0
+    if (vramPeak == 0 && history.peak { it.d3dPipelines } == null) return
     VMetricGraphCard(
         title = "d3d · video memory",
         axisStyle = ::formatMegabytes,
@@ -812,12 +866,18 @@ private const val NO_CORE_CLOCKS = "No core reported a clock during this run."
  * Said when a run produced no D3D counters and the probe had nothing to add.
  *
  * Not a failure and phrased so it does not read as one. The counters come from
- * DXVK, DXVK is only loaded by a program that uses Direct3D, and a container
- * running an installer or a shell has no graphics story to tell.
+ * the D3D layer a title loads, that layer is only loaded by a program that uses
+ * Direct3D, and a container running an installer or a shell has no graphics
+ * story to tell.
+ *
+ * The wording no longer names DXVK, and the change is not cosmetic: it said
+ * "D3D 8/9/10/11" because DXVK was the only producer, which made an empty panel
+ * under a D3D 12 title read as "nothing was drawing" when the truth was "no
+ * producer existed on that path". `patches/vkd3d/0007` added the second one.
  */
 private const val NO_D3D =
-    "No Direct3D counters this run. DXVK writes them only while a program is drawing " +
-        "through D3D 8/9/10/11, so a session that ran nothing graphical has none."
+    "No Direct3D counters this run. DXVK (D3D 8/9/10/11) and vkd3d (D3D 12) write them " +
+        "only while a program is drawing, so a session that ran nothing graphical has none."
 
 private const val NO_TRACE =
     "No telemetry was recorded for this session. Runs from before metrics existed have " +

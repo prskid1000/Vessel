@@ -268,3 +268,119 @@ against it.
 since it is a plain inconsistency between this rule and
 `vkd3d_check_subresource_overlap`, but the performance case is Turnip's and has
 not been measured on any other driver. AI-authored in full.
+
+## `0007-counters-the-d3d-panel-has-been-empty-for-every-d3d12-title`
+
+Adds `libs/vkd3d/vkd3d_vessel_stats.{c,h}` and eight hook sites, so vkd3d writes
+the same per-frame counter snapshot to the same `VESSEL_GFX_STATS` path that
+`patches/dxvk/0001` has been writing since the metrics panel existed.
+
+**The symptom is one screenshot.** The host's D3D card fills in under Metro and
+is blank under Resident Evil Requiem, with the panel's own explanation printed in
+it: *"no Direct3D counters: DXVK writes them only while a program is drawing
+through D3D 8/9/10/11"*. That text was accurate and the situation it described
+was structural, not a bug — DXVK's producer hooks `DxvkDevice::presentImage`, RE9
+presents through `dxgi_vk_swap_chain_present_iteration` in `swapchain.c`, and the
+two never meet. Every D3D12 title ever run on this stack has had no graphics
+counters at all.
+
+### What it counts, and how that differs from DXVK's
+
+Eight counters, incremented at the D3D12 entry points and reported as deltas over
+the interval, exactly as `dxvk_vessel_stats.cpp` reports its own:
+
+| counter | site |
+|---|---|
+| `draws` | `DrawInstanced`, `DrawIndexedInstanced` |
+| `dispatches` | `Dispatch` |
+| `execute_indirects` / `execute_indirect_commands` | `ExecuteIndirect` |
+| `barriers` | `ResourceBarrier` (`barrier_count`) and `Barrier` (summed `NumBarriers`) |
+| `submissions` / `command_lists` | `ExecuteCommandLists` |
+| `presents` | the `vkQueuePresentKHR` site in `swapchain.c` |
+
+**DXVK counts Vulkan commands as it emits them; this counts D3D12 calls as the
+application makes them.** That is a real difference in meaning and it is on
+purpose: the open question on this stack is what RE9 *asks for*, not what vkd3d
+does with it. The one place a counted call can fail to reach Vulkan is a draw
+whose `begin_render_pass` fails (`command.c:8924`), and that logs a WARN, so the
+discrepancy is never silent.
+
+`submissions` is counted after `ExecuteCommandLists`' empty-list early-out, since
+a call that submits nothing is not a submission. Everything else is counted at
+entry.
+
+### Why `ExecuteIndirect` is the reason this exists
+
+Every session log on this device carries `vkd3d_init_device_caps: Not all
+relevant pipeline stages are supported by EXT_dgc. Skipping.` — so vkd3d cannot
+use device-generated commands and lowers each `ExecuteIndirect` to a compute pass
+that patches an argument buffer instead. RE Engine draws world geometry
+indirectly and props conventionally, and the open geometry bug is precisely that
+world geometry is missing while props render. Until now nothing on either side of
+the stack could count those calls.
+
+`max_command_count` is the application's stated upper bound, not the count
+buffer's — the GPU decides the real number and no CPU-side counter can see it.
+It is still the right thing to graph: a frame where it drops to zero is a frame
+where the application stopped asking.
+
+### Four fields it deliberately leaves blank
+
+`renderPassesPerFrame` — vkd3d has no render-pass call to count.
+`d3d12_command_list_begin_render_pass` (`command.c:8652`) is an ensure-active
+helper called on every draw, so counting it would print the draw count under
+another name.
+
+`gpuSyncsPerFrame` — vkd3d's equivalent is spread across `queue_timeline.c`, and
+`VKD3D_QUEUE_PROFILE` already reports it in far more detail with no rebuild.
+
+`pipelines*` / `pipeTasks*` — the hook sites are in `state.c`, which `0003`
+already edits. Keeping this patch to files no other patch touches is what lets it
+be generated and regenerated mechanically. Worth a follow-up, not worth
+entangling two patches.
+
+`memAllocatedMb` / `memUsedMb` — the host already graphs device free memory and
+the session's RSS, and a third number counting only vkd3d's allocations would
+invite the reader to treat it as the total.
+
+The host renders an absent field as an absent card rather than a flat zero;
+`SessionMetricsPanel.kt`'s video-memory card is guarded for exactly this.
+
+### Cost when off
+
+One relaxed load of a tri-state int and a predictable branch per counted call.
+Tri-state and lazily resolved rather than initialised at device creation because
+command lists are recorded long before the first present, so anything resolved on
+the present path would miss the first frame's draws.
+
+### The path fixup
+
+`vkd3d_vessel_stats_resolve` applies the `Z:\` prefix and slash flip that
+`timestamp_profiler.c:277-290` carries, with the same comment. Note that
+`patches/dxvk/0001` does a plain `fopen` on the same value and demonstrably
+works, so the two disagree about whether it is needed; the fixup is the safe side
+of that disagreement, being a no-op wherever DXVK is right.
+
+### Verification
+
+**Not compiled.** No vkd3d build has been run against this — the build needs
+meson, llvm-mingw and `glslangValidator`, none of which are on the machine it was
+written on.
+
+What *was* checked:
+
+- Applies forward against the pinned tree and round-trips (`git apply --reverse`
+  then `git apply --check` then re-apply, all clean).
+- The `snprintf` — the realistic failure mode for a file like this — was
+  extracted verbatim into a standalone translation unit and compiled with
+  `clang -Wall -Wextra -Wformat=2`. Clean, so the format string and its ten
+  arguments agree.
+- A full `-fsyntax-only` of the new `.c` against the vkd3d headers was attempted
+  and could not be completed: `vkd3d.h` pulls in `vkd3d_d3d12.h`, which the build
+  generates with widl.
+
+The host half — `GfxStats`, `MetricSample`, `MetricSampler` and the new
+`d3d · indirect` card — compiles and its unit tests pass.
+
+**Policy.** Vessel-only; there is nothing here to send upstream, since the file
+it adds exists to feed this app's metrics panel. AI-authored in full.

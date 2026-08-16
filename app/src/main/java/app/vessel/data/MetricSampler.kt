@@ -215,6 +215,9 @@ class MetricSampler @Inject constructor(
             d3dBarriersPerFrame = d3d?.barriersPerFrame,
             d3dSubmissionsPerFrame = d3d?.submissionsPerFrame,
             d3dGpuSyncsPerFrame = d3d?.gpuSyncsPerFrame,
+            d3dExecuteIndirectsPerFrame = d3d?.executeIndirectsPerFrame,
+            d3dExecuteIndirectCommandsPerFrame = d3d?.executeIndirectCommandsPerFrame,
+            d3dCommandListsPerFrame = d3d?.commandListsPerFrame,
             d3dPipelines = d3d?.pipelinesGraphics,
             d3dPipelineLibraries = d3d?.pipelineLibraries,
             d3dPipelinesCompute = d3d?.pipelinesCompute,
@@ -302,10 +305,10 @@ class MetricSampler @Inject constructor(
             reason = if (reading != null) {
                 ""
             } else {
-                "no Direct3D counters: DXVK writes them only while a program is drawing " +
-                    "through D3D 8/9/10/11, so a session that runs nothing graphical — or " +
-                    "one whose game has exited — leaves these columns empty. This is not a " +
-                    "source that failed."
+                "no Direct3D counters: DXVK (D3D 8/9/10/11) and vkd3d (D3D 12) write them " +
+                    "only while a program is drawing, so a session that runs nothing " +
+                    "graphical — or one whose game has exited — leaves these columns empty. " +
+                    "This is not a source that failed."
             },
         )
     }

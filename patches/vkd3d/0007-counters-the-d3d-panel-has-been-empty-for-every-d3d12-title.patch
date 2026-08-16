@@ -1,0 +1,478 @@
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index 84976e6a..e130133c 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -24,6 +24,8 @@
+ #include "vkd3d_swapchain_factory.h"
+ #include "vkd3d_descriptor_debug.h"
+ #include "vkd3d_timestamp_profiler.h"
++/* VESSEL: the per-frame counters the host's D3D panel graphs. See the header. */
++#include "vkd3d_vessel_stats.h"
+ #ifdef VKD3D_ENABLE_RENDERDOC
+ #include "vkd3d_renderdoc.h"
+ #endif
+@@ -8907,6 +8909,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
+             iface, vertex_count_per_instance, instance_count,
+             start_vertex_location, start_instance_location);
+ 
++    VKD3D_VESSEL_COUNT(draws, 1);
++
+     d3d12_command_list_flush_dgc_batch(list);
+ 
+     if (list->predication.fallback_enabled)
+@@ -8992,6 +8996,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
+             iface, index_count_per_instance, instance_count, start_vertex_location,
+             base_vertex_location, start_instance_location);
+ 
++    VKD3D_VESSEL_COUNT(draws, 1);
++
+     d3d12_command_list_flush_dgc_batch(list);
+ 
+     if (!d3d12_command_list_update_index_buffer(list))
+@@ -9158,6 +9164,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
+ 
+     TRACE("iface %p, x %u, y %u, z %u.\n", iface, x, y, z);
+ 
++    VKD3D_VESSEL_COUNT(dispatches, 1);
++
+     d3d12_command_list_check_render_pass_validation(list, "Dispatch called within a render pass.\n", true);
+     d3d12_command_list_flush_dgc_batch(list);
+ 
+@@ -13109,6 +13117,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
+ 
+     TRACE("iface %p, barrier_count %u, barriers %p.\n", iface, barrier_count, barriers);
+ 
++    VKD3D_VESSEL_COUNT(barriers, barrier_count);
++
+     d3d12_command_list_flush_dgc_batch(list);
+     d3d12_command_list_end_current_render_pass(list, false);
+     d3d12_command_list_end_transfer_batch(list);
+@@ -17119,6 +17129,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
+             iface, command_signature, max_command_count, arg_buffer, arg_buffer_offset,
+             count_buffer, count_buffer_offset);
+ 
++    /* VESSEL: counted before the early-outs below, deliberately. `max_command_count`
++     * is the application's stated command count, not the count buffer's — the
++     * GPU decides the real one and no CPU-side counter can see it. It is still
++     * the right number to graph: it is the upper bound the app budgeted for, and
++     * a frame where it goes to zero is a frame where the app stopped asking. */
++    VKD3D_VESSEL_COUNT(execute_indirects, 1);
++    VKD3D_VESSEL_COUNT(execute_indirect_commands, max_command_count);
++
+     if (!max_command_count)
+         return;
+ 
+@@ -20963,6 +20981,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
+     TRACE("iface %p, NumBarrierGroups %u, D3D12_BARRIER_GROUP %p\n",
+             iface, NumBarrierGroups, pBarrierGroups);
+ 
++    /* VESSEL: barriers, not groups, so this counter means the same thing whether
++     * a title uses enhanced barriers or the legacy ResourceBarrier above. Summed
++     * into one add rather than one per group: the loop is over a handful of
++     * groups and the atomic is the expensive half. */
++    if (vkd3d_vessel_stats_active())
++    {
++        uint64_t counted = 0;
++
++        for (i = 0; i < NumBarrierGroups; i++)
++            counted += pBarrierGroups[i].NumBarriers;
++
++        vkd3d_vessel_stats_add(&vkd3d_vessel_counters.barriers, counted);
++    }
++
+     if (d3d12_command_list_barrier_is_noop(list, NumBarrierGroups, pBarrierGroups))
+     {
+         d3d12_command_list_debug_mark_label(list, "Noop Barrier", 1.0f, 0.0f, 0.0f, 1.0f);
+@@ -21928,6 +21960,12 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
+     if (!command_list_count)
+         return;
+ 
++    /* VESSEL: after the early-out, unlike the draw counters above. An
++     * ExecuteCommandLists with no lists submits nothing, so counting it would
++     * put a submission on the graph that never reached a queue. */
++    VKD3D_VESSEL_COUNT(submissions, 1);
++    VKD3D_VESSEL_COUNT(command_lists, command_list_count);
++
+     if (FAILED(hr = vkd3d_memory_transfer_queue_flush(&command_queue->device->memory_transfers)))
+     {
+         d3d12_device_mark_as_removed(command_queue->device, hr,
+diff --git a/libs/vkd3d/meson.build b/libs/vkd3d/meson.build
+index 477b3663..f48bd8bc 100644
+--- a/libs/vkd3d/meson.build
++++ b/libs/vkd3d/meson.build
+@@ -89,7 +89,12 @@ vkd3d_src = [
+   'swapchain.c',
+   'queue_timeline.c',
+   'address_binding_tracker.c',
+-  'workgraphs.c'
++  'workgraphs.c',
++  # VESSEL: unconditional, like every other entry here. The file compiles to a
++  # handful of counters and one writer that never opens a file unless
++  # VESSEL_GFX_STATS names one, so an option to leave it out would only be an
++  # option to have the D3D panel be empty on a build nobody could tell apart.
++  'vkd3d_vessel_stats.c'
+ ]
+ 
+ if enable_renderdoc
+diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
+index 8dd2cc10..4c2e4f2e 100644
+--- a/libs/vkd3d/swapchain.c
++++ b/libs/vkd3d/swapchain.c
+@@ -23,6 +23,8 @@
+ #endif
+ #include "vkd3d_private.h"
+ #include "vkd3d_timestamp_profiler.h"
++/* VESSEL: the per-frame counters the host's D3D panel graphs. See the header. */
++#include "vkd3d_vessel_stats.h"
+ 
+ static inline bool vkd3d_swapchain_present_mode_parse(const char *string, VkPresentModeKHR *present_mode)
+ {
+@@ -3163,6 +3165,17 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
+     VKD3D_REGION_END(queue_present);
+     vkd3d_queue_release(chain->queue->vkd3d_queue);
+ 
++    /* VESSEL: this is the frame boundary the host's D3D panel is graphed
++     * against, and the counters are sampled here rather than anywhere earlier
++     * for the same reason DXVK samples in `presentImage`: it is the one point
++     * per frame that every title reaches exactly once.
++     *
++     * Counted whatever `vr` says. A present that failed is still a frame the
++     * application drew and submitted, and dropping it would divide a real
++     * frame's draw calls into the next frame's total. */
++    VKD3D_VESSEL_COUNT(presents, 1);
++    vkd3d_vessel_stats_sample();
++
+     if (chain->queue->device->vk_info.NV_low_latency2 && chain->request.low_latency_frame_id)
+     {
+         dxgi_vk_swap_chain_set_latency_marker(chain, chain->request.low_latency_frame_id,
+diff --git a/libs/vkd3d/vkd3d_vessel_stats.c b/libs/vkd3d/vkd3d_vessel_stats.c
+new file mode 100644
+index 00000000..27cd91b5
+--- /dev/null
++++ b/libs/vkd3d/vkd3d_vessel_stats.c
+@@ -0,0 +1,179 @@
++/*
++ * VESSEL: the writer for the counters declared in vkd3d_vessel_stats.h.
++ *
++ * Deliberately a near-transcription of `patches/dxvk/0001`'s
++ * `dxvk_vessel_stats.cpp`: same file, same schema, same once-a-second rewrite,
++ * same delta-versus-population split. Two producers that write one format are
++ * only useful if a reader can trust that a field means the same thing in both,
++ * and the cheapest way to keep that true is to keep the code the same shape.
++ */
++
++#define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
++
++#include "vkd3d_private.h"
++#include "vkd3d_vessel_stats.h"
++
++#include <stdio.h>
++#include <string.h>
++
++struct vkd3d_vessel_counters vkd3d_vessel_counters;
++int vkd3d_vessel_stats_state;
++
++static char vkd3d_vessel_stats_path[VKD3D_PATH_MAX];
++
++bool vkd3d_vessel_stats_resolve(void)
++{
++    char env[VKD3D_PATH_MAX];
++    size_t i, n;
++
++    if (!vkd3d_get_env_var("VESSEL_GFX_STATS", env, sizeof(env)) || !env[0])
++    {
++        *((volatile int *)&vkd3d_vessel_stats_state) = -1;
++        return false;
++    }
++
++#ifdef _WIN32
++    /* The host sets this to an Android absolute path, and vkd3d runs as a PE
++     * module, so msvcrt resolves a leading '/' against the *current* drive
++     * rather than the prefix's Z:. `timestamp_profiler.c:277-290` carries the
++     * same fixup with the same comment, and this is that code.
++     *
++     * `patches/dxvk/0001` does a plain fopen on the same path and demonstrably
++     * works, which means the two disagree about whether this is needed. The
++     * fixup is the safe side of that disagreement: Z: is '/' in every Wine
++     * prefix, so it is a no-op where DXVK is right and the fix where it is
++     * lucky. A path that already names a drive is left alone. */
++    if (env[0] == '/')
++        snprintf(vkd3d_vessel_stats_path, sizeof(vkd3d_vessel_stats_path), "Z:\\%s", env + 1);
++    else
++        strcpy(vkd3d_vessel_stats_path, env);
++
++    for (i = 0, n = strlen(vkd3d_vessel_stats_path); i < n; i++)
++        if (vkd3d_vessel_stats_path[i] == '/')
++            vkd3d_vessel_stats_path[i] = '\\';
++#else
++    (void)i; (void)n;
++    strcpy(vkd3d_vessel_stats_path, env);
++#endif
++
++    INFO("Writing D3D12 counters to \"%s\".\n", vkd3d_vessel_stats_path);
++
++    /* Last, so a thread that observes 1 also observes the path. Relaxed stores
++     * would be enough on the machines this runs on, but the ordering is free
++     * here and the alternative is a class of bug nobody would find. */
++    vkd3d_atomic_uint32_store_explicit((uint32_t *)&vkd3d_vessel_stats_state, 1u,
++            vkd3d_memory_order_release);
++    return true;
++}
++
++/* Rewritten in place rather than appended: the host samples on its own schedule
++ * and only ever wants the newest line. */
++static void vkd3d_vessel_stats_write(const char *line, size_t size)
++{
++    FILE *f;
++
++    if (!(f = fopen(vkd3d_vessel_stats_path, "w")))
++        return;
++
++    fwrite(line, 1, size, f);
++    fclose(f);
++}
++
++void vkd3d_vessel_stats_sample(void)
++{
++    /* One device presents. A state object threaded through d3d12_device for a
++     * diagnostic would be a worse trade than a counter that is wrong for one
++     * interval if there were ever two — the same call `dxvk_vessel_stats.cpp`
++     * makes, for the same reason. */
++    static uint64_t last_write_ns;
++    static struct vkd3d_vessel_counters prev;
++
++    struct vkd3d_vessel_counters now;
++    uint64_t now_ns, last, interval_ns;
++    double seconds, frames;
++    char line[768];
++    int n;
++
++    if (!vkd3d_vessel_stats_active())
++        return;
++
++    now_ns = vkd3d_get_current_time_ns();
++    last = vkd3d_atomic_uint64_load_explicit(&last_write_ns, vkd3d_memory_order_relaxed);
++    interval_ns = 1000000000ull;
++
++    if (last && now_ns - last < interval_ns)
++        return;
++
++    /* Claim the slot before doing any work, so two presenting threads cannot
++     * both write the same second. */
++    if (vkd3d_atomic_uint64_compare_exchange((UINT64 *)&last_write_ns, last, now_ns,
++            vkd3d_memory_order_relaxed, vkd3d_memory_order_relaxed) != last)
++        return;
++
++    /* One read of each counter, so every field in a line describes the same
++     * instant. Reading them twice — once for the delta and once for the next
++     * `prev` — would let a draw land in between and be counted twice. */
++    now.draws = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.draws, vkd3d_memory_order_relaxed);
++    now.dispatches = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.dispatches, vkd3d_memory_order_relaxed);
++    now.execute_indirects = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.execute_indirects, vkd3d_memory_order_relaxed);
++    now.execute_indirect_commands = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.execute_indirect_commands, vkd3d_memory_order_relaxed);
++    now.barriers = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.barriers, vkd3d_memory_order_relaxed);
++    now.submissions = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.submissions, vkd3d_memory_order_relaxed);
++    now.command_lists = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.command_lists, vkd3d_memory_order_relaxed);
++    now.presents = vkd3d_atomic_uint64_load_explicit(&vkd3d_vessel_counters.presents, vkd3d_memory_order_relaxed);
++
++#define DELTA(field) (now.field - prev.field)
++
++    seconds = last ? (double)(now_ns - last) / 1.0e9 : 1.0;
++    frames = DELTA(presents) ? (double)DELTA(presents) : 1.0;
++
++    n = snprintf(line, sizeof(line),
++            "{\"intervalMs\":%llu,\"presents\":%llu,\"fps\":%.2f,"
++            "\"drawCallsPerFrame\":%.1f,\"dispatchesPerFrame\":%.1f,"
++            "\"barriersPerFrame\":%.1f,\"submissionsPerFrame\":%.1f,"
++            "\"commandListsPerFrame\":%.1f,"
++            "\"executeIndirectsPerFrame\":%.1f,\"executeIndirectCommandsPerFrame\":%.1f}\n",
++            (unsigned long long)((now_ns - last) / 1000000ull),
++            (unsigned long long)DELTA(presents),
++            seconds > 0.0 ? (double)DELTA(presents) / seconds : 0.0,
++            (double)DELTA(draws) / frames,
++            (double)DELTA(dispatches) / frames,
++            (double)DELTA(barriers) / frames,
++            (double)DELTA(submissions) / frames,
++            (double)DELTA(command_lists) / frames,
++            (double)DELTA(execute_indirects) / frames,
++            (double)DELTA(execute_indirect_commands) / frames);
++
++#undef DELTA
++
++    prev = now;
++
++    /* Four fields DXVK fills and this does not, listed so a blank column is
++     * read as "not produced here" rather than "zero":
++     *
++     * `renderPassesPerFrame` — vkd3d has no render-pass call to count. Its
++     * `d3d12_command_list_begin_render_pass` (`command.c:8652`) is an
++     * ensure-active helper invoked on every draw, so counting it would print
++     * the draw count under a different name, which is worse than printing
++     * nothing.
++     *
++     * `gpuSyncsPerFrame` — DXVK's is a count of CPU waits on GPU work inside
++     * its own submission thread. vkd3d's equivalent is spread across
++     * `queue_timeline.c` and is what `VKD3D_QUEUE_PROFILE` already reports in
++     * far more detail; duplicating a worse version of it here is not worth a
++     * hook site.
++     *
++     * `pipelines*` / `pipeTasks*` — the counters exist to be written but the
++     * hook sites are in `state.c`, which `patches/vkd3d/0003` already edits.
++     * Keeping this patch to files no other patch touches is what lets it be
++     * generated and re-generated mechanically; the pipeline counts are worth a
++     * follow-up, not worth entangling two patches.
++     *
++     * `memAllocatedMb` / `memUsedMb` — the host already graphs device free
++     * memory and the session's own RSS from `/proc`, and a third number that
++     * counts only what vkd3d allocated would invite the reader to treat it as
++     * the total. */
++
++    if (n > 0)
++        vkd3d_vessel_stats_write(line, (size_t)n);
++}
+diff --git a/libs/vkd3d/vkd3d_vessel_stats.h b/libs/vkd3d/vkd3d_vessel_stats.h
+new file mode 100644
+index 00000000..53eaea62
+--- /dev/null
++++ b/libs/vkd3d/vkd3d_vessel_stats.h
+@@ -0,0 +1,140 @@
++/*
++ * VESSEL: per-frame D3D12 counters, written where the host already looks.
++ *
++ * This file has no upstream counterpart. It exists because the host's D3D panel
++ * has been empty for every D3D12 title ever run on this stack, and the reason is
++ * structural rather than a bug: the counters it graphs are produced by
++ * `patches/dxvk/0001`, which hooks `DxvkDevice::presentImage`. That function is
++ * DXVK's, so it runs for D3D 8/9/10/11 and never for D3D 12 — Resident Evil
++ * Requiem presents through `dxgi_vk_swap_chain` in `swapchain.c` and touches no
++ * DXVK code path at all. Metro fills the panel; RE9 leaves it blank.
++ *
++ * So this is the same instrument, built again on the other side of the D3D12
++ * boundary, writing the *same* JSON schema to the *same* `VESSEL_GFX_STATS`
++ * path. The host needs no change to read it: `app.vessel.core.parseGfxStats`
++ * decodes with `ignoreUnknownKeys` and every field of `GfxStats` is nullable,
++ * so a producer that emits a subset plus a few keys of its own is already
++ * handled.
++ *
++ * **Where the two producers disagree, and it matters when reading a graph.**
++ * DXVK counts Vulkan commands as it emits them. This counts D3D12 calls as the
++ * application makes them, at the entry point, before any of vkd3d's lowering.
++ * The numbers are therefore *the application's* draw count, not the driver's —
++ * which is the more useful of the two here, because the open question on this
++ * stack is what RE9 asks for, not what vkd3d does with it. It also means a call
++ * that vkd3d declines to translate still counts. There is exactly one such case
++ * on the draw paths (`begin_render_pass` failing, `command.c:8924`) and it logs
++ * a WARN when it happens, so the discrepancy is never silent.
++ *
++ * **`executeIndirects` is why this was built now.** Every session log on this
++ * device carries `vkd3d_init_device_caps: Not all relevant pipeline stages are
++ * supported by EXT_dgc. Skipping.`, so vkd3d falls back from device-generated
++ * commands and every `ExecuteIndirect` goes through the compute-shader patching
++ * path instead. RE Engine draws world geometry indirectly and props directly,
++ * which is the shape of the geometry that is missing. Nothing on either side of
++ * the stack could count those calls until now.
++ *
++ * Off unless `VESSEL_GFX_STATS` names a path, and the environment is read once.
++ * When it is unset the cost is a relaxed load and a predictable branch per
++ * counted call, which is the bar this path is held to.
++ */
++
++#ifndef __VKD3D_VESSEL_STATS_H
++#define __VKD3D_VESSEL_STATS_H
++
++#include "vkd3d_common.h"
++#include "vkd3d_atomic.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++
++struct d3d12_device;
++
++/*
++ * Cumulative for the life of the process. The writer keeps its own previous
++ * snapshot and reports deltas, exactly as `dxvk_vessel_stats.cpp` does, because
++ * a running total says nothing about the frame being drawn.
++ */
++struct vkd3d_vessel_counters
++{
++    uint64_t draws;
++    uint64_t dispatches;
++    /* Calls, and the command counts they were given. The second is not derivable
++     * from the first and is the more interesting one: a title that batches ten
++     * thousand commands into one ExecuteIndirect and one that issues ten
++     * thousand calls look identical on `execute_indirects` alone. */
++    uint64_t execute_indirects;
++    uint64_t execute_indirect_commands;
++    uint64_t barriers;
++    /* Submissions are ExecuteCommandLists calls; command_lists is the number of
++     * lists handed to them. Same distinction, same reason. */
++    uint64_t submissions;
++    uint64_t command_lists;
++    uint64_t presents;
++};
++
++extern struct vkd3d_vessel_counters vkd3d_vessel_counters;
++
++/*
++ * 0 before the environment has been read, 1 when a path was named, -1 when it
++ * was not. Tri-state rather than a bool because there is no init hook on this
++ * path worth adding one for: command lists are recorded long before the first
++ * present, so anything resolved at present time would miss the first frame's
++ * draws, and threading an init call through device creation for a diagnostic
++ * would be a worse trade than one relaxed load per counted call.
++ */
++extern int vkd3d_vessel_stats_state;
++
++/* Reads the environment and settles [vkd3d_vessel_stats_state]. Idempotent and
++ * safe to race: two threads that both resolve it write the same answer. */
++bool vkd3d_vessel_stats_resolve(void);
++
++/* Writes a snapshot if a second has passed since the last one. Called from the
++ * present path; see the file comment in the .c for why the interval is there. */
++void vkd3d_vessel_stats_sample(void);
++
++static inline bool vkd3d_vessel_stats_active(void)
++{
++    int state = *((volatile int *)&vkd3d_vessel_stats_state);
++
++    if (state)
++        return state > 0;
++
++    return vkd3d_vessel_stats_resolve();
++}
++
++/*
++ * A relaxed add. Relaxed is correct and not a shortcut: these counters are read
++ * once a second by the same process for a graph, nothing orders on them, and
++ * the alternative costs a barrier on a path that runs thousands of times a
++ * frame across every recording thread.
++ */
++static inline void vkd3d_vessel_stats_add(uint64_t *target, uint64_t value)
++{
++#ifdef vkd3d_atomic_generic_add
++    vkd3d_atomic_generic_add(target, value, vkd3d_memory_order_relaxed);
++#else
++    /* MSVC has no 64-bit generic add in vkd3d_atomic.h. This tree is built with
++     * llvm-mingw so the branch above is the one taken; this is here so the file
++     * does not quietly stop compiling if that ever changes. */
++    uint64_t expected = vkd3d_atomic_uint64_load_explicit(target, vkd3d_memory_order_relaxed);
++    uint64_t prev;
++
++    for (;;)
++    {
++        prev = vkd3d_atomic_uint64_compare_exchange((UINT64 *)target, expected, expected + value,
++                vkd3d_memory_order_relaxed, vkd3d_memory_order_relaxed);
++        if (prev == expected)
++            break;
++        expected = prev;
++    }
++#endif
++}
++
++#define VKD3D_VESSEL_COUNT(field, n) \
++    do { \
++        if (vkd3d_vessel_stats_active()) \
++            vkd3d_vessel_stats_add(&vkd3d_vessel_counters.field, (uint64_t)(n)); \
++    } while (0)
++
++#endif  /* __VKD3D_VESSEL_STATS_H */
