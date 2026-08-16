@@ -356,9 +356,12 @@ class ContainerDiagnosticsTest {
             mapOf("VKD3D_DEBUG" to "info"),
             diagnosticEnvironment(row("VKD3D_DEBUG", "info")),
         )
+        // `fixme` is the shipped baseline for this one, and a row at the
+        // baseline contributes nothing — that is the property this file asserts
+        // elsewhere, so the level here has to be one that differs.
         assertEquals(
-            mapOf("VKD3D_SHADER_DEBUG" to "fixme"),
-            diagnosticEnvironment(row("VKD3D_SHADER_DEBUG", "fixme")),
+            mapOf("VKD3D_SHADER_DEBUG" to "warn"),
+            diagnosticEnvironment(row("VKD3D_SHADER_DEBUG", "warn")),
         )
         // "0" is the off-baseline stop now that silent is the default, so it is
         // the one that has anything to write. A row at "1" contributes nothing,

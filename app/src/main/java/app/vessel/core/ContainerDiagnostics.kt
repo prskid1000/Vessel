@@ -462,6 +462,210 @@ class EmittedEnvironment {
 }
 
 /**
+ * Which subsystem a row belongs to — the *type* column.
+ *
+ * **This exists because the screen had three tables and the model had two lists,
+ * and neither number was a fact about the stack.** A row was a Wine channel or a
+ * Turnip flag, discriminated by a boolean called `turnip`; anything else had to
+ * go through the free-text environment table, which drops every
+ * [RESERVED_SESSION_ENV] name — so a *reserved* variable was reachable only by
+ * being declared, and a declared thing could only be one of two families. There
+ * was no way to say "vkd3d, breadcrumbs, on" at all, and finding that out cost a
+ * device run: `VKD3D_CONFIG=breadcrumbs` was set in the env table, silently
+ * dropped, and the guest's own environ still read `nodxr`.
+ *
+ * A family is **data**, so adding a subsystem is an entry in [FAMILIES] and no
+ * change to the composer, the screen, or the document schema. That is the whole
+ * point: the previous shape needed a boolean, a partition in the UI, a branch in
+ * `loggableFor` and a hardcoded baseline in `diagnosticEnvironment` for every new
+ * kind of knob.
+ *
+ * @param wire what is stored in the container document and what a user types.
+ *   It must not change once a document has been written with it.
+ * @param shape how a member of this family reaches the environment. This is the
+ *   only thing the composer needs, and it is why [Emit] does not have to be
+ *   declared per entry — see [emitFor].
+ * @param variable the environment variable this family writes, for [Shape.LIST]
+ *   where every member shares one. Empty for [Shape.CHANNEL] (they all share
+ *   `WINEDEBUG`) and for [Shape.SCALAR] (the row's own name *is* the variable).
+ * @param baseMembers what the session already puts in [variable], which a
+ *   composed list must not drop. `TU_DEBUG`'s `startup` is the ground truth for
+ *   whether Turnip loaded; `VKD3D_CONFIG`'s `nodxr` is a correctness setting.
+ *   Getting this wrong is silent — the variable is still set, just missing the
+ *   thing nobody was looking at.
+ */
+data class DiagnosticFamily(
+    val wire: String,
+    val label: String,
+    val shape: Shape,
+    val secondary: String,
+    val variable: String = "",
+    val baseMembers: List<String> = emptyList(),
+) {
+    enum class Shape {
+        /** A channel inside `WINEDEBUG`. The row's name is the channel. */
+        CHANNEL,
+
+        /** A variable of its own. The row's name *is* the variable. */
+        SCALAR,
+
+        /** One member of a comma-joined variable named by [variable]. */
+        LIST,
+
+        /**
+         * Any variable at all: the row's name is the variable and its level is
+         * the literal value.
+         *
+         * **The escape hatch, and it is deliberately the weakest shape.** It is
+         * subject to `RESERVED_SESSION_ENV` — the reserved names are the paths
+         * this app writes and reads and the plumbing a session needs to start,
+         * and a container document that could reach them could point Wine
+         * outside its own directory. A reserved variable is reachable *only* by
+         * being declared, which is what the other shapes are for.
+         */
+        RAW,
+    }
+}
+
+/**
+ * Every family, and adding one is this list plus nothing.
+ *
+ * Ordered by how often the question is asked, the same rule `TRACE_TOPICS` uses.
+ */
+val FAMILIES: List<DiagnosticFamily> = listOf(
+    DiagnosticFamily(
+        wire = "wine",
+        label = "Wine",
+        shape = DiagnosticFamily.Shape.CHANNEL,
+        secondary = "A debug channel inside WINEDEBUG.",
+    ),
+    DiagnosticFamily(
+        wire = "vkd3d",
+        label = "vkd3d",
+        shape = DiagnosticFamily.Shape.SCALAR,
+        secondary = "The Direct3D 12 translator's own log levels.",
+    ),
+    // Separate from `vkd3d` because it is a different *shape*, not a different
+    // component: VKD3D_CONFIG is a comma-joined set, so a member must be added
+    // to what the session already sends rather than replacing it. Sending
+    // `breadcrumbs` alone would drop `nodxr` and change what the title runs
+    // with while trying to observe it.
+    DiagnosticFamily(
+        wire = "vkd3dconfig",
+        label = "vkd3d config",
+        shape = DiagnosticFamily.Shape.LIST,
+        secondary = "Behaviour flags, added to the ones Vessel already sends.",
+        variable = "VKD3D_CONFIG",
+        baseMembers = listOf(FIXED_VKD3D_CONFIG),
+    ),
+    DiagnosticFamily(
+        wire = "dxvk",
+        label = "DXVK",
+        shape = DiagnosticFamily.Shape.SCALAR,
+        secondary = "The Direct3D 9/10/11 translator's log level.",
+    ),
+    DiagnosticFamily(
+        wire = "turnip",
+        label = "Turnip",
+        shape = DiagnosticFamily.Shape.LIST,
+        secondary = "Driver flags. Half of these change the frame, not the log.",
+        variable = "TU_DEBUG",
+        baseMembers = listOf(TU_DEBUG_STARTUP),
+    ),
+    DiagnosticFamily(
+        wire = "mesa",
+        label = "Mesa",
+        shape = DiagnosticFamily.Shape.SCALAR,
+        secondary = "Which logger the driver uses, and its severity floor.",
+    ),
+    DiagnosticFamily(
+        wire = "fex",
+        label = "FEX",
+        shape = DiagnosticFamily.Shape.SCALAR,
+        secondary = "The x86 translator. One switch; it has no level.",
+    ),
+    // A flag list, not a level — `zink_debug_options` in `zink_screen.c` is a
+    // `debug_named_value` table read with the comma-joined flag parser, the same
+    // shape as `TU_DEBUG`. Declared SCALAR first and corrected against the
+    // source: a scalar would have written `ZINK_DEBUG=validation` over whatever
+    // else was set rather than adding to it.
+    //
+    // No base members: nothing in the session sets `ZINK_DEBUG`, and inventing a
+    // baseline for a variable Vessel does not send would be a claim about the
+    // environment that is not true.
+    DiagnosticFamily(
+        wire = "zink",
+        label = "Zink",
+        shape = DiagnosticFamily.Shape.LIST,
+        secondary = "OpenGL over Vulkan. Only reached by a title that asks for GL.",
+        variable = "ZINK_DEBUG",
+    ),
+    // Vessel's own variables, and `VESSEL_TRACE` is why this family is worth
+    // declaring: it is the one entry in the free-text table this layer *reads*
+    // rather than forwards, which made it a variable pretending to be a setting.
+    // Declared, it is a row like any other.
+    DiagnosticFamily(
+        wire = "vessel",
+        label = "Vessel",
+        shape = DiagnosticFamily.Shape.SCALAR,
+        secondary = "Vessel's own switches, including the one trace vocabulary.",
+    ),
+    // **Last, and last on purpose.** Every family above names a subsystem whose
+    // knobs this build understands; this one is "a variable nobody anticipated",
+    // which is the case the six-graphics-experiments-in-an-afternoon note
+    // upstream of here exists for. It is also the only shape the reserved set
+    // filters, so a row here can never reach a path the app writes.
+    DiagnosticFamily(
+        wire = "env",
+        label = "Environment variable",
+        shape = DiagnosticFamily.Shape.RAW,
+        secondary = "Any variable, typed by name and value. Reserved names are refused.",
+    ),
+)
+
+/** The family called [wire], or null — which is what makes the column free text. */
+fun familyFor(wire: String): DiagnosticFamily? =
+    FAMILIES.firstOrNull { it.wire.equals(wire.trim(), ignoreCase = true) }
+
+/**
+ * The family a *scalar* variable belongs to, read off its own name.
+ *
+ * By prefix rather than by a table of variable names, so that a variable nobody
+ * has declared yet — `VKD3D_SHADER_DEBUG`'s next sibling, another `FEX_` switch —
+ * files itself. The alternative is a second list to forget to update, which is
+ * the failure this whole layer replaces.
+ *
+ * Longest prefix first, because `VKD3D_` must not be read as a shorter match.
+ */
+private fun familyOfVariable(variable: String): String {
+    val name = variable.uppercase()
+    val byPrefix = listOf(
+        "VKD3D_" to "vkd3d",
+        "DXVK_" to "dxvk",
+        "MESA_" to "mesa",
+        "FEX_" to "fex",
+        "TU_" to "turnip",
+        "ZINK_" to "zink",
+        "VESSEL_" to "vessel",
+    )
+    return byPrefix.firstOrNull { (prefix, _) -> name.startsWith(prefix) }?.second ?: ""
+}
+
+/**
+ * The variable each list family already holds, for the composer.
+ *
+ * Derived from [FAMILIES] rather than passed in, which is the defect this
+ * replaces: `diagnosticEnvironment` took one `turnipBaseFlags` list and appended
+ * it to **every** list variable it had composed. With `TU_DEBUG` the only list
+ * that was invisible; the moment `VKD3D_CONFIG` became one it would have written
+ * `breadcrumbs,startup` — Turnip's ground-truth flag into vkd3d's config, where
+ * it means nothing, and `nodxr` dropped.
+ */
+internal fun listBaseMembers(): Map<String, List<String>> =
+    FAMILIES.filter { it.shape == DiagnosticFamily.Shape.LIST && it.variable.isNotEmpty() }
+        .associate { it.variable to it.baseMembers }
+
+/**
  * One thing that can be logged, and everything the screen and the composer need
  * to know about it.
  *
@@ -533,6 +737,29 @@ data class Loggable(
      */
     val isTurnipFlag: Boolean
         get() = emit is Emit.ListMember && (emit as Emit.ListMember).variable == "TU_DEBUG"
+
+    /**
+     * Which [DiagnosticFamily] this belongs to — the *type* column.
+     *
+     * **Derived from [emit], never declared**, for the reason [isTurnipFlag]
+     * already gives and which generalises exactly: a thing cannot end up filed
+     * under one family and sent through another's variable, because the family
+     * *is* a reading of how it is sent. A declared `type` would be a second
+     * place to be wrong.
+     *
+     * The match is on the variable a member writes, then on the prefix of a
+     * scalar's own name. A scalar whose prefix names no family is `wine` only if
+     * it really is a channel; anything else falls through to an empty string,
+     * which the screen shows as an untyped row rather than filing it wrongly.
+     */
+    val family: String
+        get() = when (val e = emit) {
+            is Emit.WineChannel -> "wine"
+            is Emit.ListMember ->
+                FAMILIES.firstOrNull { it.variable == e.variable }?.wire ?: ""
+            is Emit.Variable -> familyOfVariable(e.variable)
+            Emit.Fixed -> familyOfVariable(name)
+        }
 
     /**
      * Whether the user may add a row for this.
@@ -937,6 +1164,51 @@ val LOGGABLES: List<Loggable> = listOf(
         addAt = WineChannelLevel.EVERYTHING,
         oneSessionFrom = WineChannelLevel.EVERYTHING,
     ),
+
+    // — VKD3D_CONFIG, the only instrument that can explain a lost device -------
+    vkd3dConfigFlag(
+        flag = "breadcrumbs",
+        secondary = "On device loss, replay the command buffers and name the last " +
+            "command the GPU acknowledged.",
+        // Not a level and not a volume: it prints nothing at all until the device
+        // is already lost, and then it prints once. The cost is per-command
+        // instrumentation on every submission, which is why it is not on by
+        // default rather than why it is loud.
+        caution = "Needs a component built with VKD3D_BREADCRUMBS=1; on a normal " +
+            "build the word parses and does nothing.",
+    ),
+    vkd3dConfigFlag(
+        flag = "breadcrumbs_sync",
+        secondary = "As above, and stall after every command so the report names the " +
+            "exact one rather than a region.",
+        caution = "Serialises the GPU. Frame rate is not a measurement while this is on.",
+    ),
+)
+
+/**
+ * A `VKD3D_CONFIG` member — a switch inside a comma-joined set.
+ *
+ * The same shape as [turnipRenderFlag] and for the same reason: `VKD3D_CONFIG`
+ * holds several independent words, so a row must *add* one rather than write the
+ * variable. `FIXED_VKD3D_CONFIG` is carried as the family's base member, so
+ * turning one of these on composes `breadcrumbs,nodxr` and does not quietly turn
+ * DXR back on.
+ *
+ * **These are the reason the type column exists.** `VKD3D_CONFIG` is in
+ * `RESERVED_SESSION_ENV`, so the free-text environment table drops it — a device
+ * run was spent discovering that, with the guest's own environ still reading
+ * `nodxr`. A reserved variable is reachable only by being declared, and before
+ * [FAMILIES] a declared thing could only be a Wine channel or a Turnip flag.
+ */
+private fun vkd3dConfigFlag(flag: String, secondary: String, caution: String) = Loggable(
+    name = flag,
+    emit = Emit.ListMember("VKD3D_CONFIG", flag),
+    levels = ON_OFF,
+    labels = ON_OFF_LABELS,
+    baseline = Emit.OFF,
+    secondary = "VKD3D_CONFIG — $secondary",
+    addAt = Emit.ON,
+    caution = caution,
 )
 
 /**
@@ -1104,8 +1376,65 @@ private const val CHANNEL_NAME_STRUCTURE = ",+-:"
  */
 const val FIXED_DXVK_LOG_LEVEL: String = "info"
 const val FIXED_DXVK_LOG_PATH: String = "none"
-const val FIXED_VKD3D_DEBUG: String = "warn"
-const val FIXED_VKD3D_SHADER_DEBUG: String = "warn"
+/**
+ * **`fixme`, which is `vkd3d`'s own default — and it used to be `warn`, which
+ * was 62% of a session.**
+ *
+ * Measured on a Resident Evil Requiem session, 3,645 lines: 2,251 of them were
+ * vkd3d at WARN, and the whole of that is now known to be noise —
+ *
+ * | lines | message |
+ * |---|---|
+ * | 1,146 | `has_extension: Extension "VK_KHR_present_*" is disabled` |
+ * |   902 | `DSV format is DXGI_FORMAT_UNKNOWN` |
+ * |   199 | `vk_image_memory_barrier_for_initial_transition` |
+ * |   106 | `Invalid resource alignment` and its `GetResourceAllocationInfo3` pair |
+ *
+ * Each was chased and each is benign: the DSV one sets `null_attachment_mask`
+ * and builds the pipeline, and the alignment pair is a `GetResourceAllocationInfo3`
+ * *query* that native D3D12 refuses identically — vkd3d's own conformance test
+ * asserts `SizeInBytes == ~0ull` for those descriptors.
+ *
+ * **The ladder is inverted relative to Wine's and that is the trap**:
+ * `debug.c:38-47` orders it `none < err < info < fixme < warn < trace`, so
+ * `fixme` is *quieter* than `warn` while carrying err and info. And
+ * `debug.c:97` sets an unset channel to `FIXME`, so `warn` was Vessel choosing
+ * to run louder than upstream rather than accepting a default.
+ *
+ * **What this gives up, stated plainly.** The WARN tier includes
+ * `d3d12_device_mark_as_removed: Device … is lost`. That is a real line and it
+ * is now absent by default. It is affordable because the *error* tier carries
+ * the same event with more information — `vkd3d_wait_for_gpu_timeline_semaphore:
+ * … vr -4` is what actually named the device loss — and because a row raises
+ * this back to `warn` for one session when the question is a graphics one.
+ */
+const val FIXED_VKD3D_DEBUG: String = "fixme"
+
+/**
+ * `fixme`, for the reason above and one measurement of its own.
+ *
+ * At `warn` this produced **26,966 lines in six minutes** — 98% of that
+ * session's output — as `parse_dxbc: Ignoring DXBC checksum` plus
+ * `skip_dword_unknown`, eight lines per DXBC parse across 3,025 shaders. Both
+ * sites are WARN in `dxbc.c`, so upstream's `fixme` default is silent for them
+ * and Vessel's `warn` was not. See the `shaders` topic in `TraceSpec.kt`, which
+ * records the arithmetic that confirmed the mechanism rather than just the grep.
+ */
+const val FIXED_VKD3D_SHADER_DEBUG: String = "fixme"
+
+/**
+ * `VKD3D_CONFIG`, which is a comma-joined set rather than a level.
+ *
+ * Named because two places have to agree about it and neither can see the other:
+ * `sessionEnvironment` writes it, and the `vkd3dconfig` family in [FAMILIES]
+ * carries it as a base member so a row that adds `breadcrumbs` composes
+ * `breadcrumbs,nodxr` instead of replacing the whole variable. A literal in both
+ * would silently drop `nodxr` the first time someone used the family, and the
+ * symptom would be a behaviour change while trying to *observe* behaviour.
+ *
+ * `nodxr` is not a diagnostic: see the assignment for why DXR is off.
+ */
+const val FIXED_VKD3D_CONFIG: String = "nodxr"
 /**
  * Silent, because the translator's debug tier is not a diagnostic — it is the
  * whole log.
@@ -1376,7 +1705,9 @@ fun composeWineDebug(diagnostics: ContainerDiagnostics): String =
  *
  * @param turnipBaseFlags what the rest of the environment has already composed
  *   for `TU_DEBUG`, ending in `startup`. Passed in rather than rebuilt, because
- *   the manifest can contribute flags too and this stage adds to them.
+ *   the manifest can contribute flags too and this stage adds to them. It applies
+ *   to `TU_DEBUG` **only**; every other list family takes its base from
+ *   [listBaseMembers], which is derived from [FAMILIES].
  */
 fun diagnosticEnvironment(
     diagnostics: ContainerDiagnostics,
@@ -1389,12 +1720,27 @@ fun diagnosticEnvironment(
         out["WINEDEBUG"] = (WINEDEBUG_CHANNELS.split(",") + emitted.wineTerms).joinToString(",")
     }
     out.putAll(emitted.variables)
+
+    // **The base is per variable, and it used to be per call.** This loop
+    // appended `turnipBaseFlags` to *every* list it had composed, which was
+    // invisible while `TU_DEBUG` was the only list variable in the stack and
+    // wrong the moment it stopped being: a `VKD3D_CONFIG` row would have
+    // composed `breadcrumbs,startup` — Turnip's ground-truth flag written into
+    // vkd3d's config, where it means nothing, and `nodxr` silently dropped.
+    //
+    // `TU_DEBUG` still takes its base from the parameter rather than from
+    // [FAMILIES], because the manifest contributes flags to that one and this
+    // stage adds to them; the declared base is the fallback for a caller that
+    // passes nothing.
+    val bases = listBaseMembers()
     for ((variable, members) in emitted.lists) {
         if (members.isEmpty()) continue
-        // The added flags first and the base last, so `startup` stays where it is:
-        // it is the ground truth for whether Turnip loaded and nothing may
-        // displace it.
-        out[variable] = (members + turnipBaseFlags).distinct().joinToString(",")
+        val base = if (variable == "TU_DEBUG") turnipBaseFlags else bases[variable].orEmpty()
+        // The added flags first and the base last, so `startup` stays where it
+        // is: it is the ground truth for whether Turnip loaded and nothing may
+        // displace it. The same ordering serves `nodxr` for the same reason —
+        // what the session already chose is not something a diagnostic may move.
+        out[variable] = (members + base).distinct().joinToString(",")
     }
     return out
 }

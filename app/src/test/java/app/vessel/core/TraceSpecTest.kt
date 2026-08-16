@@ -233,8 +233,15 @@ class TraceSpecTest {
             wineChannelTerms("vulkan", WineChannelLevel.WARNINGS),
             out.wineTerms,
         )
-        assertNull("already the shipped value", out.variables["VKD3D_DEBUG"])
-        assertNull("already the shipped value", out.variables["VKD3D_SHADER_DEBUG"])
+        // **These used to be null and the reason is worth keeping.** Both
+        // shipped at `warn`, so the topic asking for `warn` changed nothing and
+        // the assertion read "already the shipped value". The baselines are now
+        // vkd3d's own default of `fixme` — 62% of a Requiem session was vkd3d at
+        // WARN, all of it since shown benign — so this topic genuinely raises
+        // them, which is what a graphics topic at *warnings* should always have
+        // done.
+        assertEquals("warn", out.variables["VKD3D_DEBUG"])
+        assertEquals("warn", out.variables["VKD3D_SHADER_DEBUG"])
     }
 
     /** And the same topic at a stop the environment is not already at does write them. */

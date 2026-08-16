@@ -511,6 +511,36 @@ val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     "FEX_SILENTLOG",
     "MESA_LOG",
     "MESA_LOG_LEVEL",
+    // **`VKD3D_CONFIG` is here for one word: `breadcrumbs`.**
+    //
+    // It stays in [RESERVED_SESSION_ENV] — this set is a strict subset — so no
+    // manifest param can reach it and no container document can set it through
+    // the params path. What changes is that the *Diagnostics* surface can, and
+    // the reason is that this variable holds the only instrument in the stack
+    // that can explain a `VK_ERROR_DEVICE_LOST`.
+    //
+    // Requiem loses the device on a timeline-semaphore wait, in vkd3d's memory
+    // transfer queue, before a swapchain exists — and Turnip's own log says
+    // nothing about it. Breadcrumbs replay the command buffers that were in
+    // flight and name the last command the GPU acknowledged, which is the
+    // difference between "the GPU died" and knowing what killed it.
+    //
+    // Two things make this safe to expose rather than merely useful. It is
+    // *narrowing* like everything else on that surface: `sessionEnvironment`
+    // has already written the fixed `nodxr`, and a diagnostics row replaces
+    // that value for one session rather than editing the baseline. And it is
+    // inert on a shipped build: `enable_trace` is `auto`, which resolves to
+    // false under `--buildtype release`, so `VKD3D_ENABLE_BREADCRUMBS` is not
+    // defined and the word parses to nothing. `VKD3D_BREADCRUMBS=1
+    // ./build/vkd3d.sh` is what makes it mean something, and that build is
+    // deliberately not the default.
+    //
+    // Verified on the shipped payload before adding this: `d3d12core.dll` from
+    // a normal build contains the config *names* and no report strings at all,
+    // so a container that sets this against a normal component gets silence and
+    // not a lie. Turnip does support the `VK_AMD_buffer_marker` the tracer
+    // needs (`tu_device.cc`), so on the diagnostic build it really reports.
+    "VKD3D_CONFIG",
 )
 
 /**
@@ -1222,7 +1252,7 @@ fun sessionEnvironment(
     // Qualcomm on purpose — state.c calls the difference "profound (~15% in some
     // cases)" — and setting the flag would undo that. Tiler mode needs no flag
     // either; device.c turns it on for VK_DRIVER_ID_MESA_TURNIP by itself.
-    environment["VKD3D_CONFIG"] = "nodxr"
+    environment["VKD3D_CONFIG"] = FIXED_VKD3D_CONFIG
 
     // **`display.fpsLimit`, applied to the renderer and not only to the screen.**
     //

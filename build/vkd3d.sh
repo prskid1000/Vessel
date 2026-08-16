@@ -134,6 +134,34 @@ EOF
 
   # bindir and libdir both point at the payload directory so the DLLs land flat
   # in one place, the same trick upstream's package-release.sh uses for x64/x86.
+  # VKD3D_BREADCRUMBS=1 builds the one instrument that can explain a
+  # VK_ERROR_DEVICE_LOST, and it is opt-in because it is not free.
+  #
+  # `enable_trace` is `auto`, which resolves to `vkd3d_debug` -- false under
+  # `--buildtype release` -- and `meson.build` derives `enable_breadcrumbs` from
+  # it, so a normal Vessel build has `VKD3D_ENABLE_BREADCRUMBS` undefined.
+  # Confirmed on the shipped 3.0.1 payload: `d3d12core.dll` contains the config
+  # *names* `breadcrumbs`, `breadcrumbs_sync` and `breadcrumbs_trace` and no
+  # report strings at all, so `VKD3D_CONFIG=breadcrumbs` parses and then does
+  # nothing. That is the trap this flag exists to avoid walking into twice.
+  #
+  # What it buys: on device loss vkd3d replays the command buffers it had in
+  # flight and names the last draw/dispatch the GPU acknowledged, which is the
+  # difference between "the GPU died" and knowing which command killed it.
+  # Requiem currently loses the device during vkd3d's memory transfer queue,
+  # before a swapchain exists, and nothing in Turnip's own log mentions it.
+  #
+  # What it costs, and why it is not the default: `-Denable_trace=true` also
+  # compiles in every TRACE message (they stay gated at runtime by
+  # `VKD3D_DEBUG`, so this is binary size rather than output), and breadcrumbs
+  # add per-command instrumentation. This is a diagnostic build; ship the
+  # default one.
+  VKD3D_TRACE_FLAG="-Denable_trace=false"
+  if [ "${VKD3D_BREADCRUMBS:-0}" = "1" ]; then
+    log "breadcrumbs enabled -- diagnostic build, not for shipping"
+    VKD3D_TRACE_FLAG="-Denable_trace=true"
+  fi
+
   meson setup "$BUILD" "$SRC" \
     --cross-file "$CROSS" \
     --prefix "$STAGE" \
@@ -142,6 +170,7 @@ EOF
     --buildtype release \
     -Dstrip=true \
     -Denable_tests=false \
+    "$VKD3D_TRACE_FLAG" \
     -Db_lto="$(lto_flag)"
 
   log "building $COMPONENT ($TRIPLE)"

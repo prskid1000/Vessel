@@ -267,9 +267,9 @@ class SessionEnvironmentTest {
         // `DXVK_LOG_PATH` means "next to the executable" rather than "nowhere".
         assertEquals("none", environment["DXVK_LOG_PATH"])
         assertFalse(environment.containsKey("VKD3D_LOG_FILE"))
-        assertEquals("warn", environment["VKD3D_DEBUG"])
+        assertEquals("fixme", environment["VKD3D_DEBUG"])
         // A separate channel with its own level: VKD3D_DEBUG does not carry it.
-        assertEquals("warn", environment["VKD3D_SHADER_DEBUG"])
+        assertEquals("fixme", environment["VKD3D_SHADER_DEBUG"])
     }
 
     @Test
@@ -757,8 +757,8 @@ class SessionEnvironmentTest {
                 // set: it is what makes draw calls, submissions and vidmem
                 // graphable without a per-game `dxvk.conf` and a screenshot.
                 "VESSEL_GFX_STATS" to File(tmp, GFX_STATS_FILE).absolutePath,
-                "VKD3D_DEBUG" to "warn",
-                "VKD3D_SHADER_DEBUG" to "warn",
+                "VKD3D_DEBUG" to "fixme",
+                "VKD3D_SHADER_DEBUG" to "fixme",
                 "VKD3D_CONFIG" to "nodxr",
                 "MESA_SHADER_CACHE_DISABLE" to "false",
                 "MESA_SHADER_CACHE_DIR" to File(caches, "mesa").absolutePath,
@@ -1022,7 +1022,7 @@ class SessionEnvironmentTest {
         assertEquals("debug", environment["DXVK_LOG_LEVEL"])
         assertEquals("trace", environment["VKD3D_SHADER_DEBUG"])
         // Untouched, and still its own channel.
-        assertEquals("warn", environment["VKD3D_DEBUG"])
+        assertEquals("fixme", environment["VKD3D_DEBUG"])
         assertEquals("1", environment["FEX_SILENTLOG"])
         assertEquals("file", environment["MESA_LOG"])
         // Still not reachable, by any path.
