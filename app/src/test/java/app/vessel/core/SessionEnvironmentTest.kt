@@ -1040,6 +1040,85 @@ class SessionEnvironmentTest {
     }
 
     @Test
+    fun `a memory size may carry the unit the field shows`() {
+        // **The field is pre-filled with the option's label, so this is the
+        // ordinary way to reach a size the presets do not offer.** Editing `6 GB`
+        // in place leaves the unit behind, and `7 GB` used to do two things at
+        // once: fail the param's pattern, which drew the danger ring, and parse
+        // to null, which told the guest the whole 15.6 GB device. The visible
+        // half was the harmless one.
+        // Its own manifest: `hardwareLimits` reads a param only when the manifest
+        // declares it, and `fexManifest` above declares no Hardware group.
+        val hardwareManifest = ParamManifest(
+            schemaVersion = 1,
+            groups = listOf(
+                ParamGroup(
+                    id = "hardware",
+                    title = "Hardware",
+                    params = listOf(
+                        ParamSpec(
+                            key = "hardware.ram",
+                            title = "RAM",
+                            type = ParamType.ENUM_OR_TEXT,
+                            options = listOf("auto", "6"),
+                            default = JsonPrimitive("6"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        fun mb(ram: String): Int? = hardwareLimits(
+            profile = container().copy(params = mapOf("hardware.ram" to ParamValue.Text(ram))),
+            manifest = hardwareManifest,
+            deviceRamMb = 15_606,
+            deviceCores = 8,
+        ).ramMb
+
+        // A bare number is gigabytes, which is what every stored document holds
+        // and what every preset writes. Nothing migrates.
+        assertEquals(7 * 1024, mb("7"))
+        assertEquals(7 * 1024, mb("7 GB"))
+        assertEquals(7 * 1024, mb("7gb"))
+        assertEquals(7 * 1024, mb("  7 g  "))
+        // Megabytes are the reason the unit is read rather than stripped: there
+        // was no way to ask for anything between 4 GB and 6 GB.
+        assertEquals(1536, mb("1536 MB"))
+        assertEquals(1536, mb("1536mb"))
+        assertEquals(6144, mb("6144 M"))
+        // Still auto, and still auto for anything that will not parse — reporting
+        // the real machine is the honest failure, not inventing a number.
+        assertNull(mb("auto"))
+        assertNull(mb(""))
+        assertNull(mb("0"))
+        assertNull(mb("lots"))
+        assertNull(mb("6 gigabytes"))
+    }
+
+    @Test
+    fun `the audio capture switch reaches the guest`() {
+        // **Written because it did not, and the way it failed is the way this
+        // whole surface fails: silently.** The row was armed in the container
+        // document, the launch spent it — `on` came back as `off`, which is what
+        // an applied one-session row looks like — and `VESSEL_AUDIO_DUMP` was
+        // absent from `/proc/<re9.exe>/environ` next to `DXVK_CONFIG` and
+        // `VESSEL_GFX_STATS`, which were both there. Nothing anywhere said so.
+        val diagnosed = container().copy(
+            diagnostics = ContainerDiagnostics()
+                .withRowAdded().withRowNamed(0, "VESSEL_AUDIO_DUMP").withRowLevel(0, "on"),
+        )
+        val environment = sessionEnvironment(diagnosed, fexManifest, paths)
+        assertEquals("on", environment["VESSEL_AUDIO_DUMP"])
+        // Off is the baseline, so the row contributes nothing rather than
+        // writing a value the driver would have to interpret.
+        val quiet = container().copy(
+            diagnostics = ContainerDiagnostics()
+                .withRowAdded().withRowNamed(0, "VESSEL_AUDIO_DUMP").withRowLevel(0, "off"),
+        )
+        assertFalse(sessionEnvironment(quiet, fexManifest, paths).containsKey("VESSEL_AUDIO_DUMP"))
+    }
+
+    @Test
     fun `a diagnostics record adds no key the fixed block did not already have`() {
         // `MESA_LOG` is the one exception and it is the point of this assertion:
         // everything else Diagnostics writes is a value the environment already

@@ -534,6 +534,75 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // nothing reads. Neither is a setting anyone wants to be able to express.
     "FEX_ENABLECODECACHINGWIP",
 
+    // **`FEX_DISABLEDEP` is deliberately absent from this set, and the absence is
+    // the answer to "it is applied globally where it should be scoped".**
+    //
+    // Written down here because an omission is invisible: correction 9 in
+    // `docs/TODO.md` is that reachability is decided by this set and nothing
+    // else, so the only place a reader can learn that this name is reachable is
+    // a comment in the set that does not contain it.
+    //
+    // *What it turns off.* `patches/fex/0002` adds the option and defaults it to
+    // true, then routes it through `HandleProcessExecuteFlagsChange(
+    // MEM_EXECUTE_OPTION_ENABLE)` in `InvalidationTracker`'s constructor rather
+    // than assigning the flag, so the DEP-promoted interval bookkeeping runs as
+    // it would for a guest that asked. FEX's page permissions are its own
+    // interval map and not a query to the host, so with this on every readable
+    // guest page counts as executable and every writable one as SMC-capable.
+    //
+    // *Why it is on for every guest.* Without it a program that builds code at
+    // runtime — packers, anti-tamper stubs, some JITs — fails to decode an entry
+    // block at all: `NoExec instruction in entry block`. The one title in this
+    // project that has reached gameplay is a Denuvo title.
+    //
+    // *What it costs, and both halves are already paid for.* `0002`'s own
+    // description names the first: a genuinely wild jump is translated instead of
+    // faulting, so what would have been a clean access violation becomes silent
+    // corruption. The second is a lock — with DEP off an ordinary
+    // `PAGE_READWRITE` heap block gives `EffectiveExec = true`, so every growth of
+    // the guest heap takes `CodeInvalidationMutex` exclusively
+    // (`InvalidationTracker.cpp:502`), where without it the same notification
+    // takes no lock at all. That is the `0188` edge of the #49 deadlock, and the
+    // classification defect `patches/fex/0012` fixes has the same root. Two
+    // defects, one default.
+    //
+    // *So why not narrow the default.* The two failure directions are not
+    // symmetric. DEP **on** for a title that needs it off is a hard, loud death
+    // before the first frame; DEP **off** for a title that does not need it is a
+    // latent risk and a mutex. And there is no evidence any title is harmed by
+    // it: it was tested and exonerated as the cause of Metro's 2026-08-14
+    // regression. A per-title default would need a table of titles that nothing
+    // in this project has, and guessing wrong in the safe-looking direction is
+    // the direction that stops a game starting.
+    //
+    // *It is nevertheless already scoped two ways, both live, both measured, and
+    // this was re-examined on 2026-08-16 rather than assumed:*
+    //
+    //  1. **Per process.** `SessionRuntime.generateCodeCache` sets
+    //     `FEX_DISABLEDEP=0` for the offline compiler alone — the one process
+    //     that runs no anti-tamper code — and that is what stopped its own 272 MB
+    //     `LookupCache` reservation being classified as guest RWX. Measured: 21
+    //     modules, zero `RWX reprotect FAILED`.
+    //  2. **Per container.** Because the name is not in this set, both the
+    //     manifest stage (a `ParamSpec` carrying `env: FEX_DISABLEDEP`) and the
+    //     container's own environment table already reach it, and stage four runs
+    //     last so it wins. It is also not in [FEX_CACHE_KEY_IGNORED], so
+    //     [fexCacheKey] digests it: a container that turns DEP off lands in a
+    //     *different* FEX cache directory instead of loading blocks generated
+    //     with it on. The setting and the code it produced cannot come apart,
+    //     which is what makes per-container scoping safe rather than merely
+    //     possible.
+    //
+    // *What was considered and rejected: writing `FEX_DISABLEDEP = "1"` into the
+    // environment below to make the default visible.* It changes no behaviour —
+    // it is FEX's own default under `0002` — and it changes [fexCacheKey] for
+    // every container that exists, discarding a 339 MB code cache that took until
+    // 2026-08-15 to work at all, in exchange for a line of documentation. This
+    // comment is that line, and it costs nothing. **Reopen only if a title is
+    // found that DEP-off actually breaks**; the shape then is a manifest param
+    // with a default, not a new name in this set, because reserving it would take
+    // away both mechanisms above.
+
     // FEX's log destination, for the same reason as WINEDEBUG: docs/LOGGING.md
     // says everything diagnostic arrives on fd 2, and FEX's defaults send it
     // somewhere else.
@@ -2155,6 +2224,27 @@ private const val VRAM_KEY = "hardware.vram"
 private const val HARDWARE_AUTO = "auto"
 
 /**
+ * A memory size as the Hardware fields accept one: a number, optionally with a
+ * unit.
+ *
+ * **The unit is optional and a bare number means gigabytes**, which is what every
+ * container document already stores and what every preset writes, so widening the
+ * field costs no migration. `g`/`gb` is therefore only ever redundant, and it is
+ * accepted because the field is pre-filled with the option's label — `6 GB` — and
+ * a person editing that in place will leave the unit behind. That is not a
+ * mistake to reject; it is the most likely way anyone reaches a size the presets
+ * do not offer.
+ *
+ * `m`/`mb` is the reason to parse the unit at all rather than just strip it: 4 GB
+ * and 6 GB are a long way apart on a phone that has to fit Android, the
+ * translator and a shader compiler in the same pool, and there was no way to ask
+ * for anything between them.
+ *
+ * Case-insensitive, and whitespace anywhere it could plausibly be typed.
+ */
+private val MEMORY_SIZE = Regex("""\s*(\d{1,6})\s*([gGmM][bB]?)?\s*""")
+
+/**
  * Read the three Hardware params, in gigabytes, into [HardwareLimits].
  *
  * Resolved by the caller and passed to [sessionEnvironment] rather than read
@@ -2177,17 +2267,29 @@ fun hardwareLimits(
         manifest?.allParams.orEmpty().firstOrNull { it.key == key }
             ?.let { spec -> profile.params[spec.key] ?: spec.defaultValue() }
 
-    // A gigabyte count, or null for `auto` and for anything that will not parse.
+    // Megabytes, or null for `auto` and for anything that will not parse.
     // Unparseable is deliberately the same as auto: the field is free text so a
-    // user can type a size the presets do not offer, and the honest failure for
-    // "4gb" is to report the real machine rather than to invent a number.
-    fun gigabytes(key: String): Int? = (value(key) as? ParamValue.Text)
-        ?.value
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() && !it.equals(HARDWARE_AUTO, ignoreCase = true) }
-        ?.toIntOrNull()
-        ?.takeIf { it > 0 }
-        ?.times(1024)
+    // user can type a size the presets do not offer, and the honest failure is to
+    // report the real machine rather than to invent a number.
+    //
+    // **`4gb` used to be one of the unparseable ones, and that is why the unit is
+    // read now.** The field is pre-filled with the option's *label* — `6 GB`, not
+    // `6` — so editing it in place is how anyone reaches a size the presets do
+    // not offer, and every such edit produced a string ending in ` GB`. That
+    // failed the param's pattern, drew the danger ring, and then parsed to null,
+    // so the guest was told the whole 15.6 GB device. Two failures from one
+    // typing, and the one that mattered was silent. Seen on device with
+    // `hardware.ram` reading `7 GB`.
+    fun megabytes(key: String): Int? {
+        val text = (value(key) as? ParamValue.Text)?.value?.trim().orEmpty()
+        if (text.isEmpty() || text.equals(HARDWARE_AUTO, ignoreCase = true)) return null
+        val match = MEMORY_SIZE.matchEntire(text) ?: return null
+        val size = match.groupValues[1].toIntOrNull()?.takeIf { it > 0 } ?: return null
+        // A bare number is gigabytes, which is what every stored document means
+        // and what the presets write, so no container has to be migrated to read
+        // this. A unit is only ever an addition to that.
+        return if (match.groupValues[2].startsWith("m", ignoreCase = true)) size else size * 1024
+    }
 
     val cores = (value(CORES_KEY) as? ParamValue.Choices)
         ?.values
@@ -2197,8 +2299,8 @@ fun hardwareLimits(
 
     return HardwareLimits(
         cores = cores,
-        ramMb = gigabytes(RAM_KEY),
-        vramMb = gigabytes(VRAM_KEY),
+        ramMb = megabytes(RAM_KEY),
+        vramMb = megabytes(VRAM_KEY),
         deviceRamMb = deviceRamMb,
         deviceCores = deviceCores,
     )

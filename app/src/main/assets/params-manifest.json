@@ -202,36 +202,7 @@
         {
           "key": "hardware.ram",
           "title": "RAM",
-          "help": "How much system memory the guest is told it has. Games size streaming and texture pools from this, and the phone runs Android and the translator in the same memory, so six is a deliberate under-report rather than the fifteen the device has.",
-          "type": "enumOrText",
-          "options": [
-            "auto",
-            "2",
-            "3",
-            "4",
-            "6",
-            "8",
-            "12",
-            "16"
-          ],
-          "default": "6",
-          "optionLabels": {
-            "auto": "Auto  (report the whole device)",
-            "2": "2 GB",
-            "3": "3 GB",
-            "4": "4 GB",
-            "6": "6 GB",
-            "8": "8 GB",
-            "12": "12 GB",
-            "16": "16 GB"
-          },
-          "pattern": "^\\s*\\d{1,6}\\s*$",
-          "placeholder": "6"
-        },
-        {
-          "key": "hardware.vram",
-          "title": "VRAM",
-          "help": "How much video memory the guest is told it has. This phone shares one pool between CPU and GPU, so left to itself a game is told it has all of system memory and sizes its texture budget for a machine that does not exist. Set on the driver, so every graphics layer reports it.",
+          "help": "How much system memory the guest is told it has. Games size streaming and texture pools from this, and the phone runs Android and the translator in the same memory, so six is a deliberate under-report rather than the fifteen the device has. Type a size the list does not offer if you want one: a bare number is gigabytes, and MB works too, so 1536 MB is sayable.",
           "type": "enumOrText",
           "options": [
             "auto",
@@ -239,7 +210,44 @@
             "2",
             "3",
             "4",
+            "5",
             "6",
+            "7",
+            "8",
+            "12",
+            "16"
+          ],
+          "default": "6",
+          "optionLabels": {
+            "auto": "Auto  (report the whole device)",
+            "1": "1 GB",
+            "2": "2 GB",
+            "3": "3 GB",
+            "4": "4 GB",
+            "5": "5 GB",
+            "6": "6 GB",
+            "7": "7 GB",
+            "8": "8 GB",
+            "12": "12 GB",
+            "16": "16 GB"
+          },
+          "pattern": "^\\s*\\d{1,6}\\s*([gGmM][bB]?)?\\s*$",
+          "placeholder": "6"
+        },
+        {
+          "key": "hardware.vram",
+          "title": "VRAM",
+          "help": "How much video memory the guest is told it has. This phone shares one pool between CPU and GPU, so left to itself a game is told it has all of system memory and sizes its texture budget for a machine that does not exist. Set on the driver, so every graphics layer reports it. A bare number is gigabytes; MB works too.",
+          "type": "enumOrText",
+          "options": [
+            "auto",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
             "8",
             "12"
           ],
@@ -250,11 +258,13 @@
             "2": "2 GB",
             "3": "3 GB",
             "4": "4 GB",
+            "5": "5 GB",
             "6": "6 GB",
+            "7": "7 GB",
             "8": "8 GB",
             "12": "12 GB"
           },
-          "pattern": "^\\s*\\d{1,6}\\s*$",
+          "pattern": "^\\s*\\d{1,6}\\s*([gGmM][bB]?)?\\s*$",
           "placeholder": "6"
         }
       ]
