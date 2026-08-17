@@ -3,19 +3,58 @@ package app.vessel.core
 import java.io.File
 
 /**
- * The two value types this seed writes.
+ * The three value types this seed writes.
  *
- * Not a general facility — it is two because two readers demand different
+ * Not a general facility — it is three because three readers demand different
  * things. [SZ] is the default and is load-bearing for the emulator keys:
  * `load_arm64ec_module` and `get_cpu_dll_name` both test
  * `info->Type == REG_SZ` and ignore the value otherwise, so `REG_EXPAND_SZ`
  * would leave the key present, readable, and silently unused. [DWORD] exists
  * because `ShouldAppsUseDarkMode` reads its value with `RRF_RT_REG_DWORD`,
- * which rejects a string outright.
+ * which rejects a string outright. [MULTI_SZ] exists because
+ * `load_system_links` walks one value as a run of NUL-terminated strings, and a
+ * font-link chain is a list.
  */
 enum class RegistryKind {
     SZ,
     DWORD,
+
+    /**
+     * `REG_MULTI_SZ` — a list of strings in one value, rendered as `hex(7):`.
+     *
+     * **Added for [PrefixRegistry.fontLink], which is the only thing that wants
+     * a list**, and worth the new kind rather than a workaround because Wine's
+     * `load_system_links` reads a font's whole fallback chain out of a single
+     * value: the value *name* is the base family and the data is a run of
+     * NUL-terminated `filename[,familyname]` entries, walked until a zero-length
+     * entry or the end of the data (`dlls/win32u/font.c:2050-2079`). There is no
+     * one-value-per-entry form to fall back on.
+     *
+     * **`hex(7)` is verified against the parser this seed actually reaches, not
+     * assumed.** `SessionRuntime.applyRegistry` runs `regedit <file>`, so the
+     * parser is `programs/regedit/regproc.c`. Its `parse_data_type`
+     * (regproc.c:302-345) holds `{ L"hex(", 4, -1, REG_BINARY }` and, for the
+     * `-1` type, reads the number generically with `wcstoul(*line, &end, 16)`
+     * (regproc.c:335) and assigns it straight to `parser->data_type`
+     * (regproc.c:339) — no whitelist, so type 7 is accepted like any other, and
+     * `RegSetValueExW` is then called with it (regproc.c:909). Upstream's own
+     * tests cover `hex(7)` specifically (`programs/regedit/tests/regedit.c:351`).
+     *
+     * **The bytes are single-byte ASCII, NOT UTF-16LE, and getting that backwards
+     * is the whole trap.** `ContainerProvisioner` writes the seed as UTF-8 with no
+     * BOM; `regproc.c:1044` decides `is_unicode` purely on a UTF-16LE BOM, so this
+     * file takes the `get_lineA` path. On that path `prepare_hex_string_data`
+     * (regproc.c:466-497) treats the hex bytes as *narrow* text and widens them
+     * with `MultiByteToWideChar(CP_ACP, …)` before the value is written. Emitting
+     * UTF-16LE bytes here would therefore be widened a second time: `4e,00,6f,00`
+     * would import as the strings "N", "o", … and `load_system_links` would walk a
+     * chain of one-character filenames, resolve none of them, and log a `TRACE`
+     * line per entry. The value would exist, have the right type, and link nothing.
+     *
+     * See [RegistryValue.multiSz] for the terminator rules and
+     * [PrefixRegistry.block] for the rendering.
+     */
+    MULTI_SZ,
 
     /**
      * `"name"=-`, which removes one value and leaves the key.
@@ -33,6 +72,18 @@ enum class RegistryKind {
      */
     DELETE,
 }
+
+/**
+ * The separator [RegistryValue.multiSz] joins entries with, and the one
+ * [PrefixRegistry.multiSzHex] splits them back on.
+ *
+ * A NUL rather than a space or a comma: [RegistryValue.multiSz] accepts any
+ * printable ASCII in an entry, which includes both, and a comma is meaningful
+ * *inside* an entry - it separates a filename from an optional family name
+ * (`dlls/win32u/font.c:2065-2071`). A NUL cannot appear in an entry that passed
+ * that check, so it is the one unambiguous separator.
+ */
+internal const val MULTI_SZ_SEPARATOR: String = "\u0000"
 
 /**
  * One registry value. [name] is empty for a key's default value, which a `.reg`
@@ -54,6 +105,52 @@ data class RegistryValue(
         /** `"name"=-` — remove this one value, keep the key. See [RegistryKind.DELETE]. */
         fun removed(name: String): RegistryValue =
             RegistryValue(name, "", RegistryKind.DELETE)
+
+        /**
+         * A `REG_MULTI_SZ` from [entries], stored NUL-joined and rendered as
+         * `hex(7):`. See [RegistryKind.MULTI_SZ] for why the kind exists.
+         *
+         * [data] holds the entries joined by NUL and with **no** trailing
+         * terminators; [PrefixRegistry.block] adds both — a NUL after every entry
+         * and one more to end the sequence. Keeping the terminators out of the
+         * stored form means there is exactly one place that can get them wrong,
+         * and `PrefixRegistryTest` pins the bytes it produces. An off-by-one in a
+         * UTF-16 byte run is invisible by eye and shows up only as a font that
+         * quietly does not link.
+         *
+         * **ASCII-only, and it throws rather than encoding.** The rendered bytes
+         * are narrow characters that Wine widens with `MultiByteToWideChar(CP_ACP,
+         * …)`, and the prefix's ACP is not something this code knows — a non-ASCII
+         * filename would be written in one encoding and read in another, which is
+         * the silent-wrong-value failure this whole class is careful about.
+         * Everything that wants this is a font filename, so the restriction costs
+         * nothing and the alternative is a guess.
+         *
+         * An empty entry is refused for a sharper reason: a zero-length string
+         * ends `load_system_links`' walk (`font.c:2056`), so one blank entry in the
+         * middle silently discards every entry after it.
+         */
+        fun multiSz(name: String, entries: List<String>): RegistryValue {
+            require(entries.isNotEmpty()) { "$name: a REG_MULTI_SZ needs at least one entry" }
+            entries.forEach { entry ->
+                require(entry.isNotEmpty()) {
+                    "$name: an empty entry ends Wine's SystemLink walk and would " +
+                        "discard every entry after it"
+                }
+                require(entry.all { it.code in 0x20..0x7E }) {
+                    "$name: '$entry' is not printable ASCII; the seed is read back " +
+                        "through MultiByteToWideChar(CP_ACP) and this code does not " +
+                        "know the prefix's ACP"
+                }
+            }
+            // NUL-joined and not space- or comma-joined. Printable ASCII includes
+            // both, so either would be ambiguous with an entry containing one —
+            // and a comma is meaningful inside an entry, where it separates the
+            // filename from an optional family name (`font.c:2065-2071`). A NUL
+            // cannot appear in an entry the check above accepted.
+            val joined = entries.joinToString(MULTI_SZ_SEPARATOR)
+            return RegistryValue(name, joined, RegistryKind.MULTI_SZ)
+        }
     }
 }
 
@@ -223,8 +320,11 @@ object PrefixRegistry {
      * glyphs rendered on the device. It is replaced anyway because it is
      * bitmap-derived and illegible at any size, and the cost is stated rather than
      * discovered later -- one face with no font linking means no CJK in a console
-     * at all. The family name was read out of the TTF's `name` table and
-     * `build/tools.sh` asserts it against `TOOLS_CASCADIA_FAMILY`.
+     * at all. (That cost was real and its stated cause was not: seed 31 retires the
+     * "no font linking" half of it, which was never true. Left standing here because
+     * this entry is what seed 30 believed, and 31's entry is where it is corrected.)
+     * The family name was read out of the TTF's `name` table and `build/tools.sh`
+     * asserts it against `TOOLS_CASCADIA_FAMILY`.
      *
      * **The palette**, which is a measured colour bug and not a retheme.
      * `patches/wine/0052` was taught to quantise `38;5;n` and `38;2;r;g;b` to the
@@ -245,8 +345,29 @@ object PrefixRegistry {
      * replaces values, so without it a container would keep seed 29's `FaceName`
      * naming a font the new payload no longer contains, and keep a background on
      * palette slot 8.
+     * 31 added [fontLink], which retires the premise seeds 29 and 30 were both
+     * built on. Each of them swapped one console face for another and wrote the
+     * other's property down as the price -- 29 had complete coverage in an
+     * illegible bitmap face, 30 has a legible face missing 12 glyphs Claude Code's
+     * TUI draws on every tool-call line -- and both cited the same sentence:
+     * "conhost resolves one face with no font linking". Its second half is false.
+     * Per-glyph fallback is GDI's, not conhost's, and Wine implements it; the whole
+     * path is verified on [fontLink], including the hop that reaches the text
+     * conhost actually draws. So `FaceName` stays `Cascadia Mono` and this key names
+     * what it falls back to. Measured, so the trade is not a guess this time:
+     * Cascadia maps 2,426 codepoints (1,863 of them BMP) against Unifont's 58,910,
+     * it is missing exactly 12 glyphs the TUI uses -- `U+23FA` and `U+23BF` on every
+     * tool-call line, the five spinners `U+273B U+273D U+2733 U+2734 U+2736`, the
+     * marks `U+2714 U+2717 U+2718`, `U+26A0` and `U+21B5` -- and the union of the
+     * chain covers all 12 and 116,125 codepoints. **What it does not buy is
+     * geometry**: CJK and emoji stop being tofu and become mis-positioned instead,
+     * because conhost has no double-width cells at all, and emoji are monochrome.
+     * [fontLink] states both limits rather than leaving them to be found. The bump
+     * is what carries the new key to prefixes that already exist -- a `.reg` merge
+     * adds and replaces, so without it the fallback would only ever reach a
+     * container created after this ships.
      */
-    const val SEED_VERSION: Int = 30
+    const val SEED_VERSION: Int = 31
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -656,13 +777,14 @@ object PrefixRegistry {
      * whatever happens, so a name that does not resolve gives a nearest match with
      * no error and no log line.
      *
-     * **Tools 1.4.0 replaced GNU Unifont with this, and that was a trade rather
-     * than a bug fix.** Unifont was chosen for coverage and delivered it — the
-     * box-drawing glyphs rendered on the device — and it is bitmap-derived, so it
-     * is illegible at any size. The cost of the swap is CJK: conhost uses one face
-     * and does no font linking, so Chinese, Japanese and Korean text in a console
-     * now has nothing to fall back to. Counted out of the two fonts' cmaps,
-     * Cascadia Mono maps 1,863 BMP codepoints against Unifont's 57,070;
+     * **Tools 1.4.0 replaced GNU Unifont with this and 1.5.0 stopped that being a
+     * trade.** Unifont was chosen for coverage and delivered it — the box-drawing
+     * glyphs rendered on the device — and it is bitmap-derived, so it is illegible
+     * at any size. 1.4.0's swap cost coverage: counted out of the fonts' own cmaps,
+     * Cascadia Mono maps 2,426 codepoints (1,863 BMP) against Unifont's 58,910, and
+     * it is missing 12 glyphs Claude Code's TUI draws. 1.5.0 keeps this face and
+     * puts Unifont behind it instead of in front of it — see [fontLink], which is
+     * where the mechanism, the ordered chain and the measured union coverage are.
      * `native/pins.env` lists what is probed present and absent.
      */
     private const val CONSOLE_FACE = "Cascadia Mono"
@@ -796,12 +918,16 @@ object PrefixRegistry {
      * error and no log line. Whether the glyphs appear, and whether this face is
      * legible at this cell size, cannot be settled by reading.
      *
-     * **And two real limitations rather than things to chase later.** Emoji cannot
-     * render in this console: conhost uses a single face, does no font linking, and
-     * has no colour-glyph path at all. Neither can CJK, hiragana, katakana, hangul,
-     * Devanagari or Thai — Cascadia Mono has none of them, where Unifont did, and
-     * with one face there is nothing behind it. That is the trade Tools 1.4.0 made
-     * deliberately; see [CONSOLE_FACE].
+     * **The "one face, no fallback" limitation this used to carry is gone, and it
+     * was never true.** Seed 30 said here that emoji, CJK, hiragana, katakana,
+     * hangul, Devanagari and Thai could not render because conhost uses a single
+     * face and does no font linking. conhost does use a single face; the conclusion
+     * did not follow, because per-glyph fallback happens in GDI and Wine implements
+     * it. Seed 31 uses it: [fontLink] names what this face falls back to, so the
+     * glyphs Cascadia lacks now resolve behind it and nothing changes for the ones
+     * it has. What remains is not coverage but geometry and colour — CJK is
+     * mis-positioned because conhost has no double-width cells, and emoji are
+     * monochrome — and [fontLink] states both.
      */
     val consoleColours: RegistryKey = RegistryKey(
         path = """HKEY_CURRENT_USER\Console""",
@@ -816,6 +942,207 @@ object PrefixRegistry {
             // (`window.c:153`) — `ColorTable8` would be silently ignored.
             RegistryValue.dword("ColorTable%02d".format(i), bgr(argb))
         },
+    )
+
+    /**
+     * `\Registry\Machine\...` as a `.reg` file spells it. See [fontLink].
+     *
+     * The `Windows NT` component carries a space, and that is part of the real key
+     * name rather than a separator: a `.reg` key path inside `[...]` is taken
+     * literally and needs no escaping, which is why this is one raw string and not
+     * assembled from parts.
+     */
+    private const val FONT_LINK_KEY =
+        """HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink"""
+
+    /**
+     * The fallback chain for [CONSOLE_FACE], best typography first.
+     *
+     * **Filenames, not family names, because that is what Wine matches on.**
+     * `find_face_from_filename` compares the basename of a registered font's path
+     * (`dlls/win32u/font.c:879-893`); the `,familyname` suffix the format allows is
+     * optional and omitted here. **A name that does not resolve is dropped with a
+     * `TRACE` line and nothing else (`font.c:2076`)** — no error, no warning, no
+     * log line at any level a device run would show — so a wrong filename costs
+     * exactly the glyphs it was meant to supply and reports nothing. That is why
+     * `native/pins.env` spells the two Unifont names as literals
+     * (`TOOLS_FONTLINK_UNIFONT_FILE`, `TOOLS_FONTLINK_UNIFONT_UPPER_FILE`) and
+     * `build/tools.sh` asserts them against the files it actually staged: the
+     * version is inside the filename, so a Unifont bump with no edit here would
+     * ship a correct payload, a green build and no fallback.
+     *
+     * **The order is load-bearing.** `get_glyph_index_linked` takes the *first*
+     * child that has the glyph (`font.c:3765-3772`), so this runs from the face
+     * that draws a glyph best to the face that merely has it:
+     *
+     *  1. `NotoSansSymbols-Regular-Subsetted.ttf` — real typography for the
+     *     spinners and status marks, which are on screen constantly. Measured on
+     *     the device: 708,968 bytes, 4,616 codepoints, covering all five spinner
+     *     glyphs (`U+273B U+273D U+2733 U+2734 U+2736`), all five status marks
+     *     (`U+2713 U+2714 U+2717 U+2718 U+26A0`) and 100% of Box Drawing, Block
+     *     Elements and Braille. It does **not** have `U+23FA` or `U+23BF`, which is
+     *     why it cannot be the only fallback.
+     *  2. `unifont-17.0.05.otf` — `U+23FA` and `U+23BF`, the two glyphs on every
+     *     Claude Code tool-call line that nothing else in reach has, plus the rest
+     *     of the BMP as the guarantee against tofu.
+     *  3. `unifont_upper-17.0.05.otf` — planes 1-15, which is where emoji live.
+     *
+     * Put Unifont anywhere but last and it wins glyphs a real typeface would have
+     * drawn better, which is the one way to make this change look like a
+     * regression.
+     *
+     * **Two of these three ship and one does not**, and the split is worth stating
+     * because 36 MB of Noto in a payload would be a poor trade. The Unifonts are in
+     * the Tools payload under `Fonts/` — ~315 KB packed for 11.5 MB raw, measured
+     * at 1.3.0, which is also why there is no case for subsetting Unifont: a subset
+     * would save almost nothing and destroy the one property that makes it worth
+     * shipping, that arbitrary text never comes out empty. Noto Symbols is already
+     * on the device in `/system/fonts`, so `SessionRuntime.linkAndroidFonts`
+     * symlinks it into `windows\Fonts` and the payload cost is zero.
+     *
+     * **A missing file degrades quietly and on purpose.** `/system/fonts` names
+     * vary by Android version and OEM, so entry 1 may be absent on some device; an
+     * unresolvable entry is skipped and the chain falls through. That is exactly
+     * why Unifont is last — the backstop is the one tier that ships with the
+     * payload and therefore cannot be missing.
+     *
+     * **Four further tiers were measured on the device and rejected**, so their
+     * absence is a decision and not an oversight. `NotoSansCJK-Regular.ttc` is
+     * 32 MB and would buy a better typeface for something conhost cannot lay out at
+     * all — see [fontLink] on double-width. The Arabic, Hebrew, Devanagari and Thai
+     * Noto faces are complex scripts needing shaping conhost does not do (no
+     * Uniscribe, no HarfBuzz, one glyph per cell through `ExtTextOutW`), so Arabic
+     * renders as isolated unjoined forms however good the font is.
+     * `NotoColorEmoji.ttf` is CBDT/CBLC colour bitmaps against an outline
+     * rasteriser: an entry that probably does nothing is worse than none, because
+     * it makes the chain look like it handles colour emoji. Microsoft's Consolas,
+     * Segoe UI, MS Gothic and Segoe UI Emoji were the other obvious answer and are
+     * rejected outright — proprietary, and not redistributable in a public release,
+     * which is why this chain is built from OFL fonts and the device's own Noto.
+     *
+     * **Measured union of the base face plus what ships**: 57,070 BMP + 59,055
+     * above-BMP = 116,125 codepoints, and **all 12** of the glyphs Cascadia was
+     * missing. Cascadia's 1,863 BMP codepoints are a strict subset of Unifont's
+     * 57,070, which is what makes a two-file chain complete rather than merely
+     * bigger. Counted out of each font's own `cmap` on 2026-08-17.
+     */
+    internal val FONT_LINK_CHAIN: List<String> = listOf(
+        "NotoSansSymbols-Regular-Subsetted.ttf",
+        "unifont-17.0.05.otf",
+        "unifont_upper-17.0.05.otf",
+    )
+
+    /**
+     * The [FONT_LINK_CHAIN] entries that come off the device rather than out of the
+     * payload. `SessionRuntime.linkAndroidFonts` symlinks these.
+     *
+     * **Here rather than in `SessionRuntime` so the two lists cannot drift.** A font
+     * symlinked into `windows\Fonts` that no chain entry names is a link nothing
+     * reaches; a chain entry naming a file nothing links is a tier that silently does
+     * not exist. Both failures are invisible -- an unresolvable entry costs one
+     * `TRACE` line (`win32u/font.c:2076`) -- so the relationship is expressed as a
+     * subset of the chain and checked below rather than left to two files agreeing.
+     *
+     * One entry, and the shortness is the decision. Measured on the device: 211
+     * fonts in `/system/fonts`, of which `NotoSansSymbols-Regular-Subsetted.ttf`
+     * (708,968 bytes, 4,616 codepoints) covers all five spinner glyphs, all five
+     * status marks and 100% of Box Drawing, Block Elements and Braille.
+     * `NotoSansSymbols-Regular-Subsetted2.ttf` (32,996 bytes, 124 codepoints) covers
+     * none of that set and `DroidSansMono.ttf` almost nothing, so neither earns a
+     * tier. See [FONT_LINK_CHAIN] for why CJK, the complex scripts and colour emoji
+     * were measured on the device and deliberately left out.
+     */
+    internal val ANDROID_LINKED_FONTS: List<String> =
+        listOf("NotoSansSymbols-Regular-Subsetted.ttf")
+
+    init {
+        // Checked at class load rather than in a test alone, because the cost of
+        // getting it wrong is a tier that quietly does not exist and the check is
+        // free. Every test and every launcher path loads this object.
+        require(FONT_LINK_CHAIN.containsAll(ANDROID_LINKED_FONTS)) {
+            "ANDROID_LINKED_FONTS has entries FONT_LINK_CHAIN does not name, so they " +
+                "would be linked into windows\\Fonts and fallen back to by nothing: " +
+                ANDROID_LINKED_FONTS.filterNot { it in FONT_LINK_CHAIN }
+        }
+    }
+
+    /**
+     * The fonts [CONSOLE_FACE] falls back to, per glyph, when it has none.
+     *
+     * **This is Windows' own mechanism and not something Vessel invented**, which
+     * is the whole reason it is the answer here. Seeds 29 and 30 each swapped one
+     * console face for another and each wrote the other's property down as the
+     * unavoidable price — 29 shipped Unifont and got complete coverage in an
+     * illegible bitmap face; 30 shipped Cascadia Mono and got a legible face
+     * missing 12 glyphs Claude Code's TUI draws. Both were resting on one claim,
+     * repeated in four files: "conhost resolves one face with no font linking".
+     * The first half is true and the second is false. conhost does select a single
+     * `HFONT`, but per-glyph fallback is not conhost's job — it is GDI's, one layer
+     * down, and Wine implements it.
+     *
+     * **Verified end to end in the Wine we ship (`native/wine/`), because a
+     * mechanism that stopped short of the text conhost draws would be no use:**
+     *
+     *  1. `system_link_keyW` (`dlls/win32u/font.c:107-118`) is exactly
+     *     [FONT_LINK_KEY] below, in NT form. Wine reads the same key Windows does.
+     *  2. `load_system_links` (`font.c:2030-2085`) enumerates that key. **The value
+     *     NAME is the base font family** — hence [CONSOLE_FACE] as the name — and
+     *     the data is a run of NUL-terminated `filename[,familyname]` strings,
+     *     walked until a zero-length entry or the end of the data. Each is resolved
+     *     by `find_face_from_filename` (`font.c:896-911`), which compares the
+     *     **basename** of a registered font's path, case-insensitively.
+     *  3. `create_child_font_list` (`font.c:2775-2816`) attaches the resolved
+     *     families as child fonts. Called unconditionally from `create_gdi_font`
+     *     (`font.c:4533`), so every font anything selects gets its children.
+     *  4. `get_glyph_index_linked` (`font.c:3757-3775`) is the payoff: try the base
+     *     font, and on a miss walk the children **in list order**, switching to the
+     *     first that has the glyph. Called from `get_glyph_outline` (`font.c:3799`).
+     *  5. And it reaches conhost. conhost draws into `CreateCompatibleDC(0)`
+     *     (`programs/conhost/window.c:2083`) — a memory DC, so the DIB engine
+     *     rather than the X11 driver. The DIB engine rasterises text through
+     *     `cache_glyph_bitmap` (`dlls/win32u/dibdrv/graphics.c:745-780`), which
+     *     calls `NtGdiGetGlyphOutline` per glyph; that reaches
+     *     `font_GetGlyphOutline` (`font.c:4082`) and therefore the linked lookup.
+     *
+     * **Nothing changes for a glyph Cascadia has.** The base font is tried first
+     * and wins, so this is additive by construction: the legibility seed 30 bought
+     * is untouched, and only the misses go anywhere else.
+     *
+     * **[FONT_LINK_CHAIN] is ordered and the order is the design.** See there.
+     *
+     * **What this does NOT fix, written down rather than left to be discovered.**
+     * CJK and emoji stop being tofu and start being *geometrically wrong*, which is
+     * a different defect and not a smaller one. conhost has no double-width support
+     * at all: `window.c:725` and `:797` both carry "FIXME: use maximum width for
+     * DBCS codepages since some chars take two cells", and the draw loop pins every
+     * glyph to `i * console->active->font.width` with `dx[] = font.width`
+     * (`window.c:483`), so a full-width glyph is drawn in a half-width cell and
+     * overlaps its neighbour. Worse than the drawing: the buffer model stores one
+     * cell per character where Windows stores a wide character as two cells flagged
+     * `COMMON_LVB_LEADING_BYTE` / `COMMON_LVB_TRAILING_BYTE`, so a program that
+     * believes a CJK character occupies two columns is mis-aligned before anything
+     * is rendered. Fixing that means implementing wide cells in conhost —
+     * `write_console`, the buffer model and the renderer — and is deliberately out
+     * of scope here. **Emoji are monochrome**, separately: Unifont Upper is
+     * outlines and Wine's FreeType path has no colour-glyph format, so "emoji
+     * render" must not be read as "emoji work".
+     *
+     * **Unverified until it runs.** Reading says the `.reg` import writes a
+     * REG_MULTI_SZ that `load_system_links` parses and that the chain resolves.
+     * Whether the 12 glyphs appear, and whether a 16x16-bitmap-derived glyph beside
+     * Cascadia's outlines reads as acceptable rather than merely present, cannot be
+     * settled by reading.
+     */
+    val fontLink: RegistryKey = RegistryKey(
+        // `HKEY_LOCAL_MACHINE` and not `HKEY_CURRENT_USER`: `system_link_keyW` is
+        // `\Registry\Machine\...`, so a per-user copy would be read by nothing.
+        // The machine hive is reachable from this seed and that is measured rather
+        // than assumed -- [arm64ecEmulator] writes
+        // `HKLM\Software\Microsoft\Wow64\amd64` and translated code runs on the
+        // device, which is the same hive and the same `Software` subtree, so
+        // nothing redirects between what `regedit` writes and what win32u reads.
+        path = FONT_LINK_KEY,
+        values = listOf(RegistryValue.multiSz(CONSOLE_FACE, FONT_LINK_CHAIN)),
     )
 
     /**
@@ -1049,12 +1376,13 @@ object PrefixRegistry {
                     // installed to this exact path, ARM64.
                     //
                     // Literal rather than `%USERPROFILE%\.local\bin`, because
-                    // this seed writes REG_SZ only -- see [RegistryKind],
+                    // this seed writes no REG_EXPAND_SZ -- see [RegistryKind],
                     // where the same constraint is load-bearing for the
                     // emulator keys. An expandable string would be left
                     // present, readable and silently unexpanded. It is why
                     // the Windows entries above are literal too rather than
-                    // `%SystemRoot%`.
+                    // `%SystemRoot%`. (The seed does write REG_DWORD and, since
+                    // seed 31, one REG_MULTI_SZ; neither expands either.)
                     //
                     // The profile name is not ours: Wine takes it from the
                     // user it runs as and Valve's tree defaults it to
@@ -1251,6 +1579,11 @@ object PrefixRegistry {
         driveTypesReset,
         driveTypes(letters),
         consoleColours,
+        // After [consoleColours] rather than before it, because the SystemLink
+        // value is keyed on the family name [consoleColours] writes as `FaceName`
+        // and reading them in that order is reading one decision. Nothing in
+        // `regedit` cares about the order of keys in the file.
+        fontLink,
     ) + virtualDesktop + unixNamespace
 
     /** The seed for a container whose drives nobody has looked at. */
@@ -1351,10 +1684,53 @@ object PrefixRegistry {
                     RegistryKind.SZ -> append('"').append(escape(value.data)).append('"')
                     RegistryKind.DWORD -> append("dword:").append(value.data)
                     RegistryKind.DELETE -> append('-')
+                    RegistryKind.MULTI_SZ -> append(multiSzHex(value.data))
                 }
                 append(CRLF)
             }
         }
+    }
+
+    /**
+     * A NUL-joined [RegistryValue.data] as `hex(7):` and comma-separated bytes.
+     *
+     * **One byte per character, lower-case hex, comma-separated with no spaces,
+     * on one line.** Each of those is a property of the parser rather than a
+     * style choice:
+     *
+     *  - **One byte per character**, because the seed is UTF-8 with no BOM and
+     *    `regproc.c:1044` sets `is_unicode` only on a UTF-16LE BOM. On the narrow
+     *    path `prepare_hex_string_data` widens the bytes itself with
+     *    `MultiByteToWideChar(CP_ACP, …)` (regproc.c:483-495), so writing UTF-16LE
+     *    pairs here would be widened twice and import as a chain of
+     *    one-character filenames. See [RegistryKind.MULTI_SZ].
+     *  - **Comma-separated**, because `convert_hex_csv_to_hex` requires a comma
+     *    between bytes and accepts only end-of-line or a `;` comment after one
+     *    (regproc.c:282-287) — space-separated bytes are a parse failure.
+     *  - **One line**, because the alternative is `\` continuations
+     *    (regproc.c:265-273) and there is nothing to buy with them here: the
+     *    longest chain this writes is under 300 characters, and a continuation is
+     *    one more place for a terminator to go missing.
+     *
+     * **Both terminators are written here and nowhere else.** A NUL after every
+     * entry — including the last — and one further NUL ending the sequence, which
+     * is what makes the value a well-formed `REG_MULTI_SZ` rather than one that
+     * happens to work because `DataLength` bounds the walk.
+     * `prepare_hex_string_data` appends a NUL only if the data does not already
+     * end in one, so writing both explicitly means the parser adds nothing and the
+     * bytes in the file are the bytes in the hive.
+     */
+    private fun multiSzHex(nulJoined: String): String {
+        val bytes = buildList {
+            for (entry in nulJoined.split(MULTI_SZ_SEPARATOR)) {
+                entry.forEach { add(it.code) }
+                // This entry's own terminator.
+                add(0)
+            }
+            // And the one that ends the sequence.
+            add(0)
+        }
+        return "hex(7):" + bytes.joinToString(",") { "%02x".format(it) }
     }
 
     /**

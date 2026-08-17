@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Package Git, Python, Node.js, PowerShell 7, a JDK and Cascadia Mono as one ARM64
-# `Tools` component.
+# Package Git, Python, Node.js, PowerShell 7, a JDK, Cascadia Mono and GNU Unifont
+# as one ARM64 `Tools` component.
 #
 #   ./build/tools.sh            # -> dist/tools-<ver>-arm64.wcp
 #
@@ -62,24 +62,42 @@
 # Bash native and it does not touch the `fork()` emulation TerminalProfile.kt:56-70
 # measured pegging a core at 98%; PowerShell is still the answer to that.
 #
-# **Fonts/ is the sixth tree and the only one that is not a program.** One face —
-# Cascadia Mono — and it is here because the container had no fonts at all:
-# measured on the device, `prefix/drive_c/windows/Fonts/` is empty, `HKCU\Console`
-# had no `FaceName`, and Claude Code's TUI drew every horizontal rule as `□□□□□`.
-# The Wine component ships `.fon` bitmap faces and non-monospace TTFs; Android
-# contributes `CutiveMono.ttf` and `DroidSansMono.ttf`. Nothing in that set has a
-# U+2500 block, so a box was the correct thing for the renderer to draw.
+# **Fonts/ is the sixth tree and the only one that is not a program.** Three faces
+# and they are here because the container had no fonts at all: measured on the
+# device, `prefix/drive_c/windows/Fonts/` is empty, `HKCU\Console` had no
+# `FaceName`, and Claude Code's TUI drew every horizontal rule as `□□□□□`. The Wine
+# component ships `.fon` bitmap faces and non-monospace TTFs; Android contributes
+# `CutiveMono.ttf` and `DroidSansMono.ttf`. Nothing in that set has a U+2500 block,
+# so a box was the correct thing for the renderer to draw.
 #
-# **1.3.0 answered that with GNU Unifont and 1.4.0 takes Unifont back out.**
-# Unifont was chosen for coverage and delivered it — the box-drawing glyphs
-# rendered on the device — and it is bitmap-derived, so it is illegible at any
-# size. Measured on the device: it works and it is ugly. Cascadia Mono replaces it
-# outright rather than joining it, because conhost uses one face and does no font
-# linking, so a second file would be coverage nothing in a console can reach. The
-# cost is CJK: see TOOLS_CASCADIA_VERSION in native/pins.env for the codepoint
-# counts, what is probed present and absent, why Mono and static rather than Code
-# and variable, why the hash is computed rather than published, and what stays
-# unverified.
+# **1.3.0 answered that with GNU Unifont, 1.4.0 swapped it for Cascadia Mono, and
+# 1.5.0 ships both — because the question the first two were answering was the
+# wrong question.** Unifont covered everything and is bitmap-derived and ugly;
+# Cascadia is legible and is missing 12 glyphs the TUI draws on every tool-call
+# line. Each release wrote the other's property down as the unavoidable price, on
+# the strength of one claim: "conhost resolves one face with no font linking". The
+# second half of that is false. Per-glyph fallback is GDI's job, not conhost's,
+# Wine implements it, and 1.5.0 uses it: **Cascadia stays the face and Unifont
+# becomes its linked fallback**, so nothing changes for the glyphs Cascadia has and
+# everything it lacks resolves behind it. `PrefixRegistry.fontLink` seeds the link;
+# TOOLS_UNIFONT_VERSION in native/pins.env has the four-hop mechanism read out of
+# `native/wine/dlls/win32u/font.c`, the ordered chain and why it is ordered, the
+# measured union coverage, the five tiers that were measured and the four that were
+# rejected, and what stays unverified.
+#
+# **The one thing font linking does NOT fix, so nobody goes looking for it here.**
+# CJK and emoji now render rather than being tofu, and they are geometrically
+# wrong. conhost has no double-width support at all: `programs/conhost/window.c:725`
+# and `:797` both carry "FIXME: use maximum width for DBCS codepages since some
+# chars take two cells", and the draw loop pins every glyph to
+# `i * console->active->font.width` with `dx[] = font.width` (window.c:483), so a
+# full-width glyph overlaps its neighbour. The buffer model is one cell per
+# character where Windows stores a wide character as two cells with
+# `COMMON_LVB_LEADING_BYTE`/`TRAILING_BYTE`, so a program that thinks a CJK
+# character occupies two columns is mis-aligned before anything is drawn. Fixing
+# that is wide cells in conhost — `write_console`, the buffer model and the
+# renderer — and is out of scope. Emoji are monochrome for a separate reason:
+# Unifont Upper is outlines and Wine's FreeType path has no colour-glyph format.
 #
 # It is in the Tools payload rather than in a component of its own for the reason
 # every other tree is: a container references exactly one component per type, so a
@@ -131,14 +149,14 @@ VERSION="$TOOLS_VERSION"
 # decimal digits — the shipped Git package derives 25500 from "2.55.0.3" that way
 # — so a naive code from a version string like this one lands nowhere useful. It
 # is worth writing down what the derivation actually produces, because the number
-# is not the obvious one: version_code("1.4.0") is 10400, and vessel_version_code
-# multiplies by 100 for the revision, giving 1,040,000. That is BELOW the
-# 1,300,000 already on the device, so a derived code here would be adopted as
+# is not the obvious one: version_code("1.5.0") is 10500, and vessel_version_code
+# multiplies by 100 for the revision, giving 1,050,000. That is BELOW the
+# 1,400,000 already on the device, so a derived code here would be adopted as
 # older than what is installed and this build would change nothing — a scheme
 # that happens to be correct is not a scheme, and this time it would not even
 # happen to be correct.
 #
-# So the code is a literal. 1,400,000 reads as "1.4.0, revision 0" to a human
+# So the code is a literal. 1,500,000 reads as "1.5.0, revision 0" to a human
 # under the same 100-per-part convention the rest of the repo uses, it is
 # comfortably above the shipped Git component's 25500, and it leaves two digits
 # underneath for packaging-only revisions. TOOLS_REVISION is what those digits
@@ -148,27 +166,31 @@ VERSION="$TOOLS_VERSION"
 # **That no-op has two faces, and every contents change walks straight at the
 # second one.** Being above the shipped Git is not enough:
 # WcpInstaller.kt:290-305 skips unpacking any package whose type+versionCode pair
-# the store already holds, and **1.3.0 at 1,300,000 is installed on the device
-# right now**. Swapping the console face under the same code would produce a
-# different .wcp, a different APK, a successful `adb install`, and a container
-# still rendering its console in Unifont — the change invisibly not applied, with
-# `windows\Fonts` holding exactly the file it was told to replace. So the minor
-# moves: TOOLS_VERSION is now 1.4.0. (1.2.0 and 1.3.0 both moved for the same
-# reason one and two steps earlier.)
-VERSION_CODE=1400000
+# the store already holds, and **1.4.0 at 1,400,000 is installed on the device
+# right now**. Adding the two Unifont files back under the same code would produce
+# a different .wcp, a different APK, a successful `adb install`, and a container
+# whose `windows\Fonts` still holds Cascadia alone — so the SystemLink value the
+# seed writes would name two files that are not registered, every entry would be
+# dropped with a `TRACE` line (win32u/font.c:2076), and the console would render
+# exactly as it does today. A font-linking change is the worst possible candidate
+# for this no-op, because a chain that silently degrades to its base font is what
+# the design does on purpose when a file is missing. So the minor moves:
+# TOOLS_VERSION is now 1.5.0. (1.2.0, 1.3.0 and 1.4.0 all moved for the same
+# reason one, two and three steps earlier.)
+VERSION_CODE=1500000
 [ "${TOOLS_REVISION:-0}" = 0 ] || die "TOOLS_REVISION is ${TOOLS_REVISION}, but
-     VERSION_CODE above is the literal 1400000 and does not read it. Either fold
-     the revision into that literal by hand (1400000 + revision) or put the
+     VERSION_CODE above is the literal 1500000 and does not read it. Either fold
+     the revision into that literal by hand (1500000 + revision) or put the
      derivation back — silently ignoring it is how a rebuild ships under a code
      the store already has and installs nothing."
 # The floor is what is actually installed, not the oldest thing that ever was.
 # It used to be the shipped Git component's 25500, then Tools 1.1.0's 1,100,000,
-# then 1.2.0's 1,200,000; Tools 1.3.0 at 1,300,000 has since been installed on the
-# device, so that is the number a new build has to clear. Anything at or under it
-# is adopted as no newer than what is there and the build looks exactly like a
-# package that did not install.
-[ "$VERSION_CODE" -gt 1300000 ] || die "version code $VERSION_CODE is not above
-     Tools 1.3.0's 1300000, which is installed on the device, so
+# then 1.2.0's 1,200,000, then 1.3.0's 1,300,000; Tools 1.4.0 at 1,400,000 has
+# since been installed on the device, so that is the number a new build has to
+# clear. Anything at or under it is adopted as no newer than what is there and the
+# build looks exactly like a package that did not install.
+[ "$VERSION_CODE" -gt 1400000 ] || die "version code $VERSION_CODE is not above
+     Tools 1.4.0's 1400000, which is installed on the device, so
      WcpInstaller would skip unpacking it and adoptLatest would refuse to move a
      container's Tools reference forward — this build would install nothing.
      See the version-code note in build/common.sh."
@@ -241,6 +263,17 @@ CASCADIA_ARCHIVE="CascadiaCode-$TOOLS_CASCADIA_VERSION.zip"
 CASCADIA_URL="https://github.com/microsoft/cascadia-code/releases/download/v$TOOLS_CASCADIA_VERSION/$CASCADIA_ARCHIVE"
 CASCADIA_MEMBER="ttf/static/CascadiaMono-Regular.ttf"
 CASCADIA_FONT="$(basename "$CASCADIA_MEMBER")"
+
+# GNU Unifont, the fallback tier. Two files from one release directory on
+# ftp.gnu.org, and no architecture in either name — a font is data.
+#
+# `.otf` and not `.ttf`: 17.0.05 ships an OTF build only. unifoundry's
+# `font-builds/*.ttf` paths 404 for this release, and there is nothing to work
+# around — Wine hands every file in `windows\Fonts` to FreeType without looking at
+# the extension (win32u/font.c `load_directory_fonts`), and FreeType reads CFF.
+UNIFONT_BASE_URL="https://ftp.gnu.org/gnu/unifont/unifont-$TOOLS_UNIFONT_VERSION"
+UNIFONT_ARCHIVE="unifont-$TOOLS_UNIFONT_VERSION.otf"
+UNIFONT_UPPER_ARCHIVE="unifont_upper-$TOOLS_UNIFONT_VERSION.otf"
 
 # Downloads live in the work volume, not the repo: ~400 MB that a re-run should
 # not fetch again, and nothing here belongs in a bind mount. The JDK and
@@ -316,6 +349,8 @@ fetch_pinned "$PWSH_URL"   "$TOOLS_PWSH_SHA256"
 fetch_pinned "$JAVA_URL"   "$TOOLS_JAVA_SHA256"
 fetch_pinned "$GET_PIP_URL" "$TOOLS_GET_PIP_SHA256"
 fetch_pinned "$CASCADIA_URL" "$TOOLS_CASCADIA_SHA256"
+fetch_pinned "$UNIFONT_BASE_URL/$UNIFONT_ARCHIVE"       "$TOOLS_UNIFONT_SHA256"
+fetch_pinned "$UNIFONT_BASE_URL/$UNIFONT_UPPER_ARCHIVE" "$TOOLS_UNIFONT_UPPER_SHA256"
 
 STAGE="$WORK_DIR/stage-$COMPONENT"
 rm -rf "$STAGE"
@@ -556,8 +591,14 @@ ok "Java: $(find "$STAGE/Java" -type f | wc -l) file(s)"
 
 # --- Fonts -------------------------------------------------------------------
 #
-# One face, flat in `Fonts/`: Cascadia Mono, extracted out of Microsoft's
-# all-variants zip.
+# Three faces, flat in `Fonts/`: Cascadia Mono extracted out of Microsoft's
+# all-variants zip, plus the two GNU Unifont files copied in whole.
+#
+# **Cascadia is the console face and the Unifonts are what it falls back to**, and
+# the difference between those two roles is entirely in the registry rather than
+# here — the seed names Cascadia in `HKCU\Console\FaceName` and names the Unifont
+# *files* in the SystemLink chain. This block's obligation is that the three files
+# land under the exact names the seed spells, which is asserted below.
 #
 # **The family name is asserted, not assumed, and that assertion is the whole
 # point of this block.** PrefixRegistry.consoleColours seeds
@@ -641,17 +682,95 @@ CASCADIA_FAMILY="$(sfnt_family_name "$STAGE/Fonts/$CASCADIA_FONT")" \
      platform 3 / name ID 1 read on 2026-08-17."
 info "Fonts/$CASCADIA_FONT: family '$CASCADIA_FAMILY' (seeded as HKCU\\Console\\FaceName)"
 
+# --- Unifont, the fallback tier ---
+#
+# Copied whole and not unpacked — these are the fonts, not archives containing
+# them.
+log "staging fonts: GNU Unifont $TOOLS_UNIFONT_VERSION (fallback tier)"
+cp "$CACHE/$UNIFONT_ARCHIVE"       "$STAGE/Fonts/$UNIFONT_ARCHIVE"
+cp "$CACHE/$UNIFONT_UPPER_ARCHIVE" "$STAGE/Fonts/$UNIFONT_UPPER_ARCHIVE"
+
+# **The filenames are asserted against pins.env, and this is the assertion that
+# matters most in this block.** `find_face_from_filename` matches on the *basename*
+# of a registered font (win32u/font.c:879-893), so the SystemLink value
+# PrefixRegistry writes has to spell these two names exactly. An entry that does not
+# resolve is dropped with a `TRACE` line and nothing else (font.c:2076), which means
+# bumping TOOLS_UNIFONT_VERSION would stage `unifont-<new>.otf`, leave the seed
+# pointing at the old name, and silently lose the whole fallback tier with a green
+# build and a payload that looks right. pins.env spells the names the seed uses as
+# literals for exactly this comparison.
+[ "$UNIFONT_ARCHIVE" = "$TOOLS_FONTLINK_UNIFONT_FILE" ] || die "this build stages
+     Fonts/$UNIFONT_ARCHIVE, but native/pins.env pins
+     TOOLS_FONTLINK_UNIFONT_FILE='$TOOLS_FONTLINK_UNIFONT_FILE', which is the name
+     PrefixRegistry.FONT_LINK_CHAIN writes into the SystemLink value. Wine matches
+     linked fonts by filename, and a name that does not resolve is dropped with a
+     TRACE line and nothing else — the console would render in Cascadia alone with
+     no error anywhere. Update both, and PrefixRegistry.FONT_LINK_CHAIN with them."
+[ "$UNIFONT_UPPER_ARCHIVE" = "$TOOLS_FONTLINK_UNIFONT_UPPER_FILE" ] || die "this
+     build stages Fonts/$UNIFONT_UPPER_ARCHIVE, but native/pins.env pins
+     TOOLS_FONTLINK_UNIFONT_UPPER_FILE='$TOOLS_FONTLINK_UNIFONT_UPPER_FILE'. See
+     the assertion above; the same silent failure applies to plane 1."
+
+UNIFONT_FAMILY="$(sfnt_family_name "$STAGE/Fonts/$UNIFONT_ARCHIVE")" \
+  || die "could not read the family name out of $UNIFONT_ARCHIVE"
+[ "$UNIFONT_FAMILY" = "$TOOLS_UNIFONT_FAMILY" ] || die "$UNIFONT_ARCHIVE says its
+     family name is
+       '$UNIFONT_FAMILY'
+     but native/pins.env pins TOOLS_UNIFONT_FAMILY='$TOOLS_UNIFONT_FAMILY'. The seed
+     links this file by *filename* rather than by family, so a family rename is not
+     itself fatal — it is asserted because an upstream change to the name table is
+     exactly the kind of thing that should stop a build rather than be found on a
+     device."
+info "Fonts/$UNIFONT_ARCHIVE: family '$UNIFONT_FAMILY' (BMP fallback, linked)"
+
+# **`unifont_upper` is a SECOND FAMILY, not a style of the first**, and that is
+# worth asserting rather than assuming: 'Unifont Upper' is what its name table
+# says. It matters because both files are in the same SystemLink chain and
+# `find_face_from_filename` resolves each to a family — two files claiming one
+# family would let GDI resolve a lookup to the plane-1 file, which covers exactly 1
+# BMP codepoint (measured).
+UNIFONT_UPPER_FAMILY="$(sfnt_family_name "$STAGE/Fonts/$UNIFONT_UPPER_ARCHIVE")" \
+  || die "could not read the family name out of $UNIFONT_UPPER_ARCHIVE"
+[ "$UNIFONT_UPPER_FAMILY" = "$TOOLS_UNIFONT_UPPER_FAMILY" ] || die "$UNIFONT_UPPER_ARCHIVE
+     says its family name is
+       '$UNIFONT_UPPER_FAMILY'
+     but native/pins.env pins
+     TOOLS_UNIFONT_UPPER_FAMILY='$TOOLS_UNIFONT_UPPER_FAMILY'."
+[ "$UNIFONT_UPPER_FAMILY" != "$UNIFONT_FAMILY" ] || die "$UNIFONT_UPPER_ARCHIVE
+     reports the same family name as the base font ('$UNIFONT_UPPER_FAMILY'). Two
+     files claiming one family is one family with two faces, and GDI would then be
+     free to resolve a lookup to the plane-1 file, which covers 1 BMP codepoint.
+     Upstream has always shipped these as separate families; if that changed, the
+     SystemLink chain needs rethinking rather than patching."
+[ "$UNIFONT_UPPER_FAMILY" != "$TOOLS_CASCADIA_FAMILY" ] || die "$UNIFONT_UPPER_ARCHIVE
+     reports the same family name as the console face ('$TOOLS_CASCADIA_FAMILY').
+     The SystemLink value is keyed on that family name, so this would make a
+     fallback font its own base font."
+info "Fonts/$UNIFONT_UPPER_ARCHIVE: family '$UNIFONT_UPPER_FAMILY' (planes 1-15, linked)"
+
 # **No verify_pe_arm64 here and nothing to verify.** A font is data, not code —
 # there is no IMAGE_FILE_HEADER to read and no architecture to get wrong. What
 # stands in for that check is the sfnt tag, because a truncated download or an
 # HTML error page saved under a `.ttf` name would otherwise reach the device as a
-# font Wine silently declines to register. `00010000` is the TrueType tag, which is
-# what taking the `ttf/` tree rather than `otf/` means; Unifont was `OTTO` (CFF)
-# and the same check caught the same class of failure there.
+# font Wine silently declines to register — and a fallback font that fails to
+# register is the one failure in this whole change that produces no symptom at all
+# beyond the glyphs it was added for still being missing.
+#
+# The two tags differ because the two sources do: `00010000` is TrueType, which is
+# what taking Cascadia's `ttf/` tree rather than `otf/` means, and `OTTO` is the
+# CFF-outline tag, which is what "17.0.05 is an OTF-only release" means for Unifont.
 tag="$(sfnt_tag "$STAGE/Fonts/$CASCADIA_FONT")"
 [ "$tag" = "00010000" ] || die "Fonts/$CASCADIA_FONT does not start with the sfnt
      tag 00010000 (got '$tag'). 4f54544f is 'OTTO', i.e. a CFF font from the otf/
      tree; 74727565 is 'true'; anything else means this is not a font at all."
+for f in "$UNIFONT_ARCHIVE" "$UNIFONT_UPPER_ARCHIVE"; do
+  tag="$(sfnt_tag "$STAGE/Fonts/$f")"
+  # 4f54544f is 'OTTO' in hex — sfnt_tag returns hex rather than a string because
+  # the TrueType tag contains NULs and a shell variable cannot hold them.
+  [ "$tag" = "4f54544f" ] || die "Fonts/$f does not start with the sfnt tag OTTO
+     (got '$tag'). 17.0.05 is an OTF/CFF release; 00010000 would mean a TrueType
+     build arrived instead, and anything else means this is not a font at all."
+done
 ok "Fonts: $(find "$STAGE/Fonts" -type f | wc -l) file(s), $(du -sh "$STAGE/Fonts" | cut -f1)"
 
 # --- Provenance --------------------------------------------------------------
@@ -666,7 +785,7 @@ ok "Fonts: $(find "$STAGE/Fonts" -type f | wc -l) file(s), $(du -sh "$STAGE/Font
 # way, and `builtBy` says plainly what happened, as the hand-made Git package it
 # replaces already did.
 #
-# One version per upstream tree, because "1.3.0" answers nothing anyone would
+# One version per upstream tree, because "1.5.0" answers nothing anyone would
 # ask of this package.
 #
 # `targetDesc` states the mixture rather than rounding it to "ARM64", because the
@@ -681,8 +800,8 @@ write_tools_provenance() {
   "target": "arm64",
   "targetDesc": "ARM64 Windows binaries, run natively under ARM64EC; Git's MSYS2 layer (usr/bin, msys-2.0.dll) is x86-64 and runs under FEX, no ARM64 port existing; Fonts/ is architecture-independent data",
   "sourceRepo": "upstream release archives; see native/pins.env",
-  "sourceRef": "git $TOOLS_GIT_VERSION, python $TOOLS_PYTHON_VERSION, node $TOOLS_NODE_VERSION, pwsh $TOOLS_PWSH_VERSION, temurin jdk $TOOLS_JAVA_VERSION, cascadia mono $TOOLS_CASCADIA_VERSION",
-  "sourceSha": "$GIT_ARCHIVE $TOOLS_GIT_SHA256; $PYTHON_ARCHIVE $TOOLS_PYTHON_SHA256; $NODE_ARCHIVE $TOOLS_NODE_SHA256; $PWSH_ARCHIVE $TOOLS_PWSH_SHA256; $JAVA_ARCHIVE $TOOLS_JAVA_SHA256; get-pip.py $TOOLS_GET_PIP_SHA256; $CASCADIA_ARCHIVE $TOOLS_CASCADIA_SHA256 (computed, GitHub publishes no checksum list; $CASCADIA_MEMBER is the only member shipped)",
+  "sourceRef": "git $TOOLS_GIT_VERSION, python $TOOLS_PYTHON_VERSION, node $TOOLS_NODE_VERSION, pwsh $TOOLS_PWSH_VERSION, temurin jdk $TOOLS_JAVA_VERSION, cascadia mono $TOOLS_CASCADIA_VERSION, gnu unifont $TOOLS_UNIFONT_VERSION",
+  "sourceSha": "$GIT_ARCHIVE $TOOLS_GIT_SHA256; $PYTHON_ARCHIVE $TOOLS_PYTHON_SHA256; $NODE_ARCHIVE $TOOLS_NODE_SHA256; $PWSH_ARCHIVE $TOOLS_PWSH_SHA256; $JAVA_ARCHIVE $TOOLS_JAVA_SHA256; get-pip.py $TOOLS_GET_PIP_SHA256; $CASCADIA_ARCHIVE $TOOLS_CASCADIA_SHA256 (computed, GitHub publishes no checksum list; $CASCADIA_MEMBER is the only member shipped); $UNIFONT_ARCHIVE $TOOLS_UNIFONT_SHA256 (computed, GNU publishes no checksum list); $UNIFONT_UPPER_ARCHIVE $TOOLS_UNIFONT_UPPER_SHA256 (computed)",
   "cpuFlags": "none",
   "ndk": "n/a",
   "apiLevel": "n/a",
@@ -695,12 +814,12 @@ write_tools_provenance
 log "packaging"
 python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Tools \
-  --name "Tools $VERSION — Git $TOOLS_GIT_VERSION, Python $TOOLS_PYTHON_VERSION, Node $TOOLS_NODE_VERSION, PowerShell $TOOLS_PWSH_VERSION, JDK $TOOLS_JAVA_VERSION, Cascadia Mono $TOOLS_CASCADIA_VERSION (arm64)" \
+  --name "Tools $VERSION — Git $TOOLS_GIT_VERSION, Python $TOOLS_PYTHON_VERSION, Node $TOOLS_NODE_VERSION, PowerShell $TOOLS_PWSH_VERSION, JDK $TOOLS_JAVA_VERSION, Cascadia Mono $TOOLS_CASCADIA_VERSION + Unifont $TOOLS_UNIFONT_VERSION (arm64)" \
   --version "$VERSION" \
   --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
-  --description "Git, Python, Node.js, PowerShell 7 and the Temurin JDK as ARM64 Windows binaries, installed into C:\\Program Files\\{Git,Python,Node,PowerShell,Java}, plus Cascadia Mono into C:\\Windows\\Fonts as the console face — the prefix shipped with no fonts at all, so box-drawing glyphs came out as boxes. It replaces GNU Unifont, which fixed the boxes and was illegible; the trade is no CJK in a console. Git's MSYS2 shell layer is x86-64; no ARM64 port of msys-2.0 exists." \
+  --description "Git, Python, Node.js, PowerShell 7 and the Temurin JDK as ARM64 Windows binaries, installed into C:\\Program Files\\{Git,Python,Node,PowerShell,Java}, plus three faces into C:\\Windows\\Fonts — the prefix shipped with no fonts at all, so box-drawing glyphs came out as boxes. Cascadia Mono is the console face and GNU Unifont is what it falls back to per glyph through GDI font linking, so the console is legible where Cascadia has the glyph and never tofu where it does not. 1.3.0 shipped Unifont alone and 1.4.0 Cascadia alone; neither had to choose. Git's MSYS2 shell layer is x86-64; no ARM64 port of msys-2.0 exists." \
   --out "$DIST_DIR/$COMPONENT-$VERSION-arm64.wcp"
 
 ok "dist/$COMPONENT-$VERSION-arm64.wcp"

@@ -2,6 +2,7 @@ package app.vessel.core
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -178,12 +179,21 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(30, PrefixRegistry.SEED_VERSION)
+        assertEquals(31, PrefixRegistry.SEED_VERSION)
+        // 31 added [fontLink], which is the first key the seed has gained since 23
+        // and the first REG_MULTI_SZ it has ever written. It retires the premise
+        // seeds 29 and 30 shared: each swapped one console face for another because
+        // "conhost resolves one face with no font linking", and the second half of
+        // that is false -- per-glyph fallback is GDI's and Wine implements it. So
+        // `FaceName` stays `Cascadia Mono` and this key names what it falls back to,
+        // Unifont last so nothing is ever tofu. Measured: Cascadia was missing
+        // exactly 12 glyphs the TUI draws, and the chain covers all 12.
         // 30 rewrote [consoleColours] twice and added no key. The face moved from
         // `Unifont` to `Cascadia Mono`, Tools 1.4.0 having swapped the payload -- a
         // trade, not a fix: Unifont's box-drawing glyphs did render on the device and
-        // it is bitmap-derived and illegible, and the cost of the swap is no CJK in a
-        // console. The palette moved because `patches/wine/0052` now quantises
+        // it is bitmap-derived and illegible, and the cost of the swap was no CJK in
+        // a console, which is what 31 takes back. The palette moved because
+        // `patches/wine/0052` now quantises
         // 38;5;n and 38;2;r;g;b to the sixteen console colours, and the device's
         // vt-trace.log has Claude Code emitting 297 such sequences whose commonest,
         // 38;5;238, is RGB 68,68,68 and lands on index 8 -- which seed 26 had made
@@ -220,8 +230,11 @@ class PrefixRegistryTest {
         // `FaceName` to [consoleColours]: `HKCU\Console` was already in the seed
         // carrying the palette, and the console font belongs on the same key
         // conhost reads everything else from. Nor with 30, which changed that key's
-        // face and grew its palette from two entries to sixteen.
-        assertEquals(18, PrefixRegistry.seed.size)
+        // face and grew its palette from two entries to sixteen. **31 does move it**,
+        // to nineteen: [fontLink] is a new key under HKLM and not a value on one the
+        // seed already had, because `system_link_keyW` names that exact path
+        // (`win32u/font.c:107-118`) and nothing else in the seed lives there.
+        assertEquals(19, PrefixRegistry.seed.size)
     }
 
     @Test
@@ -248,6 +261,130 @@ class PrefixRegistryTest {
         assertFalse(rendered.contains("FontFamily"))
         // Same key as the palette, because it is the same key conhost reads.
         assertTrue(rendered.contains("""[HKEY_CURRENT_USER\Console]"""))
+    }
+
+    @Test
+    fun `a REG_MULTI_SZ renders as hex(7) with one byte per character`() {
+        // **The bytes are pinned rather than recomputed, because that is the only
+        // way this test can fail for the right reason.** A UTF-16LE byte run is
+        // unreadable by eye, an off-by-one in the terminators is invisible, and the
+        // symptom of either is a font that quietly does not link -- Wine drops an
+        // unresolvable SystemLink entry with a TRACE line and nothing else
+        // (`win32u/font.c:2076`). Asserting against a re-derivation of the same
+        // logic would pass for a renderer that is wrong in exactly the way this
+        // guards against.
+        //
+        // `a.ttf` is 61,2e,74,74,66 and `b.otf` is 62,2e,6f,74,66; the three `00`s
+        // are this entry's terminator, that entry's terminator, and the one that
+        // ends the sequence.
+        val value = RegistryValue.multiSz("Base Face", listOf("a.ttf", "b.otf"))
+        val rendered = PrefixRegistry.render(
+            listOf(RegistryKey("""HKEY_LOCAL_MACHINE\Software\Test""", listOf(value))),
+        )
+        assertTrue(
+            rendered.contains(
+                """"Base Face"=hex(7):61,2e,74,74,66,00,62,2e,6f,74,66,00,00""",
+            ),
+        )
+    }
+
+    @Test
+    fun `one byte per character and not UTF-16LE, which the seed's encoding decides`() {
+        // **This is the trap the kind exists to avoid, so it gets its own test.**
+        // `ContainerProvisioner` writes the seed as UTF-8 with no BOM, and
+        // `regproc.c:1044` sets `is_unicode` only on a UTF-16LE BOM -- so the file
+        // takes the narrow path, where `prepare_hex_string_data` widens the bytes
+        // itself with `MultiByteToWideChar(CP_ACP, ...)` (regproc.c:483-495).
+        // Emitting UTF-16LE pairs here would be widened a second time and import as
+        // a chain of one-character filenames: the value would exist, carry type 7,
+        // and link nothing. An interleaved `00` after every character is what that
+        // mistake looks like, so assert it is absent.
+        val value = RegistryValue.multiSz("Base", listOf("ab"))
+        val rendered = PrefixRegistry.render(
+            listOf(RegistryKey("""HKEY_LOCAL_MACHINE\Software\Test""", listOf(value))),
+        )
+        assertTrue(rendered, rendered.contains("hex(7):61,62,00,00"))
+        assertFalse(rendered, rendered.contains("61,00,62,00"))
+    }
+
+    @Test
+    fun `the font-link chain is the exact byte run Wine will walk`() {
+        val rendered = PrefixRegistry.render(listOf(PrefixRegistry.fontLink))
+        // **The value NAME is the base font family**, which is how
+        // `load_system_links` keys a link list (`win32u/font.c:2050-2079`), so it
+        // has to be the same string `HKCU\Console\FaceName` carries or the chain
+        // hangs off a family nothing selects.
+        assertTrue(rendered, rendered.contains(""""Cascadia Mono"=hex(7):"""))
+        // The whole run, pinned. Decoded, this is
+        // `NotoSansSymbols-Regular-Subsetted.ttf`, `unifont-17.0.05.otf`,
+        // `unifont_upper-17.0.05.otf`, each NUL-terminated, then the NUL that ends
+        // the sequence. The two Unifont names carry a version, which is why
+        // `native/pins.env` spells them as literals and `build/tools.sh` asserts
+        // them against the files it staged.
+        assertTrue(
+            rendered.contains(
+                "hex(7):4e,6f,74,6f,53,61,6e,73,53,79,6d,62,6f,6c,73,2d,52,65,67,75," +
+                    "6c,61,72,2d,53,75,62,73,65,74,74,65,64,2e,74,74,66,00,75,6e,69," +
+                    "66,6f,6e,74,2d,31,37,2e,30,2e,30,35,2e,6f,74,66,00,75,6e,69,66," +
+                    "6f,6e,74,5f,75,70,70,65,72,2d,31,37,2e,30,2e,30,35,2e,6f,74,66," +
+                    "00,00",
+            ),
+        )
+        // `\Registry\Machine\...` in `system_link_keyW` (font.c:107-118), so
+        // HKEY_LOCAL_MACHINE. A per-user copy would be read by nothing.
+        assertTrue(
+            rendered.contains(
+                """[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink]""",
+            ),
+        )
+    }
+
+    @Test
+    fun `the font-link chain ends in Unifont, so nothing is ever tofu`() {
+        // `get_glyph_index_linked` takes the FIRST child with the glyph
+        // (`font.c:3765-3772`), so order is the design and not presentation. Unifont
+        // last is what makes a missing `/system/fonts` file degrade quietly: the
+        // backstop is the tier that ships in the payload and therefore cannot be
+        // absent. Put it anywhere else and it wins glyphs a real typeface would have
+        // drawn better.
+        val chain = PrefixRegistry.FONT_LINK_CHAIN
+        assertEquals("unifont_upper-17.0.05.otf", chain.last())
+        assertEquals("unifont-17.0.05.otf", chain[chain.size - 2])
+        // The device-linked tier comes first, for the same reason.
+        assertEquals("NotoSansSymbols-Regular-Subsetted.ttf", chain.first())
+    }
+
+    @Test
+    fun `every font linked out of system fonts is one the chain falls back to`() {
+        // A font symlinked into `windows\Fonts` that no SystemLink entry names is a
+        // link nothing reaches, and an entry naming a file nothing links is a tier
+        // that silently does not exist. The two lists have to agree on the names,
+        // which are matched by basename (`font.c:879-893`).
+        assertTrue(
+            "linked but not in the chain: " +
+                PrefixRegistry.ANDROID_LINKED_FONTS.filterNot { it in PrefixRegistry.FONT_LINK_CHAIN },
+            PrefixRegistry.FONT_LINK_CHAIN.containsAll(PrefixRegistry.ANDROID_LINKED_FONTS),
+        )
+    }
+
+    @Test
+    fun `a REG_MULTI_SZ refuses what would silently truncate or mis-encode it`() {
+        // An empty entry ends `load_system_links`' walk (`font.c:2056`), so one blank
+        // in the middle discards every entry after it -- exactly the kind of partial
+        // success this codebase keeps finding, so it throws instead.
+        assertThrows(IllegalArgumentException::class.java) {
+            RegistryValue.multiSz("Base", listOf("a.ttf", "", "b.ttf"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            RegistryValue.multiSz("Base", emptyList())
+        }
+        // Non-ASCII would be written in one encoding and read back through
+        // `MultiByteToWideChar(CP_ACP, ...)` in another, and this code does not know
+        // the prefix's ACP. Every entry is a font filename, so the restriction is
+        // free and the alternative is a guess.
+        assertThrows(IllegalArgumentException::class.java) {
+            RegistryValue.multiSz("Base", listOf("unifont-é.otf"))
+        }
     }
 
     @Test

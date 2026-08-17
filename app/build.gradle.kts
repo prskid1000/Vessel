@@ -72,20 +72,30 @@ val bundledPackages = listOf(
     // side-loaded because installing the APK is meant to be the whole of setup,
     // and a developer toolchain that needs a manual pick is one nobody has.
     //
-    // **`Fonts/` arrived in 1.3.0 and 1.4.0 changes what is in it.** Measured on
-    // the device: `prefix/drive_c/windows/Fonts/` held zero files, so Claude Code's
-    // TUI drew every horizontal rule as `□□□□□` — a missing glyph, not a VT
-    // problem. 1.3.0 answered that with GNU Unifont and it worked; 1.4.0 replaces
-    // Unifont with Cascadia Mono, because Unifont is bitmap-derived and illegible
-    // at any size — measured on the device, it works and it is ugly. The trade is
-    // named where it is felt: Cascadia Mono has no CJK, so with one face and no
-    // font linking there is no Chinese, Japanese or Korean in a console at all.
-    // `PrefixRegistry.consoleColours` seeds it as `HKCU\Console\FaceName` and
-    // `SessionRuntime.installToolFonts` copies it in without replacing Wine's font
-    // directory. A font is not a toolchain, but it rides in this payload for the
-    // same structural reason everything else does: a container references exactly
-    // one component per type, so a `Fonts` package published as `Tools` would
-    // replace this one rather than join it.
+    // **`Fonts/` arrived in 1.3.0, and 1.5.0 is the third release to change what is
+    // in it — this time by stopping the swapping.** Measured on the device:
+    // `prefix/drive_c/windows/Fonts/` held zero files, so Claude Code's TUI drew
+    // every horizontal rule as `□□□□□` — a missing glyph, not a VT problem. 1.3.0
+    // answered that with GNU Unifont and it worked and was illegible; 1.4.0 replaced
+    // it with Cascadia Mono, which is legible and missing 12 glyphs the TUI draws on
+    // every tool-call line. Both releases wrote the other's property down as the
+    // price, citing one claim: "conhost resolves one face with no font linking".
+    // Its second half is false — per-glyph fallback is GDI's job rather than
+    // conhost's, and Wine implements it. 1.5.0 therefore ships **three** faces:
+    // Cascadia Mono stays `HKCU\Console\FaceName` and the two Unifont files sit
+    // behind it as its linked fallback, so nothing changes for the glyphs Cascadia
+    // has and everything it lacks resolves. `PrefixRegistry.fontLink` seeds the
+    // chain, `SessionRuntime.installToolFonts` copies the files in without replacing
+    // Wine's font directory, and `SessionRuntime.linkAndroidFonts` symlinks one Noto
+    // face out of the device's `/system/fonts` as a middle tier that costs the
+    // payload nothing. What font linking does *not* buy is geometry: CJK stops being
+    // tofu and becomes mis-positioned, because conhost has no double-width cells at
+    // all, and emoji are monochrome. `PrefixRegistry.fontLink` states both.
+    //
+    // A font is not a toolchain, but it rides in this payload for the same
+    // structural reason everything else does: a container references exactly one
+    // component per type, so a `Fonts` package published as `Tools` would replace
+    // this one rather than join it.
     //
     // **The version in this name is load-bearing and this line has to move with
     // it.** `WcpInstaller.kt:290-305` will not unpack a package whose
@@ -94,27 +104,39 @@ val bundledPackages = listOf(
     // corollary is here: dist/ still holds whatever was built before, so leaving
     // the old name in this list ships a package the new one supersedes.
     //
-    // Still by a wide margin the largest thing in the APK, and 1.4.0 is the first
-    // Tools release that gets *smaller*. Measured off `ls -l dist/` after the
-    // build: the .wcp is 350,261,896 bytes = 334.0 MiB, 11,851 files in the
-    // payload. Against 1.3.0's 350,462,596 = 334.2 MiB and 11,852 files, that is
-    // **-200,700 bytes and one file fewer** — two Unifont OTFs out, one Cascadia
-    // Mono TTF in.
+    // Still by a wide margin the largest thing in the APK. Measured off
+    // `ls -l dist/` after the build: the .wcp is **350,657,988 bytes = 334.4 MiB,
+    // 11,853 files** in the payload. Against 1.4.0's 350,261,896 = 334.0 MiB and
+    // 11,851 files, that is **+396,092 bytes and two files more** — the two Unifont
+    // OTFs coming back beside Cascadia Mono.
     //
-    // The compression is worth writing down because the raw numbers do not
-    // predict it. Unifont's two files were 11,460,416 raw bytes and cost only
-    // 315,196 in the package; Cascadia's one file is 575,912 raw and costs
-    // 114,496, which is 1.4.0 against 1.2.0's font-less 350,147,400. Bitmap-derived
-    // CFF outlines compress about as well as anything in this repo, which is why
-    // dropping 10.9 MB of font recovers 200 KB of APK. (1.1.0, all-x86-64, was
-    // 378,192,180 = 360.7 MiB; the ARM64 archives are smaller across all five
-    // trees, the JDK alone 192.7 MB of download against 205.1 MB.)
+    // The compression is worth writing down because the raw numbers do not predict
+    // it, and because the same two files have now been weighed twice with different
+    // answers. Unifont's 11,460,416 raw bytes cost 315,196 packed in 1.3.0 (334.2
+    // MiB, 11,852 files, against 1.2.0's font-less 350,147,400) and cost 396,092
+    // here — same files, 80,896 bytes more, because they are now xz'd in a stream
+    // that already holds Cascadia rather than one that holds no font at all.
+    // Cascadia's one file was 575,912 raw for 114,496 packed. So full-BMP-and-beyond
+    // coverage costs about 0.11% of this package, which is the whole reason there is
+    // no case for subsetting Unifont: a subset would save almost nothing and would
+    // destroy the one property that makes it worth shipping, that arbitrary text
+    // never comes out empty. (1.1.0, all-x86-64, was 378,192,180 = 360.7 MiB; the
+    // ARM64 archives are smaller across all five trees, the JDK alone 192.7 MB of
+    // download against 205.1 MB.)
+    //
+    // **The Noto tier is not in this number and costs nothing.**
+    // `SessionRuntime.linkAndroidFonts` symlinks one 708,968-byte face out of the
+    // device's own `/system/fonts`, so the middle tier of the fallback chain adds
+    // zero bytes to the payload and zero to the APK. 36 MB of Noto was measured on
+    // the device and deliberately left there — see `PrefixRegistry.FONT_LINK_CHAIN`
+    // for which tiers were rejected and why, including that Microsoft's own console
+    // fonts are proprietary and cannot be redistributed here at all.
     //
     // **The APK figure is not re-measured, because this change did not build
     // one.** The last `sideload/debug` APK on disk is 602,289,082 bytes = 574.4
     // MiB and it contains 1.1.0 — bigger than the 495.5 MiB this comment used to
     // record, from other components growing, not this one. Swapping 1.1.0 for
-    // 1.4.0 subtracts 27,930,284 bytes of asset, so ~547 MiB is arithmetic and
+    // 1.5.0 subtracts 27,534,192 bytes of asset, so ~548 MiB is arithmetic and
     // not a measurement; replace it with a real number the next time an APK is
     // built. That is the deliberate trade, and it is felt on every download,
     // every install and every first-run unpack; drop this line to take all of it
@@ -125,7 +147,7 @@ val bundledPackages = listOf(
     // existed. The rule that came out of it is the one applied above: a number is
     // labelled measured only where something was read off a file, and labelled
     // arithmetic where it was not.)
-    "tools-1.4.0-arm64.wcp",
+    "tools-1.5.0-arm64.wcp",
 )
 
 /** Copies the bill of materials into a generated assets root. */

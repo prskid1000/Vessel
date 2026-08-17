@@ -2381,6 +2381,15 @@ class SessionRuntime @Inject constructor(
             .onFailure {
                 log.line(LogSource.VESSEL, LogLevel.WARN, "tools: fonts: ${it.message}")
             }
+
+        // The other half of the font chain, and it is not in the payload at all —
+        // see [linkAndroidFonts]. Wrapped separately from [installToolFonts]
+        // because the two fail for unrelated reasons: this one depends on what
+        // Android put in `/system/fonts`, which varies by version and OEM.
+        runCatching { linkAndroidFonts(layout, log) }
+            .onFailure {
+                log.line(LogSource.VESSEL, LogLevel.WARN, "tools: system fonts: ${it.message}")
+            }
     }
 
     /**
@@ -2402,18 +2411,30 @@ class SessionRuntime @Inject constructor(
      * already parses the escape sequences. What conhost had to choose from was
      * the Wine component's `.fon` bitmap faces and non-monospace TTFs, plus the
      * two Android contributes from `/system/fonts` (`CutiveMono.ttf`,
-     * `DroidSansMono.ttf`), none of which has a U+2500 block. Tools 1.4.0 ships
-     * Cascadia Mono, and [PrefixRegistry.consoleColours] names it in
-     * `HKCU\Console\FaceName`.
+     * `DroidSansMono.ttf`), none of which has a U+2500 block. Tools 1.5.0 ships
+     * Cascadia Mono plus the two Unifont files behind it;
+     * [PrefixRegistry.consoleColours] names the face in `HKCU\Console\FaceName` and
+     * [PrefixRegistry.fontLink] names what it falls back to per glyph.
      *
-     * **One file, and the singular is the point rather than an accident of the
-     * current payload.** Tools 1.3.0 shipped two — `unifont` and `unifont_upper`
-     * — and this function looped. That was already coverage nothing could reach:
-     * conhost uses a single face and does no font linking, so a second file in
-     * this directory is only ever visible to some other guest program. 1.4.0 ships
-     * the console face and nothing else, so this installs one file and asserts
-     * that is what it was handed. If a payload ever wants more than a console face
-     * in here, that is a deliberate change and this is where it argues for itself.
+     * **Every file in `Fonts/`, and the plural is back on purpose.** 1.3.0 shipped
+     * two files and this function looped; 1.4.0 shipped one and this function
+     * asserted the singular, on the grounds that "conhost uses a single face and
+     * does no font linking, so a second file is only ever visible to some other
+     * guest program". The second half of that was wrong. Per-glyph fallback is
+     * GDI's job rather than conhost's and Wine implements it, so a second file in
+     * this directory is reachable from the console the moment
+     * `PrefixRegistry.fontLink` names it. 1.5.0 therefore ships three — Cascadia
+     * Mono as the face, `unifont` and `unifont_upper` behind it — and this copies
+     * whatever it is handed rather than deciding how many there should be. The
+     * count assertion is gone because it would now be asserting a payload shape
+     * this function has no reason to have an opinion about.
+     *
+     * **The filenames matter and this function must not rename anything.**
+     * `find_face_from_filename` (`win32u/font.c:879-893`) matches a linked font by
+     * the basename of its path, so the names in `Fonts/` are the names
+     * `PrefixRegistry.FONT_LINK_CHAIN` spells. `build/tools.sh` asserts the two
+     * ends against `native/pins.env`; the copy below preserves `font.name`, which
+     * is the third link in that chain.
      *
      * **The version stamp, for the reason [installToolTree] grew one.** Keying
      * "already installed" on the file being present let a container reference a
@@ -2428,12 +2449,14 @@ class SessionRuntime @Inject constructor(
      * so a dotfile in there is a failed `FT_New_Face` and a warning on every
      * process start. One level up is a directory nothing scans.
      *
-     * **Unifont is not deleted from a prefix that already has it**, and that is
-     * deliberate rather than overlooked: this function's whole contract is that it
-     * does not remove things from Wine's directory, and a stale extra face costs
-     * 5 MB and nothing else — `FaceName` names one family and conhost resolves
-     * that one. An upgraded container therefore carries both files and renders in
-     * Cascadia Mono; a fresh one carries one.
+     * **Nothing is ever deleted from Wine's directory**, and that is this
+     * function's whole contract rather than an omission. It is also what makes the
+     * 1.3.0 -> 1.4.0 -> 1.5.0 history harmless: a container that carried Unifont
+     * through 1.3.0 kept the files across 1.4.0's swap, and 1.5.0 now wants them
+     * back. Either way this copies the payload's own files over whatever is there
+     * under the same names, so the bytes in `windows\Fonts` come from the component
+     * the container references and not from an older one that happened to get there
+     * first.
      */
     private fun installToolFonts(
         source: File,
@@ -2451,19 +2474,16 @@ class SessionRuntime @Inject constructor(
             log.line(LogSource.VESSEL, LogLevel.WARN, "tools: $FONTS_PAYLOAD_DIR/ is empty; no font installed")
             return
         }
-        // Exactly one, because `build/tools.sh` extracts exactly one member of
-        // Microsoft's all-variants archive. More than one means the payload changed
-        // shape without this deciding what to do about it, which is worth a line in
-        // the log rather than a silent guess at which file is the console face.
-        val font = fonts.singleOrNull()
-            ?: error(
-                "$FONTS_PAYLOAD_DIR/ holds ${fonts.size} files (${fonts.joinToString(", ") { it.name }}); " +
-                    "the payload is meant to carry exactly one console face"
-            )
-
         val target = File(layout.prefix, FONTS_PREFIX_DIR)
         val stamp = File(layout.prefix, FONTS_VERSION_STAMP)
-        if (File(target, font.name).isFile &&
+        // **Every payload font present, not just one**, and that is what carries a
+        // payload whose file *count* changed. 1.4.0 shipped one face and 1.5.0
+        // ships three, so a prefix stamped 1.4.0 has Cascadia already there; asking
+        // only "is some font present?" would let the stamp be rewritten with the two
+        // Unifonts still missing, and the fallback chain would name files that are
+        // not in the directory — which fails with one TRACE line per entry and
+        // nothing else (`win32u/font.c:2076`).
+        if (fonts.all { File(target, it.name).isFile } &&
             runCatching { stamp.readText().trim() }.getOrNull() == version
         ) {
             log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $FONTS_PREFIX_DIR already installed from $version")
@@ -2473,18 +2493,125 @@ class SessionRuntime @Inject constructor(
         if (!target.isDirectory && !target.mkdirs()) error("could not create ${target.path}")
         // Overwriting, and no staging directory and no rename — the whole
         // difference from [installToolTree]. There is nothing here to swap
-        // atomically: a font is one file, and a partly written one is caught next
-        // launch by the stamp not matching.
-        font.copyTo(File(target, font.name), overwrite = true)
-        // After the copy, so a launch killed mid-copy leaves no stamp claiming a
-        // version the directory does not hold.
+        // atomically: these are individual files, and a partly written one is caught
+        // next launch by the stamp not matching.
+        for (font in fonts) {
+            font.copyTo(File(target, font.name), overwrite = true)
+        }
+        // After every copy, so a launch killed part-way through leaves no stamp
+        // claiming a version the directory does not hold.
         runCatching { stamp.writeText(version) }
 
         log.line(
             LogSource.VESSEL,
             LogLevel.INFO,
-            "tools: ${font.name} into $FONTS_PREFIX_DIR (${font.length()} bytes)",
+            "tools: ${fonts.size} font(s) into $FONTS_PREFIX_DIR " +
+                "(${fonts.joinToString(", ") { "${it.name} ${it.length()}b" }})",
         )
+    }
+
+    /**
+     * Symlink the device's own font files into `windows\Fonts`.
+     *
+     * **The middle tier of `PrefixRegistry.FONT_LINK_CHAIN`, and the only one that
+     * is not in a component.** Android ships a Noto set in [ANDROID_FONTS_DIR] —
+     * measured on the device, 211 files — and one of them earns a place between
+     * Cascadia Mono and Unifont: `NotoSansSymbols-Regular-Subsetted.ttf`, 708,968
+     * bytes and 4,616 codepoints, covering all five spinner glyphs, all five status
+     * marks, and 100% of Box Drawing, Block Elements and Braille. Those are on
+     * Claude Code's screen constantly, and drawing them from real typography rather
+     * than from Unifont's 16x16 bitmap grid is the whole point of the tier.
+     *
+     * **Symlinked and not copied**, which is why this is a separate step from
+     * [installToolFonts]. The files are already on the device; copying would
+     * duplicate them into every container's storage for nothing. Same pattern as
+     * [linkVesselTmp] and [linkVkd3dCache], and the links go into the directory
+     * Wine enumerates rather than beside it, because `load_directory_fonts` is what
+     * registers a font and it hands every non-directory entry in `windows\Fonts` to
+     * FreeType with no extension filter at all. A unix symlink to a file is a
+     * regular file as far as `NtQueryDirectoryFile` is concerned, so a link
+     * registers exactly as a copy would.
+     *
+     * **Missing files are expected, not exceptional, and that is the reason the
+     * chain is ordered the way it is.** `/system/fonts` filenames vary by Android
+     * version and by OEM, so a name that is right on one device is absent on
+     * another. An entry in the SystemLink value that Wine cannot resolve is
+     * discarded with a `TRACE` line and nothing else (`win32u/font.c:2076`), so a
+     * missing file degrades to the next tier automatically — and the last tier is
+     * Unifont, which ships in the payload and therefore cannot be missing. So this
+     * skips what is not there rather than failing, and logs at WARN which ones,
+     * because a device that silently lost this tier should still be diagnosable
+     * from a log.
+     *
+     * **No stamp, unlike [installToolFonts].** There is nothing to be stale: a
+     * symlink either points at the right path or it does not, and the check below is
+     * that comparison. Re-pointing an existing link rather than leaving it is
+     * deliberate — [linkVesselTmp] can skip that because its target never moves,
+     * whereas a link here could have been made by an earlier revision naming a
+     * different source directory.
+     *
+     * **Nothing here is verified on a device.** That these names exist was measured;
+     * that Wine registers a symlinked font, and that the linked glyphs are what
+     * conhost then draws, is read out of `load_directory_fonts` and
+     * `get_glyph_index_linked` and not observed.
+     */
+    private fun linkAndroidFonts(layout: ContainerLayout, log: SessionLog) {
+        val target = File(layout.prefix, FONTS_PREFIX_DIR)
+        if (!target.isDirectory && !target.mkdirs()) error("could not create ${target.path}")
+
+        val absent = mutableListOf<String>()
+        val linked = mutableListOf<String>()
+        for (name in PrefixRegistry.ANDROID_LINKED_FONTS) {
+            val source = File(ANDROID_FONTS_DIR, name)
+            if (!source.isFile) {
+                absent += name
+                continue
+            }
+            val link = File(target, name).toPath()
+            val wanted = source.toPath()
+            runCatching {
+                if (Files.isSymbolicLink(link)) {
+                    if (Files.readSymbolicLink(link) == wanted) return@runCatching
+                    Files.delete(link)
+                } else if (Files.exists(link)) {
+                    // A real file under this name is either a font a guest program
+                    // installed or one a payload copied. Either way it is not ours
+                    // to replace -- this function's contract, like
+                    // [installToolFonts]', is that it does not remove things from
+                    // Wine's directory.
+                    log.line(
+                        LogSource.VESSEL,
+                        LogLevel.WARN,
+                        "tools: $FONTS_PREFIX_DIR/$name is a real file, not a link; left alone",
+                    )
+                    return@runCatching
+                }
+                Files.createSymbolicLink(link, wanted)
+                linked += name
+            }.onFailure {
+                absent += "$name (${it.message})"
+            }
+        }
+
+        if (linked.isNotEmpty()) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "tools: linked ${linked.size} system font(s) into $FONTS_PREFIX_DIR " +
+                    "(${linked.joinToString(", ")})",
+            )
+        }
+        // WARN and not INFO: this is the tier that makes the spinners and ticks look
+        // drawn rather than plotted, and losing it is invisible on screen -- the
+        // glyphs still render, out of Unifont, one tier down.
+        if (absent.isNotEmpty()) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "tools: not in $ANDROID_FONTS_DIR on this device, so the font-link " +
+                    "chain falls through to Unifont for these: ${absent.joinToString(", ")}",
+            )
+        }
     }
 
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
@@ -3267,6 +3394,19 @@ class SessionRuntime @Inject constructor(
          * replaced. `build/tools.sh` creates the payload half and puts exactly one
          * file in it.
          */
+        /**
+         * Android's own font directory, which win32u already reads.
+         *
+         * `freetype_load_fonts` scans `/system/fonts` on Android, so the faces in
+         * here are registered with GDI regardless of this app -- which is how
+         * `CutiveMono.ttf` and `DroidSansMono.ttf` were the two monospace faces
+         * conhost had to choose from before Tools 1.3.0 shipped one. [linkAndroidFonts]
+         * links out of it anyway rather than relying on that scan, because a
+         * SystemLink entry is resolved by filename against fonts registered from
+         * `windows\Fonts` and the two scans are separate.
+         */
+        const val ANDROID_FONTS_DIR = "/system/fonts"
+
         const val FONTS_PAYLOAD_DIR = "Fonts"
 
         /** Wine's own font directory — see [FONTS_PAYLOAD_DIR]. */
