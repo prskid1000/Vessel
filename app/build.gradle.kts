@@ -61,11 +61,16 @@ val bundledPackages = listOf(
     // shape by asking the file which it is, so installing one by hand works.
     "turnip-26.3.0-devel-9c475fc3-icd-canoe.wcp",
     // Git, Python, Node, PowerShell 7 and the Temurin JDK in one payload, all
-    // x86-64 under FEX — see docs/DEVTOOLS.md for why x64 rather than ARM64 (the
-    // wheel and prebuilt ecosystems) and why zips rather than installers
-    // (TODO #17's open .msi failure). Bundled rather than side-loaded because
-    // installing the APK is meant to be the whole of setup, and a developer
-    // toolchain that needs a manual pick is one nobody has.
+    // **ARM64** — so they run natively under Wine ARM64EC rather than through
+    // FEX. The one exception is inside Git: its MSYS2 shell layer
+    // (`usr/bin/bash.exe`, `msys-2.0.dll`) is x86-64 and always will be, msys-2.0
+    // having no ARM64 port, so that half is translated in either build. See
+    // native/pins.env for why 1.2.0 reversed 1.1.0's all-x64 decision — the
+    // wheel-ecosystem argument behind it was counted against PyPI and is false,
+    // and PowerShell x86-64 crashed on the device — and why zips rather than
+    // installers (TODO #17's open .msi failure). Bundled rather than side-loaded
+    // because installing the APK is meant to be the whole of setup, and a
+    // developer toolchain that needs a manual pick is one nobody has.
     //
     // **The version in this name is load-bearing and this line has to move with
     // it.** `WcpInstaller.kt:290-305` will not unpack a package whose
@@ -74,18 +79,29 @@ val bundledPackages = listOf(
     // corollary is here: dist/ still holds whatever was built before, so leaving
     // the old name in this list ships a package the new one supersedes.
     //
-    // 1.1.0 adds PowerShell (~101 MiB of archive) and the JDK (~196 MiB), which
-    // is roughly a tripling of the component and makes it by a wide margin the
-    // largest thing in the APK. Measured from the artifacts themselves:
-    // the .wcp is 360.7 MiB against 1.0.0's 126.2 MiB, and the APK goes from
-    // 261 MiB to 495.5 MiB. That is the deliberate trade, and it is felt on
-    // every download, every install and every first-run unpack; drop this line
-    // to take all of it back.
+    // Still by a wide margin the largest thing in the APK, and 1.2.0 is slightly
+    // smaller than 1.1.0 rather than larger: the ARM64 archives are smaller than
+    // their x86-64 counterparts across all five trees (the JDK alone is 192.7 MB
+    // of download against 205.1 MB). Measured off `ls -l dist/`: the .wcp is
+    // 350,147,400 bytes = 333.9 MiB, against 1.1.0's 378,192,180 = 360.7 MiB.
+    // 11,850 files in the payload.
     //
-    // (An earlier revision of this comment said 425 MiB and 566 MiB and called
-    // them measured. They were not — the numbers were written before the
-    // package existed. Both are now read off `ls -l dist/` and the built APK.)
-    "tools-1.1.0-x64.wcp",
+    // **The APK figure is not re-measured, because this change did not build
+    // one.** The last `sideload/debug` APK on disk is 602,289,082 bytes = 574.4
+    // MiB and it contains 1.1.0 — bigger than the 495.5 MiB this comment used to
+    // record, from other components growing, not this one. Swapping 1.1.0 for
+    // 1.2.0 subtracts 28,044,780 bytes of asset, so ~547 MiB is arithmetic and
+    // not a measurement; replace it with a real number the next time an APK is
+    // built. That is the deliberate trade, and it is felt on every download,
+    // every install and every first-run unpack; drop this line to take all of it
+    // back.
+    //
+    // (An earlier revision of this comment said 425 MiB and 566 MiB for 1.1.0 and
+    // called them measured. They were not — they were written before the package
+    // existed. The rule that came out of it is the one applied above: a number is
+    // labelled measured only where something was read off a file, and labelled
+    // arithmetic where it was not.)
+    "tools-1.2.0-arm64.wcp",
 )
 
 /** Copies the bill of materials into a generated assets root. */

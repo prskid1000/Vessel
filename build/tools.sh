@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Package Git, Python, Node.js, PowerShell 7 and a JDK as one x86-64 `Tools`
+# Package Git, Python, Node.js, PowerShell 7 and a JDK as one ARM64 `Tools`
 # component.
 #
-#   ./build/tools.sh            # -> dist/tools-<ver>-x64.wcp
+#   ./build/tools.sh            # -> dist/tools-<ver>-arm64.wcp
 #
 # **Nothing here is compiled.** Every byte of the payload is an upstream release
 # archive, verified against a sha256 in native/pins.env and unpacked. That makes
@@ -18,13 +18,49 @@
 # whichever has the higher code, `installTools()` copies that one, and the other
 # silently disappears. docs/DEVTOOLS.md §7.2 and §7.3 have the full walk-through.
 #
-# **Why x86-64 for all three, Git included.** The shipped Git component was the
-# ARM64 build; this replaces it. The reason is the package ecosystems rather than
-# the binaries: PyPI resolves far more `win_amd64` wheels than `win_arm64`, npm
-# ships `win32-x64` binaries for packages that have no ARM64 build at all, and
-# there is no C compiler in the prefix to build an sdist when a wheel is missing.
-# See native/pins.env for the rest of the reasoning, including what Git's ARM64
-# build actually was (half of it was x86-64 already).
+# **Why ARM64 for all five, and why this is a revert.** Vessel runs Wine ARM64EC
+# on Android, so an ARM64 Windows PE runs natively and an x86-64 one is
+# translated by FEX. 1.1.0 built the whole payload x86-64 on a belief about the
+# wheel ecosystem — "PyPI resolves far more `win_amd64` wheels than `win_arm64`"
+# — and that belief has now been measured false. Counted against PyPI on
+# 2026-08-17, wheels per release:
+#
+#     numpy 2.5.2        arm64 6   amd64 6
+#     pandas 3.0.5       arm64 5   amd64 5
+#     pillow 12.3.0      arm64 8   amd64 9
+#     lxml 6.1.1         arm64 7   amd64 9
+#     pydantic-core 2.48 arm64 7   amd64 9
+#     cryptography 50.0  arm64 0   amd64 4
+#
+# That is parity, not a gap. **cryptography is the one real cost and it is named
+# here rather than discovered later**: it publishes no `win_arm64` wheel at all,
+# so `pip install cryptography` fails outright on this payload — there is no C
+# compiler in the prefix to build the sdist. It fails loudly at install time
+# rather than running slowly, which is the better of the two failures but is
+# still a real thing a user will hit. Git's tree was ARM64 in the component that
+# originally shipped (dist/git-2.55.0.3-arm64.wcp); the all-x64 decision reversed
+# it and this reverses that.
+#
+# **The measured failure that drives it: PowerShell x86-64 crashes.** Two
+# unhandled `c0000005` access violations at 0x6f9d20dbec and 0x6f9d22ad05 the
+# moment .NET does real work — same region, and inside no module Wine logged,
+# which places them in FEX's JIT buffer rather than in any Wine DLL. Not a
+# connectivity problem: `ping google.com` from inside the same prefix resolves
+# DNS and gets 4/4 replies. So the fault is .NET-under-FEX. ARM64 does not work
+# around that, it removes the translation layer the fault lives in.
+#
+# **Unverified.** Nothing in this payload has been run on the device as ARM64.
+# That the crash goes away is the expectation behind the change, not a result.
+#
+# **Git is mixed-architecture either way, and this is not a caveat about the
+# switch — it is true of both builds.** Measured by reading
+# IMAGE_FILE_HEADER.Machine off the ARM64 tree: `cmd/git.exe`, `bin/git.exe` and
+# `clangarm64/bin/git.exe` are 0xAA64, while `usr/bin/bash.exe`, `usr/bin/ls.exe`
+# and `usr/bin/msys-2.0.dll` are 0x8664 — there is no ARM64 port of msys-2.0, so
+# the shell layer is translated in both variants. What ARM64 buys is a native
+# `git.exe`, which is the binary anything actually invokes. It does NOT make Git
+# Bash native and it does not touch the `fork()` emulation TerminalProfile.kt:56-70
+# measured pegging a core at 98%; PowerShell is still the answer to that.
 #
 # **Layout: Git/, Python/, Node/, Pwsh/, Java/ at the payload root.** The shipped
 # Git package put its tree flat at the root, which works exactly as long as there
@@ -43,12 +79,14 @@
 # had nothing behind it but Wine's stub `powershell.exe`. TerminalProfile.kt:38-45
 # already wrote down that portable PowerShell 7 was the answer; this is that.
 #
-# **The JDK is the one piece here nobody has watched run.** It is x86-64 by the
-# user's explicit choice — consistency with the rest of the payload, chosen with
-# the tradeoff in front of them, since an aarch64 Temurin exists and would run
-# native. What that buys is JIT-on-JIT: HotSpot writing code at runtime and FEX
-# translating it. See TOOLS_JAVA_VERSION in native/pins.env for the cost in full
-# and for the plain statement that whether a JVM starts here is unverified.
+# **The JDK is the one piece here nobody has watched run**, and the switch is
+# worth the most on it. 1.1.0 took the x86-64 Temurin for payload consistency and
+# wrote down what that bought: JIT-on-JIT, HotSpot generating and then rewriting
+# machine code while FEX translates code that did not exist when the process
+# started. That is FEX's hardest path — the whole FEX_REVISION history in
+# native/pins.env is about it. The aarch64 Temurin has HotSpot emitting ARM64
+# directly, so none of that machinery is on the path at all. Whether a JVM starts
+# here is still unverified; see TOOLS_JAVA_VERSION in native/pins.env.
 
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -62,37 +100,45 @@ VERSION="$TOOLS_VERSION"
 # decimal digits — the shipped Git package derives 25500 from "2.55.0.3" that way
 # — so a naive code from a version string like this one lands nowhere useful. It
 # is worth writing down what the derivation actually produces, because the number
-# is not the obvious one: version_code("1.1.0") is 10100, and vessel_version_code
-# multiplies by 100 for the revision, giving 1,010,000. That is above the 1.0.0
-# already installed and would technically work, which is exactly what makes it a
-# trap — a scheme that happens to be correct is not a scheme.
+# is not the obvious one: version_code("1.2.0") is 10200, and vessel_version_code
+# multiplies by 100 for the revision, giving 1,020,000. That is BELOW the
+# 1,100,000 already on the device, so a derived code here would be adopted as
+# older than what is installed and this build would change nothing — a scheme
+# that happens to be correct is not a scheme, and this time it would not even
+# happen to be correct.
 #
-# So the code is a literal. 1,100,000 reads as "1.1.0, revision 0" to a human
+# So the code is a literal. 1,200,000 reads as "1.2.0, revision 0" to a human
 # under the same 100-per-part convention the rest of the repo uses, it is
 # comfortably above the shipped Git component's 25500, and it leaves two digits
 # underneath for packaging-only revisions. TOOLS_REVISION is what those digits
 # are for; it is 0 and asserted to be, because a revision bump that this literal
 # silently ignored would be the same class of no-op as everything below.
 #
-# **That no-op has two faces, and adding PowerShell and the JDK walked straight
-# at the second one.** Being above the shipped Git is not enough:
+# **That no-op has two faces, and the architecture switch walks straight at the
+# second one.** Being above the shipped Git is not enough:
 # WcpInstaller.kt:290-305 skips unpacking any package whose type+versionCode pair
-# the store already holds, and 1.0.0 at 1,000,000 is already installed on the
-# device. Rebuilding this payload with two more programs in it under the same
-# code would have produced a larger .wcp, a larger APK, a successful
-# `adb install`, and a container with no `pwsh` and no `java` in it and nothing
-# anywhere saying why. Changing the payload means changing the version:
-# TOOLS_VERSION is now 1.1.0. One bump, both programs — they land together, so
-# there is nothing for a second bump to distinguish.
-VERSION_CODE=1100000
+# the store already holds, and **1.1.0 at 1,100,000 is installed on the device
+# right now**. Rebuilding this payload as ARM64 under the same code would produce
+# a different .wcp, a different APK, a successful `adb install`, and a container
+# still running the x86-64 trees — the exact failure this change exists to fix,
+# invisibly not fixed. An architecture change is a contents change, so the minor
+# moves: TOOLS_VERSION is now 1.2.0. One bump, all five trees — they land
+# together, so there is nothing for a second bump to distinguish.
+VERSION_CODE=1200000
 [ "${TOOLS_REVISION:-0}" = 0 ] || die "TOOLS_REVISION is ${TOOLS_REVISION}, but
-     VERSION_CODE above is the literal 1100000 and does not read it. Either fold
+     VERSION_CODE above is the literal 1200000 and does not read it. Either fold
      the revision into that literal by hand (1100000 + revision) or put the
      derivation back — silently ignoring it is how a rebuild ships under a code
      the store already has and installs nothing."
-[ "$VERSION_CODE" -gt 25500 ] || die "version code $VERSION_CODE is not above the
-     shipped Git component's 25500, so adoptLatest would refuse to move a
-     container's Tools reference forward and this build would install nothing.
+# The floor is what is actually installed, not the oldest thing that ever was.
+# It used to be the shipped Git component's 25500; Tools 1.1.0 at 1,100,000 has
+# since been installed on the device, so that is the number a new build has to
+# clear. Anything at or under it is adopted as no newer than what is there and
+# the build looks exactly like a package that did not install.
+[ "$VERSION_CODE" -gt 1100000 ] || die "version code $VERSION_CODE is not above
+     Tools 1.1.0's 1100000, which is installed on the device, so
+     WcpInstaller would skip unpacking it and adoptLatest would refuse to move a
+     container's Tools reference forward — this build would install nothing.
      See the version-code note in build/common.sh."
 
 # 7-Zip is the one tool this script needs that the rest of the build does not:
@@ -105,17 +151,20 @@ command -v 7z >/dev/null 2>&1 \
      self-extracting archive and this is what reads it (Debian/Ubuntu:
      p7zip-full). Rebuild the image: docker build -t vessel-build ."
 
-GIT_ARCHIVE="PortableGit-$TOOLS_GIT_VERSION-64-bit.7z.exe"
+# Five upstreams, five spellings of "ARM64" in a file name: `-arm64`, `-arm64`,
+# `-win-arm64`, `-win-arm64` and `aarch64`. There is no shared token to factor
+# out, so each is written where it is used.
+GIT_ARCHIVE="PortableGit-$TOOLS_GIT_VERSION-arm64.7z.exe"
 GIT_URL="https://github.com/git-for-windows/git/releases/download/$TOOLS_GIT_TAG/$GIT_ARCHIVE"
 
-PYTHON_ARCHIVE="python-$TOOLS_PYTHON_VERSION-embed-amd64.zip"
+PYTHON_ARCHIVE="python-$TOOLS_PYTHON_VERSION-embed-arm64.zip"
 PYTHON_URL="https://www.python.org/ftp/python/$TOOLS_PYTHON_VERSION/$PYTHON_ARCHIVE"
 
-NODE_DIRNAME="node-v$TOOLS_NODE_VERSION-win-x64"
+NODE_DIRNAME="node-v$TOOLS_NODE_VERSION-win-arm64"
 NODE_ARCHIVE="$NODE_DIRNAME.zip"
 NODE_URL="https://nodejs.org/dist/v$TOOLS_NODE_VERSION/$NODE_ARCHIVE"
 
-PWSH_ARCHIVE="PowerShell-$TOOLS_PWSH_VERSION-win-x64.zip"
+PWSH_ARCHIVE="PowerShell-$TOOLS_PWSH_VERSION-win-arm64.zip"
 PWSH_URL="https://github.com/PowerShell/PowerShell/releases/download/v$TOOLS_PWSH_VERSION/$PWSH_ARCHIVE"
 
 # Temurin spells its build identifier three different ways in three places and
@@ -127,9 +176,14 @@ PWSH_URL="https://github.com/PowerShell/PowerShell/releases/download/v$TOOLS_PWS
 #   JAVA_ARCHIVE        …_21.0.12_8…   `+` -> `_` in the file name
 #   JAVA_URL            …jdk-21.0.12%2B8…  `+` percent-encoded in the release tag,
 #                       because a raw `+` in a URL path is not a literal plus
+#
+# `aarch64` and not `arm64` in the archive name: Adoptium spells the architecture
+# the GNU way while the other four upstreams spell it the Windows way. The
+# directory inside the zip is `jdk-21.0.12+8` for both architectures, so nothing
+# below this line changed with the switch.
 JAVA_MAJOR="${TOOLS_JAVA_VERSION%%.*}"
 JAVA_DIRNAME="jdk-$TOOLS_JAVA_VERSION"
-JAVA_ARCHIVE="OpenJDK${JAVA_MAJOR}U-jdk_x64_windows_hotspot_${TOOLS_JAVA_VERSION/+/_}.zip"
+JAVA_ARCHIVE="OpenJDK${JAVA_MAJOR}U-jdk_aarch64_windows_hotspot_${TOOLS_JAVA_VERSION/+/_}.zip"
 JAVA_URL="https://github.com/adoptium/temurin$JAVA_MAJOR-binaries/releases/download/${JAVA_DIRNAME/+/%2B}/$JAVA_ARCHIVE"
 
 GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
@@ -162,21 +216,43 @@ fetch_pinned() {
   info "$name  $(stat -c%s "$CACHE/$name") bytes  sha256 ok"
 }
 
-# Every PE in this payload should be x86-64, and that is the whole architecture
-# decision expressed as an assertion. `file` reads IMAGE_FILE_HEADER.Machine, so
-# an ARM64 binary that slipped in — the wrong release asset, a mirror serving the
-# arm64 file under the x64 name — fails here rather than on the phone, where the
-# symptom would be a program that simply does not start.
+# Every PE this script asserts on should be ARM64, and that is the whole
+# architecture decision expressed as an assertion.
+#
+# **This is the guard against silently shipping x64 again, so it reads the header
+# itself.** The previous version of this function asserted x86-64 and would have
+# passed happily on the payload it was pointed at; an assertion that still passes
+# for the wrong architecture is worse than no assertion, because it reads like
+# the question was asked. So both halves are checked: `file`'s decoding of
+# IMAGE_FILE_HEADER.Machine for a human-readable message, and the Machine word
+# read out of the file directly and required to be 0xAA64 (IMAGE_FILE_MACHINE_ARM64).
+# The second is the one that cannot be talked into a wrong answer by a phrasing
+# change in libmagic's database.
+#
+# The failure this catches is the wrong release asset — an `-x64` or `_x64_` file
+# arriving under an arm64 name, or a mirror serving one for the other. On the
+# phone the symptom would be a program that runs under FEX when the whole point
+# of 1.2.0 was that it should not.
 #
 # Note this is not verify_pe_dll from common.sh: that one exists to tell ARM64EC
-# apart from plain x64, which is a distinction nothing in this payload has.
-verify_pe_x64() {
-  local exe="$1" label="${2:-$1}" out
+# apart from plain x64 by its CHPE load-config, and nothing in this payload is
+# ARM64EC. These are plain ARM64 PEs, which is what Wine's ARM64EC host runs
+# natively — ARM64EC is how Wine's own modules are built, not something an
+# upstream release archive would ever be.
+verify_pe_arm64() {
+  local exe="$1" label="${2:-$1}" out machine
   [ -f "$exe" ] || die "$label: expected a file at $exe and there is none"
   out="$(file -b "$exe")"
   grep -Eqi 'PE32\+ executable' <<< "$out" || die "$label is not a 64-bit PE: $out"
-  grep -Eqi 'x86-64' <<< "$out" || die "$label is not x86-64: $out"
-  info "$label: $out"
+  grep -Eqi 'aarch64|arm64' <<< "$out" || die "$label is not ARM64: $out"
+  # e_lfanew at 0x3c, then the Machine word 4 bytes into the PE signature.
+  machine="$(python3 -c 'import struct,sys
+b=open(sys.argv[1],"rb").read(0x400)
+print("0x%04X" % struct.unpack_from("<H", b, struct.unpack_from("<I", b, 0x3c)[0] + 4))' "$exe")"
+  [ "$machine" = "0xAA64" ] || die "$label has IMAGE_FILE_HEADER.Machine $machine,
+     not 0xAA64 (IMAGE_FILE_MACHINE_ARM64). 0x8664 is x86-64 — the wrong release
+     asset. \`file\` said: $out"
+  info "$label: $out  Machine=$machine"
 }
 
 fetch_pinned "$GIT_URL"    "$TOOLS_GIT_SHA256"
@@ -201,22 +277,38 @@ log "unpacking Git $TOOLS_GIT_VERSION"
 7z x -bso0 -bsp0 -o"$STAGE/Git" -y "$CACHE/$GIT_ARCHIVE" \
   || die "7z could not unpack $GIT_ARCHIVE"
 
-verify_pe_x64 "$STAGE/Git/cmd/git.exe" "Git/cmd/git.exe"
+verify_pe_arm64 "$STAGE/Git/cmd/git.exe" "Git/cmd/git.exe"
+# **The MSYS2 layer is x86-64 and is asserted to be, rather than passed over.**
+# There is no ARM64 port of msys-2.0, so `usr/bin` is x86-64 in the ARM64 build
+# exactly as it is in the x64 one. Measured on this tree by reading
+# IMAGE_FILE_HEADER.Machine: cmd/git.exe, bin/git.exe and clangarm64/bin/git.exe
+# are 0xAA64; usr/bin/bash.exe, usr/bin/ls.exe and usr/bin/msys-2.0.dll are
+# 0x8664. Asserting the x86-64 half says out loud that the mixture is known and
+# intended — and it would catch the day msys2 ports to ARM64, which is a payload
+# change worth noticing rather than absorbing silently.
+grep -Eqi 'x86-64' <<< "$(file -b "$STAGE/Git/usr/bin/msys-2.0.dll")" \
+  || die "Git/usr/bin/msys-2.0.dll is not x86-64: $(file -b "$STAGE/Git/usr/bin/msys-2.0.dll")
+     Every ARM64 Git for Windows so far ships an x86-64 MSYS2 runtime because
+     msys-2.0 has no ARM64 port. If that has changed, the comments in this file,
+     native/pins.env and app/build.gradle.kts all say it has not."
+info "Git/usr/bin/msys-2.0.dll: $(file -b "$STAGE/Git/usr/bin/msys-2.0.dll") (x86-64 by design; no ARM64 msys2 exists)"
 # The prefix directory is the thing PrefixRegistry.toolsPath has to agree with,
-# and the ARM64 build calls it `clangarm64` while this one calls it `mingw64`.
-# Asserting it here is what stops a silent architecture swap upstream turning the
-# PATH seed into three entries that point at nothing.
-[ -d "$STAGE/Git/mingw64/bin" ] \
-  || die "Git payload has no mingw64/bin — this is not the x64 build.
-     PrefixRegistry.toolsPath names \$GIT_DIR\\mingw64\\bin and MSYSTEM=MINGW64;
-     if upstream has renamed the prefix, both have to move with it."
+# and the ARM64 build calls it `clangarm64` while the x64 build calls it
+# `mingw64`. Asserting it here is what stops a silent architecture swap upstream
+# turning the PATH seed into three entries that point at nothing.
+[ -d "$STAGE/Git/clangarm64/bin" ] \
+  || die "Git payload has no clangarm64/bin — this is not the ARM64 build.
+     PrefixRegistry.toolsPath names \$GIT_DIR\\clangarm64\\bin and
+     MSYSTEM=CLANGARM64; if upstream has renamed the prefix, both have to move
+     with it. A tree with mingw64/bin instead is the x64 asset under an arm64
+     name."
 ok "Git: $(find "$STAGE/Git" -type f | wc -l) file(s)"
 
 # --- Python ------------------------------------------------------------------
 log "unpacking Python $TOOLS_PYTHON_VERSION"
 mkdir -p "$STAGE/Python"
 unzip -q "$CACHE/$PYTHON_ARCHIVE" -d "$STAGE/Python" || die "could not unpack $PYTHON_ARCHIVE"
-verify_pe_x64 "$STAGE/Python/python.exe" "Python/python.exe"
+verify_pe_arm64 "$STAGE/Python/python.exe" "Python/python.exe"
 
 # `import site`, uncommented.
 #
@@ -252,7 +344,7 @@ ok "$(basename "$PTH"): site enabled"
 #
 # **get-pip.py is meant to be run BY the interpreter it is bootstrapping, and
 # that is not possible here.** This host is Linux and python.exe is a Windows
-# x86-64 PE; there is no Wine in this image and adding one to run a build step
+# ARM64 PE; there is no Wine in this image and adding one to run a build step
 # would be a strange amount of machinery for what the step actually does. So the
 # host's python3 runs it with `--target`, which is the flag that turns a pip
 # install into "unpack this wheel into that directory and do nothing else".
@@ -312,10 +404,12 @@ ok "Python: $(find "$STAGE/Python" -type f | wc -l) file(s), pip in Lib/site-pac
 
 # --- Node --------------------------------------------------------------------
 #
-# The zip unpacks to node-v<ver>-win-x64/, one directory deep. Flattened, because
-# the payload subdirectory root is what installTools() copies and what the PATH
-# seed names — a `Node\node-v26.7.0-win-x64\node.exe` would put the version in
-# the PATH and make every future bump a registry seed change.
+# The zip unpacks to node-v<ver>-win-arm64/, one directory deep. Flattened,
+# because the payload subdirectory root is what installTools() copies and what the
+# PATH seed names — a `Node\node-v26.7.0-win-arm64\node.exe` would put the version
+# AND the architecture in the PATH and make every future bump a registry seed
+# change. NODE_DIRNAME above carries the architecture, which is why the switch
+# from `-win-x64` needed nothing here.
 log "unpacking Node $TOOLS_NODE_VERSION"
 NODE_TMP="$WORK_DIR/$COMPONENT-node"
 rm -rf "$NODE_TMP"
@@ -326,7 +420,7 @@ unzip -q "$CACHE/$NODE_ARCHIVE" -d "$NODE_TMP" || die "could not unpack $NODE_AR
 mv "$NODE_TMP/$NODE_DIRNAME" "$STAGE/Node"
 rm -rf "$NODE_TMP"
 
-verify_pe_x64 "$STAGE/Node/node.exe" "Node/node.exe"
+verify_pe_arm64 "$STAGE/Node/node.exe" "Node/node.exe"
 # npm is a .cmd shim over node_modules/npm; without it `npm` from cmd is nothing.
 for f in npm.cmd npx.cmd node_modules/npm/package.json; do
   [ -e "$STAGE/Node/$f" ] || die "Node payload is missing $f"
@@ -335,18 +429,23 @@ ok "Node: $(find "$STAGE/Node" -type f | wc -l) file(s)"
 
 # --- PowerShell --------------------------------------------------------------
 #
-# The only one of the five that needs no reshaping at all: the win-x64 zip is
+# The only one of the five that needs no reshaping at all: the win-arm64 zip is
 # already flat, with `pwsh.exe` and its ~660 sibling assemblies at the archive
-# root and the module tree under them. So it unpacks straight into `Pwsh/`, which
-# gets the same result Node's flattening does — nothing with a version string in
-# it ends up on PATH, so bumping TOOLS_PWSH_VERSION never touches the registry
-# seed.
+# root and the module tree under them — the same shape the win-x64 zip has. So it
+# unpacks straight into `Pwsh/`, which gets the same result Node's flattening does
+# — nothing with a version string in it ends up on PATH, so bumping
+# TOOLS_PWSH_VERSION never touches the registry seed.
 #
 # Self-contained .NET, which is why there is no runtime step here and no
-# wine-mono anywhere in this repo: the CoreCLR is in the zip as native x86-64 PE.
-# That also rules out the alternative, since a runtime install would mean an
-# `.msi` and docs/TODO.md #17 is an open, measured `.msi` failure in this
-# container.
+# wine-mono anywhere in this repo: the CoreCLR is in the zip, and on this asset it
+# is a native ARM64 PE. That also rules out the alternative, since a runtime
+# install would mean an `.msi` and docs/TODO.md #17 is an open, measured `.msi`
+# failure in this container.
+#
+# **This is the tree the architecture switch is for.** The x86-64 build of this
+# same version crashed on the device with two unhandled `c0000005`s the moment
+# .NET did real work; see the header. Same PowerShell, same version, different
+# machine code.
 log "unpacking PowerShell $TOOLS_PWSH_VERSION"
 mkdir -p "$STAGE/Pwsh"
 unzip -q "$CACHE/$PWSH_ARCHIVE" -d "$STAGE/Pwsh" || die "could not unpack $PWSH_ARCHIVE"
@@ -356,11 +455,14 @@ unzip -q "$CACHE/$PWSH_ARCHIVE" -d "$STAGE/Pwsh" || die "could not unpack $PWSH_
      versioned directory, flatten it here the way the Node block does — the
      PATH seed names \$PWSH_DIR and nothing below it."
 
-verify_pe_x64 "$STAGE/Pwsh/pwsh.exe" "Pwsh/pwsh.exe"
-# The CoreCLR itself, checked separately. `pwsh.exe` is a small apphost stub and
-# would be the right architecture even in a build whose runtime was not, which is
-# the exact shape of the mistake verify_pe_x64 exists to catch.
-verify_pe_x64 "$STAGE/Pwsh/coreclr.dll" "Pwsh/coreclr.dll"
+verify_pe_arm64 "$STAGE/Pwsh/pwsh.exe" "Pwsh/pwsh.exe"
+# **The CoreCLR itself, and on this payload it is the single most important
+# assertion in the file.** `pwsh.exe` is a small apphost stub and would be the
+# right architecture even in a build whose runtime was not — and the runtime is
+# what crashed: two `c0000005` faults at 0x6f9d20dbec and 0x6f9d22ad05 inside no
+# Wine module, i.e. in FEX's JIT buffer, the moment .NET did real work. An x86-64
+# coreclr.dll reaching the device again is that crash reaching the device again.
+verify_pe_arm64 "$STAGE/Pwsh/coreclr.dll" "Pwsh/coreclr.dll"
 ok "Pwsh: $(find "$STAGE/Pwsh" -type f | wc -l) file(s)"
 
 # --- Java --------------------------------------------------------------------
@@ -383,13 +485,13 @@ unzip -q "$CACHE/$JAVA_ARCHIVE" -d "$JAVA_TMP" || die "could not unpack $JAVA_AR
 mv "$JAVA_TMP/$JAVA_DIRNAME" "$STAGE/Java"
 rm -rf "$JAVA_TMP"
 
-verify_pe_x64 "$STAGE/Java/bin/java.exe" "Java/bin/java.exe"
+verify_pe_arm64 "$STAGE/Java/bin/java.exe" "Java/bin/java.exe"
 # HotSpot itself, for the same reason coreclr.dll is checked above: java.exe is a
-# launcher and the VM is the thing that will actually be executing translated
-# code. This is also the assertion that says out loud what the payload signed up
-# for — a JIT running under a JIT. Whether it *works* is unverified; see
-# native/pins.env.
-verify_pe_x64 "$STAGE/Java/bin/server/jvm.dll" "Java/bin/server/jvm.dll"
+# launcher and the VM is the thing that will actually be generating code. This is
+# the assertion that retires the JIT-on-JIT problem 1.1.0 signed up for — an
+# ARM64 jvm.dll emits ARM64 and FEX is not in the loop at all. Whether a JVM
+# *starts* here is still unverified; see native/pins.env.
+verify_pe_arm64 "$STAGE/Java/bin/server/jvm.dll" "Java/bin/server/jvm.dll"
 # `release` is the JDK's own record of what it is, and javac is what makes this a
 # JDK rather than a runtime. Both absent means a repackaged or partial tree.
 for f in release lib/modules bin/javac.exe; do
@@ -409,15 +511,20 @@ ok "Java: $(find "$STAGE/Java" -type f | wc -l) file(s)"
 # way, and `builtBy` says plainly what happened, as the hand-made Git package it
 # replaces already did.
 #
-# One version per upstream tree, because "1.1.0" answers nothing anyone would
+# One version per upstream tree, because "1.2.0" answers nothing anyone would
 # ask of this package.
+#
+# `targetDesc` states the mixture rather than rounding it to "ARM64", because the
+# Components screen is the one place a user reads this and Git's MSYS2 layer is
+# genuinely x86-64 — there is no ARM64 msys-2.0. Rounding it would make the
+# screen say something the payload does not.
 write_tools_provenance() {
   cat > "$STAGE/provenance.json" <<EOF
 {
   "component": "$COMPONENT",
   "version": "$VERSION",
-  "target": "x64",
-  "targetDesc": "x86-64 Windows binaries, run under FEX",
+  "target": "arm64",
+  "targetDesc": "ARM64 Windows binaries, run natively under ARM64EC; Git's MSYS2 layer (usr/bin, msys-2.0.dll) is x86-64 and runs under FEX, no ARM64 port existing",
   "sourceRepo": "upstream release archives; see native/pins.env",
   "sourceRef": "git $TOOLS_GIT_VERSION, python $TOOLS_PYTHON_VERSION, node $TOOLS_NODE_VERSION, pwsh $TOOLS_PWSH_VERSION, temurin jdk $TOOLS_JAVA_VERSION",
   "sourceSha": "$GIT_ARCHIVE $TOOLS_GIT_SHA256; $PYTHON_ARCHIVE $TOOLS_PYTHON_SHA256; $NODE_ARCHIVE $TOOLS_NODE_SHA256; $PWSH_ARCHIVE $TOOLS_PWSH_SHA256; $JAVA_ARCHIVE $TOOLS_JAVA_SHA256; get-pip.py $TOOLS_GET_PIP_SHA256",
@@ -433,12 +540,12 @@ write_tools_provenance
 log "packaging"
 python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Tools \
-  --name "Tools $VERSION — Git $TOOLS_GIT_VERSION, Python $TOOLS_PYTHON_VERSION, Node $TOOLS_NODE_VERSION, PowerShell $TOOLS_PWSH_VERSION, JDK $TOOLS_JAVA_VERSION (x64)" \
+  --name "Tools $VERSION — Git $TOOLS_GIT_VERSION, Python $TOOLS_PYTHON_VERSION, Node $TOOLS_NODE_VERSION, PowerShell $TOOLS_PWSH_VERSION, JDK $TOOLS_JAVA_VERSION (arm64)" \
   --version "$VERSION" \
   --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
-  --description "Git, Python, Node.js, PowerShell 7 and the Temurin JDK as x86-64 Windows binaries, installed into C:\\Program Files\\{Git,Python,Node,PowerShell,Java}" \
-  --out "$DIST_DIR/$COMPONENT-$VERSION-x64.wcp"
+  --description "Git, Python, Node.js, PowerShell 7 and the Temurin JDK as ARM64 Windows binaries, installed into C:\\Program Files\\{Git,Python,Node,PowerShell,Java}. Git's MSYS2 shell layer is x86-64; no ARM64 port of msys-2.0 exists." \
+  --out "$DIST_DIR/$COMPONENT-$VERSION-arm64.wcp"
 
-ok "dist/$COMPONENT-$VERSION-x64.wcp"
+ok "dist/$COMPONENT-$VERSION-arm64.wcp"

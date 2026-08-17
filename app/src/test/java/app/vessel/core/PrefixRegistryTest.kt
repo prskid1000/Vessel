@@ -178,7 +178,12 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(26, PrefixRegistry.SEED_VERSION)
+        assertEquals(27, PrefixRegistry.SEED_VERSION)
+        // 27 changed two values in [toolsPath] and added no key: Git's PATH entry
+        // back to `clangarm64\bin` and `MSYSTEM` back to `CLANGARM64`, Tools 1.2.0
+        // being the ARM64 payload again. It needed the bump because a prefix keeps
+        // the seed that provisioned it, so an existing container would otherwise
+        // hold a PATH naming a `mingw64` directory the new payload does not have.
         // 26 changed a colour and added no key: the console ground moved from
         // GuestPalette.BG to CONSOLE_BG. It needed a seed bump anyway, because a
         // prefix already carrying ColorTable08 = the window ground would
@@ -186,10 +191,11 @@ class PrefixRegistryTest {
         // Fifteen keys, the three the seed deletes, and the stamp `renderSeed`
         // appends — which is not in the list, its value being a hash of the rest.
         // Seed 23 added `bluetoothService`, which only does anything paired with
-        // patches/wine/0031. Seeds 24 and 25 both changed [toolsPath]'s contents
-        // and added no key — 25 put PowerShell and the JDK on PATH and added
-        // `JAVA_HOME` as a *value* in the Environment key that was already
-        // there — which is why this count has not moved with either.
+        // patches/wine/0031. Seeds 24, 25 and 27 all changed [toolsPath]'s
+        // contents and added no key — 25 put PowerShell and the JDK on PATH and
+        // added `JAVA_HOME` as a *value* in the Environment key that was already
+        // there, and 27 rewrote two values that were already there — which is why
+        // this count has not moved with any of them.
         assertEquals(18, PrefixRegistry.seed.size)
     }
 
@@ -308,19 +314,29 @@ class PrefixRegistryTest {
     }
 
     @Test
-    fun `PATH and MSYSTEM name the x64 Git prefix, not the ARM64 one`() {
+    fun `PATH and MSYSTEM name the ARM64 Git prefix, not the x64 one`() {
         // The one value in this seed that is wrong in a way nothing reports.
-        // Git for Windows' x86-64 build puts its helpers under `mingw64` and its
-        // ARM64 build under `clangarm64`; the Tools component is the x64 build,
-        // so a PATH or an MSYSTEM naming `clangarm64` resolves `git.exe` through
-        // `cmd\` and then fails on the first command that shells out to a
-        // helper. The two have to agree with each other as well as with the
-        // payload — `/etc/profile` derives MSYSTEM_PREFIX from the name.
+        // Git for Windows' ARM64 build puts its helpers under `clangarm64` and
+        // its x86-64 build under `mingw64`; Tools 1.2.0 is the ARM64 build, so a
+        // PATH or an MSYSTEM naming `mingw64` resolves `git.exe` through `cmd\`
+        // and then fails on the first command that shells out to a helper. The
+        // two have to agree with each other as well as with the payload —
+        // `/etc/profile` derives MSYSTEM_PREFIX from the name.
+        //
+        // This assertion has been inverted once already: it read `mingw64` for
+        // seeds 24-26, when the payload was x86-64. It is written as an equality
+        // against the payload rather than against an architecture in the
+        // abstract, so whichever way it goes, `build/tools.sh` asserting
+        // `clangarm64/bin` exists and this test are the two ends of the same
+        // contract.
         val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data
         val msystem = PrefixRegistry.toolsPath.values.single { it.name == "MSYSTEM" }.data
-        assertTrue("mingw64 is on PATH", path.contains("""${PrefixRegistry.GIT_DIR}\mingw64\bin"""))
-        assertTrue("clangarm64 is not", !path.contains("clangarm64"))
-        assertEquals("MINGW64", msystem)
+        assertTrue(
+            "clangarm64 is on PATH",
+            path.contains("""${PrefixRegistry.GIT_DIR}\clangarm64\bin"""),
+        )
+        assertTrue("mingw64 is not", !path.contains("mingw64"))
+        assertEquals("CLANGARM64", msystem)
     }
 
     @Test

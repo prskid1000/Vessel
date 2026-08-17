@@ -2368,7 +2368,7 @@ class SessionRuntime @Inject constructor(
             }
             // Per tree, so one failure does not cost the others. The caller
             // wraps this whole function in the same way and for the same reason.
-            runCatching { installToolTree(from, layout, tree, log) }
+            runCatching { installToolTree(from, layout, tree, source.name, log) }
                 .onFailure {
                     log.line(LogSource.VESSEL, LogLevel.WARN, "tools: ${tree.prefixDir}: ${it.message}")
                 }
@@ -2380,13 +2380,38 @@ class SessionRuntime @Inject constructor(
         source: File,
         layout: ContainerLayout,
         tree: ToolsTree,
+        /** The component's version code, which is the store directory's name. */
+        version: String,
         log: SessionLog,
     ) {
         val target = File(layout.prefix, tree.prefixDir)
 
-        // Present already? The marker is the one file everything else hangs off.
-        if (File(target, tree.sentinel).isFile) {
-            log.line(LogSource.VESSEL, LogLevel.INFO, "tools: ${tree.prefixDir} already installed")
+        // **Present already *from this version*?** The sentinel alone is not the
+        // question, and answering it that way cost a whole test cycle.
+        //
+        // A container adopts a new Tools component by version code, and nothing
+        // in the prefix changes when it does — the trees are copies, made here.
+        // Keyed on the sentinel alone, this function looked at a `pwsh.exe` that
+        // was already there and returned "already installed", so a container
+        // referencing 1200000 kept running 1100000's binaries. Measured: the
+        // store held the ARM64 payload, `provisioned.json` said `Tools: 1200000`,
+        // and the `pwsh.exe` in the prefix still reported Machine 0x8664. The log
+        // line said the tree was installed, which is the shape of every silent
+        // no-op this project keeps finding: something reports success and changes
+        // nothing.
+        //
+        // The stamp is the version code the tree was copied from. Absent means a
+        // tree written before this existed, and that re-copies once — cheap, and
+        // the alternative is trusting bytes whose provenance nobody recorded.
+        val stamp = File(target, TOOLS_VERSION_STAMP)
+        if (File(target, tree.sentinel).isFile &&
+            runCatching { stamp.readText().trim() }.getOrNull() == version
+        ) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "tools: ${tree.prefixDir} already installed from $version",
+            )
             return
         }
 
@@ -2400,6 +2425,12 @@ class SessionRuntime @Inject constructor(
         source.copyRecursively(staging, overwrite = true)
         deleteTree(target)
         if (!staging.renameTo(target)) error("could not move the tools payload into place")
+
+        // After the rename, so a launch killed mid-copy leaves no stamp claiming
+        // a version the tree does not hold. Best-effort: a tree that is right
+        // with no stamp costs one extra copy next launch, which is the safe
+        // direction to fail in.
+        runCatching { File(target, TOOLS_VERSION_STAMP).writeText(version) }
 
         if (tree.msys2) {
             // **The three directories MSYS2's first run tries to make and
@@ -3104,6 +3135,17 @@ class SessionRuntime @Inject constructor(
 
         /** Where a tools tree is assembled before it is renamed into place. */
         const val STAGING_SUFFIX = ".staging"
+
+        /**
+         * Which Tools version a prefix tree was copied from.
+         *
+         * A dotfile inside the tree rather than a record beside it, so it cannot
+         * outlive what it describes: deleting the tree deletes the claim about
+         * it. Named with a leading dot so it sorts out of the way in a directory
+         * a user may open in the Files tab, and so nothing in Git, Python, Node,
+         * PowerShell or the JDK collides with it.
+         */
+        const val TOOLS_VERSION_STAMP = ".vessel-tools-version"
 
         /**
          * The graphics translation layers, all optional.

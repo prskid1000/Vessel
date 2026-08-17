@@ -184,8 +184,20 @@ object PrefixRegistry {
      * effect for the first time and the console became a navy pane blending into
      * the desktop behind it. Black is what it always looked like, now asked for
      * deliberately: a console is a box on the themed desktop, not a pane of it.
+     * 27 reverted Git's prefix to ARM64's `clangarm64` — [toolsPath]'s third PATH
+     * entry and `MSYSTEM`, which move together or not at all. Tools 1.2.0 is the
+     * ARM64 payload again: the wheel-ecosystem claim that justified the all-x64
+     * 1.1.0 was counted against PyPI on 2026-08-17 and is false (`win_arm64` is at
+     * parity, `cryptography` alone missing), and PowerShell x86-64 crashed on the
+     * device with two unhandled `c0000005`s inside FEX's JIT buffer. `native/pins.env`
+     * has the numbers and the addresses. This bump is the half a rebuilt component
+     * cannot deliver: a prefix keeps the seed it was provisioned with, so without
+     * it every existing container would get an ARM64 payload with `PATH` and
+     * `MSYSTEM` still naming a `mingw64` prefix the payload does not contain —
+     * `git` would resolve through `cmd\` and every helper behind it would not,
+     * which reads as a working install until the first command that shells out.
      */
-    const val SEED_VERSION: Int = 26
+    const val SEED_VERSION: Int = 27
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -800,14 +812,18 @@ object PrefixRegistry {
      * so it is where everything a user installs will appear, and the build ships
      * a file in it so the directory genuinely arrives.
      *
-     * **`mingw64`, not `clangarm64`, and this is easy to get wrong in either
+     * **`clangarm64`, not `mingw64`, and this is easy to get wrong in either
      * direction.** The ARM64 build of Git for Windows uses a `clangarm64` prefix
      * where the x86-64 build uses `mingw64`. This seed said `clangarm64` from
      * seed 19 to seed 23, because the component was the ARM64 build; seed 24
-     * moves it because the component is now the x64 one. Whichever way the
-     * component goes, a PATH naming the other prefix finds `git.exe` through
-     * `cmd\` and misses every helper behind it — which looks like a working
-     * install right up to the first command that needs one.
+     * moved it to `mingw64` for the all-x64 payload; seed 27 moves it back,
+     * because Tools 1.2.0 is ARM64 again — the wheel-ecosystem claim that
+     * justified x64 was measured false and PowerShell x86-64 crashed under FEX
+     * (see `native/pins.env`). Whichever way the component goes, a PATH naming
+     * the other prefix finds `git.exe` through `cmd\` and misses every helper
+     * behind it — which looks like a working install right up to the first
+     * command that needs one. `build/tools.sh` asserts the payload really
+     * contains `clangarm64/bin`, so the two cannot drift apart silently.
      *
      * Written whole rather than appended, because a `.reg` merge replaces a
      * value and there is no append form: this seed is the definition of the
@@ -829,7 +845,7 @@ object PrefixRegistry {
                     """C:\windows\system32\wbem""",
                     """$GIT_DIR\cmd""",
                     """$GIT_DIR\usr\bin""",
-                    """$GIT_DIR\mingw64\bin""",
+                    """$GIT_DIR\clangarm64\bin""",
                     PYTHON_DIR,
                     """$PYTHON_DIR\Scripts""",
                     NODE_DIR,
@@ -845,18 +861,24 @@ object PrefixRegistry {
             // before `bash --login` runs.** `/etc/profile` reads `MSYSTEM` to
             // decide what to put on the Unix `PATH` and what `MSYSTEM_PREFIX`
             // is; unset, it falls through to the MSYS prefix and a login shell
-            // comes up without `mingw64/bin` on its path — so `git` works
+            // comes up without `clangarm64/bin` on its path — so `git` works
             // from `cmd` and not from the shell that exists to run it.
             // `git-bash.exe` sets this itself, which is exactly why launching
             // `bash.exe` directly needs it set somewhere else.
             //
-            // `MINGW64` for the same reason the PATH above says `mingw64`: the
-            // component is the x86-64 build of Git for Windows. It was
-            // `CLANGARM64` while the component was the ARM64 build, and the two
-            // values have to move together — `/etc/profile` derives
+            // `CLANGARM64` for the same reason the PATH above says `clangarm64`:
+            // the component is the ARM64 build of Git for Windows. It was
+            // `MINGW64` for seeds 24-26, while the payload was x86-64, and the
+            // two values have to move together — `/etc/profile` derives
             // `MSYSTEM_PREFIX` from this name, so a mismatch is a shell whose
             // prefix directory does not exist.
-            RegistryValue("MSYSTEM", "MINGW64"),
+            //
+            // Note what this does NOT change: the shell itself is x86-64 in both
+            // builds. `usr/bin/bash.exe` and `usr/bin/msys-2.0.dll` measure
+            // 0x8664 in the ARM64 tree, msys-2.0 having no ARM64 port, so this
+            // value picks which prefix a translated shell reads — not whether it
+            // is translated.
+            RegistryValue("MSYSTEM", "CLANGARM64"),
             // **A JDK without `JAVA_HOME` is half-installed.** `PATH` is enough
             // to type `java`, and it is not enough for anything that builds:
             // Gradle, Maven and Ant all look this variable up before they look
