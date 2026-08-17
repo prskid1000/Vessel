@@ -2301,16 +2301,27 @@ class SessionRuntime @Inject constructor(
      *
      * **A whole tree, not a handful of DLLs, which is why this is not
      * [copyWindowsPayload].** DXVK and friends are a few files that belong in
-     * `system32`; Git is 7894 of them under a directory that has to keep its
-     * shape — `cmd\git.exe` finds its helpers by walking up from where it lives,
-     * so flattening or relocating any of it breaks the install in ways that only
-     * show up on the first command that shells out.
+     * `system32`; Git alone is 9567 of them under a directory that has to keep
+     * its shape — `cmd\git.exe` finds its helpers by walking up from where it
+     * lives, so flattening or relocating any of it breaks the install in ways
+     * that only show up on the first command that shells out.
      *
-     * `C:\Program Files\Git` because that is where Git for Windows puts itself
-     * and where every instruction on the internet says it is. The name is
+     * **Several trees now, from a table rather than a constant.** The payload
+     * used to be Git and nothing else, so one hardcoded destination was the whole
+     * story. It cannot stay that way: a container references exactly one
+     * component per type ([ComponentStore.referencesOf] returns a
+     * `type -> versionCode` map with no list in it), so Python, Node, PowerShell
+     * and the JDK cannot arrive as `Tools` packages of their own — a second one
+     * would *replace* the first rather than join it. They arrive inside the same
+     * payload, under [TOOLS_LAYOUT]'s directory names, and this walks the table.
+     *
+     * `C:\Program Files\Git` stays exactly where it was, because that is where
+     * Git for Windows puts itself, where every instruction on the internet says
+     * it is, and what the launcher's `git-bash` entry depends on. The name is
      * [PrefixRegistry.GIT_DIR], which the machine PATH already lists — the seed
      * names those directories whether or not they exist, so installing the
-     * component needs no registry write and no relaunch to be on PATH.
+     * component needs no registry write and no relaunch to be on PATH. Python,
+     * Node, PowerShell and Java sit beside it under the same reasoning.
      *
      * Copied rather than symlinked, on the same reasoning as the D3D payload: a
      * link would let a guest program write through into the shared store that
@@ -2324,12 +2335,59 @@ class SessionRuntime @Inject constructor(
         log: SessionLog,
     ): Unit = withContext(Dispatchers.IO) {
         val source = components.directoryFor(containerId, ComponentType.TOOLS) ?: return@withContext
-        val target = File(layout.prefix, GIT_PREFIX_DIR)
+
+        // **Which payload is this?** The shipped Git-only package puts its tree
+        // flat at the component root, with no `Git/` above it, and a phone
+        // carrying that package does not stop carrying it because this code
+        // changed — the store keeps whatever was installed until a higher
+        // version code is adopted. So the layout is detected rather than
+        // assumed: a `cmd\git.exe` at the root can only be the old flat tree,
+        // and it installs exactly where it always did.
+        val trees = if (File(source, LEGACY_TOOLS.sentinel).isFile) {
+            listOf(LEGACY_TOOLS)
+        } else {
+            TOOLS_LAYOUT
+        }
+
+        for (tree in trees) {
+            val from = if (tree.payloadDir.isEmpty()) source else File(source, tree.payloadDir)
+            // A payload that carries some of the trees and not others is a
+            // legitimate package, not a broken one — an older `Tools` component
+            // predating PowerShell and the JDK is exactly that, and it is what a
+            // device that has not adopted 1.1.0 yet is carrying. So an absent
+            // directory is silence. A directory
+            // that is there without its sentinel is the broken case and says so.
+            if (!from.isDirectory) continue
+            if (!File(from, tree.sentinel).isFile) {
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.WARN,
+                    "tools: ${tree.payloadDir}/ has no ${tree.sentinel}; not installed",
+                )
+                continue
+            }
+            // Per tree, so one failure does not cost the others. The caller
+            // wraps this whole function in the same way and for the same reason.
+            runCatching { installToolTree(from, layout, tree, log) }
+                .onFailure {
+                    log.line(LogSource.VESSEL, LogLevel.WARN, "tools: ${tree.prefixDir}: ${it.message}")
+                }
+        }
+    }
+
+    /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
+    private fun installToolTree(
+        source: File,
+        layout: ContainerLayout,
+        tree: ToolsTree,
+        log: SessionLog,
+    ) {
+        val target = File(layout.prefix, tree.prefixDir)
 
         // Present already? The marker is the one file everything else hangs off.
-        if (File(target, GIT_SENTINEL).isFile) {
-            log.line(LogSource.VESSEL, LogLevel.INFO, "tools: ${PrefixRegistry.GIT_DIR} already installed")
-            return@withContext
+        if (File(target, tree.sentinel).isFile) {
+            log.line(LogSource.VESSEL, LogLevel.INFO, "tools: ${tree.prefixDir} already installed")
+            return
         }
 
         if (!target.parentFile!!.isDirectory && !target.parentFile!!.mkdirs()) {
@@ -2343,32 +2401,58 @@ class SessionRuntime @Inject constructor(
         deleteTree(target)
         if (!staging.renameTo(target)) error("could not move the tools payload into place")
 
-        // **The three directories MSYS2's first run tries to make and cannot.**
-        //
-        // Opening Git Bash printed, before anything else:
-        //
-        //   mkdir: cannot create directory '/dev/shm': Read-only file system
-        //   Creating /dev/shm directory failed.
-        //   POSIX semaphores and POSIX shared memory will not work
-        //   mkdir: cannot create directory '/dev/mqueue': Read-only file system
-        //
-        // That is `/etc/post-install/01-devices.post`, which Git for Windows
-        // runs once on first launch. `mkdir` is coreutils, not the runtime, so
-        // this is a script failing rather than the emulator — and `/etc/fstab`
-        // here is `none / cygdrive`, which leaves the MSYS2 root as the
-        // directory holding `usr\bin\msys-2.0.dll`: this one.
-        //
-        // Making them in advance turns the script's `mkdir -p` into a no-op that
-        // succeeds. It costs three empty directories and removes four lines of
-        // alarming red text from the first thing a user sees in a shell they
-        // just opened. If the warning survives this, the path is *not* being
-        // resolved against the install root and that is worth knowing — the
-        // directories are harmless either way, and nothing here depends on them.
-        listOf("dev/shm", "dev/mqueue", "tmp").forEach { File(target, it).mkdirs() }
+        if (tree.msys2) {
+            // **The three directories MSYS2's first run tries to make and
+            // cannot.** Git's tree only, because Git's tree is where MSYS2 is —
+            // Python and Node are plain Windows programs with no POSIX runtime
+            // under them and nothing that reads `/etc/fstab`.
+            //
+            // Opening Git Bash printed, before anything else:
+            //
+            //   mkdir: cannot create directory '/dev/shm': Read-only file system
+            //   Creating /dev/shm directory failed.
+            //   POSIX semaphores and POSIX shared memory will not work
+            //   mkdir: cannot create directory '/dev/mqueue': Read-only file system
+            //
+            // That is `/etc/post-install/01-devices.post`, which Git for Windows
+            // runs once on first launch. `mkdir` is coreutils, not the runtime,
+            // so this is a script failing rather than the emulator — and
+            // `/etc/fstab` here is `none / cygdrive`, which leaves the MSYS2
+            // root as the directory holding `usr\bin\msys-2.0.dll`: this one.
+            //
+            // Making them in advance turns the script's `mkdir -p` into a no-op
+            // that succeeds. It costs three empty directories and removes four
+            // lines of alarming red text from the first thing a user sees in a
+            // shell they just opened. If the warning survives this, the path is
+            // *not* being resolved against the install root and that is worth
+            // knowing — the directories are harmless either way, and nothing
+            // here depends on them.
+            listOf("dev/shm", "dev/mqueue", "tmp").forEach { File(target, it).mkdirs() }
+        }
 
         val files = target.walkTopDown().count { it.isFile }
-        log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $files file(s) into ${PrefixRegistry.GIT_DIR}")
+        log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $files file(s) into ${tree.prefixDir}")
     }
+
+    /**
+     * One tree inside the Tools payload, and where in the prefix it belongs.
+     *
+     * The table this describes ([TOOLS_LAYOUT]) is the contract between
+     * `build/tools.sh`, which creates these directories, and
+     * [PrefixRegistry.toolsPath], which puts them on `PATH`. All three have to
+     * agree, and there is no runtime check that they do — a disagreement is a
+     * program that is installed and unreachable.
+     */
+    private data class ToolsTree(
+        /** Directory at the payload root. Empty means the payload *is* the tree. */
+        val payloadDir: String,
+        /** Destination under the prefix, as a relative path. */
+        val prefixDir: String,
+        /** The one file whose presence means this tree finished copying. */
+        val sentinel: String,
+        /** Whether MSYS2 lives here and wants its first-run directories made. */
+        val msys2: Boolean = false,
+    )
 
     /** What one package's payload cost. */
     private data class Deployed(val copied: Int = 0, val present: Int = 0) {
@@ -2959,21 +3043,75 @@ class SessionRuntime @Inject constructor(
         const val WAKE_LOCK_TAG = "vessel:session"
 
         /**
+         * What the Tools payload carries and where each part of it goes.
+         *
+         * The directory names on the left are `build/tools.sh`'s output layout;
+         * the paths on the right are [PrefixRegistry.GIT_DIR],
+         * [PrefixRegistry.PYTHON_DIR], [PrefixRegistry.NODE_DIR],
+         * [PrefixRegistry.PWSH_DIR] and [PrefixRegistry.JAVA_DIR] written as
+         * paths under the prefix. Those constants are what the machine `PATH`
+         * seed names, so this table and that seed have to say the same thing.
+         *
+         * The sentinels are each tree's own entry point rather than any file
+         * that happens to be present: `cmd\git.exe` is what the launcher runs,
+         * `python.exe`, `node.exe`, `pwsh.exe` and `bin\java.exe` are what
+         * `PATH` resolves. A tree whose sentinel is missing is not a tree worth
+         * copying 400 MB for.
+         */
+        private val TOOLS_LAYOUT = listOf(
+            ToolsTree("Git", "drive_c/Program Files/Git", "cmd/git.exe", msys2 = true),
+            ToolsTree("Python", "drive_c/Program Files/Python", "python.exe"),
+            ToolsTree("Node", "drive_c/Program Files/Node", "node.exe"),
+            // `Pwsh/` in the payload, `PowerShell` in the prefix, and the
+            // asymmetry is deliberate on both ends: the payload directory is
+            // short because it is only ever typed in `build/tools.sh`, and the
+            // installed directory is spelled out because it is what a user sees
+            // in `C:\Program Files` and types into a path.
+            //
+            // This is the tree that makes Claude Code's shell tool work.
+            // Claude Code runs commands through a Bash tool that means Git Bash
+            // on Windows, or a PowerShell tool when Git for Windows is absent;
+            // [app.vessel.ui.shell.TerminalProfile] records the measurement that
+            // rules the first one out here — a `bash --login -i` child spinning
+            // at 98% of a core inside MSYS2's `fork()` emulation, with
+            // `/etc/profile` forking before the shell ever reaches a prompt.
+            // `pwsh.exe` forks for nothing.
+            ToolsTree("Pwsh", "drive_c/Program Files/PowerShell", "pwsh.exe"),
+            // `bin/java.exe` rather than a file at the root, because a JDK has
+            // no single entry point at its root — the launchers are all under
+            // `bin`, which is also the one directory of this tree that goes on
+            // PATH ([PrefixRegistry.JAVA_DIR] plus `\bin`).
+            ToolsTree("Java", "drive_c/Program Files/Java", "bin/java.exe"),
+        )
+
+        /**
+         * The payload that shipped before the bundle: Git's tree flat at the
+         * component root.
+         *
+         * Kept because an installed component does not change when this code
+         * does. `dist/git-2.55.0.3-arm64.wcp` has no `Git/` directory in it — it
+         * is the Git for Windows tree re-tarred as-is — and a phone carrying it
+         * keeps carrying it until a package with a higher version code is
+         * adopted. Dropping this branch would turn every such device's Git into
+         * a component that installs nothing, silently, on the next launch.
+         */
+        private val LEGACY_TOOLS = ToolsTree(
+            payloadDir = "",
+            prefixDir = "drive_c/Program Files/Git",
+            sentinel = "cmd/git.exe",
+            msys2 = true,
+        )
+
+        /** Where a tools tree is assembled before it is renamed into place. */
+        const val STAGING_SUFFIX = ".staging"
+
+        /**
          * The graphics translation layers, all optional.
          *
          * FEX is deliberately not in this list — it is mandatory and has a step
          * of its own, because a missing FEX stops the prefix running anything at
          * all rather than only its Direct3D.
          */
-        /** [PrefixRegistry.GIT_DIR] as a path under the prefix. */
-        const val GIT_PREFIX_DIR = "drive_c/Program Files/Git"
-
-        /** The one file whose presence means the tree finished copying. */
-        const val GIT_SENTINEL = "cmd/git.exe"
-
-        /** Where a tools tree is assembled before it is renamed into place. */
-        const val STAGING_SUFFIX = ".staging"
-
         val D3D_COMPONENTS = listOf(
             ComponentType.DXVK,
             ComponentType.VKD3D,

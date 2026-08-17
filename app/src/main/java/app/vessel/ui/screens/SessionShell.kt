@@ -727,6 +727,14 @@ fun SessionLauncher(
                         // editor*.
                         icon = when (option.profile) {
                             TerminalProfile.COMMAND_PROMPT -> VIcons.Terminal
+                            // The same glyph as the Command Prompt, deliberately:
+                            // it is the other shell, and the two belong to the
+                            // same category. `pwsh.exe` carries a real icon and
+                            // `rememberBuiltInIcon` will replace this with it —
+                            // unlike Wine's own programs, though, this one comes
+                            // from the Tools component, so the fallback shows
+                            // until that resolves.
+                            TerminalProfile.POWERSHELL -> VIcons.Terminal
                             TerminalProfile.WINE_EXPLORER -> VIcons.FolderOpen
                             TerminalProfile.REGEDIT -> VIcons.List
                             TerminalProfile.WINECFG -> VIcons.Monitor

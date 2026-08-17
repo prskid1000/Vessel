@@ -133,6 +133,44 @@ enum class TerminalProfile(
     ),
 
     /**
+     * PowerShell 7, and the one entry here that is not a Wine program.
+     *
+     * **Beside the Command Prompt because it is the shell language `cmd` does
+     * not have.** The note above this enum measured what the Command Prompt can
+     * already do — `git`, `ls`, `sed`, `awk`, real pipelines between two x86-64
+     * MSYS2 processes under FEX — and named the one thing missing: the shell
+     * language itself, subshells, `$(…)`, scripts. This is that, without the
+     * `fork()` MSYS2 needs and deadlocks on, because PowerShell is a single
+     * Win32 process that spawns children with `CreateProcess`.
+     *
+     * **The header's "PowerShell 7 cannot be built from source and belongs
+     * behind the component downloader" is now out of date.** It does not need
+     * building: the `win-x64` release is a self-contained .NET application, so
+     * `build/tools.sh` unpacks the published zip into the `Tools` payload
+     * alongside Git, Python, Node and the JDK, and the APK carries it. The rule
+     * that comment was defending still holds and is why [installedAt] is set
+     * here and not null — a button that has only ever refused is worse than no
+     * button, so this one is offered only when the file is really there.
+     *
+     * **Unverified, and this is a real caveat rather than a formality.**
+     * PSReadLine drives the terminal with VT escape sequences, and Wine's
+     * conhost has no VT parser — it stored the mode word verbatim, so
+     * `SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_PROCESSING)` always succeeded and
+     * every program that probes that way believed it. Python's and Node's REPLs
+     * both printed their escapes as literal text on the device for exactly this
+     * reason. `patches/wine/0052` stops conhost claiming the capability, which
+     * should make PowerShell take its Console API rendering path instead; until
+     * that is measured on the device, expect this to look wrong rather than to
+     * fail.
+     */
+    POWERSHELL(
+        label = "PowerShell",
+        program = "pwsh.exe",
+        installedAt = """C:\Program Files\PowerShell\pwsh.exe""",
+        missingReason = "PowerShell arrives with the Tools component; install it from Components",
+    ),
+
+    /**
      * Wine's file manager, beside Vessel's own C: browser rather than instead
      * of it.
      *
@@ -281,6 +319,7 @@ enum class TerminalProfile(
     val shortLabel: String
         get() = when (this) {
             COMMAND_PROMPT -> "cmd"
+            POWERSHELL -> "pwsh"
             WINE_EXPLORER -> "files"
             NOTEPAD -> "notepad"
             REGEDIT -> "reg"

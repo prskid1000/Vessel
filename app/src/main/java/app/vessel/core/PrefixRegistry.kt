@@ -118,6 +118,28 @@ object PrefixRegistry {
      * nothing puts a second Wine program on the desktop any more; 8 added
      * [windowMetrics], so an existing container's windows get captions, borders
      * and scrollbars a finger can hit rather than Windows' mouse-sized ones;
+     * 25 added the two programs Tools 1.1.0 puts in the payload — [PWSH_DIR] and
+     * [JAVA_DIR]`\bin` on the PATH, plus `JAVA_HOME` as a value of its own in the
+     * same Environment key, since a JDK that PATH can reach and Gradle cannot
+     * find is a JDK nobody can build with. PowerShell is the one that has a
+     * reason beyond completeness: it is what gives Claude Code's shell tool
+     * something to run, Git Bash having been measured deadlocking in MSYS2's
+     * `fork()` emulation (see `TerminalProfile`). This bump is the half a rebuilt
+     * component cannot deliver — a prefix keeps whatever seed provisioned it, so
+     * without it every existing container would receive two new programs and a
+     * PATH that names neither, and `pwsh` would not resolve;
+     * 24 rewrote [toolsPath] for a Tools component that is no longer Git alone
+     * and no longer ARM64. Python and Node are in the same payload — they have
+     * to be, a container referencing exactly one component per type — so the
+     * seed gains `C:\Program Files\Python`, its `Scripts` subdirectory and
+     * `C:\Program Files\Node`; and Git's third entry moves from `clangarm64` to
+     * `mingw64` with `MSYSTEM` following it from `CLANGARM64` to `MINGW64`,
+     * because the x86-64 build of Git for Windows names its prefix differently
+     * from the ARM64 one. This is the half of that change a rebuild cannot
+     * deliver on its own: an existing prefix keeps the seed it was provisioned
+     * with, so without the bump every device that already has a container would
+     * install three new programs and leave `PATH` pointing at a `clangarm64`
+     * directory the new payload does not contain;
      * 22 removes the `opengl32` DLL override with `.reg`'s value-delete form,
      * because dropping it from the list would only ever reach a new prefix and
      * every existing one would keep loading Zink into every process — see
@@ -155,7 +177,7 @@ object PrefixRegistry {
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
      */
-    const val SEED_VERSION: Int = 23
+    const val SEED_VERSION: Int = 25
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -750,27 +772,36 @@ object PrefixRegistry {
     /**
      * The machine `PATH`, written whole.
      *
-     * Wine's own three entries, plus Git's three.
+     * Wine's own three entries, plus the eight the `Tools` component delivers:
+     * Git's three, Python's two, and one each for Node, PowerShell and the JDK's
+     * `bin`. `JAVA_HOME` sits beside them for the reason given on that value.
      *
      * **`Vessel Tools` used to be here and was a promise the build did not
      * keep**: it named a directory for a BusyBox nobody ever built, so the value
      * pointed at nothing. The rule that replaced it stands — this seed does not
-     * claim a directory in advance. Git's entries are different in the way that
-     * matters: the component really does put those directories there, and the
-     * entire point of installing it is that `git`, `ls`, `grep` and `sed` work
-     * from `cmd` without anyone typing a path.
+     * claim a directory in advance. The entries below are different in the way
+     * that matters: `build/tools.sh` really does create every one of them, and
+     * the entire point of installing the component is that `git`, `python`,
+     * `node`, `npm`, `pip`, `pwsh`, `java`, `javac`, `ls`, `grep` and `sed` work
+     * from `cmd` without anyone typing a path. `Python\Scripts` is on the list for the same reason
+     * even though it starts nearly empty: it is where pip puts console scripts,
+     * so it is where everything a user installs will appear, and the build ships
+     * a file in it so the directory genuinely arrives.
      *
-     * **`clangarm64`, not `mingw64`.** The ARM64 build of Git for Windows uses a
-     * `clangarm64` prefix where the x86-64 build uses `mingw64`. Copying the
-     * usual x64 instructions gives a PATH that finds `git.exe` through `cmd\`
-     * and misses every helper behind it — which looks like a working install
-     * until the first command that needs one.
+     * **`mingw64`, not `clangarm64`, and this is easy to get wrong in either
+     * direction.** The ARM64 build of Git for Windows uses a `clangarm64` prefix
+     * where the x86-64 build uses `mingw64`. This seed said `clangarm64` from
+     * seed 19 to seed 23, because the component was the ARM64 build; seed 24
+     * moves it because the component is now the x64 one. Whichever way the
+     * component goes, a PATH naming the other prefix finds `git.exe` through
+     * `cmd\` and misses every helper behind it — which looks like a working
+     * install right up to the first command that needs one.
      *
      * Written whole rather than appended, because a `.reg` merge replaces a
      * value and there is no append form: this seed is the definition of the
-     * machine PATH, so it has to name everything that belongs on it. Naming
-     * Git's directories before Git is installed is harmless — a PATH entry for a
-     * directory that does not exist is something every Windows machine has
+     * machine PATH, so it has to name everything that belongs on it. Naming the
+     * component's directories before it is installed is harmless — a PATH entry
+     * for a directory that does not exist is something every Windows machine has
      * several of, and it means installing the component needs no second write.
      *
      * Kept as a key rather than deleted so an existing prefix is *corrected*.
@@ -786,21 +817,44 @@ object PrefixRegistry {
                     """C:\windows\system32\wbem""",
                     """$GIT_DIR\cmd""",
                     """$GIT_DIR\usr\bin""",
-                    """$GIT_DIR\clangarm64\bin""",
+                    """$GIT_DIR\mingw64\bin""",
+                    PYTHON_DIR,
+                    """$PYTHON_DIR\Scripts""",
+                    NODE_DIR,
+                    PWSH_DIR,
+                    // The JDK is the one tree whose PATH entry is not its root:
+                    // a JDK root holds `bin`, `lib`, `conf` and `release`, and
+                    // only `bin` has launchers in it. [JAVA_HOME] below names the
+                    // root, which is what Java tooling actually asks for.
+                    """$JAVA_DIR\bin""",
                 ).joinToString(";"),
             ),
             // **Which MSYS2 prefix the shell belongs to, and it has to be set
             // before `bash --login` runs.** `/etc/profile` reads `MSYSTEM` to
             // decide what to put on the Unix `PATH` and what `MSYSTEM_PREFIX`
             // is; unset, it falls through to the MSYS prefix and a login shell
-            // comes up without `clangarm64/bin` on its path — so `git` works
+            // comes up without `mingw64/bin` on its path — so `git` works
             // from `cmd` and not from the shell that exists to run it.
             // `git-bash.exe` sets this itself, which is exactly why launching
             // `bash.exe` directly needs it set somewhere else.
             //
-            // `CLANGARM64` for the same reason the PATH above says `clangarm64`:
-            // this is the ARM64 build of Git for Windows.
-            RegistryValue("MSYSTEM", "CLANGARM64"),
+            // `MINGW64` for the same reason the PATH above says `mingw64`: the
+            // component is the x86-64 build of Git for Windows. It was
+            // `CLANGARM64` while the component was the ARM64 build, and the two
+            // values have to move together — `/etc/profile` derives
+            // `MSYSTEM_PREFIX` from this name, so a mismatch is a shell whose
+            // prefix directory does not exist.
+            RegistryValue("MSYSTEM", "MINGW64"),
+            // **A JDK without `JAVA_HOME` is half-installed.** `PATH` is enough
+            // to type `java`, and it is not enough for anything that builds:
+            // Gradle, Maven and Ant all look this variable up before they look
+            // at `PATH`, and a build tool that cannot find a JDK says so in a
+            // way that reads like the JDK is missing rather than unlabelled.
+            //
+            // The root, not `\bin` — the convention is that `%JAVA_HOME%\bin`
+            // is where the launchers are, so pointing it at `bin` gives every
+            // consumer `…\bin\bin\java.exe`.
+            RegistryValue("JAVA_HOME", JAVA_DIR),
         ),
     )
 
@@ -811,6 +865,58 @@ object PrefixRegistry {
      * unpacks the payload, the PATH above, and the launcher's `git-bash` entry.
      */
     const val GIT_DIR: String = """C:\Program Files\Git"""
+
+    /**
+     * Where the Python tree of the Tools component installs.
+     *
+     * `Program Files` beside Git rather than the `C:\PythonXX` that Windows
+     * installers default to, because the version is not in the name: the payload
+     * carries exactly one Python and a bump should not move the directory the
+     * PATH seed points at. Two things have to agree about this — the PATH above
+     * and `SessionRuntime.TOOLS_LAYOUT`.
+     */
+    const val PYTHON_DIR: String = """C:\Program Files\Python"""
+
+    /** Where the Node.js tree of the Tools component installs. See [PYTHON_DIR]. */
+    const val NODE_DIR: String = """C:\Program Files\Node"""
+
+    /**
+     * Where the PowerShell 7 tree of the Tools component installs. See [PYTHON_DIR].
+     *
+     * `PowerShell` and not `Pwsh`, even though the payload directory is `Pwsh`:
+     * this is the name a user sees in `C:\Program Files` and types into a path,
+     * and it is also where a Windows install of PowerShell 7 puts itself (minus
+     * the `\7` version directory, which is left off for the same reason nothing
+     * else here carries a version — the payload holds exactly one).
+     *
+     * This tree is the reason the component grew: `TerminalProfile` records the
+     * device measurement that rules out Git Bash as Claude Code's shell — a
+     * `fork()`-emulation busy loop at 98% of a core — and named PowerShell 7 as
+     * the replacement before there was one to name.
+     *
+     * **Unverified: `pwsh` in a window may render escape sequences as literal
+     * text.** PSReadLine is VT-heavy, Wine's conhost has no VT parser, and
+     * `SetConsoleMode` stores the VT bits verbatim, so the capability probe every
+     * such program makes gets a yes it should get a no. `patches/wine/0052` stops
+     * conhost claiming what it cannot do, which should send PowerShell down its
+     * Console API rendering path — but that patch is in flight and nothing here
+     * has been measured on the device.
+     */
+    const val PWSH_DIR: String = """C:\Program Files\PowerShell"""
+
+    /**
+     * Where the Temurin JDK tree of the Tools component installs. See [PYTHON_DIR].
+     *
+     * The root of the JDK, which is deliberately not what goes on `PATH` — the
+     * launchers live in `bin` and that is the entry [toolsPath] adds. This is
+     * the value `JAVA_HOME` gets, because that is the variable every Java build
+     * tool reads and it wants the root.
+     *
+     * No version in the name, matching every other tree here: the payload
+     * carries exactly one JDK, so a bump must not move the directory the seed
+     * points at.
+     */
+    const val JAVA_DIR: String = """C:\Program Files\Java"""
 
     /**
      * Tell dark-aware Windows programs that this is a dark system.

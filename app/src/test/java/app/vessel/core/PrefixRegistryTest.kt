@@ -178,11 +178,14 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(23, PrefixRegistry.SEED_VERSION)
+        assertEquals(25, PrefixRegistry.SEED_VERSION)
         // Fifteen keys, the three the seed deletes, and the stamp `renderSeed`
         // appends — which is not in the list, its value being a hash of the rest.
         // Seed 23 added `bluetoothService`, which only does anything paired with
-        // patches/wine/0031.
+        // patches/wine/0031. Seeds 24 and 25 both changed [toolsPath]'s contents
+        // and added no key — 25 put PowerShell and the JDK on PATH and added
+        // `JAVA_HOME` as a *value* in the Environment key that was already
+        // there — which is why this count has not moved with either.
         assertEquals(18, PrefixRegistry.seed.size)
     }
 
@@ -298,6 +301,57 @@ class PrefixRegistryTest {
         assertTrue("system32 is on it", path.contains("""C:\windows\system32"""))
         assertTrue("wbem is on it", path.contains("""C:\windows\system32\wbem"""))
         assertTrue("nothing of ours is", !path.contains("Vessel"))
+    }
+
+    @Test
+    fun `PATH and MSYSTEM name the x64 Git prefix, not the ARM64 one`() {
+        // The one value in this seed that is wrong in a way nothing reports.
+        // Git for Windows' x86-64 build puts its helpers under `mingw64` and its
+        // ARM64 build under `clangarm64`; the Tools component is the x64 build,
+        // so a PATH or an MSYSTEM naming `clangarm64` resolves `git.exe` through
+        // `cmd\` and then fails on the first command that shells out to a
+        // helper. The two have to agree with each other as well as with the
+        // payload — `/etc/profile` derives MSYSTEM_PREFIX from the name.
+        val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data
+        val msystem = PrefixRegistry.toolsPath.values.single { it.name == "MSYSTEM" }.data
+        assertTrue("mingw64 is on PATH", path.contains("""${PrefixRegistry.GIT_DIR}\mingw64\bin"""))
+        assertTrue("clangarm64 is not", !path.contains("clangarm64"))
+        assertEquals("MINGW64", msystem)
+    }
+
+    @Test
+    fun `every directory the Tools payload delivers is on PATH`() {
+        // The seed's own rule is that it never names a directory the build does
+        // not deliver, and the inverse is what this checks: build/tools.sh lays
+        // out Git, Python, Node, PowerShell and the JDK,
+        // SessionRuntime.TOOLS_LAYOUT copies all five into the prefix, and a
+        // program that is installed but not on PATH is one nobody can run
+        // without typing a path. `Scripts` is included because that is where pip
+        // puts console scripts.
+        val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data.split(";")
+        assertTrue("git", path.contains("""${PrefixRegistry.GIT_DIR}\cmd"""))
+        assertTrue("msys2 userland", path.contains("""${PrefixRegistry.GIT_DIR}\usr\bin"""))
+        assertTrue("python", path.contains(PrefixRegistry.PYTHON_DIR))
+        assertTrue("pip's scripts", path.contains("""${PrefixRegistry.PYTHON_DIR}\Scripts"""))
+        assertTrue("node", path.contains(PrefixRegistry.NODE_DIR))
+        assertTrue("pwsh", path.contains(PrefixRegistry.PWSH_DIR))
+        // `\bin` and not the root, which is the one tree where those differ: a
+        // JDK root has no launchers in it, so a PATH naming it resolves nothing
+        // while looking entirely correct.
+        assertTrue("java", path.contains("""${PrefixRegistry.JAVA_DIR}\bin"""))
+        assertTrue("not the JDK root", !path.contains(PrefixRegistry.JAVA_DIR))
+    }
+
+    @Test
+    fun `JAVA_HOME names the JDK root, because that is what build tools read`() {
+        // PATH is enough to type `java` and not enough to build: Gradle, Maven
+        // and Ant read JAVA_HOME first, and report a JDK that is present but
+        // unlabelled as one that is missing.
+        val javaHome = PrefixRegistry.toolsPath.values.single { it.name == "JAVA_HOME" }.data
+        assertEquals(PrefixRegistry.JAVA_DIR, javaHome)
+        // The root, never `\bin` — every consumer appends `\bin` itself, so the
+        // wrong value here produces `…\bin\bin\java.exe` and no useful error.
+        assertTrue("not \\bin", !javaHome.endsWith("""\bin"""))
     }
 
     @Test

@@ -132,6 +132,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip3 install --no-cache-dir --break-system-packages 'meson>=1.8.0' \
     && meson --version
 
+# --- 7-Zip -----------------------------------------------------------------------
+# Git for Windows ships its portable build as `PortableGit-<ver>-64-bit.7z.exe`,
+# a 7-Zip self-extracting archive: a Windows PE stub with a 7z archive appended.
+# build/tools.sh unpacks it on the build host, so something here has to read that
+# format, and nothing in the image did.
+#
+# `bsdtar` was the near miss and is the reason this is a real layer rather than a
+# one-word substitution. libarchive does read 7z, but its SFX support scans only
+# the first 0x27000 bytes for the signature (`skip_sfx` in archive_read_support_
+# format_7zip.c) and Git's stub is larger than that — so bsdtar on this file is a
+# gamble on a stub size upstream never promised to keep. p7zip finds the archive
+# wherever it starts. Measured against PortableGit-2.55.0.4-64-bit.7z.exe:
+# 9,567 files, 403,239,574 bytes unpacked, exit 0.
+#
+# Late layer on purpose, for the same reason as the two above: putting it in the
+# apt block at the top would invalidate the NDK layer and re-download 700 MB.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      p7zip-full \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/bin/7z
+
 # Object files land here; mount a volume over it.
 ENV VESSEL_WORK_DIR=/work
 RUN mkdir -p /work

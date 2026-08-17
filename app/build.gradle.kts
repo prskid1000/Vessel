@@ -40,14 +40,52 @@ val bundledPackages = listOf(
     // the ICD can present to a window: the Android platform loader the HAL has
     // to be driven through keeps the WSI surface layer for itself and knows only
     // surfaces it made for an ANativeWindow, so a swapchain on Wine's X11 window
-    // faults in the loader. docs/GRAPHICS.md has the whole story. Shipping the
-    // HAL too would cost 2 MB for a driver nothing would choose — `adoptLatest`
-    // takes the highest versionCode and the ICD is 260301 against its 260300.
+    // faults in the loader. docs/GRAPHICS.md has the whole story.
     //
-    // `build/turnip.sh` still builds the HAL by default and it stays in `dist/`;
-    // both `GpuProbe` and `patches/wine/0009` handle either shape by asking the
-    // file which it is, so installing one by hand still works.
+    // **The "ICD outranks the HAL anyway" reasoning that used to be here is
+    // gone, because it stopped being true.** It read: shipping the HAL too
+    // would cost 2 MB for a driver nothing would choose, since `adoptLatest`
+    // takes the highest versionCode and the ICD is 260301 against its 260300.
+    // That +1 is real (`build/turnip.sh` adds it for the `-icd` suffix) but it
+    // is smaller than one Vessel patch revision, which the same expression adds
+    // as `2 * rev`. At TURNIP_REVISION=2 the HAL is 260304 and the ICD 260305,
+    // so a HAL built one revision ahead of the ICD outranks it and would be
+    // adopted silently — reversing this decision with no error anywhere. That
+    // nearly happened: revision 2's HAL was built, staged on a device, and only
+    // caught by reading this list. Do not rely on the ordering; rely on the name
+    // below, which is the whole reason the bill of materials is named and not
+    // globbed.
+    //
+    // `build/turnip.sh` still builds the HAL by default (`VESSEL_TURNIP_ICD=1`
+    // selects the ICD); both `GpuProbe` and `patches/wine/0009` handle either
+    // shape by asking the file which it is, so installing one by hand works.
     "turnip-26.3.0-devel-9c475fc3-icd-canoe.wcp",
+    // Git, Python, Node, PowerShell 7 and the Temurin JDK in one payload, all
+    // x86-64 under FEX — see docs/DEVTOOLS.md for why x64 rather than ARM64 (the
+    // wheel and prebuilt ecosystems) and why zips rather than installers
+    // (TODO #17's open .msi failure). Bundled rather than side-loaded because
+    // installing the APK is meant to be the whole of setup, and a developer
+    // toolchain that needs a manual pick is one nobody has.
+    //
+    // **The version in this name is load-bearing and this line has to move with
+    // it.** `WcpInstaller.kt:290-305` will not unpack a package whose
+    // type+versionCode the store already holds, so a payload that grows without
+    // a version bump installs nothing; `native/pins.env` has the note. The
+    // corollary is here: dist/ still holds whatever was built before, so leaving
+    // the old name in this list ships a package the new one supersedes.
+    //
+    // 1.1.0 adds PowerShell (~101 MiB of archive) and the JDK (~196 MiB), which
+    // is roughly a tripling of the component and makes it by a wide margin the
+    // largest thing in the APK. Measured from the artifacts themselves:
+    // the .wcp is 360.7 MiB against 1.0.0's 126.2 MiB, and the APK goes from
+    // 261 MiB to 495.5 MiB. That is the deliberate trade, and it is felt on
+    // every download, every install and every first-run unpack; drop this line
+    // to take all of it back.
+    //
+    // (An earlier revision of this comment said 425 MiB and 566 MiB and called
+    // them measured. They were not — the numbers were written before the
+    // package existed. Both are now read off `ls -l dist/` and the built APK.)
+    "tools-1.1.0-x64.wcp",
 )
 
 /** Copies the bill of materials into a generated assets root. */
