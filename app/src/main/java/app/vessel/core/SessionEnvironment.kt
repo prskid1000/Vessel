@@ -229,8 +229,10 @@ const val RESTRICT_SUBGROUP_SIZE_64: Boolean = false
  * The FEX flags stay because they are correctness rather than graphics: the
  * second `wineboot --update` runs after the emulator key is applied, so it is a
  * translated process, and a translated process with the wrong memory-ordering
- * settings is wrong in the same way here as anywhere else. `WINEESYNC` stays
- * because the server and its clients have to agree about it.
+ * settings is wrong in the same way here as anywhere else. `WINEFSYNC` stays
+ * because the server and its clients have to agree about it -- a client that
+ * thinks fsync is on while the server does not is the one failure mode
+ * `dlls/ntdll/unix/fsync.c:477` warns about by name.
  */
 val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     // The exec model. See `wineLauncherEnvironment` for why each is required.
@@ -255,7 +257,7 @@ val BOOTSTRAP_SESSION_ENV: Set<String> = setOf(
     "GST_REGISTRY_FORK",
 
     "WINEPREFIX",
-    "WINEESYNC",
+    "WINEFSYNC",
     "WINEDEBUG",
 
     "FEX_SILENTLOG",
@@ -565,8 +567,9 @@ const val DEFAULT_DISPLAY: String = ":0"
  * Variables this layer owns outright, which a manifest param may never set.
  *
  * Most are simply not settings — `WINEDEBUG` is fixed per `docs/LOGGING.md`,
- * `WINEESYNC` because esync is the only synchronisation mode that works here
- * (README, Known limitations).
+ * `WINEFSYNC` because the synchronisation mode is not the container's to pick:
+ * `server/inproc_sync.c:50-65` chooses ntsync, then fsync, then a server-side
+ * fallback, and only the middle one is reachable on this device.
  *
  * `VKD3D_LOG_FILE` is different: it is listed to guarantee its **absence**.
  * `vkd3d_dbg_init_once` is an if/else — set the variable and it opens the file
@@ -575,7 +578,7 @@ const val DEFAULT_DISPLAY: String = ":0"
  */
 val RESERVED_SESSION_ENV: Set<String> = setOf(
     "WINEPREFIX",
-    "WINEESYNC",
+    "WINEFSYNC",
     "WINEDEBUG",
     WINEDLLOVERRIDES_ENV,
     "DISPLAY",
@@ -668,7 +671,7 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     "ADRENOTOOLS_HOOKS_PATH",
     "ADRENOTOOLS_DRIVER_NAME",
 
-    // The FEX memory-ordering flags are listed for the same reason as WINEESYNC:
+    // The FEX memory-ordering flags are listed for the same reason as WINEFSYNC:
     // they stopped being settings. Reserving them is what makes that stick —
     // a container document saved while they were still switches still carries
     // the old values, and without this the manifest merge would hand them back.
@@ -1371,7 +1374,86 @@ fun sessionEnvironment(
     val environment = LinkedHashMap<String, String>()
 
     environment["WINEPREFIX"] = paths.prefix.absolutePath
-    environment["WINEESYNC"] = "1"
+
+    // **fsync, and `WINEESYNC` is gone because esync is not in this Wine.**
+    //
+    // Checked rather than assumed, and the answer was a surprise: there is no
+    // `server/esync.c`, no `dlls/ntdll/unix/esync.c`, and `WINEESYNC` appears in
+    // zero source files anywhere in the tree. Valve's experimental_11.0 dropped
+    // esync for ntsync and fsync. So the `WINEESYNC=1` that used to be on this
+    // line was an inert string, and `docs/OPTIMIZATION.md`'s "esync is the best
+    // available" describes a mechanism this build does not contain.
+    //
+    // The real ladder is `server/inproc_sync.c:50-65`, in this order:
+    //
+    //     /dev/ntsync opens          -> "ntsync: up and running."
+    //     else do_fsync()            -> fsync
+    //     else                       -> "using server-side synchronization."
+    //
+    // `/dev/ntsync` does not exist on this device (checked) and this Wine has no
+    // ntsync.c, so that first branch is unreachable here. With WINEFSYNC unset
+    // every session so far therefore took the *last* branch -- server-side
+    // synchronisation, where each wait is a round trip to wineserver. This is
+    // not a marginal upgrade over esync; it is leaving the fallback.
+    //
+    // fsync's advantage over the fallback is structural: WaitForMultipleObjects
+    // becomes one futex_waitv instead of a server round trip, and the
+    // uncontended case -- almost all of them -- stays in userspace on the futex
+    // word entirely.
+    //
+    // **The risk, and it is not the usual kind.** `patches/wine/0022` records
+    // that under Android's seccomp policy futex_waitv (arm64 449) is not
+    // refused with ENOSYS, it is *fatal* -- SIGSYS, and wineserver dies inside
+    // the probe before serving a request. That patch stops the probe running
+    // unless WINEFSYNC is set, which is exactly what this line now does, so the
+    // probe will run. If this device's policy kills it, the symptom is a session
+    // that never starts, loudly and immediately, and the fix is deleting this
+    // line. That is a survivable failure and a legible one, which is why it is
+    // worth finding out; `docs/TODO.md` #39 has been open on precisely this
+    // question with nobody willing to flip the switch.
+    //
+    // **Unmeasured.** No session has run with fsync on this device. The claim
+    // above is a mechanism argument, not a number, and #39 does not close until
+    // one run either beats esync on a real workload or is written up as not
+    // worth it.
+    // **Explicitly "0", because fsync cannot work on Android and the reason is
+    // upstream of this device.**
+    //
+    // `fsync_check_support` (`server/fsync.c:58`) returns 0 without issuing any
+    // syscall when this is unset or zero, and probes `futex_waitv` (arm64 449)
+    // when it is set. Android's seccomp policy does not allow that syscall:
+    // bionic's `SECCOMP_ALLOWLIST_COMMON.TXT` carries `futex` and
+    // `futex_time64` and no `futex_waitv`, `SYSCALLS.TXT` defines none either,
+    // and that file states the resulting policy "is applied only to zygote
+    // spawned processes" -- which is every app, this one included. A syscall
+    // outside the allowlist gets SECCOMP_RET_TRAP, i.e. SIGSYS, so the probe
+    // does not return an error, it kills wineserver.
+    //
+    // **Measured twice, the second time on a clean install with nothing else
+    // changed**: `wineboot --init` left `prefix/system.reg` at 0 bytes against
+    // a fresh prefix's ~97 KB, and the session reported "Initialise Wine prefix
+    // did not finish". The *absence* of a Wine error is the fingerprint rather
+    // than a gap in the evidence: a clean decline prints "wineserver: using
+    // server-side synchronization", and a dead server prints nothing at all --
+    // which is why Vessel's own 0-byte registry check is the only thing that
+    // can report this failure.
+    //
+    // **Not set at all, rather than set to "0".** Unset and zero take the same
+    // branch in `fsync_check_support`, so an explicit zero would buy nothing at
+    // runtime, and this file's own rule is that it does not add variables it
+    // does not need. What keeps the decision from being re-made by accident is
+    // the entry in [RESERVED_SESSION_ENV] below: WINEFSYNC stays reserved, so a
+    // container manifest cannot set it either, and a switch that is fatal on
+    // this platform is not reachable from a settings screen.
+    //
+    // `patches/wine/0020` and `0022` stay. They are not wasted: 0022 is why an
+    // unset variable is a fast decline instead of a probe, and both become live
+    // again on any platform whose sandbox permits the syscall.
+    //
+    // So `server/inproc_sync.c:50-65` resolves here to its last rung, and not
+    // by neglect: `/dev/ntsync` needs Linux 6.14 and this device runs 6.12, and
+    // fsync needs a syscall the sandbox kills for. Server-side synchronisation
+    // is the only one of the three that can run.
 
     // FEX's memory-ordering behaviour is fixed here, not offered as settings.
     //
@@ -1719,6 +1801,37 @@ fun sessionEnvironment(
     // A DOS path, not `gfxStatsFile(paths.tmp).absolutePath` — the unix path
     // reached both producers and neither could open it. See [GFX_STATS_DOS_PATH].
     environment["VESSEL_GFX_STATS"] = GFX_STATS_DOS_PATH
+
+    // **Every .NET program dies on Wine's ICU stub without this, and the death
+    // looks like nothing at all.**
+    //
+    // `dlls/icu/icu.spec` is forwarders and only forwarders — the whole
+    // directory is `Makefile.in` and that spec, and every line reads
+    // `@ cdecl -norelay <name>() icuuc68.<name>_68`. There is no `icuuc68.dll`
+    // in this build, so each forward dangles. .NET requires ICU for
+    // globalization, resolves one of those exports during startup, and exits.
+    //
+    // Measured on the device with PowerShell 7, which is the first .NET program
+    // this project has shipped. The session log ends:
+    //
+    //   loaddll:build_module Loaded L"C:\windows\system32\icu.dll": builtin
+    //   module:load_dll Failed to load module L"icuuc68.dll"; status=c0000135
+    //   module:find_forwarded_export module not found for forward
+    //     'icuuc68.u_charsToUChars_68' used by L"...\icu.dll"
+    //   module:LdrGetProcedureAddress "u_charsToUChars" (ordinal 0) not found
+    //
+    // From the outside that is a console window that appears and vanishes, with
+    // no error anywhere a user can see. Note what it is *not*: `clrjit.dll`
+    // loads successfully a few lines earlier, so CoreCLR runs under FEX fine and
+    // the JIT was never the problem — worth recording because it was the first
+    // theory and it was wrong.
+    //
+    // Invariant globalization is .NET's own documented answer to a missing ICU.
+    // The cost is culture-aware string comparison and formatting, which a shell
+    // does not need; the alternative is shipping ICU or implementing Wine's,
+    // both much larger than one variable. Set for every session rather than for
+    // PowerShell alone, because the wall belongs to .NET and not to pwsh.
+    environment["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1"
 
     environment["VKD3D_DEBUG"] = FIXED_VKD3D_DEBUG
     environment["VKD3D_SHADER_DEBUG"] = FIXED_VKD3D_SHADER_DEBUG

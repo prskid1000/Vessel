@@ -357,9 +357,30 @@ class SessionEnvironmentTest {
     // — the fixed variables ---------------------------------------------------
 
     @Test
-    fun `esync is set unconditionally, because it is not a setting`() {
-        assertEquals("1", env()["WINEESYNC"])
+    fun `no synchronisation variable is set, because none of them can work here`() {
+        // **WINEFSYNC is absent, and that is a measurement rather than an
+        // omission.** Set to "1" it made `fsync_check_support` probe
+        // futex_waitv (arm64 449), which Android's seccomp policy does not
+        // allow -- bionic's SECCOMP_ALLOWLIST_COMMON.TXT carries `futex` and
+        // `futex_time64` and no `futex_waitv`. A syscall outside the allowlist
+        // gets SECCOMP_RET_TRAP, so the probe killed wineserver instead of
+        // returning an error. Twice on the device, the second on a clean
+        // install: `wineboot --init` left a 0-byte system.reg and the client
+        // logged `recvmsg: Connection reset by peer` with no Wine error at all,
+        // which is what a SIGSYS-killed server looks like from outside.
         assertFalse(env().containsKey("WINEFSYNC"))
+
+        // **`WINEESYNC` is absent because esync is absent.** There is no
+        // `server/esync.c` and no `dlls/ntdll/unix/esync.c` in the Wine this
+        // project builds, and the string appears in none of its source — Valve's
+        // experimental_11.0 dropped esync for ntsync and fsync. Setting it was
+        // writing an inert variable, and this assertion is what stops it coming
+        // back the next time somebody reads an old Proton guide.
+        assertFalse(env().containsKey("WINEESYNC"))
+
+        // Not set either, and for a different reason worth keeping apart: ntsync
+        // is selected by `server/inproc_sync.c` opening `/dev/ntsync`, not by a
+        // variable. There is no `WINENTSYNC` to set.
         assertFalse(env().containsKey("WINENTSYNC"))
     }
 
@@ -753,7 +774,6 @@ class SessionEnvironmentTest {
         assertEquals(
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
-                "WINEESYNC" to "1",
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",
@@ -785,6 +805,12 @@ class SessionEnvironmentTest {
                 // producer can open a unix path from inside the prefix — see
                 // [GFX_STATS_DOS_PATH].
                 "VESSEL_GFX_STATS" to GFX_STATS_DOS_PATH,
+                // Every .NET program needs this, because Wine's icu.dll is
+                // forwarders to an icuuc68.dll that is not in the build. Without
+                // it PowerShell opened a console window and vanished, with the
+                // failure visible only in the session log's forwarded-export
+                // error. See the comment on the assignment.
+                "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT" to "1",
                 "VKD3D_DEBUG" to "fixme",
                 "VKD3D_SHADER_DEBUG" to "fixme",
                 "VKD3D_CONFIG" to "nodxr",
@@ -1317,7 +1343,7 @@ class SessionEnvironmentTest {
         val bootstrap = full.filterKeys { it in BOOTSTRAP_SESSION_ENV }
         listOf(
             "WINEDLLPATH", "WINENLSDIR", "LD_LIBRARY_PATH", "PATH",
-            "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEDEBUG", "WINEESYNC",
+            "HOME", "TMPDIR", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEDEBUG",
             // `wineboot --init` registers winegstreamer.dll (loader/wine.inf.in
             // line 765), which loads its unix half and runs gst_init(). Without
             // the plugin path that scan finds nothing and caches an EMPTY
