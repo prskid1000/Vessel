@@ -29,21 +29,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
-    # The repository's default workflow permission is `read`
-    # (`actions/permissions/workflow` -> default_workflow_permissions: read) and
-    # this file declared none, so GITHUB_TOKEN could not write a release and the
-    # publish step ended every successful build with
+    # **`contents: write` is granted by each caller, not here.** The repository
+    # default is `read` (`actions/permissions/workflow`), so the publish step
+    # ended every successful build with
     #     HTTP 403: Resource not accessible by integration
     #       https://api.github.com/repos/<owner>/Vessel/releases
-    # after the .wcp had already been built and uploaded as a run artifact.
-    # There is no `components` release on this repository, which is the visible
-    # consequence: no component has ever been published by CI, and every .wcp
-    # that reached a device was pulled out of a run artifact by hand.
+    # after the .wcp was already built and uploaded as a run artifact -- which
+    # is why no `components` release has ever existed and every .wcp that
+    # reached a device came out of a run artifact by hand.
     #
-    # Declared here rather than raising the repository default, so exactly the
-    # jobs that publish get write and nothing else does.
-    permissions:
-      contents: write
+    # Declaring the grant *here* does not work and is not a style preference: a
+    # called workflow cannot hold more than the calling job passes it, and this
+    # file asking for write while its callers held read made every caller fail
+    # with `startup_failure` before a step ran. The grant therefore lives in
+    # turnip.yml, wine.yml, dxvk.yml, vkd3d.yml, fex.yml and zink.yml.
 
     # **Serialised on the release, not on the component.** Two components
     # finishing at once both rebuild `contents.json` from what is on the release

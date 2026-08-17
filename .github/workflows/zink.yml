@@ -16,6 +16,12 @@ on:
 
 jobs:
   build:
+    # `_component.yml` publishes the built .wcp to the `components` release, and
+    # the repository default workflow permission is `read`. A called workflow
+    # cannot hold more than its caller passes it, so the grant has to be here.
+    permissions:
+      contents: write
+
     uses: ./.github/workflows/_component.yml
     with:
       component: zink
