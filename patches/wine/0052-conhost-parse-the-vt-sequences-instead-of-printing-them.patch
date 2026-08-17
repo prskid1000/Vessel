@@ -489,3 +489,42 @@ index d3485156894..e04670229e3 100644
  };
  
  /* conhost.c */
+diff --git a/programs/conhost/window.c b/programs/conhost/window.c
+index f8fc7016af1..0679b82462a 100644
+--- a/programs/conhost/window.c
++++ b/programs/conhost/window.c
+@@ -1803,6 +1803,34 @@ static void apply_config( struct console *console, const struct console_config *
+ 
+     console->active->cursor_size = config->cursor_size;
+     console->active->cursor_visible = config->cursor_visible;
++    /* Vessel: a changed screen attribute has to reach the cells that are
++     * already there, which is what Windows does when the console's colours are
++     * changed and what conhost was not doing.
++     *
++     * create_screen_buffer fills every cell with the built-in default (0x000F,
++     * grey on black) before any configuration is read. Vessel then themes the
++     * console -- PrefixRegistry writes ScreenColors 0x87, background index 8 --
++     * and this assignment moved `attr` without touching the fill. From then on
++     * the buffer held two different backgrounds: index 0 in everything written
++     * before, index 8 in everything written or erased after.
++     *
++     * Invisible until something erased. Measured on the device with Node, whose
++     * REPL startup is exactly `CSI 1 G`, `CSI 0 J`, `CSI 3 G` -- no SGR at all,
++     * which is what cleared the parser and Node of a bug that was neither's:
++     * the erase honoured attr=0x0087 correctly and the region below the cursor
++     * became a different colour from the text above it.
++     *
++     * Only cells still carrying the old attribute are moved, so a program that
++     * has deliberately coloured part of the screen keeps it. */
++    if (console->active->attr != config->attr && console->active->data)
++    {
++        unsigned int i, cells = console->active->width * console->active->height;
++        unsigned short from = console->active->attr;
++
++        for (i = 0; i < cells; i++)
++            if (console->active->data[i].attr == from)
++                console->active->data[i].attr = config->attr;
++    }
+     console->active->attr = config->attr;
+     console->active->popup_attr = config->popup_attr;
+     console->active->win.left   = config->win_pos.X;
