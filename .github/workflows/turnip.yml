@@ -6,7 +6,15 @@ on:
     branches: [main]
     paths:
       - native/pins.env
-      - patches/turnip/**
+      # patches/mesa/**, not patches/turnip/** — there is no patches/turnip and
+      # never has been. build/turnip.sh sets SOURCE_NAME=mesa and applies
+      # patches/mesa/*.patch, because native/ and patches/ are keyed on the
+      # source tree and the package on the driver built out of it. zink.yml,
+      # which builds from the same checkout, already had this right. The filter
+      # that was here matched nothing, so eight mesa patches only ever reached a
+      # Turnip build when native/pins.env or build/turnip.sh happened to change
+      # in the same commit — and patches/mesa/0008 did not, so it never built.
+      - patches/mesa/**
       - build/turnip.sh
       - build/common.sh
       - build/package_wcp.py

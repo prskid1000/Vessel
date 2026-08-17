@@ -147,10 +147,10 @@ index 8dd2cc10..4c2e4f2e 100644
          dxgi_vk_swap_chain_set_latency_marker(chain, chain->request.low_latency_frame_id,
 diff --git a/libs/vkd3d/vkd3d_vessel_stats.c b/libs/vkd3d/vkd3d_vessel_stats.c
 new file mode 100644
-index 00000000..27cd91b5
+index 00000000..66779133
 --- /dev/null
 +++ b/libs/vkd3d/vkd3d_vessel_stats.c
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,188 @@
 +/*
 + * VESSEL: the writer for the counters declared in vkd3d_vessel_stats.h.
 + *
@@ -186,16 +186,25 @@ index 00000000..27cd91b5
 +    }
 +
 +#ifdef _WIN32
-+    /* The host sets this to an Android absolute path, and vkd3d runs as a PE
-+     * module, so msvcrt resolves a leading '/' against the *current* drive
-+     * rather than the prefix's Z:. `timestamp_profiler.c:277-290` carries the
-+     * same fixup with the same comment, and this is that code.
++    /* A path that already names a drive is left alone, and under Vessel that is
++     * the only path that ever arrives: the host passes GFX_STATS_DOS_PATH
++     * (`C:\vessel\tmp\gfx-stats.json`) and this branch is not taken.
 +     *
-+     * `patches/dxvk/0001` does a plain fopen on the same path and demonstrably
-+     * works, which means the two disagree about whether this is needed. The
-+     * fixup is the safe side of that disagreement: Z: is '/' in every Wine
-+     * prefix, so it is a no-op where DXVK is right and the fix where it is
-+     * lucky. A path that already names a drive is left alone. */
++     * The rewrite below is kept for a non-Vessel host, but its old comment
++     * claimed "Z: is '/' in every Wine prefix, so it is a no-op where DXVK is
++     * right and the fix where it is lucky" and that was wrong twice over.
++     * Vessel's DriveMap.removeRootDrive takes Z: out of every prefix on
++     * purpose, so the rewrite named a drive that cannot resolve; and DXVK's
++     * plain fopen was not right either, since msvcrt resolves a leading '/'
++     * against the *current* drive and `C:\data\user\0\...` does not exist.
++     * Both producers therefore failed the open and neither said so, and the
++     * panel reported "no Direct3D counters" for a title that was rendering --
++     * measured on Resident Evil Requiem, no gfx-stats.json anywhere in the
++     * container after 9,120 presents. The disagreement between the two was the
++     * evidence that one of them was wrong; the conclusion drawn from it, that
++     * the safer branch could be assumed rather than checked, is what cost the
++     * session. `timestamp_profiler.c:277-290` carries the same fixup and the
++     * same original comment, and is wrong in the same way. */
 +    if (env[0] == '/')
 +        snprintf(vkd3d_vessel_stats_path, sizeof(vkd3d_vessel_stats_path), "Z:\\%s", env + 1);
 +    else

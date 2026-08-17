@@ -353,21 +353,56 @@ Tri-state and lazily resolved rather than initialised at device creation because
 command lists are recorded long before the first present, so anything resolved on
 the present path would miss the first frame's draws.
 
-### The path fixup
+### The path fixup — and how it made this patch produce nothing
 
 `vkd3d_vessel_stats_resolve` applies the `Z:\` prefix and slash flip that
-`timestamp_profiler.c:277-290` carries, with the same comment. Note that
-`patches/dxvk/0001` does a plain `fopen` on the same value and demonstrably
-works, so the two disagree about whether it is needed; the fixup is the safe side
-of that disagreement, being a no-op wherever DXVK is right.
+`timestamp_profiler.c:277-290` carries. **Revision 7 shipped with a comment
+claiming that was the safe side of a disagreement with DXVK — "Z: is '/' in every
+Wine prefix, so it is a no-op where DXVK is right and the fix where it is lucky."
+Both halves of that were false, and the patch produced no output at all.**
+
+- `Z:` is **not** in every Wine prefix. `DriveMap.removeRootDrive` takes it out of
+  every Vessel prefix on purpose, and `SessionEnvironment.kt`'s
+  `VKD3D_CACHE_DOS_PATH` already documented that — vkd3d's *shader cache* hit the
+  identical wall and was fixed the identical way. The rewrite therefore named a
+  drive with no `dosdevices/z:` to resolve through.
+- DXVK was not "right" either. Its plain `fopen("/data/user/0/…")` is resolved by
+  msvcrt against the **current drive**, so it opened `C:\data\user\0\…`, which
+  nothing creates.
+
+Both producers failed the open, `fopen` returns NULL, and neither logs — so an
+unwritten snapshot is indistinguishable from a title drawing no Direct3D. On a
+Resident Evil Requiem session with `VESSEL_GFX_STATS` correctly set and the string
+present in both shipped DLLs, there was **no `gfx-stats.json` anywhere in the
+container after 9,120 presents**.
+
+The fix is host-side: `GFX_STATS_DOS_PATH` hands both producers
+`C:\vessel\tmp\gfx-stats.json`, backed by a `drive_c/vessel/tmp` symlink. A path
+that already names a drive skips the rewrite and is what msvcrt wants, so **one
+host change fixes both layers and neither binary had to be rebuilt.** Revision 8
+carries only the corrected comment.
+
+The lesson worth keeping: the disagreement between the two producers was real
+evidence that one of them was wrong. Concluding from it that the safer-looking
+branch could be *assumed* rather than checked is what cost a session — and the
+fact that could have settled it was already written down in this repository.
 
 ### Verification
 
-**Not compiled.** No vkd3d build has been run against this — the build needs
-meson, llvm-mingw and `glslangValidator`, none of which are on the machine it was
-written on.
+**Compiled and shipped since — and it proved nothing, for a reason outside this
+patch.** CI built it, the `.wcp` packaged as version code `3000107`, and the
+device was checked directly rather than trusted: `executeIndirectsPerFrame` and
+`VESSEL_GFX_STATS` are both present in the installed
+`components/VKD3D/3000107/system32/d3d12core.dll`, and the container's
+`provisioned.json` selects that code.
 
-What *was* checked:
+Then a full Resident Evil Requiem session — 9,120 presents — wrote **no
+`gfx-stats.json` anywhere in the container**. The cause is the path fixup
+documented above, and it is fixed on the host side with no new binary. So the
+counters have still never been read, and this patch is not yet verified to
+produce a correct number; it is only verified to be present.
+
+What was checked before that build, and still holds:
 
 - Applies forward against the pinned tree and round-trips (`git apply --reverse`
   then `git apply --check` then re-apply, all clean).

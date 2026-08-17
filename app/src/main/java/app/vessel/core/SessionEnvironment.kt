@@ -1246,6 +1246,48 @@ const val GFX_STATS_FILE: String = "gfx-stats.json"
 /** [GFX_STATS_FILE] inside a container's scratch directory, for both sides of it. */
 fun gfxStatsFile(tmp: File): File = File(tmp, GFX_STATS_FILE)
 
+/**
+ * The DOS path the D3D layers are handed for [GFX_STATS_FILE], and the reason
+ * they are not handed the unix one.
+ *
+ * Both producers open this with plain C file I/O from *inside* the prefix,
+ * where a leading `/` is not the root: msvcrt resolves it against the current
+ * drive, so `/data/user/0/…` becomes `C:\data\user\0\…` and the open fails
+ * because nothing ever created those directories. vkd3d does not even get that
+ * far — `vkd3d_vessel_stats.c` rewrites a leading `/` to `Z:\…` on the standard
+ * Wine assumption that `Z:` is the unix root, and [DriveMap.removeRootDrive]
+ * takes `Z:` out of every Vessel prefix on purpose. That is the same wall
+ * [VKD3D_CACHE_DOS_PATH] already documents one layer down, hit a second time
+ * by code whose comment asserted the assumption instead of checking it.
+ *
+ * **Neither failure says anything.** `fopen` returns NULL, the producer
+ * returns, and an unwritten snapshot is indistinguishable from a title that
+ * draws no Direct3D — so the panel reported "no Direct3D counters" for a game
+ * that was rendering. Measured on Resident Evil Requiem: `VESSEL_GFX_STATS`
+ * present in the process environment, the string present in the shipped
+ * `d3d11.dll` and `d3d12core.dll`, and no `gfx-stats.json` anywhere in the
+ * container after 9,120 presents.
+ *
+ * A path that already names a drive skips vkd3d's rewrite and is what msvcrt
+ * wants, so one DOS path fixes both producers and neither component has to be
+ * rebuilt. [vesselTmpLink] is what makes it resolve.
+ */
+const val GFX_STATS_DOS_PATH: String = "C:\\vessel\\tmp\\$GFX_STATS_FILE"
+
+/**
+ * The host side of [GFX_STATS_DOS_PATH]'s directory — `drive_c/vessel/tmp`
+ * pointed at the container's scratch directory.
+ *
+ * The directory rather than the file, deliberately: the reader keeps naming the
+ * same inode through [gfxStatsFile] with no change at all, and everything else
+ * already in `tmp` — [TU_DEBUG_FILE_NAME], [GPU_TRACE_FILE_NAME] — gains a DOS
+ * name for free, which is what the next instrument that has to be opened from
+ * inside the prefix will need. Same shape and same parent directory as
+ * [fexCacheLink] and [vkd3dCacheLink].
+ */
+internal fun vesselTmpLink(prefix: File): File =
+    File(File(File(prefix, DriveMap.DRIVE_C), "vessel"), "tmp")
+
 /** `TU_DEBUG_FILE` — Turnip re-reads this mid-session. See `RESERVED_SESSION_ENV`. */
 const val TU_DEBUG_FILE_NAME: String = "tu-debug"
 
@@ -1674,7 +1716,9 @@ fun sessionEnvironment(
     // A program that uses no Direct3D never loads DXVK and so never writes this,
     // which is not a failure and is reported as such: see the `d3d` row in
     // [app.vessel.data.MetricSampler]'s sources.
-    environment["VESSEL_GFX_STATS"] = gfxStatsFile(paths.tmp).absolutePath
+    // A DOS path, not `gfxStatsFile(paths.tmp).absolutePath` — the unix path
+    // reached both producers and neither could open it. See [GFX_STATS_DOS_PATH].
+    environment["VESSEL_GFX_STATS"] = GFX_STATS_DOS_PATH
 
     environment["VKD3D_DEBUG"] = FIXED_VKD3D_DEBUG
     environment["VKD3D_SHADER_DEBUG"] = FIXED_VKD3D_SHADER_DEBUG

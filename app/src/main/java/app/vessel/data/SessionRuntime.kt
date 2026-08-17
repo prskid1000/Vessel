@@ -47,6 +47,7 @@ import app.vessel.core.programArgv
 import app.vessel.core.serverArgv
 import app.vessel.core.sessionEnvironment
 import app.vessel.core.toolArgv
+import app.vessel.core.vesselTmpLink
 import app.vessel.core.vkd3dCacheLink
 import app.vessel.core.wineLauncherEnvironment
 import app.vessel.input.InputProfile
@@ -753,6 +754,12 @@ class SessionRuntime @Inject constructor(
         // open outright — so the DOS path needs something real to resolve to
         // before the guest starts, the same way [linkFexCache] does for FEX.
         linkVkd3dCache(layout.prefix, File(layout.caches, "vkd3d"), log)
+
+        // Same reason, one directory over: the D3D layers are handed
+        // GFX_STATS_DOS_PATH (`C:\vessel\tmp\gfx-stats.json`) because the unix
+        // path they used to get could not be opened from inside the prefix by
+        // either of them. See that constant.
+        linkVesselTmp(layout.prefix, layout.tmp, log)
 
         // **`.cache.write` is the pipeline cache, not a lock, and this used to
         // delete it on every launch.**
@@ -2043,6 +2050,60 @@ class SessionRuntime @Inject constructor(
      * Best-effort and never fatal, for the same reason as [linkFexCache]:
      * losing this link costs a slower launch, not a launch.
      */
+    /**
+     * Point `drive_c/vessel/tmp` at this container's scratch directory.
+     *
+     * Same shape and same motive as [linkVkd3dCache]: a program running inside
+     * the prefix cannot open a unix path with plain C file I/O, so the D3D
+     * layers are handed `C:\vessel\tmp\gfx-stats.json` and this is what makes
+     * that resolve. [app.vessel.core.GFX_STATS_DOS_PATH] carries the mechanism
+     * and the measurement.
+     *
+     * The host directory is created first: `fopen(…, "w")` creates a file and
+     * not the directories above it, so a link pointing at a directory that does
+     * not exist yet fails exactly the same way the unix path did, and just as
+     * quietly.
+     *
+     * Never re-pointed once made, for [linkVkd3dCache]'s reason — `tmp` is the
+     * same directory for the life of the container, so a link already pointing
+     * at it is already correct.
+     *
+     * Best-effort and never fatal: losing this costs the counters, not the
+     * session. It is logged at WARN because a silent loss here is precisely the
+     * failure this whole change exists to stop.
+     */
+    private suspend fun linkVesselTmp(prefix: File, host: File, log: SessionLog) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                host.mkdirs()
+                val link = vesselTmpLink(prefix)
+                link.parentFile?.mkdirs()
+                val path = link.toPath()
+                val target = host.toPath()
+                if (Files.isSymbolicLink(path)) {
+                    if (Files.readSymbolicLink(path) == target) return@runCatching
+                    Files.delete(path)
+                } else if (link.exists()) {
+                    log.line(
+                        LogSource.VESSEL,
+                        LogLevel.WARN,
+                        "${link.path} is a real directory, not a link; " +
+                            "the Direct3D counters will not reach the metrics panel",
+                    )
+                    return@runCatching
+                }
+                Files.createSymbolicLink(path, target)
+            }.onFailure {
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.WARN,
+                    "the container's tmp could not be linked into the prefix, " +
+                        "so the Direct3D counters have nowhere to land: ${it.message}",
+                )
+            }
+        }
+    }
+
     private suspend fun linkVkd3dCache(prefix: File, host: File, log: SessionLog) {
         withContext(Dispatchers.IO) {
             runCatching {

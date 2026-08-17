@@ -186,16 +186,32 @@ class SessionEnvironmentTest {
     // — the graphics counters --------------------------------------------------
 
     @Test
-    fun `the D3D counter snapshot lands in the container's own scratch directory`() {
-        // Inside app data, because both sides open it by path: Wine writes it
-        // through the CRT and the sampler reads it as the app. Anywhere else and
-        // one of the two is denied.
-        assertEquals(File(tmp, GFX_STATS_FILE).absolutePath, env()["VESSEL_GFX_STATS"])
-        // The directory, stated separately from the file name: `tmp` is what
-        // `TMPDIR` already points at, and the point of the row is that the two
-        // agree. Compared as `File`s rather than as strings because this suite
-        // runs on the build host, where a separator is a backslash.
-        assertEquals(tmp.absoluteFile, File(env()["VESSEL_GFX_STATS"]!!).absoluteFile.parentFile!!)
+    fun `the D3D counter snapshot is named by a DOS path and never a unix one`() {
+        // **A drive letter, and this test exists to insist on it.** Both
+        // producers open this value with plain C file I/O from inside the
+        // prefix, where a leading `/` is not the root: vkd3d rewrites it to
+        // `Z:\`, which Vessel's prefixes deliberately do not have, and DXVK lets
+        // msvcrt resolve it against the current drive. Both failed the open, and
+        // neither says so. See [GFX_STATS_DOS_PATH].
+        assertEquals(GFX_STATS_DOS_PATH, env()["VESSEL_GFX_STATS"])
+
+        // **Stated as a property, not only as a literal, because the assertion
+        // that used to be here could not fail.** It compared against
+        // `File(tmp, GFX_STATS_FILE).absolutePath`, and this suite runs on the
+        // build host, where that call turns `/data/user/0/…` into
+        // `C:\data\user\0\…`. Producer and test agreed on a string that was
+        // DOS-shaped on Windows and unix-shaped on the only machine that
+        // mattered, so the suite was green for as long as the bug existed. A
+        // shape check is the part that does not depend on which host runs it.
+        val value = env()["VESSEL_GFX_STATS"]!!
+        assertTrue("must name a drive: $value", Regex("""^[A-Za-z]:\\""").containsMatchIn(value))
+        assertFalse("must not be a unix path: $value", value.startsWith("/"))
+
+        // The file name still ties the two sides together: the host reads
+        // through `gfxStatsFile(tmp)`, which is this name inside the directory
+        // `drive_c/vessel/tmp` is linked to, so a rename that moved only one
+        // side would show up here.
+        assertTrue("must end in $GFX_STATS_FILE: $value", value.endsWith("\\$GFX_STATS_FILE"))
     }
 
     @Test
@@ -230,7 +246,7 @@ class SessionEnvironmentTest {
             ),
         )
         assertEquals(
-            File(tmp, GFX_STATS_FILE).absolutePath,
+            GFX_STATS_DOS_PATH,
             env(manifest = sneaky)["VESSEL_GFX_STATS"],
         )
     }
@@ -762,10 +778,13 @@ class SessionEnvironmentTest {
                 // container, because the heap is one heap on every device this
                 // runs on.
                 "DXVK_CONFIG" to FIXED_DXVK_MAX_SHARED_MEMORY,
-                // The D3D counter snapshot, in the container's scratch. Always
-                // set: it is what makes draw calls, submissions and vidmem
-                // graphable without a per-game `dxvk.conf` and a screenshot.
-                "VESSEL_GFX_STATS" to File(tmp, GFX_STATS_FILE).absolutePath,
+                // The D3D counter snapshot. Always set: it is what makes draw
+                // calls, submissions and vidmem graphable without a per-game
+                // `dxvk.conf` and a screenshot. A DOS path onto the container's
+                // scratch rather than the unix path to it, because neither
+                // producer can open a unix path from inside the prefix — see
+                // [GFX_STATS_DOS_PATH].
+                "VESSEL_GFX_STATS" to GFX_STATS_DOS_PATH,
                 "VKD3D_DEBUG" to "fixme",
                 "VKD3D_SHADER_DEBUG" to "fixme",
                 "VKD3D_CONFIG" to "nodxr",
