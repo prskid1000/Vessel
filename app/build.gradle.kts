@@ -182,8 +182,8 @@ android {
         applicationId = "app.vessel"
         minSdk = 31
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.4.7"
+        versionCode = 12
+        versionName = "0.4.8"
 
         // One shipping ABI. Every native component this app installs is built
         // for a single arm64 target (see build/targets/), so an armeabi-v7a or
