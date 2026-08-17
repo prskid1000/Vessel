@@ -70,6 +70,7 @@ import com.winlator.widget.XServerView
 import com.winlator.xconnector.UnixSocketConfig
 import com.winlator.xconnector.XConnectorEpoll
 import com.winlator.xserver.Atom
+import com.winlator.xserver.ClipboardSelection
 import com.winlator.xserver.Decoration
 import com.winlator.xserver.Pointer
 import com.winlator.xserver.Property
@@ -1076,8 +1077,41 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 
     private val padBridge = PadBridge(padSocketName)
 
+    /**
+     * Android's clipboard, watched for this session only.
+     *
+     * Per session rather than per app: a listener registered while nothing is
+     * running would take the X selection over on a server that does not exist, and
+     * would keep a `ClipboardManager` callback alive for the life of the process.
+     */
+    private val clipboard = AndroidClipboard(context)
+
     init {
         xServer.setDebugSink { line -> Log.d("VesselDisplay", line) }
+        // **The clipboard seam, and the whole of it on this side.**
+        //
+        // The selection protocol is the vendored server's — see
+        // `com/winlator/README.md` item 30. What belongs here is the Android half:
+        // a change listener that tells the server to claim `CLIPBOARD`, and the two
+        // calls it answers conversions out of. `getText` is only ever called while
+        // a guest program is pasting, which is why the listener carries no content;
+        // reading Android's clipboard is something the user may be shown a toast
+        // about, so it happens once per paste and never on a timer.
+        clipboard.onChanged = { runCatching { xServer.clipboard.announce() } }
+        xServer.clipboard.setBridge(
+            object : ClipboardSelection.Bridge {
+                override fun getText(): String? = clipboard.currentText()
+
+                override fun setText(text: String) = clipboard.publish(text)
+            },
+        )
+        clipboard.start()
+        // Claimed once at startup so the *first* paste inside the guest works
+        // without the user having to copy again. Nothing is read to do it — the
+        // server takes ownership and asks for content only when asked for content,
+        // so a session that never pastes never touches Android's clipboard at all.
+        runCatching { xServer.clipboard.announce() }
+            .onFailure { Log.w("VesselDisplay", "could not offer the clipboard to the guest", it) }
         // MIT-SHM is advertised unconditionally by XServer.setupExtensions, and
         // its Attach handler dereferences this manager without a null check, so
         // it is set before a client can possibly connect rather than lazily.
@@ -1219,6 +1253,11 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
     }
 
     fun stop() {
+        // Before the connectors, because the listener's only job is to reach into
+        // a server that is about to stop existing. The bridge goes with it, so a
+        // conversion racing teardown refuses instead of touching a dead session.
+        clipboard.stop()
+        runCatching { xServer.clipboard.setBridge(null) }
         // Connectors first, view second. Destroying a connector joins its epoll
         // thread, which calls back into the server to free each client's
         // resources; doing that while the GL thread is already parked by

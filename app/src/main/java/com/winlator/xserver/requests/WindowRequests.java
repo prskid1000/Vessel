@@ -447,10 +447,40 @@ public abstract class WindowRequests {
 
         byte[] data = new byte[32];
         inputStream.read(data);
+
+        // VESSEL: an event aimed at the server's own window goes to the server.
+        //
+        // The clipboard shim owns a window so that it can be a selection
+        // *requestor* — X11 hands selection data over as a property on the
+        // requestor's window, and the owner announces it by sending a
+        // SelectionNotify to that window with XSendEvent. The shim has no
+        // connection, so there is no socket for that event to arrive on; this is
+        // where it is picked up instead.
+        //
+        // Before the RawEvent below, because that class exists to forward 32 bytes
+        // to a client and there is no client here.
+        if (client.xServer.clipboard.isServerWindow(destination)) {
+            client.xServer.clipboard.onServerWindowEvent(data);
+            return;
+        }
+
         Event event = new RawEvent(data);
 
         if (eventMask.isEmpty()) {
-            destination.originClient.sendEvent(event);
+            // VESSEL: a window with no origin client is not an NPE.
+            //
+            // `originClient` is null for every window the server made rather than
+            // a client — the root window is one, and so is the clipboard shim's.
+            // Upstream dereferenced it unconditionally, so SendEvent with an empty
+            // mask to the root threw out of the request thread, which is a
+            // RuntimeException rather than an X error and therefore drops the
+            // connection. Delivering to the window's listeners is the closest
+            // honest thing: an empty mask means "the owner of this window", and a
+            // server window's listeners are who that is.
+            if (destination.originClient != null) {
+                destination.originClient.sendEvent(event);
+            }
+            else destination.sendEvent(event);
         }
         else destination.sendEvent(eventMask, event);
     }

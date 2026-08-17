@@ -258,6 +258,15 @@ public class XClientRequestHandler implements RequestHandler {
                             SelectionRequests.getSelectionOwner(client, inputStream, outputStream);
                         }
                         break;
+                    // VESSEL: ConvertSelection. The lock is WINDOW_MANAGER
+                    // because the handler both reads the selection table and
+                    // writes a property onto the requestor's window, which is the
+                    // same pair CHANGE_PROPERTY above takes.
+                    case ClientOpcodes.CONVERT_SELECTION:
+                        try (XLock lock = client.xServer.lock(XServer.Lockable.WINDOW_MANAGER)) {
+                            SelectionRequests.convertSelection(client, inputStream, outputStream);
+                        }
+                        break;
                     case ClientOpcodes.SEND_EVENT:
                         try (XLock lock = client.xServer.lockAll()) {
                             WindowRequests.sendEvent(client, inputStream, outputStream);

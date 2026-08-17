@@ -20,6 +20,10 @@ public abstract class ClientOpcodes {
     public static final byte GET_PROPERTY = 20;
     public static final byte SET_SELECTION_OWNER = 22;
     public static final byte GET_SELECTION_OWNER = 23;
+    // VESSEL: ConvertSelection. Not declared here at all before, so opcode 24
+    // fell through XClientRequestHandler's default and dropped the connection —
+    // a selection could be claimed and never asked about. See SelectionRequests.
+    public static final byte CONVERT_SELECTION = 24;
     public static final byte SEND_EVENT = 25;
     public static final byte GRAB_POINTER = 26;
     public static final byte UNGRAB_POINTER = 27;

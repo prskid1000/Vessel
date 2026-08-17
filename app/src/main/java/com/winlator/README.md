@@ -676,6 +676,112 @@ The modifications, in the order they were made:
    `docs/BANDWIDTH.md` carries what is known about the cacheability half of the
    question.
 
+30. **The selection protocol, which was half-built, and the clipboard that needs
+   it — `ClientOpcodes`, `XClientRequestHandler`, `SelectionManager`,
+   `requests/SelectionRequests`, `requests/WindowRequests`, `WindowManager`,
+   `XServer`, and four new files: `ClipboardSelection`,
+   `events/SelectionRequest`, `events/SelectionNotify`.**
+
+   Upstream implements `SetSelectionOwner` (22) and `GetSelectionOwner` (23) and
+   stops. **`ConvertSelection` (24) was not declared in `ClientOpcodes` at all**,
+   so it did not merely go unanswered — an undeclared major opcode falls through
+   the dispatch switch's default, which throws `UnsupportedOperationException`
+   and drops the connection (modification 19). There was no `SelectionRequest`
+   event and no `SelectionNotify` event either. So a guest could *claim* the
+   clipboard and nothing in the universe could ask what was in it. That is the
+   whole reason clipboard did not work, and it is a shorter explanation than it
+   looks: `ChangeProperty` (18) and `GetProperty` (20) were already here, and in
+   X11 the property **is** the clipboard — only the handshake around it was
+   missing.
+
+   *The three pieces, and why the data does not travel in any of them.* A
+   requestor sends `ConvertSelection`. The server routes a `SelectionRequest` to
+   whoever owns the selection. The owner writes the value into a property **on
+   the requestor's window** and answers with `SelectionNotify`, whose `property`
+   field names it — or is `None`, which means refused and must be sent rather
+   than dropped, because a requestor with no reply waits and a paste that hangs
+   is worse than a paste that does nothing. The requestor then reads it with
+   `GetProperty`. Nothing new carries bytes; `SelectionNotify` is 32 bytes like
+   every other event.
+
+   `TARGETS` is answerable, because it is how a client discovers what is on
+   offer, and the offered list is exactly `TARGETS`, `UTF8_STRING`, `STRING`,
+   `TEXT`. **Text only, deliberately.** Images and arbitrary formats are refused
+   with `property = None`; so are `TIMESTAMP`, `MULTIPLE` and `INCR`, and none of
+   the three is advertised — advertising a target and refusing it at the first
+   call is the failure shape modification 20 exists to remember. `INCR` is the
+   one that will bite: Wine switches to it above its own selection-size limit, so
+   a very large copy out of the guest is recognised by property type, logged at
+   WARN and dropped rather than pasted as the byte count it actually contains.
+
+   *Two latent defects on the paths this had to cross, both of which drop the
+   connection rather than returning an error.* `SetSelectionOwner` with owner
+   `None` is how a client **releases** a selection, and `winex11.drv` does
+   exactly that when the Windows clipboard is emptied; upstream looked the window
+   up unconditionally and threw `BadWindow`, and worse, `SelectionManager` then
+   built a `SelectionClear` around the *incoming* owner — so a release produced
+   an event carrying null and `SelectionClear.send` dereferenced it, an NPE out of
+   the request thread. The event now names the window losing the selection, which
+   is what the protocol says that field is. Separately, `WindowRequests.sendEvent`
+   dereferenced `destination.originClient` unconditionally for an empty event
+   mask, and that is null for every window the server made rather than a client —
+   the root window included. `onFreeResource` also now clears the owning client
+   and not only the owner window, since `ResourceIDs` hands a departing client's
+   id base straight to the next connection.
+
+   *The Android half, and the boundary.* `ClipboardSelection` is the server's own
+   participant, and it plays **both** roles, which is the shape of the problem.
+   As **owner** it claims `CLIPBOARD` and `PRIMARY` for a server-internal window
+   whenever Android says its clipboard changed, and answers the resulting
+   conversion. As **requestor** — the harder direction — it needs a window to
+   receive `SelectionNotify` and a property to receive the data, so
+   `WindowManager.createServerWindow()` was added: unparented, with no `Drawable`,
+   because both the compositor and Vessel's taskbar walk the window tree from the
+   root and a window in that tree is a window somebody has to remember to skip.
+   Borrowing a client's window was the alternative and is worse late rather than
+   early — the client owns its lifetime, so the requestor would vanish
+   mid-transfer whenever that program exited. `SendEvent` to that window is
+   routed to the shim instead of to a socket, because it has no socket.
+
+   Nothing Android-facing is in this tree: `ClipboardSelection.Bridge` is a
+   two-method interface (`getText`, `setText`) and
+   `app.vessel.display.AndroidClipboard` implements it, wired up in
+   `XServerDisplay` — still the only file in `app.vessel` that imports from here.
+
+   *Reading Android's clipboard is lazy on purpose and it is not about
+   performance.* Android logs an access notification every time an app reads the
+   clipboard and from Android 12 shows the user a toast, so a poll or a read on
+   every change notification would produce a stream of them while the user did
+   nothing. Ownership is claimed knowing only that *something* changed; the
+   content is fetched at conversion time, which is when a guest program actually
+   pastes.
+
+   *The echo loop, which is not optional.* Pushing text to Android makes
+   Android's clipboard change, which fires the listener, which would claim the X
+   selection straight back and send the guest a `SelectionClear` for the copy it
+   just made — after which every paste in the guest is served out of a stale
+   Android clip. Two guards, catching different halves: `ClipboardSelection`
+   remembers the last string handed *to* the guest and does not write it back if
+   the guest hands it home again, and `AndroidClipboard` counts its own writes so
+   the callback each one causes is consumed rather than acted on. The count lapses
+   after two seconds, so a write whose callback never arrives costs one ignored
+   change instead of a permanently one-way clipboard. It would not spin forever
+   without them — the cycle needs a user to copy again — but the selection flaps
+   on every copy, and against a Wine that re-asserted ownership on
+   `SelectionClear` it would spin.
+
+   **Written and compiled; none of it has been run.** A clipboard round trip needs
+   a live Wine, a real `ClipboardManager` and a user copying something, so there
+   is nothing about it a JVM test can see. `SelectionProtocolTest` covers what one
+   can: the opcode, the atom names and ids, the offered target list against what
+   is actually answerable, and the property encodings including the NUL truncation
+   and the refusal to decode `INCR`. Unverified on the device: whether Wine
+   accepts these answers at all, whether it asks `TARGETS` first or goes straight
+   for `UTF8_STRING`, whether `getPrimaryClip` succeeds from an X request thread
+   (Android 10+ refuses an app without focus), how often `INCR` is reached in
+   practice, and whether the self-write suppression matches how many callbacks
+   `setPrimaryClip` really produces.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -699,17 +805,24 @@ fails the build.
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
+| `app/src/main/java/com/winlator/xserver/ClientOpcodes.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/ClipboardSelection.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28, 29 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/SelectionManager.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21 |
+| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21, 30 |
 | `app/src/main/java/com/winlator/xserver/XClient.java` | 24 |
-| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24 |
+| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30 |
 | `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
 | `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24 |
-| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19 |
+| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/events/SelectionNotify.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/events/SelectionRequest.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/requests/SelectionRequests.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/requests/WindowRequests.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
 | `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |

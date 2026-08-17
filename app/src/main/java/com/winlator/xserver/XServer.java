@@ -28,6 +28,10 @@ public class XServer {
     public final ResourceIDs resourceIDs = new ResourceIDs(128);
     public final GraphicsContextManager graphicsContextManager = new GraphicsContextManager();
     public final SelectionManager selectionManager;
+    // VESSEL: the server's own participant in the selection protocol, which is
+    // what makes clipboard work in either direction. Always present and inert
+    // until a host installs a Bridge; see ClipboardSelection.
+    public final ClipboardSelection clipboard;
     public final DrawableManager drawableManager;
     public final WindowManager windowManager;
     public final CursorManager cursorManager;
@@ -60,6 +64,9 @@ public class XServer {
         cursorManager = new CursorManager(drawableManager);
         windowManager = new WindowManager(screenInfo, drawableManager);
         selectionManager = new SelectionManager(windowManager);
+        // VESSEL: after selectionManager and windowManager, which it reaches
+        // through this server. It creates nothing until a selection is claimed.
+        clipboard = new ClipboardSelection(this);
         inputDeviceManager = new InputDeviceManager(this);
         grabManager = new GrabManager(this);
 

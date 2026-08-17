@@ -199,6 +199,40 @@ public class WindowManager extends XResourceManager {
         return window;
     }
 
+    /**
+     * VESSEL: a window that belongs to the server rather than to a client.
+     *
+     * <p>Clipboard needs one and there was no way to make one. Every route into
+     * {@link #windows} starts from `CreateWindow` with an {@link XClient} to bill
+     * it to, and X11 moves selection data <em>through a property on the
+     * requestor's window</em> — so a server acting as a requestor, which is what
+     * the container-to-Android direction requires, has to own a window that the
+     * guest can `ChangeProperty` onto and `SendEvent` to.
+     *
+     * <p>Deliberately **not** parented, and it is the one interesting decision
+     * here. Both the compositor ({@link com.winlator.renderer.GLRenderer}) and
+     * Vessel's taskbar walk the window tree from the root, and a window in that
+     * tree is a window somebody has to decide to skip. Left out of it entirely, it
+     * is reachable by id — which is all the protocol needs — and invisible to
+     * everything that draws or lists. It has no {@link Drawable} for the same
+     * reason: nothing will ever paint it, so allocating a backing buffer would be
+     * a pixel-sized lie.
+     *
+     * <p>Borrowing a client's window instead was the alternative and it is worse
+     * in a way that shows up late: the client owns its lifetime, so the shim's
+     * requestor would vanish mid-transfer whenever that program exited, and the
+     * property the guest is about to write would land on a freed id.
+     *
+     * <p>Never freed. It lives as long as the server, which is also as long as
+     * the clipboard shim.
+     */
+    public Window createServerWindow() {
+        int id = IDGenerator.generate();
+        Window window = new Window(id, null, 0, 0, 1, 1, null);
+        windows.put(id, window);
+        return window;
+    }
+
     private void changeWindowGeometry(Window window, short x, short y, short width, short height) {
         boolean resized = window.getWidth() != width || window.getHeight() != height;
         if (resized && window.hasEventListenerFor(Event.RESIZE_REDIRECT)) {
