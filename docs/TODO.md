@@ -135,16 +135,25 @@ and both were free to avoid.
   conventional draws — which is the same split as the symptom, world missing and
   props present. That is a shape match and not yet evidence.
 
-  **The instrument for it now exists and has never been run.** `patches/vkd3d/0007`
-  counts `ExecuteIndirect` calls and the commands they were given, per frame, on
-  the `d3d · indirect` card. It was built for this entry. A frame drawing a
-  basement with no walls should still be issuing indirect draws; if the counter
-  is zero the fallback is not reached and this lead is dead, and if it is large
-  the lead survives and the next question is what the patching pass produces.
+  **The instrument for it exists, shipped, installed — and has still never
+  produced a reading.** `patches/vkd3d/0007` counts `ExecuteIndirect` calls and
+  the commands they were given, per frame, on the `d3d · indirect` card. It was
+  built for this entry. A frame drawing a basement with no walls should still be
+  issuing indirect draws; if the counter is zero the fallback is not reached and
+  this lead is dead, and if it is large the lead survives and the next question
+  is what the patching pass produces.
 
-  *Done when:* the room has walls. **Next step:** one session on a vkd3d build at
-  revision 7 or later, standing in the same basement, reading the indirect
-  counter. Nothing else in this entry needs doing first.
+  The 2026-08-17 session was supposed to be that run. vkd3d `3000107` was
+  installed and verified on the device, and the counters still wrote nothing —
+  because **neither producer could open `VESSEL_GFX_STATS` at all**, for a reason
+  that had nothing to do with this entry and is now fixed host-side (see the
+  entry in *Fixed, and waiting for the run that would prove it*). This blocker
+  was never tested; it was only ever waiting behind a second, invisible one.
+
+  *Done when:* the room has walls. **Next step:** unchanged — one session
+  standing in the same basement, reading the indirect counter. What changed is
+  that the counter can now reach the panel. Nothing else in this entry needs
+  doing first.
 ---
 
 ## Fixed, and waiting for the run that would prove it
@@ -196,8 +205,54 @@ regression gets attributed to the wrong change three days later.
   or CPU-bound rather than how much work was in it.
 
   *Done when:* a Requiem session fills the `d3d · indirect` card, which is also
-  the next step for #56. **Needs a DXVK build at revision 1 and a vkd3d build at
-  revision 7**; neither has been compiled, and neither README claims otherwise.
+  the next step for #56. Both builds shipped and installed (DXVK `2070101`, vkd3d
+  `3000107`, verified on device by the counter strings in the DLLs themselves) —
+  and **the run produced no counters anyway**, see the next item.
+
+- [x] **Neither producer could open `VESSEL_GFX_STATS`, and neither said so.** A
+  Requiem session on 2026-08-17 had the variable set, both patched DLLs installed
+  with the counter strings present in them, and **no `gfx-stats.json` anywhere in
+  the container after 9,120 presents**. The value was a unix path, and nothing
+  inside the prefix can open one with plain C file I/O:
+
+  - vkd3d rewrites a leading `/` to `Z:\…`, and `DriveMap.removeRootDrive` takes
+    `Z:` out of every Vessel prefix **on purpose**. The prefix's `dosdevices/`
+    holds `c:` and `d:` and nothing else.
+  - DXVK does a plain `fopen`, and msvcrt resolves a leading `/` against the
+    *current* drive — `C:\data\user\0\…`, which nothing creates.
+
+  `fopen` returns NULL, both producers return, and an unwritten snapshot is
+  indistinguishable from a title drawing no Direct3D. The panel said "no Direct3D
+  counters" for a game that was rendering.
+
+  Fixed host-side: `GFX_STATS_DOS_PATH` hands both producers
+  `C:\vessel\tmp\gfx-stats.json`, backed by a `drive_c/vessel/tmp` symlink made
+  in `linkVesselTmp` — the same shape as the `fexcache` and `vkd3dcache` links,
+  which exist for this exact reason. **A path naming a drive skips vkd3d's
+  rewrite and is what msvcrt wants, so one host change fixes both layers and
+  neither binary had to be rebuilt.**
+
+  Two corrections worth keeping. `patches/vkd3d/0007`'s comment asserted "Z: is
+  '/' in every Wine prefix, so it is a no-op where DXVK is right and the fix
+  where it is lucky" — both halves false, and `SessionEnvironment.kt`'s
+  `VKD3D_CACHE_DOS_PATH` **already documented the same wall** for vkd3d's shader
+  cache. The fact that would have settled it was written down in this repository
+  before the patch was authored. And the suite could not have caught it:
+  `SessionEnvironmentTest` asserted `File(tmp, GFX_STATS_FILE).absolutePath`,
+  which on the Windows build host turns `/data/user/0/…` into `C:\data\user\0\…`,
+  so producer and test agreed on a string that was only unix-shaped on the one
+  machine that mattered. The assertion is a path-shape check now.
+
+- [x] **`turnip.yml` watched a directory that does not exist, so `patches/mesa/`
+  never triggered a Turnip build.** The filter was `patches/turnip/**`; Turnip's
+  patches are in `patches/mesa/`, as `build/turnip.sh`'s `SOURCE_NAME=mesa` says
+  and as `zink.yml` — building from the same checkout — already had right. Eight
+  mesa patches have only ever reached a Turnip build when `native/pins.env` or
+  `build/turnip.sh` happened to change in the same commit. `patches/mesa/0008`
+  did not, which is why the device still runs Turnip `260303` with no
+  `VESSEL-KGSL dma_type=` line. Filter fixed and `TURNIP_REVISION` bumped to 2 in
+  the same commit — either alone would have looked exactly like a patch that did
+  not work.
 
 - [x] **`build/dxvk.sh` never computed a version code, so every DXVK rebuild since
   `patches/dxvk/0001` landed installed as a no-op.** `package_wcp.py` derived

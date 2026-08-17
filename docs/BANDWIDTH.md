@@ -1143,3 +1143,79 @@ adb shell ls -laZ /dev/dma_heap/
 adb shell 'for d in /sys/kernel/dmabuf/buffers/*; do \
     echo "$d $(cat $d/exporter_name 2>/dev/null) $(cat $d/size 2>/dev/null)"; done'
 ```
+
+---
+
+## 10. Answered: the 19 ms is a wait, not a cost
+
+Section 9 asked where the present copy's 19 ms goes and could not answer it —
+`heapbench` had eliminated page protection, bandwidth and cache maintenance, and
+left only "something blocks" (§9.6, candidate c) with no way to see it. The split
+timer shipped in `PresentExtension.java` ran on Resident Evil Requiem on
+2026-08-17 and answered it on the first session.
+
+    Present copyArea x9120 mean=32814us min=223us max=469307us 1280x720
+      means syncIn=32262us copy=431us syncOut=25us other=95us sync=LIVE
+
+**`syncIn` is 98.3% of the present.** It is one `DMA_BUF_IOCTL_SYNC(START|READ)`
+and nothing else — `Drawable.java` brackets it between `t0` and `t1` with the
+copy outside. The pixel copy is **431 µs**, which is `heapbench`'s 142 µs floor
+scaled up for a busy phone, exactly as §9.3a predicted.
+
+### 10.1 Why it is a wait and not a slow ioctl
+
+Two independent readings of the same 9,120 samples, both from windowed deltas
+rather than the cumulative mean:
+
+**The copy does not move when the total does.** Across 57 windows the present
+cost swung 14.8 ms → 73 ms, a 5× range, while the copy stayed between 277 and
+666 µs. Cache maintenance on a fixed 1280×720 buffer cannot vary 5×. A wait on a
+producer can.
+
+**`syncIn` tracks the frame interval and never reaches it.**
+
+    syncIn / present-interval:  mean=0.828  min=0.234  max=0.955
+
+The low-ratio windows are the proof, not noise:
+
+| time | fps | interval | syncIn | ratio | reading |
+|---|---|---|---|---|---|
+| 07:03:31 | 27.4 | 36.5 ms | 34.7 ms | 0.95 | GPU-bound — the server waits out the whole frame |
+| 07:06:25 | 11.5 | 87.3 ms | 70.4 ms | 0.81 | GPU-bound, much worse frame |
+| 07:04:49 | 16.3 | 61.5 ms | **14.4 ms** | 0.23 | interval ballooned and `syncIn` *fell* |
+| 07:06:57 | 10.6 | 94.6 ms | 39.1 ms | 0.41 | same |
+
+When the frame interval stretched to 61–95 ms but `syncIn` **dropped**, the stall
+was upstream of the GPU: the GPU had already finished, so the ioctl returned
+promptly. A fixed overhead cannot do that.
+
+### 10.2 What this retires
+
+| claim | status |
+|---|---|
+| write-combine mapping (§9.2) | dead — `ratio_vs_control=1.038` |
+| memory bandwidth (§9.6a) | dead — 24 GB/s, cached |
+| `DMA_BUF_IOCTL_SYNC` is expensive cache maintenance (§9.3a's replacement) | **dead — it is expensive because it blocks** |
+| "the present copy costs 19 ms" | **dead. It costs 0.43 ms.** |
+
+The parallel row-band copy in `copy_pool.c` was therefore built against 1.3% of
+the number it was aimed at. It is not wrong and it is not removed, but it cannot
+have been worth what it looked like it was worth, and nothing should be built on
+that premise again without this split in hand.
+
+### 10.3 The limit, stated rather than glossed
+
+This shows the wait ends when the frame ends, which is consistent with an
+**honest** wait. It does not rule out an **over**-wait — `begin_cpu_access`
+blocking on more fences than this read needs, or serialising against KGSL's own
+submissions. The ratio topping out at 0.955 rather than sitting at 1.0 is mild
+evidence against, not proof. Distinguishing them needs the fence state at the
+moment of the call, which nothing here can see.
+
+### 10.4 An instrument that came out of it
+
+`syncIn / interval` separates GPU-bound from CPU-bound directly, which this stack
+has been inferring from GPU load percentages and getting wrong (§9.3a withdrew
+one such inference). High ratio: the GPU is the frame. Low ratio with a long
+interval: something upstream stalled and the GPU was already idle. Both readings
+came out of the same session with no extra instrumentation.
