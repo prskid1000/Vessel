@@ -101,8 +101,6 @@ and both were free to avoid.
 
 ## The blockers, in order
 
-- [x] **#55 — Requiem's loading-screen GPU hang.** Our Turnip fork set `supports_double_threadsize` on `a8xx_base`; upstream never did, because a8xx's `has_dual_wave_dispatch` replaces THREAD128 rather than joining it. `patches/mesa/0007`. 64 is native here, so pinning it back costs nothing — the earlier "half the lanes" claim was wrong. Still owed: one clean run, no override, no workaround variable.
-
 - [ ] **#56 — the world is not drawn.** Standing inside a house basement, the
   room's own geometry is missing while the city outside is visible through where
   the walls should be, and props render as unlit black. The game is interactive
@@ -162,14 +160,6 @@ Written, shipped, and not yet watched. This section exists because the file's
 top rule makes "fixed" and "proven" different words, and mixing them is how a
 regression gets attributed to the wrong change three days later.
 
-- [x] **#42 — the PSO compatibility hash mismatch was `node_mask`. `patches/vkd3d/0004`.** Confirmed on device 2026-08-16: **zero** mismatches and zero rejected blobs across a 21,956-line Requiem session, against 45-50 per launch before. The cache maps in 0.29 ms and parses in 19.9 ms, and `.cache.write` stays at its 264-byte header through hard rendering — a warm cache with nothing left to compile.
-
-  The field was named by arithmetic, not by guessing: every rejection reported `shaders identical` and `flags 0`, with the two hashes differing by exactly `0x100000001b3`, the FNV-1 64-bit prime. In `h = (h * P) ^ v` with `flags` zero, a whole-prime difference can only mean the penultimate input — `node_mask` — differed in bit 0. vkd3d already treats 0 and 1 as the same device everywhere else (`debug_ignored_node_mask` only complains when `mask && mask != 1`), so `0004` normalises rather than removes and existing blobs keep their hashes.
-
-  **Two things had to be fixed before this was even testable, and that is the lesson.** The vkd3d disk cache was deleted on every launch by Vessel's own "stale lock" sweep, so "do the keys match across runs" had nothing to match against. A fix whose test needs a working cache cannot be verified while the cache is being thrown away, and neither bug was visible from the other's symptoms.
-
-- [x] **FEX cache content hash.** The Denuvo half was never real — the cache is installed inside `NtMapViewOfSection` before the guest runs, and every later divergence is a write that invalidates. The real hole was `TryMapImage` never checking the id it was handed. `patches/fex/0021`.
-
 - [~] **DRI3's present copy is split across a worker pool, and the number that
   justified it has not been re-taken.** The copy measured `mean=19114us
   max=385490us` at 1280x720 — about 154 MB/s for a 3.5 MB frame, which is
@@ -209,65 +199,10 @@ regression gets attributed to the wrong change three days later.
   `3000107`, verified on device by the counter strings in the DLLs themselves) —
   and **the run produced no counters anyway**, see the next item.
 
-- [x] **Neither producer could open `VESSEL_GFX_STATS`, and neither said so.** A
-  Requiem session on 2026-08-17 had the variable set, both patched DLLs installed
-  with the counter strings present in them, and **no `gfx-stats.json` anywhere in
-  the container after 9,120 presents**. The value was a unix path, and nothing
-  inside the prefix can open one with plain C file I/O:
-
-  - vkd3d rewrites a leading `/` to `Z:\…`, and `DriveMap.removeRootDrive` takes
-    `Z:` out of every Vessel prefix **on purpose**. The prefix's `dosdevices/`
-    holds `c:` and `d:` and nothing else.
-  - DXVK does a plain `fopen`, and msvcrt resolves a leading `/` against the
-    *current* drive — `C:\data\user\0\…`, which nothing creates.
-
-  `fopen` returns NULL, both producers return, and an unwritten snapshot is
-  indistinguishable from a title drawing no Direct3D. The panel said "no Direct3D
-  counters" for a game that was rendering.
-
-  Fixed host-side: `GFX_STATS_DOS_PATH` hands both producers
-  `C:\vessel\tmp\gfx-stats.json`, backed by a `drive_c/vessel/tmp` symlink made
-  in `linkVesselTmp` — the same shape as the `fexcache` and `vkd3dcache` links,
-  which exist for this exact reason. **A path naming a drive skips vkd3d's
-  rewrite and is what msvcrt wants, so one host change fixes both layers and
-  neither binary had to be rebuilt.**
-
-  Two corrections worth keeping. `patches/vkd3d/0007`'s comment asserted "Z: is
-  '/' in every Wine prefix, so it is a no-op where DXVK is right and the fix
-  where it is lucky" — both halves false, and `SessionEnvironment.kt`'s
-  `VKD3D_CACHE_DOS_PATH` **already documented the same wall** for vkd3d's shader
-  cache. The fact that would have settled it was written down in this repository
-  before the patch was authored. And the suite could not have caught it:
-  `SessionEnvironmentTest` asserted `File(tmp, GFX_STATS_FILE).absolutePath`,
-  which on the Windows build host turns `/data/user/0/…` into `C:\data\user\0\…`,
-  so producer and test agreed on a string that was only unix-shaped on the one
-  machine that mattered. The assertion is a path-shape check now.
-
-- [x] **`turnip.yml` watched a directory that does not exist, so `patches/mesa/`
-  never triggered a Turnip build.** The filter was `patches/turnip/**`; Turnip's
-  patches are in `patches/mesa/`, as `build/turnip.sh`'s `SOURCE_NAME=mesa` says
-  and as `zink.yml` — building from the same checkout — already had right. Eight
-  mesa patches have only ever reached a Turnip build when `native/pins.env` or
-  `build/turnip.sh` happened to change in the same commit. `patches/mesa/0008`
-  did not, which is why the device still runs Turnip `260303` with no
-  `VESSEL-KGSL dma_type=` line. Filter fixed and `TURNIP_REVISION` bumped to 2 in
-  the same commit — either alone would have looked exactly like a patch that did
-  not work.
-
-- [x] **`build/dxvk.sh` never computed a version code, so every DXVK rebuild since
-  `patches/dxvk/0001` landed installed as a no-op.** `package_wcp.py` derived
-  20701 from `"2.7.1"` alone and `ComponentStore` is keyed on it, so a phone that
-  already had 2.7.1 accepted the `.wcp` and kept what it had. The only symptom is
-  a counter that never changes. `vkd3d.sh`, `wine.sh`, `turnip.sh` and `fex.sh`
-  were all checked and are correct; `zink.sh` also lacks one but has no
-  `patches/zink/` to go stale against.
 ---
 
 ## Live, and not blocking a frame
 
-- [x] **SMC thrash — closed, do not reopen without a number.** 3,656 handles is 10-20/sec, and `InvalidateRange` is already page-keyed so a page with no translated code is a no-op. QEMU built sub-page precision and deleted it. `patches/fex/0020` ships the counter. Reopen above ~1,000/sec.
-- [x] **#52 — the guest was told twice the memory that exists.** DXVK copies device memory into `sharedMemory` on a single-heap UMA part (`dxgi_adapter.cpp:455`) and RE Engine adds the two: 7.98 GB against a 3.98 GiB heap, then OOM at a 16 MB allocation. Now split so the pair sums to `hardware.vram`. Turnip, vkd3d and zink checked and need nothing.
-- [x] **A memory size typed over the field's own label was dropped.** The field shows `6 GB`, so editing it stores `"7 GB"` — which failed the pattern (visible, harmless) and `toIntOrNull` (silent: `auto`, the whole 15.6 GB). Units parse now, MB included.
 - [~] **`is_ec_code`, the unix twin of `RtlIsEcCode`, is bounded —
   `patches/wine/0048`, written and not yet compiled.**
   `dlls/ntdll/unix/unix_private.h:475` had the identical shape and the identical
@@ -306,14 +241,37 @@ regression gets attributed to the wrong change three days later.
   `native/pins.env` is owed** — `patches/wine/README.md` states the rule and a new
   patch with an unchanged revision builds, installs and does nothing.
 
-- [x] **`DisableDEP` stays global.** Already scoped per-process (offline compiler) and per-container (absent from `RESERVED_SESSION_ENV`), and it is in the FEX cache key, so the setting cannot come apart from the code generated under it.
-- [x] **`TraceSpec.kt:340`.** Went stale by restating a constant's value; now links `[FIXED_VKD3D_SHADER_DEBUG]` instead.
 ---
 
 ## Resolved
 
 Kept with a one-line outcome and the reasoning that would otherwise be
 re-derived. Everything procedural about these has been dropped.
+
+- [-] **#39 — fsync. Closed won't-do: it cannot work on Android.** `WINEFSYNC=1`
+  makes `fsync_check_support` (`server/fsync.c:58`) probe `futex_waitv`, arm64
+  syscall 449. Android's seccomp policy does not allow it — bionic's
+  `SECCOMP_ALLOWLIST_COMMON.TXT` carries `futex` and `futex_time64` and no
+  `futex_waitv` — and an out-of-allowlist syscall gets `SECCOMP_RET_TRAP`, so
+  the probe does not return an error, it kills wineserver. Measured twice, the
+  second on a clean install with nothing else changed: `wineboot --init` left a
+  0-byte `system.reg` against a fresh prefix's ~97 KB, and the client logged
+  `recvmsg: Connection reset by peer` with **no Wine error at all** — the
+  absence is the fingerprint, because a killed server logs nothing.
+
+  Also settled on the way: **esync does not exist in this Wine.** No
+  `server/esync.c`, no `dlls/ntdll/unix/esync.c`, `WINEESYNC` in zero source
+  files — Valve's `experimental_11.0` dropped it. So `WINEESYNC=1` had been
+  inert, and `docs/OPTIMIZATION.md`'s "esync is the best available" describes a
+  mechanism this build does not contain. Both variables are now unset and both
+  stay reserved, so a manifest cannot reach them.
+
+  `server/inproc_sync.c:50-65` therefore resolves to its last rung — server-side
+  synchronisation — and that is the only one of the three that can run here, not
+  a default nobody revisited. Reopens only if the sandbox ever permits the
+  syscall. **ntsync needs no variable and is already compiled in**, so a 6.14+
+  kernel would select it at runtime; whether the vendored 2021-2022
+  `server/ntsync_tmp.h` still matches the ABI upstreamed in 6.14 is unverified.
 
 - [x] **#43 — the FEX config assert.** `patches/fex/0005`. Closed 2026-08-16 by
   reading the shipped binary rather than by running a session, and the
@@ -358,14 +316,6 @@ Real work, none of it blocking a frame.
   nobody has priced — **including the 56 fps in #51.** *Done when:* a
   release-variant APK runs a session on the device and one of the existing
   measurements is repeated on it.
-
-- [ ] **#39 — fsync.** The session runs esync; `docs/OPTIMIZATION.md:196` records
-  esync as the best available and `docs/ARCHITECTURE.md` fixes Wine sync to it.
-  `patches/wine/0020` exists so fsync can work without `shm_open`, and
-  `patches/wine/0022` stops the server probing `futex_waitv` before winefsync is
-  asked for, so the groundwork is in the tree and unproven. *Done when:* a session
-  runs with fsync selected and either beats esync on a measured workload or is
-  written up as not worth it.
 
 - [ ] **#17 — `.msi` support.** From a launch-type matrix measured before
   2026-08-14: `msiexec` loads `msi.dll`, `cabinet.dll`, `wintrust.dll` and
