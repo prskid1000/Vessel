@@ -24,6 +24,30 @@ object GuestPalette {
     /** `bg` — the window ground. */
     const val BG: Int = 0xFF161826.toInt()
 
+    /**
+     * The console's ground, and deliberately **not** [BG].
+     *
+     * A console is a black box on the themed desktop, not a pane of it. It was
+     * black for months by accident -- conhost fills its buffer with the built-in
+     * 0x000F before any configuration is read, and nothing repainted those cells
+     * when `ScreenColors` was applied, so the theming was inert and black came
+     * through. `patches/wine/0052` makes the attribute reach existing cells,
+     * which made the theme take effect for the first time and turned the console
+     * into a navy pane that blended into the desktop behind it.
+     *
+     * So this is what the console always looked like, now asked for on purpose.
+     * It is entry 8 rather than entry 0 because conhost paints the border
+     * outside the text buffer from the palette as well, and the default entry 7
+     * there is the light grey that used to put a white rim around the window --
+     * see `PrefixRegistry.consoleColours`. Both the interior and the rim read
+     * entry 8, so one value covers them.
+     *
+     * The cost, stated: a program asking for ANSI bright-black gets pure black.
+     * A shell that draws dark grey on black loses that distinction, which is a
+     * smaller loss than a console that does not look like one.
+     */
+    const val CONSOLE_BG: Int = 0xFF000000.toInt()
+
     /** `surface` — cards, sheets, bars; here, dialogs and menus. */
     const val SURFACE: Int = 0xFF232532.toInt()
 

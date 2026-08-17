@@ -178,7 +178,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(25, PrefixRegistry.SEED_VERSION)
+        assertEquals(26, PrefixRegistry.SEED_VERSION)
+        // 26 changed a colour and added no key: the console ground moved from
+        // GuestPalette.BG to CONSOLE_BG. It needed a seed bump anyway, because a
+        // prefix already carrying ColorTable08 = the window ground would
+        // otherwise keep a console that blends into the desktop.
         // Fifteen keys, the three the seed deletes, and the stamp `renderSeed`
         // appends — which is not in the list, its value being a hash of the rest.
         // Seed 23 added `bluetoothService`, which only does anything paired with

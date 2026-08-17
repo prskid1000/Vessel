@@ -176,8 +176,16 @@ object PrefixRegistry {
      * shell rather than in one profile; 10 added [virtualDesktop], without which
      * a program launched into a running session came up rootless and undecorated
      * — no title bar and no minimise, maximise or close.
+     * 26 made the console ground black. It had been [GuestPalette.BG], the
+     * window ground, and the console had nevertheless been black for months --
+     * conhost fills its buffer with the built-in 0x000F before any config is
+     * read and never repainted those cells, so this key was inert. Once
+     * `patches/wine/0052` made the attribute reach existing cells the theme took
+     * effect for the first time and the console became a navy pane blending into
+     * the desktop behind it. Black is what it always looked like, now asked for
+     * deliberately: a console is a box on the themed desktop, not a pane of it.
      */
-    const val SEED_VERSION: Int = 25
+    const val SEED_VERSION: Int = 26
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -601,8 +609,12 @@ object PrefixRegistry {
         values = listOf(
             RegistryValue.dword("ScreenColors", 0x87),
             RegistryValue.dword("PopupColors", 0x87),
-            // Entry 8 is the ground; entry 7 is the text on it.
-            RegistryValue.dword("ColorTable08", bgr(GuestPalette.BG)),
+            // Entry 8 is the ground; entry 7 is the text on it. The ground is
+            // [GuestPalette.CONSOLE_BG] -- black -- and not the window ground:
+            // a console is a black box on the themed desktop rather than a pane
+            // of it. See that constant for why it was black by accident until
+            // `patches/wine/0052` made this key take effect at all.
+            RegistryValue.dword("ColorTable08", bgr(GuestPalette.CONSOLE_BG)),
             RegistryValue.dword("ColorTable07", bgr(GuestPalette.TEXT)),
         ),
     )
