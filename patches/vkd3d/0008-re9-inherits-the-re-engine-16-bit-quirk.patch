@@ -1,0 +1,34 @@
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 63a82c33..f6a1c930 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -1019,6 +1019,29 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
+     { VKD3D_STRING_COMPARE_EXACT, "re7.exe", &re_quirks },
+     /* Resident Evil 4 (2050650) */
+     { VKD3D_STRING_COMPARE_EXACT, "re4.exe", &re4_quirks },
++    /* Resident Evil Requiem.
++     *
++     * Vessel: the same quirks as RE4, and the reason is the symptom re4_quirks
++     * already describes -- "lots of shaders which cause random flicker due to
++     * bad 16-bit behavior. These shaders really need 32-bit to render
++     * properly." On Turnip/Adreno the failure is not flicker but missing
++     * geometry: a vertex shader whose position math overflows fp16 (max 65504)
++     * yields Inf or NaN, and the GPU discards those triangles. Specific meshes
++     * vanish, everything around them renders, and nothing logs an error --
++     * which is the whole shape of the bug on this device. Interior walls are
++     * gone while the street beyond them draws; docs/TODO.md #56.
++     *
++     * Reached only after the driver was exhausted: shader and pipeline caches,
++     * the ir3 compiler, LRZ and LRZ fast-clear, UBWC, tiled versus direct
++     * rendering, driver batching, vkd3d's initial layout transition, placed
++     * versus committed resources and both present paths were each eliminated on
++     * the device. None of them can tell one mesh from another; a shader quirk
++     * can, and this engine has needed exactly this one three times before.
++     *
++     * Unverified. re_hashes are RE2/RE4 shader hashes and will not match this
++     * game's shaders, so what this actually applies is the global
++     * FORCE_MIN16_AS_32BIT half. */
++    { VKD3D_STRING_COMPARE_EXACT, "re9.exe", &re4_quirks },
+     /* Monster Hunter Rise (1446780) */
+     { VKD3D_STRING_COMPARE_EXACT, "MonsterHunterRise.exe", &mhr_quirks },
+     /* Witcher 3 (2023) (292030) */

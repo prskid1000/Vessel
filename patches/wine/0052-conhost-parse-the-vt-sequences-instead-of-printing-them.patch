@@ -1,0 +1,491 @@
+diff --git a/programs/conhost/conhost.c b/programs/conhost/conhost.c
+index 8298743553f..3da57b7c3e0 100644
+--- a/programs/conhost/conhost.c
++++ b/programs/conhost/conhost.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include <assert.h>
++#include <stdio.h>   /* Vessel: FILE, fopen, fprintf for the VT trace */
+ #include <limits.h>
+ 
+ #include "conhost.h"
+@@ -497,6 +498,87 @@ static NTSTATUS read_console_input( struct console *console, size_t out_size )
+     return STATUS_SUCCESS;
+ }
+ 
++/* Vessel: ENABLE_VIRTUAL_TERMINAL_INPUT, the read-side half.
++ *
++ * conhost never implemented this either -- the flag appears nowhere in the file
++ * or in kernelbase/console.c -- and the consequence is quieter than the output
++ * side but just as final: in raw mode a key event with no UnicodeChar is
++ * dropped, so arrows, Home/End, PgUp/PgDn, Insert/Delete and the function keys
++ * reach the program as nothing at all. Rendering the output correctly and then
++ * swallowing the arrow keys would be a strange place to stop.
++ *
++ * xterm encoding, because that is what asks for it: PSReadLine, GNU readline
++ * and PyREPL all set this flag and then parse xterm. The modifier form is
++ * CSI 1 ; m <final>, m = 1 + shift + 2*alt + 4*ctrl, which is what makes
++ * Ctrl+Left move by a word.
++ *
++ * Returns NULL for a key with no sequence, leaving the existing UnicodeChar
++ * path to handle it exactly as before. */
++static const WCHAR *vt_input_sequence( const KEY_EVENT_RECORD *key, WCHAR *buf, size_t size )
++{
++    unsigned int state = key->dwControlKeyState;
++    unsigned int mod = 1, n = 0;
++    const char *tilde = NULL;
++    char final = 0;
++
++    if (state & SHIFT_PRESSED)                            mod += 1;
++    if (state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED))   mod += 2;
++    if (state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) mod += 4;
++
++    switch (key->wVirtualKeyCode)
++    {
++    case VK_UP:     final = 'A'; break;
++    case VK_DOWN:   final = 'B'; break;
++    case VK_RIGHT:  final = 'C'; break;
++    case VK_LEFT:   final = 'D'; break;
++    case VK_HOME:   final = 'H'; break;
++    case VK_END:    final = 'F'; break;
++
++    case VK_INSERT: tilde = "2";  break;
++    case VK_DELETE: tilde = "3";  break;
++    case VK_PRIOR:  tilde = "5";  break;
++    case VK_NEXT:   tilde = "6";  break;
++    case VK_F5:     tilde = "15"; break;
++    case VK_F6:     tilde = "17"; break;
++    case VK_F7:     tilde = "18"; break;
++    case VK_F8:     tilde = "19"; break;
++    case VK_F9:     tilde = "20"; break;
++    case VK_F10:    tilde = "21"; break;
++    case VK_F11:    tilde = "23"; break;
++    case VK_F12:    tilde = "24"; break;
++
++    /* F1-F4 are SS3 rather than CSI. A quirk of the encoding, not of this
++     * implementation; readline's keymaps expect exactly that. */
++    case VK_F1: case VK_F2: case VK_F3: case VK_F4:
++        if (size < 4) return NULL;
++        buf[0] = 0x1b; buf[1] = 'O';
++        buf[2] = 'P' + (key->wVirtualKeyCode - VK_F1);
++        buf[3] = 0;
++        return buf;
++
++    default:
++        return NULL;
++    }
++
++    /* Built a character at a time rather than with swprintf, which nothing else
++     * in this file uses and which would add a header dependency for four short
++     * strings. */
++    if (size < 12) return NULL;
++    buf[n++] = 0x1b;
++    buf[n++] = '[';
++    if (tilde) while (*tilde) buf[n++] = *tilde++;
++    else if (mod > 1) buf[n++] = '1';
++
++    if (mod > 1)
++    {
++        buf[n++] = ';';
++        buf[n++] = '0' + mod;   /* mod is 2..8, always one digit */
++    }
++    buf[n++] = tilde ? '~' : final;
++    buf[n] = 0;
++    return buf;
++}
++
+ static void read_from_buffer( struct console *console, size_t out_size )
+ {
+     size_t len, read_len = 0;
+@@ -1337,6 +1419,8 @@ static NTSTATUS process_console_input( struct console *console )
+     {
+         void (*func)( struct console *console ) = NULL;
+         INPUT_RECORD ir = console->records[i];
++        WCHAR vt_buf[16];
++        const WCHAR *vt_seq;
+ 
+         if (ir.EventType != KEY_EVENT || !ir.Event.KeyEvent.bKeyDown) continue;
+ 
+@@ -1396,6 +1480,13 @@ static NTSTATUS process_console_input( struct console *console )
+             ^ ctx->insert_key;
+ 
+         if (func) func( console );
++        /* Vessel: raw mode only. In line-input mode conhost runs its own editor
++         * above and a key already has a meaning there; this is for the programs
++         * that asked for the keys themselves. */
++        else if (!(console->mode & ENABLE_LINE_INPUT) &&
++                 (console->mode & ENABLE_VIRTUAL_TERMINAL_INPUT) &&
++                 (vt_seq = vt_input_sequence( &ir.Event.KeyEvent, vt_buf, ARRAY_SIZE(vt_buf) )))
++            edit_line_insert( console, vt_seq, wcslen( vt_seq ) );
+         else if (ir.Event.KeyEvent.uChar.UnicodeChar)
+             edit_line_insert( console, &ir.Event.KeyEvent.uChar.UnicodeChar, 1 );
+ 
+@@ -2103,6 +2194,314 @@ static NTSTATUS set_output_info( struct screen_buffer *screen_buffer,
+     return STATUS_SUCCESS;
+ }
+ 
++/* Vessel: a VT escape parser for the windowed console.
++ *
++ * conhost emits VT on the tty path (set_tty_cursor, set_tty_attr) and never
++ * learned to read it, so with ENABLE_VIRTUAL_TERMINAL_PROCESSING set the
++ * sequences reached the screen as text -- "[?2004h[?25l[1;35m" where a prompt
++ * should be. WineHQ bug 49780. Python's REPL, Node's readline and PowerShell's
++ * PSReadLine all drive the terminal this way.
++ *
++ * Two earlier attempts answered through the console *mode* -- masking the bit,
++ * then failing SetConsoleMode -- and both were measured doing nothing, because
++ * these programs emit VT whatever the console reports. There is no mode answer.
++ *
++ * **The governing rule: a sequence must never reach the screen, including one
++ * this does not implement.** Every unhandled dispatch swallows. Missing an
++ * effect costs a few characters; printing the sequence costs the screen.
++ */
++enum vt_parse_state
++{
++    VT_GROUND = 0,   /* zero, so calloc gives the right initial state */
++    VT_ESC,
++    VT_CSI,
++    VT_OSC,
++    VT_OSC_ESC,
++};
++
++/* ANSI orders its colour bits blue-green-red and the console orders them
++ * red-green-blue, so the two disagree on every colour that is not a grey. */
++static unsigned short vt_ansi_to_attr( unsigned int n )
++{
++    return ((n & 1) ? FOREGROUND_RED   : 0) |
++           ((n & 2) ? FOREGROUND_GREEN : 0) |
++           ((n & 4) ? FOREGROUND_BLUE  : 0);
++}
++
++static void vt_erase( struct screen_buffer *screen_buffer, unsigned int from, unsigned int to,
++                      RECT *update_rect )
++{
++    unsigned int cells = screen_buffer->width * screen_buffer->height, i;
++
++    if (to > cells) to = cells;
++    if (from >= to) return;
++    for (i = from; i < to; i++)
++    {
++        screen_buffer->data[i].ch   = ' ';
++        /* The *current* attribute, which is what erasing is defined to use --
++         * "the background color of erased cells is colored according to the
++         * current SGR state" for both ED and EL. An earlier revision filled
++         * with the screen default instead, on the theory that conhost does not
++         * implement background-colour erase; that was wrong, and it is recorded
++         * here so it is not tried a third time. If a colour is appearing where
++         * it should not, the fault is in what SGR left in `attr`, not in the
++         * erase honouring it. */
++        screen_buffer->data[i].attr = screen_buffer->attr;
++    }
++    update_rect->left   = 0;
++    update_rect->right  = max( update_rect->right, screen_buffer->width - 1 );
++    update_rect->top    = min( update_rect->top,    from / screen_buffer->width );
++    update_rect->bottom = max( update_rect->bottom, (to - 1) / screen_buffer->width );
++}
++
++static void vt_apply_sgr( struct screen_buffer *screen_buffer, const unsigned int *params,
++                          unsigned int count )
++{
++    unsigned int i;
++
++    for (i = 0; i < count || (!count && !i); i++)
++    {
++        unsigned int p = count ? params[i] : 0;   /* bare CSI m means CSI 0 m */
++
++        if (!p)
++        {
++            screen_buffer->vt_base_attr = screen_buffer->vt_default_attr;
++            screen_buffer->vt_reverse = 0;
++        }
++        else if (p == 1)  screen_buffer->vt_base_attr |= FOREGROUND_INTENSITY;
++        else if (p == 22) screen_buffer->vt_base_attr &= ~FOREGROUND_INTENSITY;
++        else if (p == 7)  screen_buffer->vt_reverse = 1;
++        else if (p == 27) screen_buffer->vt_reverse = 0;
++        else if (p >= 30 && p <= 37)
++            screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & ~0x07) |
++                                          vt_ansi_to_attr( p - 30 );
++        else if (p == 39)
++            screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & ~0x07) |
++                                          (screen_buffer->vt_default_attr & 0x07);
++        else if (p >= 40 && p <= 47)
++            screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & ~0x70) |
++                                          (vt_ansi_to_attr( p - 40 ) << 4);
++        else if (p == 49)
++            screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & ~0x70) |
++                                          (screen_buffer->vt_default_attr & 0x70);
++        else if (p >= 90 && p <= 97)
++            screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & ~0x07) |
++                                          vt_ansi_to_attr( p - 90 ) | FOREGROUND_INTENSITY;
++        else if (p >= 100 && p <= 107)
++            screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & ~0x70) |
++                                          (vt_ansi_to_attr( p - 100 ) << 4) | BACKGROUND_INTENSITY;
++        else if (p == 38 || p == 48)
++        {
++            /* 38;5;n and 38;2;r;g;b. Not approximated -- the point is to eat the
++             * parameters so they are not mistaken for further SGR codes. */
++            if (i + 1 < count && params[i + 1] == 5) i += 2;
++            else if (i + 1 < count && params[i + 1] == 2) i += 4;
++        }
++        /* 2 dim, 3 italic, 4 underline and their resets have no console
++         * attribute to carry them and are dropped rather than approximated. */
++    }
++
++    screen_buffer->attr = screen_buffer->vt_reverse
++            ? (unsigned short)(((screen_buffer->vt_base_attr & 0x0f) << 4) |
++                               ((screen_buffer->vt_base_attr & 0xf0) >> 4))
++            : screen_buffer->vt_base_attr;
++}
++
++static void vt_dispatch_csi( struct screen_buffer *screen_buffer, RECT *update_rect )
++{
++    unsigned int params[16], count = 0, i, priv = 0, cursor;
++    WCHAR final = screen_buffer->vt_seq[screen_buffer->vt_len - 1];
++
++    i = 0;
++    if (screen_buffer->vt_seq[0] == '?') { priv = 1; i = 1; }
++
++    for (; i + 1 < screen_buffer->vt_len && count < ARRAY_SIZE(params); )
++    {
++        unsigned int v = 0;
++        BOOL digits = FALSE;
++        while (i + 1 < screen_buffer->vt_len && screen_buffer->vt_seq[i] >= '0' &&
++               screen_buffer->vt_seq[i] <= '9')
++        {
++            v = v * 10 + (screen_buffer->vt_seq[i] - '0');
++            digits = TRUE;
++            i++;
++        }
++        params[count++] = digits ? v : 0;
++        if (i + 1 < screen_buffer->vt_len && screen_buffer->vt_seq[i] == ';') i++;
++        else break;
++    }
++
++    /* Vessel: every sequence, as received -- to a FILE, not to stderr.
++     *
++     * The first version of this used MESSAGE() and produced nothing, and the
++     * reason is worth keeping: **no conhost output reaches the session log at
++     * all.** Grepping a full session for "conhost" returns zero lines, and the
++     * process tags present are explorer.exe, fexofflinecompiler and the guest --
++     * never the console host. conhost is spawned by wineconsole with its own
++     * handles, so anything it writes to stderr goes nowhere this project can
++     * read. Every conhost diagnostic ever added here was invisible.
++     *
++     * `C:\vessel\tmp\` is a real directory in every session -- SessionRuntime's
++     * linkVesselTmp points it at the container's scratch, which is also how
++     * VESSEL_GFX_STATS reaches the host. A DOS path because a PE process cannot
++     * open a unix one; that lesson cost a day earlier.
++     *
++     * Opened per call and closed again: this is a diagnostic that exists to be
++     * removed, and a handle held open across a console's lifetime is a thing to
++     * clean up. A shell emits a handful of these per keystroke. */
++    {
++        unsigned int k;
++        char dbg[192];
++        int off = snprintf( dbg, sizeof(dbg), "csi %s", priv ? "?" : "" );
++        FILE *f;
++
++        for (k = 0; k < count && off > 0 && off < (int)sizeof(dbg); k++)
++            off += snprintf( dbg + off, sizeof(dbg) - off, "%u%s", params[k],
++                             k + 1 < count ? ";" : "" );
++
++        if ((f = fopen( "C:\\vessel\\tmp\\vt-trace.log", "a" )))
++        {
++            fprintf( f, "%s %c  attr=%04x base=%04x rev=%u default=%04x\n", dbg, (char)final,
++                     screen_buffer->attr, screen_buffer->vt_base_attr,
++                     screen_buffer->vt_reverse, screen_buffer->vt_default_attr );
++            fclose( f );
++        }
++    }
++
++    switch (final)
++    {
++    case 'm':
++        vt_apply_sgr( screen_buffer, params, count );
++        break;
++
++    case 'H':
++    case 'f':
++        screen_buffer->cursor_y = min( count > 0 && params[0] ? params[0] - 1 : 0,
++                                       screen_buffer->height - 1 );
++        screen_buffer->cursor_x = min( count > 1 && params[1] ? params[1] - 1 : 0,
++                                       screen_buffer->width - 1 );
++        break;
++
++    case 'A':
++        cursor = count && params[0] ? params[0] : 1;
++        screen_buffer->cursor_y -= min( cursor, screen_buffer->cursor_y );
++        break;
++    case 'B':
++        cursor = count && params[0] ? params[0] : 1;
++        screen_buffer->cursor_y = min( screen_buffer->cursor_y + cursor,
++                                       screen_buffer->height - 1 );
++        break;
++    case 'C':
++        cursor = count && params[0] ? params[0] : 1;
++        screen_buffer->cursor_x = min( screen_buffer->cursor_x + cursor,
++                                       screen_buffer->width - 1 );
++        break;
++    case 'D':
++        cursor = count && params[0] ? params[0] : 1;
++        screen_buffer->cursor_x -= min( cursor, screen_buffer->cursor_x );
++        break;
++    case 'G':
++        /* CHA. readline uses this every keystroke to return to column zero. */
++        screen_buffer->cursor_x = min( count && params[0] ? params[0] - 1 : 0,
++                                       screen_buffer->width - 1 );
++        break;
++
++    case 'J':
++    {
++        unsigned int at = screen_buffer->cursor_y * screen_buffer->width + screen_buffer->cursor_x;
++        unsigned int cells = screen_buffer->width * screen_buffer->height;
++
++        if (!count || !params[0]) vt_erase( screen_buffer, at, cells, update_rect );
++        else if (params[0] == 1)  vt_erase( screen_buffer, 0, at + 1, update_rect );
++        else                      vt_erase( screen_buffer, 0, cells, update_rect );
++        break;
++    }
++    case 'K':
++    {
++        unsigned int row = screen_buffer->cursor_y * screen_buffer->width;
++
++        if (!count || !params[0])
++            vt_erase( screen_buffer, row + screen_buffer->cursor_x,
++                      row + screen_buffer->width, update_rect );
++        else if (params[0] == 1)
++            vt_erase( screen_buffer, row, row + screen_buffer->cursor_x + 1, update_rect );
++        else
++            vt_erase( screen_buffer, row, row + screen_buffer->width, update_rect );
++        break;
++    }
++
++    case 's':
++        screen_buffer->vt_saved_x = screen_buffer->cursor_x;
++        screen_buffer->vt_saved_y = screen_buffer->cursor_y;
++        break;
++    case 'u':
++        screen_buffer->cursor_x = min( screen_buffer->vt_saved_x, screen_buffer->width - 1 );
++        screen_buffer->cursor_y = min( screen_buffer->vt_saved_y, screen_buffer->height - 1 );
++        break;
++
++    case 'h':
++    case 'l':
++        /* 25 is the cursor and the only private mode here with an effect worth
++         * having; 2004 (bracketed paste), 1049 (alternate screen) and the mouse
++         * modes are accepted and ignored, which is what stops "[?2004h" from
++         * appearing on screen. */
++        if (priv && count && params[0] == 25)
++            screen_buffer->cursor_visible = (final == 'h');
++        break;
++
++    default:
++        break;
++    }
++}
++
++/* Returns TRUE when the character was part of an escape sequence and must not
++ * be written to the screen. */
++static BOOL vt_consume( struct screen_buffer *screen_buffer, WCHAR ch, RECT *update_rect )
++{
++    if (!screen_buffer->vt_ready)
++    {
++        screen_buffer->vt_default_attr = screen_buffer->attr;
++        screen_buffer->vt_base_attr = screen_buffer->attr;
++        screen_buffer->vt_ready = 1;
++    }
++
++    switch (screen_buffer->vt_state)
++    {
++    case VT_GROUND:
++        if (ch != 0x1b) return FALSE;
++        screen_buffer->vt_state = VT_ESC;
++        return TRUE;
++
++    case VT_ESC:
++        screen_buffer->vt_len = 0;
++        if (ch == '[')      screen_buffer->vt_state = VT_CSI;
++        else if (ch == ']') screen_buffer->vt_state = VT_OSC;
++        else                screen_buffer->vt_state = VT_GROUND;  /* ESC c, ESC ( B, ESC 7 */
++        return TRUE;
++
++    case VT_CSI:
++        if (screen_buffer->vt_len < ARRAY_SIZE(screen_buffer->vt_seq))
++            screen_buffer->vt_seq[screen_buffer->vt_len++] = ch;
++        if ((ch >= 0x40 && ch <= 0x7e) ||
++            screen_buffer->vt_len == ARRAY_SIZE(screen_buffer->vt_seq))
++        {
++            if (ch >= 0x40 && ch <= 0x7e) vt_dispatch_csi( screen_buffer, update_rect );
++            screen_buffer->vt_state = VT_GROUND;
++        }
++        return TRUE;
++
++    case VT_OSC:
++        if (ch == 0x07) screen_buffer->vt_state = VT_GROUND;      /* BEL */
++        else if (ch == 0x1b) screen_buffer->vt_state = VT_OSC_ESC;
++        return TRUE;
++
++    case VT_OSC_ESC:
++        screen_buffer->vt_state = (ch == 0x5c) ? VT_GROUND : VT_ESC;   /* ESC backslash is ST */
++        return TRUE;
++    }
++    return FALSE;
++}
++
+ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR *buffer, size_t len )
+ {
+     RECT update_rect;
+@@ -2114,6 +2513,16 @@ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR
+ 
+     for (i = 0; i < len; i++)
+     {
++        /* Vessel: before the control-character handling, because a sequence's
++         * body contains digits, ';' and letters that mean nothing special here
++         * but everything inside a sequence. Gated on the mode bit as Windows
++         * gates it, and skipped on the tty path, where conhost forwards to a
++         * terminal that parses these itself. */
++        if ((screen_buffer->mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) &&
++            !screen_buffer->console->tty_output &&
++            vt_consume( screen_buffer, buffer[i], &update_rect ))
++            continue;
++
+         if (screen_buffer->mode & ENABLE_PROCESSED_OUTPUT)
+         {
+             switch (buffer[i])
+diff --git a/programs/conhost/conhost.h b/programs/conhost/conhost.h
+index d3485156894..e04670229e3 100644
+--- a/programs/conhost/conhost.h
++++ b/programs/conhost/conhost.h
+@@ -133,6 +133,31 @@ struct screen_buffer
+     RECT                   win;                 /* current visible window on the screen buffer */
+     struct font_info       font;                /* console font information */
+     struct wine_rb_entry   entry;               /* map entry */
++
++    /* Vessel: state for the VT escape parser in write_console.
++     *
++     * On the screen buffer and not on write_console's stack, because a program
++     * is free to write ESC [ in one call and 31m in the next -- readline and
++     * PSReadLine both do, since they build a sequence and flush on whatever
++     * buffer boundary happens to fall. A parser that resets between calls loses
++     * the sequence and prints the tail: the same garbage this exists to remove,
++     * only rarer and harder to reproduce.
++     *
++     * Zero-initialised by the calloc in create_screen_buffer, which is what
++     * makes VT_GROUND == 0 and vt_ready == 0 the correct starting state. */
++    unsigned int           vt_state;            /* enum vt_parse_state */
++    WCHAR                  vt_seq[64];          /* accumulated CSI/OSC body */
++    unsigned int           vt_len;
++    unsigned int           vt_saved_x;          /* CSI s / CSI u */
++    unsigned int           vt_saved_y;
++    unsigned short         vt_default_attr;     /* what SGR 0 restores */
++    unsigned int           vt_ready;            /* vt_default_attr captured */
++    /* SGR 7 is reverse video and SGR 27 turns it off again, which only works if
++     * the un-reversed colours still exist somewhere. Swapping `attr` in place
++     * loses them: 27 would have nothing to restore from. So SGR writes here and
++     * `attr` is derived. */
++    unsigned short         vt_base_attr;
++    unsigned int           vt_reverse;
+ };
+ 
+ /* conhost.c */
