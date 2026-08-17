@@ -2384,39 +2384,56 @@ class SessionRuntime @Inject constructor(
     }
 
     /**
-     * Copy the payload's fonts into `windows\Fonts`, leaving whatever else is
-     * there alone.
+     * Copy the payload's console face into `windows\Fonts`, leaving whatever else
+     * is there alone.
      *
      * **Why this is not a [ToolsTree].** `drive_c\windows\Fonts` is Wine's
      * directory, not ours. [installToolTree] does `deleteTree(target)` and a
      * rename, which is right for `C:\Program Files\Git` — a tree nothing else
      * writes into — and wrong here twice over: it would throw away any font a
      * guest program installed, and it would put this code in a fight with Wine
-     * over a directory Wine creates and populates itself. So this copies *files*
+     * over a directory Wine creates and populates itself. So this copies a *file*
      * in, creates the directory if it is absent, and touches nothing else in it.
      *
-     * **Why there are any fonts to copy at all.** Measured on the device:
+     * **Why there is a font to copy at all.** Measured on the device:
      * `prefix/drive_c/windows/Fonts/` was empty, zero files, and Claude Code's
      * TUI drew every horizontal rule as `□□□□□`. That is a missing glyph and not
      * a VT problem — colours and text rendered correctly and `patches/wine/0052`
      * already parses the escape sequences. What conhost had to choose from was
      * the Wine component's `.fon` bitmap faces and non-monospace TTFs, plus the
      * two Android contributes from `/system/fonts` (`CutiveMono.ttf`,
-     * `DroidSansMono.ttf`), none of which has a U+2500 block. GNU Unifont covers
-     * the whole BMP, and [PrefixRegistry.consoleColours] now names it in
+     * `DroidSansMono.ttf`), none of which has a U+2500 block. Tools 1.4.0 ships
+     * Cascadia Mono, and [PrefixRegistry.consoleColours] names it in
      * `HKCU\Console\FaceName`.
      *
+     * **One file, and the singular is the point rather than an accident of the
+     * current payload.** Tools 1.3.0 shipped two — `unifont` and `unifont_upper`
+     * — and this function looped. That was already coverage nothing could reach:
+     * conhost uses a single face and does no font linking, so a second file in
+     * this directory is only ever visible to some other guest program. 1.4.0 ships
+     * the console face and nothing else, so this installs one file and asserts
+     * that is what it was handed. If a payload ever wants more than a console face
+     * in here, that is a deliberate change and this is where it argues for itself.
+     *
      * **The version stamp, for the reason [installToolTree] grew one.** Keying
-     * "already installed" on the files being present let a container reference a
+     * "already installed" on the file being present let a container reference a
      * new component version while running the old bytes; that cost a full test
-     * cycle. Same treatment here: a copy happens unless every font is present
-     * *and* the stamp names this component version.
+     * cycle. Same treatment here: a copy happens unless the font is present *and*
+     * the stamp names this component version. It is what carries the 1.3.0 ->
+     * 1.4.0 face swap into a prefix that already has a font in this directory.
      *
      * **The stamp sits beside the directory rather than inside it**, and that is
      * not tidiness. `load_directory_fonts` in win32u hands *every* file in
      * `windows\Fonts` to FreeType with no extension filter (win32u/font.c:6560-6571),
      * so a dotfile in there is a failed `FT_New_Face` and a warning on every
      * process start. One level up is a directory nothing scans.
+     *
+     * **Unifont is not deleted from a prefix that already has it**, and that is
+     * deliberate rather than overlooked: this function's whole contract is that it
+     * does not remove things from Wine's directory, and a stale extra face costs
+     * 5 MB and nothing else — `FaceName` names one family and conhost resolves
+     * that one. An upgraded container therefore carries both files and renders in
+     * Cascadia Mono; a fresh one carries one.
      */
     private fun installToolFonts(
         source: File,
@@ -2429,15 +2446,24 @@ class SessionRuntime @Inject constructor(
         // A payload without fonts is a legitimate older `Tools` component — 1.2.0
         // and everything before it — not a broken one, so this is silence.
         if (!from.isDirectory) return
-        val fonts = from.listFiles()?.filter { it.isFile }?.sortedBy { it.name }.orEmpty()
+        val fonts = from.listFiles()?.filter { it.isFile }.orEmpty()
         if (fonts.isEmpty()) {
-            log.line(LogSource.VESSEL, LogLevel.WARN, "tools: $FONTS_PAYLOAD_DIR/ is empty; no fonts installed")
+            log.line(LogSource.VESSEL, LogLevel.WARN, "tools: $FONTS_PAYLOAD_DIR/ is empty; no font installed")
             return
         }
+        // Exactly one, because `build/tools.sh` extracts exactly one member of
+        // Microsoft's all-variants archive. More than one means the payload changed
+        // shape without this deciding what to do about it, which is worth a line in
+        // the log rather than a silent guess at which file is the console face.
+        val font = fonts.singleOrNull()
+            ?: error(
+                "$FONTS_PAYLOAD_DIR/ holds ${fonts.size} files (${fonts.joinToString(", ") { it.name }}); " +
+                    "the payload is meant to carry exactly one console face"
+            )
 
         val target = File(layout.prefix, FONTS_PREFIX_DIR)
         val stamp = File(layout.prefix, FONTS_VERSION_STAMP)
-        if (fonts.all { File(target, it.name).isFile } &&
+        if (File(target, font.name).isFile &&
             runCatching { stamp.readText().trim() }.getOrNull() == version
         ) {
             log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $FONTS_PREFIX_DIR already installed from $version")
@@ -2445,19 +2471,19 @@ class SessionRuntime @Inject constructor(
         }
 
         if (!target.isDirectory && !target.mkdirs()) error("could not create ${target.path}")
-        // Per file and overwriting, which is the whole difference from
-        // [installToolTree]: no staging directory and no rename, because there is
-        // nothing here to swap atomically — a font is one file, and a partly
-        // written one is caught next launch by the stamp not matching.
-        fonts.forEach { it.copyTo(File(target, it.name), overwrite = true) }
-        // After the copies, so a launch killed mid-copy leaves no stamp claiming
-        // a version the directory does not hold.
+        // Overwriting, and no staging directory and no rename — the whole
+        // difference from [installToolTree]. There is nothing here to swap
+        // atomically: a font is one file, and a partly written one is caught next
+        // launch by the stamp not matching.
+        font.copyTo(File(target, font.name), overwrite = true)
+        // After the copy, so a launch killed mid-copy leaves no stamp claiming a
+        // version the directory does not hold.
         runCatching { stamp.writeText(version) }
 
         log.line(
             LogSource.VESSEL,
             LogLevel.INFO,
-            "tools: ${fonts.size} font(s) into $FONTS_PREFIX_DIR (${fonts.joinToString(", ") { it.name }})",
+            "tools: ${font.name} into $FONTS_PREFIX_DIR (${font.length()} bytes)",
         )
     }
 
@@ -3234,11 +3260,12 @@ class SessionRuntime @Inject constructor(
         const val TOOLS_VERSION_STAMP = ".vessel-tools-version"
 
         /**
-         * The Tools payload's font directory, and where those fonts go.
+         * The Tools payload's font directory, holding the one console face.
          *
          * Not in [TOOLS_LAYOUT], and [installToolFonts] says why: the
          * destination belongs to Wine, so it is written into rather than
-         * replaced. `build/tools.sh` creates the payload half.
+         * replaced. `build/tools.sh` creates the payload half and puts exactly one
+         * file in it.
          */
         const val FONTS_PAYLOAD_DIR = "Fonts"
 

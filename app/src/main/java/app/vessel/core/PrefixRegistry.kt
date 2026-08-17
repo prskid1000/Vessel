@@ -215,8 +215,38 @@ object PrefixRegistry {
      * [consoleColours] for why, and for what stays unverified. The bump is what
      * carries it to prefixes that already exist: a `.reg` merge replaces values,
      * so without it the font would arrive and nothing would select it.
+     * 30 rewrote [consoleColours] twice over -- the face and the palette -- and it
+     * is one seed because it is one screen.
+     *
+     * **The face.** `FaceName` moves from `Unifont` to `Cascadia Mono`, which Tools
+     * 1.4.0 ships in place of Unifont. Seed 29's font worked: the box-drawing
+     * glyphs rendered on the device. It is replaced anyway because it is
+     * bitmap-derived and illegible at any size, and the cost is stated rather than
+     * discovered later -- one face with no font linking means no CJK in a console
+     * at all. The family name was read out of the TTF's `name` table and
+     * `build/tools.sh` asserts it against `TOOLS_CASCADIA_FAMILY`.
+     *
+     * **The palette**, which is a measured colour bug and not a retheme.
+     * `patches/wine/0052` was taught to quantise `38;5;n` and `38;2;r;g;b` to the
+     * sixteen console colours; the device's `vt-trace.log` shows Claude Code
+     * emitting 253 of the first form and 44 of the second, and its most common
+     * colour, `38;5;238`, is RGB 68,68,68 and quantises to index 8. Seed 26 had
+     * made index 8 the *background* so the console would come up black, so the
+     * commonest colour in a session would have painted text the colour of the
+     * ground behind it. `ScreenColors` and `PopupColors` therefore move to `0x0F`
+     * -- which is also exactly `create_screen_buffer`'s own `0x000F` fill, so the
+     * two-backgrounds mismatch Wine revision 39 repaints no longer arises at the
+     * source -- and all sixteen `ColorTable` entries are written as Campbell,
+     * Windows Terminal's default and the scheme Cascadia Mono was designed
+     * alongside. Two entries retuned out of a scheme is not a scheme, and
+     * quantisation is what makes that matter.
+     *
+     * The bump carries both to prefixes that already exist: a `.reg` merge
+     * replaces values, so without it a container would keep seed 29's `FaceName`
+     * naming a font the new payload no longer contains, and keep a background on
+     * palette slot 8.
      */
-    const val SEED_VERSION: Int = 29
+    const val SEED_VERSION: Int = 30
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -618,17 +648,64 @@ object PrefixRegistry {
     /**
      * The console font's family name, as `HKCU\Console\FaceName` wants it.
      *
-     * Read out of `unifont-17.0.05.otf`'s `name` table — Windows-platform record,
-     * name ID 1 — and not assumed. `build/tools.sh` asserts the same string
-     * against `TOOLS_UNIFONT_FAMILY` in `native/pins.env` at build time, because
-     * a wrong face name here is silent: conhost matches by name and keeps its
-     * bitmap fallback when the name does not resolve, so the missing glyphs stay
-     * and nothing anywhere says why.
+     * Read out of `CascadiaMono-Regular.ttf`'s `name` table — Windows-platform
+     * record, platform 3 / encoding 1 / name ID 1 — and not assumed.
+     * `build/tools.sh` asserts the same string against `TOOLS_CASCADIA_FAMILY` in
+     * `native/pins.env` at build time, because a wrong face name here is silent:
+     * `apply_config` reaches `CreateFontIndirectW`, which returns *some* font
+     * whatever happens, so a name that does not resolve gives a nearest match with
+     * no error and no log line.
      *
-     * The plane-1 file in the same payload is a *separate* family, `Unifont
-     * Upper`, which is why this can only ever be the BMP font.
+     * **Tools 1.4.0 replaced GNU Unifont with this, and that was a trade rather
+     * than a bug fix.** Unifont was chosen for coverage and delivered it — the
+     * box-drawing glyphs rendered on the device — and it is bitmap-derived, so it
+     * is illegible at any size. The cost of the swap is CJK: conhost uses one face
+     * and does no font linking, so Chinese, Japanese and Korean text in a console
+     * now has nothing to fall back to. Counted out of the two fonts' cmaps,
+     * Cascadia Mono maps 1,863 BMP codepoints against Unifont's 57,070;
+     * `native/pins.env` lists what is probed present and absent.
      */
-    private const val CONSOLE_FACE = "Unifont"
+    private const val CONSOLE_FACE = "Cascadia Mono"
+
+    /**
+     * Campbell, the sixteen console colours, as `0xFFRRGGBB`.
+     *
+     * Windows Terminal's default scheme, and chosen rather than invented for two
+     * reasons. It is the palette Cascadia Mono was designed alongside, so the pair
+     * is what Microsoft actually ships and looks at; and a console palette is not
+     * sixteen independent choices — `patches/wine/0052`'s parser quantises
+     * `38;5;n` and `38;2;r;g;b` to the nearest of these sixteen, so the *set* has to
+     * be coherent or "nearest" starts landing in the wrong place. Half-retuning it
+     * out of Nocturne would break exactly that.
+     *
+     * Index 0 is [GuestPalette.CONSOLE_BG] rather than a literal, because it is the
+     * console's ground and that constant is what names it. Its value is Campbell's
+     * own `0C0C0C`; see there for why it moved off pure black.
+     *
+     * The registry wants `0x00BBGGRR`, which is why every one of these goes through
+     * [bgr] on the way out. Sixteen hand-swapped literals is precisely the change
+     * that gets a byte order slip nobody notices — a plausible wrong colour rather
+     * than an error — so nothing here is pre-swapped and `PrefixRegistryTest` pins
+     * the rendered values.
+     */
+    private val CAMPBELL: List<Int> = listOf(
+        GuestPalette.CONSOLE_BG,  // 00 black          0C0C0C
+        0xFFC50F1F.toInt(),       // 01 red            C50F1F
+        0xFF13A10E.toInt(),       // 02 green          13A10E
+        0xFFC19C00.toInt(),       // 03 yellow         C19C00
+        0xFF0037DA.toInt(),       // 04 blue           0037DA
+        0xFF881798.toInt(),       // 05 magenta        881798
+        0xFF3A96DD.toInt(),       // 06 cyan           3A96DD
+        0xFFCCCCCC.toInt(),       // 07 white          CCCCCC
+        0xFF767676.toInt(),       // 08 bright black   767676
+        0xFFE74856.toInt(),       // 09 bright red     E74856
+        0xFF16C60C.toInt(),       // 10 bright green   16C60C
+        0xFFF9F1A5.toInt(),       // 11 bright yellow  F9F1A5
+        0xFF3B78FF.toInt(),       // 12 bright blue    3B78FF
+        0xFFB4009E.toInt(),       // 13 bright magenta B4009E
+        0xFF61D6D6.toInt(),       // 14 bright cyan    61D6D6
+        0xFFF2F2F2.toInt(),       // 15 bright white   F2F2F2
+    )
 
     /**
      * The console's own colours, which are not the system's.
@@ -641,14 +718,39 @@ object PrefixRegistry {
      * light grey at entry 7, which is the white edge around the black text area.
      *
      * `ScreenColors` is `0xF0 >> 4` style: the high nibble is the background
-     * index and the low nibble the foreground. `0x07` — grey on black — is the
-     * default and is what shipped. `0x08` here is entry 8 as the background,
-     * which the table below sets to Nocturne's window ground, with entry 7 as
-     * the text.
+     * index and the low nibble the foreground. `0x07` — grey on black — is
+     * conhost's default and is what originally shipped. Seed 26 made it `0x87`:
+     * background index **8**, so that slot 8 could be set to black and the console
+     * would come up black rather than as a navy pane of the desktop.
      *
-     * Only the two entries this needs are overridden. The other fourteen are
-     * ANSI colours that programs ask for by name and a shell that prints red
-     * should get red, not a palette somebody redecorated.
+     * **`0x0F` now, and moving the background off slot 8 is half of a measured
+     * colour bug.** `patches/wine/0052` was taught to quantise `38;5;n` and
+     * `38;2;r;g;b` down to these sixteen; before that both forms were swallowed
+     * unrendered, which was fine for Python and Node (they use 30-37 and 90-97) and
+     * useless for a TUI. The device's `vt-trace.log` says what Claude Code actually
+     * emits: **253 `38;2;r;g;b` and 44 `38;5;n`**, and the single most common colour
+     * in a session is `38;5;238` — grey-ramp value `8 + 10*(238-232)` = 68, so RGB
+     * 68,68,68, whose nearest of the sixteen is index **8**. With slot 8 doing
+     * double duty as the background, the most frequent colour Claude Code asks for
+     * paints text the colour of what is behind it. So the parser fix alone would not
+     * have fixed what was reported; both halves ship together or neither is worth
+     * shipping. Slot 8 is now Campbell's `767676`, a real dark grey.
+     *
+     * **`0x0F` specifically, and not some other free pair, because it is exactly
+     * what conhost fills a fresh buffer with.** `create_screen_buffer` writes
+     * `0x000F` into every cell before any config is read. `native/pins.env`'s Wine
+     * revision 39 exists because that fill and this value disagreed — "the buffer
+     * therefore held two backgrounds", so the moment anything erased, the region
+     * below the cursor came out a different colour from the text above it, and 39
+     * repaints the cells still carrying the old attribute. Agreeing with the fill
+     * removes the disagreement at its source; 39's repaint becomes a safety net for
+     * whatever else changes an attribute rather than the thing holding the screen
+     * together.
+     *
+     * **All sixteen entries are written, where seed 26 wrote two.** See [CAMPBELL]
+     * for why the whole set and not a retune of the two this happens to need:
+     * quantisation picks the nearest of sixteen, so the sixteen have to be a
+     * coherent scheme rather than a scheme with two cells redecorated.
      *
      * **`FaceName` is here too, and it is not about colour — it is what stops the
      * console drawing boxes.** Measured on the device: Claude Code's TUI rendered
@@ -659,56 +761,61 @@ object PrefixRegistry {
      * out of the Wine component's `.fon` bitmap faces, its non-monospace TTFs,
      * and the `CutiveMono.ttf` / `DroidSansMono.ttf` Android contributes. None of
      * those has a U+2500 block, so a box was the right thing for the renderer to
-     * draw. Tools 1.3.0 puts GNU Unifont in `windows\Fonts` (see
-     * `SessionRuntime.installToolFonts`) and this names it.
+     * draw. Tools 1.4.0 puts Cascadia Mono in `windows\Fonts` (see
+     * `SessionRuntime.installToolFonts`) and [CONSOLE_FACE] names it.
      *
-     * **`FontSize` is deliberately not set.** conhost's default cell is 16x8
-     * (`window.c:255-257`), which is exactly Unifont's native 16x16-on-a-16x8-cell
-     * glyph box, so the default is already the right answer and a value here could
-     * only make it wrong. If one is ever needed, note the packing: HIWORD is the
-     * height and LOWORD the width (`window.c:180-187`).
+     * **`FontSize` is deliberately still not set, and the reasoning behind that has
+     * changed.** Seed 29 could say the default cell was the *right* answer: 16x8
+     * (`window.c:255-257`) was exactly Unifont's native 16x16-on-a-16x8-cell glyph
+     * box. Cascadia Mono is a scalable outline with no native pixel grid, so 16x8 is
+     * now simply conhost's default rather than a match to anything. It is left alone
+     * because a value nobody has looked at on a screen is a guess, and the design
+     * proportions do agree: `unitsPerEm` 2048, advance width 1200, ascender 1900 and
+     * descender -480 give 1200/2380 = 0.504 against the cell's 8/16 = 0.5, all read
+     * off the TTF. **If Cascadia looks wrong at that cell size, `FontSize` is the
+     * knob** — note the packing, HIWORD is the height and LOWORD the width
+     * (`window.c:180-187`).
      *
      * **`FontFamily` is deliberately not set either.** conhost already defaults
      * it to `FIXED_PITCH | FF_DONTCARE` (`window.c:255`) and needs nothing but
      * `FaceName` to pick a face; a speculative pitch or family value can only
-     * make matching fail. Which matters more than usual here, because Unifont's
-     * own tables say it is *not* fixed pitch — `post.isFixedPitch` is 0 and
-     * PANOSE bProportion is 6 where 9 means Monospaced, both read off the OTF.
+     * make matching fail. One thing the font swap did retire here: Unifont reported
+     * `post.isFixedPitch` 0, and Cascadia Mono reports 1, so the standing worry
+     * that win32u would build a variable-pitch TEXTMETRIC from the console face is
+     * gone. (Its PANOSE is all zeros, so bProportion is 0 (Any) rather than 9
+     * (Monospaced) — nothing on the `FaceName` path consults it.)
      *
      * **What is unverified, stated as such: nothing here has run on a device.**
-     * Reading the code says the pitch mismatch should not matter — with
-     * `FaceName` set, `set_first_font` and therefore `validate_font`'s 0x3f
-     * weight mask (`window.c:821-847`, the `FIXED_PITCH` and
-     * `lfCharSet == ui_charset` conditions) are never on the path at all, and
-     * win32u's `find_matching_face` resolves a named family before pitch is ever
-     * consulted (`dlls/win32u/font.c:2288-2303`). But `apply_config` reaches
-     * `CreateFontIndirectW`, which returns *some* font whatever happens, so the
-     * failure mode if that reading is wrong is a nearest match to a different
-     * face with the boxes still on screen — no error, no log line. The one thing
-     * that cannot be settled by reading is whether the glyphs appear.
+     * Reading the code says a named family is resolved before pitch is ever
+     * consulted — with `FaceName` set, `set_first_font` and therefore
+     * `validate_font`'s 0x3f weight mask (`window.c:821-847`) are never on the path,
+     * and win32u's `find_matching_face` looks the family up in `family_name_tree`
+     * first (`dlls/win32u/font.c:2288-2303`). But `apply_config` reaches
+     * `CreateFontIndirectW`, which returns *some* font whatever happens, so if that
+     * reading is wrong the failure is a nearest match to a different face with no
+     * error and no log line. Whether the glyphs appear, and whether this face is
+     * legible at this cell size, cannot be settled by reading.
      *
-     * **And a real limitation rather than something to chase later: emoji cannot
-     * render in this console.** conhost uses a single face and does no font
-     * linking, emoji are plane 1, and the seeded face is the BMP font. The
-     * payload's `unifont_upper` is a separate family (`Unifont Upper`) so the
-     * higher planes exist for other guest programs; the console will not reach
-     * them, and Unifont's emoji are monochrome outlines with no colour-glyph path
-     * in conhost in any case.
+     * **And two real limitations rather than things to chase later.** Emoji cannot
+     * render in this console: conhost uses a single face, does no font linking, and
+     * has no colour-glyph path at all. Neither can CJK, hiragana, katakana, hangul,
+     * Devanagari or Thai — Cascadia Mono has none of them, where Unifont did, and
+     * with one face there is nothing behind it. That is the trade Tools 1.4.0 made
+     * deliberately; see [CONSOLE_FACE].
      */
     val consoleColours: RegistryKey = RegistryKey(
         path = """HKEY_CURRENT_USER\Console""",
         values = listOf(
             RegistryValue("FaceName", CONSOLE_FACE),
-            RegistryValue.dword("ScreenColors", 0x87),
-            RegistryValue.dword("PopupColors", 0x87),
-            // Entry 8 is the ground; entry 7 is the text on it. The ground is
-            // [GuestPalette.CONSOLE_BG] -- black -- and not the window ground:
-            // a console is a black box on the themed desktop rather than a pane
-            // of it. See that constant for why it was black by accident until
-            // `patches/wine/0052` made this key take effect at all.
-            RegistryValue.dword("ColorTable08", bgr(GuestPalette.CONSOLE_BG)),
-            RegistryValue.dword("ColorTable07", bgr(GuestPalette.TEXT)),
-        ),
+            // Background index 0, foreground index 15 — see above for why this
+            // pair and not another: `create_screen_buffer`'s own fill is 0x000F.
+            RegistryValue.dword("ScreenColors", 0x0F),
+            RegistryValue.dword("PopupColors", 0x0F),
+        ) + CAMPBELL.mapIndexed { i, argb ->
+            // `ColorTable%02d`, which is the format conhost reads them back with
+            // (`window.c:153`) — `ColorTable8` would be silently ignored.
+            RegistryValue.dword("ColorTable%02d".format(i), bgr(argb))
+        },
     )
 
     /**

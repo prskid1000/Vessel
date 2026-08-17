@@ -178,7 +178,19 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(29, PrefixRegistry.SEED_VERSION)
+        assertEquals(30, PrefixRegistry.SEED_VERSION)
+        // 30 rewrote [consoleColours] twice and added no key. The face moved from
+        // `Unifont` to `Cascadia Mono`, Tools 1.4.0 having swapped the payload -- a
+        // trade, not a fix: Unifont's box-drawing glyphs did render on the device and
+        // it is bitmap-derived and illegible, and the cost of the swap is no CJK in a
+        // console. The palette moved because `patches/wine/0052` now quantises
+        // 38;5;n and 38;2;r;g;b to the sixteen console colours, and the device's
+        // vt-trace.log has Claude Code emitting 297 such sequences whose commonest,
+        // 38;5;238, is RGB 68,68,68 and lands on index 8 -- which seed 26 had made
+        // the *background*, so the commonest colour in a session would have been
+        // invisible. ScreenColors is 0x0F now and all sixteen entries are Campbell.
+        // A `.reg` merge replaces values, so the bump is what carries both to
+        // prefixes that already exist.
         // 29 added `FaceName` to [consoleColours] and no key: the prefix had no
         // fonts at all, so conhost enumerated a bitmap face with no U+2500 block
         // and Claude Code's rules came out as boxes. Tools 1.3.0 ships GNU
@@ -207,30 +219,72 @@ class PrefixRegistryTest {
         // this count has not moved with any of them. Nor with 29, which added
         // `FaceName` to [consoleColours]: `HKCU\Console` was already in the seed
         // carrying the palette, and the console font belongs on the same key
-        // conhost reads everything else from.
+        // conhost reads everything else from. Nor with 30, which changed that key's
+        // face and grew its palette from two entries to sixteen.
         assertEquals(18, PrefixRegistry.seed.size)
     }
 
     @Test
     fun `the console names a font that has the box-drawing glyphs`() {
         val rendered = PrefixRegistry.render(listOf(PrefixRegistry.consoleColours))
-        // The family name out of `unifont-17.0.05.otf`'s own `name` table, which
-        // `build/tools.sh` asserts against `TOOLS_UNIFONT_FAMILY` at build time.
-        // conhost matches this by name and silently keeps its bitmap fallback if
-        // it does not resolve, so a typo here is a console still drawing `□□□□□`
-        // with nothing anywhere reporting a problem.
-        assertTrue(rendered.contains(""""FaceName"="Unifont""""))
+        // The family name out of `CascadiaMono-Regular.ttf`'s own `name` table
+        // (platform 3, encoding 1, name ID 1), which `build/tools.sh` asserts
+        // against `TOOLS_CASCADIA_FAMILY` at build time. conhost matches this by
+        // name and `CreateFontIndirectW` returns *some* font whatever happens, so a
+        // typo here is a console rendering in whatever GDI thought was nearest, with
+        // nothing anywhere reporting a problem.
+        assertTrue(rendered.contains(""""FaceName"="Cascadia Mono""""))
         // **Both of these are absent on purpose and the test is what keeps them
-        // absent.** conhost's default cell is already 16x8 (`window.c:255-257`),
-        // which is Unifont's native box, and it already defaults `FontFamily` to
-        // `FIXED_PITCH | FF_DONTCARE` and needs nothing but a face name to match.
-        // A speculative value for either can only make matching fail — which
-        // matters here because Unifont's own tables report it as *not* fixed pitch
-        // (`post.isFixedPitch` 0, PANOSE bProportion 6 where 9 is Monospaced).
+        // absent.** conhost defaults `FontFamily` to `FIXED_PITCH | FF_DONTCARE` and
+        // needs nothing but a face name to match, and its default cell is 16x8
+        // (`window.c:255-257`) -- no longer a match to a native glyph box the way it
+        // was for Unifont's 16x16, but Cascadia's own metrics agree closely enough
+        // that a guess here could only make it worse: advance width 1200 over line
+        // height 2380 is 0.504 against the cell's 8/16 = 0.5, both read off the TTF.
+        // If the face does look wrong at that size, `FontSize` is the knob and
+        // HIWORD is the height -- but a value nobody has seen on a screen does not
+        // belong here.
         assertFalse(rendered.contains("FontSize"))
         assertFalse(rendered.contains("FontFamily"))
         // Same key as the palette, because it is the same key conhost reads.
         assertTrue(rendered.contains("""[HKEY_CURRENT_USER\Console]"""))
+    }
+
+    @Test
+    fun `the console palette is all sixteen Campbell entries, in BGR`() {
+        val rendered = PrefixRegistry.render(listOf(PrefixRegistry.consoleColours))
+        // **Background index 0, foreground index 15.** It was 0x87 -- index 8 as the
+        // background -- and moving it is half of a measured colour bug.
+        // `patches/wine/0052` quantises 38;5;n and 38;2;r;g;b to the nearest of these
+        // sixteen; the device's vt-trace.log has Claude Code emitting 253 of the
+        // first form and 44 of the second, and its commonest colour, 38;5;238, is
+        // grey-ramp value 68,68,68 and quantises to index 8. With the background
+        // sitting there, the commonest colour in a Claude Code session paints text
+        // the colour of the ground behind it. 0x0F is also exactly what
+        // `create_screen_buffer` fills a fresh buffer with (0x000F), which is the
+        // two-backgrounds mismatch Wine revision 39 exists to repaint.
+        assertTrue(rendered.contains(""""ScreenColors"=dword:0000000f"""))
+        assertTrue(rendered.contains(""""PopupColors"=dword:0000000f"""))
+        // **Campbell, written here as sRGB `RRGGBB` and expected in the rendered
+        // file as `00BBGGRR`.** Sixteen hand-swapped literals is exactly the change
+        // that takes a byte-order slip nobody notices -- a plausible wrong colour
+        // rather than an error -- so the swap is asserted on every entry rather than
+        // assumed. `ColorTable%02d`, because that is the format conhost reads them
+        // back with (`window.c:153`): `ColorTable8` would be silently ignored.
+        val campbell = listOf(
+            "0C0C0C", "C50F1F", "13A10E", "C19C00",
+            "0037DA", "881798", "3A96DD", "CCCCCC",
+            "767676", "E74856", "16C60C", "F9F1A5",
+            "3B78FF", "B4009E", "61D6D6", "F2F2F2",
+        )
+        campbell.forEachIndexed { i, srgb ->
+            val swapped = srgb.substring(4, 6) + srgb.substring(2, 4) + srgb.substring(0, 2)
+            val expected = """"ColorTable%02d"=dword:00%s""".format(i, swapped.lowercase())
+            assertTrue("entry $i ($srgb) should render as $expected", rendered.contains(expected))
+        }
+        // Slot 0 is the console's ground and comes from the constant that names it
+        // rather than from a literal in the table, so this pins the two together.
+        assertEquals(0xFF0C0C0C.toInt(), GuestPalette.CONSOLE_BG)
     }
 
     @Test

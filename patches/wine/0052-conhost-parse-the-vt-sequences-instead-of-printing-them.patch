@@ -1,5 +1,5 @@
 diff --git a/programs/conhost/conhost.c b/programs/conhost/conhost.c
-index 8298743553f..3da57b7c3e0 100644
+index 8298743553f..654f354b3f0 100644
 --- a/programs/conhost/conhost.c
 +++ b/programs/conhost/conhost.c
 @@ -20,6 +20,7 @@
@@ -121,7 +121,7 @@ index 8298743553f..3da57b7c3e0 100644
          else if (ir.Event.KeyEvent.uChar.UnicodeChar)
              edit_line_insert( console, &ir.Event.KeyEvent.uChar.UnicodeChar, 1 );
  
-@@ -2103,6 +2194,314 @@ static NTSTATUS set_output_info( struct screen_buffer *screen_buffer,
+@@ -2103,6 +2194,461 @@ static NTSTATUS set_output_info( struct screen_buffer *screen_buffer,
      return STATUS_SUCCESS;
  }
  
@@ -157,6 +157,113 @@ index 8298743553f..3da57b7c3e0 100644
 +    return ((n & 1) ? FOREGROUND_RED   : 0) |
 +           ((n & 2) ? FOREGROUND_GREEN : 0) |
 +           ((n & 4) ? FOREGROUND_BLUE  : 0);
++}
++
++/* A 24-bit colour to one of the sixteen palette indices.
++ *
++ * An index is returned rather than a colour, and that is the whole design: the
++ * console paints the index through whatever ColorTable the container configured,
++ * so a program asking for "some red" gets this console's red. The question being
++ * answered is "which palette slot did the program mean", not "which of my
++ * colours is closest to these bytes".
++ *
++ * **Not nearest-neighbour by RGB distance, which was tried and is wrong.** The
++ * sixteen are saturated primaries plus a grey axis, so every muted colour is
++ * closer to a grey than to any hue -- measured on what Claude Code actually
++ * emits, `38;2;215;119;87` (a salmon accent) sits 9,408 from grey 127 and 21,830
++ * from red, so a distance metric silently discards the hue of exactly the
++ * colours a TUI uses for emphasis. Weighting the channels perceptually does not
++ * rescue it; grey still wins that case.
++ *
++ * So: separate the achromatic colours out first and put them on a brightness
++ * ladder, then classify the rest by hue against a threshold relative to the
++ * peak channel.
++ *
++ * Checked by running this arithmetic over every distinct colour in the device's
++ * trace and over the twelve saturated ANSI colours. The trace comes out as
++ * 215,119,87 -> bright red, 166,226,46 -> bright green, 177,185,249 -> bright
++ * blue, 153,153,153 -> grey, 255,255,255 -> white and the two near-black
++ * backgrounds -> black, which is what a reader of that screen would call them;
++ * all twelve canonical colours round-trip to their own index. */
++static unsigned int vt_rgb_to_index( unsigned int r, unsigned int g, unsigned int b )
++{
++    unsigned int hi = max( r, max( g, b ) );
++    unsigned int lo = min( r, min( g, b ) );
++    unsigned int index;
++
++    /* Too dark to be anything but black, hue or no hue. This is what keeps a
++     * near-black background -- `48;2;2;40;0` is in the trace -- from being
++     * painted as a full-strength green, which is the failure mode of classifying
++     * by hue alone. */
++    if (hi < 64) return 0;
++
++    /* Achromatic: four steps of grey, because the palette has exactly four
++     * (black, dark grey, light grey, white) and a TUI uses all of them --
++     * borders, dim text, body text, emphasis. The 32 tolerance is deliberately
++     * loose: 248,248,242 is grey by intent even though its channels differ. */
++    if (hi - lo < 32)
++    {
++        if (hi < 128) return 8;
++        if (hi < 224) return 7;
++        return 15;
++    }
++
++    /* Chromatic: a channel is "on" if it reaches three quarters of the peak
++     * channel. Relative to the peak rather than to a fixed 128, so a dark
++     * saturated red classifies as red instead of collapsing to black; and
++     * relative to the peak rather than to the midpoint of hi..lo, because the
++     * midpoint lets a middling channel vote. Monokai's green, 166,226,46, is the
++     * case that decided it: 166 clears the midpoint of its own range, so the
++     * midpoint rule called it yellow and painted diff additions cream. `hi`
++     * satisfies this test by definition, so the index is never zero here. */
++    index = (r * 4 >= hi * 3 ? 1u : 0u) | (g * 4 >= hi * 3 ? 2u : 0u) |
++            (b * 4 >= hi * 3 ? 4u : 0u);
++
++    /* The bright half of the palette for anything near full strength. Split at
++     * 160 on the peak channel: what matters is whether the colour reads as
++     * vivid, which is its peak, not its spread. */
++    if (hi >= 160) index |= 8u;
++    return index;
++}
++
++/* An xterm 256-colour index to one of the sixteen.
++ *
++ * 0-15 are the sixteen themselves and pass through exactly -- quantising the one
++ * case that has an exact answer could only lose information. 16-231 are a 6x6x6
++ * cube whose levels are xterm's non-linear ramp (0, 95, then 40 apart), and
++ * 232-255 a 24-step grey, which lands on the grey ladder in [vt_rgb_to_index]:
++ * `38;5;238` is the most common colour in the device's trace at 44 occurrences,
++ * it converts to 68,68,68, and it comes out as index 8. That is only visible if
++ * palette slot 8 is a real dark grey rather than the background colour, which is
++ * what PrefixRegistry's ScreenColors and ColorTable08 had to change for. */
++static unsigned int vt_256_to_index( unsigned int n )
++{
++    static const unsigned char cube[6] = { 0, 95, 135, 175, 215, 255 };
++
++    if (n < 16) return n;
++    if (n < 232)
++    {
++        n -= 16;
++        return vt_rgb_to_index( cube[(n / 36) % 6], cube[(n / 6) % 6], cube[n % 6] );
++    }
++    if (n < 256)
++    {
++        unsigned int v = 8 + 10 * (n - 232);
++        return vt_rgb_to_index( v, v, v );
++    }
++    return 7;
++}
++
++/* An index in 0-15 as foreground or background attribute bits. Index 8-15 are
++ * the bright half, which the console spells as the intensity bit rather than as
++ * eight more colours. */
++static unsigned short vt_index_to_attr( unsigned int index, BOOL background )
++{
++    unsigned short attr = vt_ansi_to_attr( index & 7 );
++
++    if (background) attr = (unsigned short)((attr << 4) | ((index & 8) ? BACKGROUND_INTENSITY : 0));
++    else if (index & 8) attr |= FOREGROUND_INTENSITY;
++    return attr;
 +}
 +
 +static void vt_erase( struct screen_buffer *screen_buffer, unsigned int from, unsigned int to,
@@ -223,10 +330,50 @@ index 8298743553f..3da57b7c3e0 100644
 +                                          (vt_ansi_to_attr( p - 100 ) << 4) | BACKGROUND_INTENSITY;
 +        else if (p == 38 || p == 48)
 +        {
-+            /* 38;5;n and 38;2;r;g;b. Not approximated -- the point is to eat the
-+             * parameters so they are not mistaken for further SGR codes. */
-+            if (i + 1 < count && params[i + 1] == 5) i += 2;
-+            else if (i + 1 < count && params[i + 1] == 2) i += 4;
++            /* 38;5;n and 38;2;r;g;b, quantised to the sixteen.
++             *
++             * Revision 34 consumed these without rendering them, on the reasoning
++             * that eating the parameters is what matters -- if they were mistaken
++             * for further SGR codes, `38;2;255;0;0` would read as 38, then 2
++             * (faint), then 255, then 0 *twice*, and a bare 0 is a full reset. So
++             * the swallow is load-bearing and stays; what was wrong was stopping
++             * there. It held up for Python and Node, which use 30-37 and 90-97,
++             * and failed completely for a TUI. Claude Code renders through Ink and
++             * chalk and uses both of these forms: the device's vt-trace.log has
++             * 253 `38;2;r;g;b` and 44 `38;5;n`, against 247 `39;49` resets, and
++             * every one of the 297 was eaten -- each logged with `attr` identical
++             * before and after, which is the swallow visible in the data. The
++             * layout drew and nothing was coloured, and because the glyphs were
++             * wrong in the same session it read as a font problem.
++             *
++             * A cell attribute has four bits per half and no way to hold more, so
++             * approximating is the only alternative to dropping. Sixteen colours
++             * is not what the program asked for, and it is what this console can
++             * say. */
++            BOOL bg = (p == 48);
++
++            if (i + 2 < count && params[i + 1] == 5)
++            {
++                unsigned int index = vt_256_to_index( params[i + 2] );
++
++                screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & (bg ? ~0x70 : ~0x07)) |
++                                              vt_index_to_attr( index, bg );
++                i += 2;
++            }
++            else if (i + 4 < count && params[i + 1] == 2)
++            {
++                unsigned int index = vt_rgb_to_index( params[i + 2], params[i + 3], params[i + 4] );
++
++                screen_buffer->vt_base_attr = (screen_buffer->vt_base_attr & (bg ? ~0x70 : ~0x07)) |
++                                              vt_index_to_attr( index, bg );
++                i += 4;
++            }
++            /* A truncated 38 or 48 -- no selector, or a selector with fewer
++             * arguments than it needs -- falls through applying nothing, which is
++             * all there is to do: the parameters that would have been skipped are
++             * the ones that are missing. The bounds are `i + 2` and `i + 4`
++             * rather than the old `i + 1` because these branches now *read* the
++             * arguments instead of only counting them. */
 +        }
 +        /* 2 dim, 3 italic, 4 underline and their resets have no console
 +         * attribute to carry them and are dropped rather than approximated. */
@@ -436,7 +583,7 @@ index 8298743553f..3da57b7c3e0 100644
  static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR *buffer, size_t len )
  {
      RECT update_rect;
-@@ -2114,6 +2513,16 @@ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR
+@@ -2114,6 +2660,16 @@ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR
  
      for (i = 0; i < len; i++)
      {

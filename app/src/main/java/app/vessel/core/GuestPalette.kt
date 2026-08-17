@@ -27,26 +27,36 @@ object GuestPalette {
     /**
      * The console's ground, and deliberately **not** [BG].
      *
-     * A console is a black box on the themed desktop, not a pane of it. It was
-     * black for months by accident -- conhost fills its buffer with the built-in
-     * 0x000F before any configuration is read, and nothing repainted those cells
-     * when `ScreenColors` was applied, so the theming was inert and black came
-     * through. `patches/wine/0052` makes the attribute reach existing cells,
-     * which made the theme take effect for the first time and turned the console
-     * into a navy pane that blended into the desktop behind it.
+     * A console is a near-black box on the themed desktop, not a pane of it. It
+     * was black for months by accident -- conhost fills its buffer with the
+     * built-in 0x000F before any configuration is read, and nothing repainted
+     * those cells when `ScreenColors` was applied, so the theming was inert and
+     * black came through. `patches/wine/0052` makes the attribute reach existing
+     * cells, which made the theme take effect for the first time and turned the
+     * console into a navy pane that blended into the desktop behind it.
      *
-     * So this is what the console always looked like, now asked for on purpose.
-     * It is entry 8 rather than entry 0 because conhost paints the border
-     * outside the text buffer from the palette as well, and the default entry 7
-     * there is the light grey that used to put a white rim around the window --
-     * see `PrefixRegistry.consoleColours`. Both the interior and the rim read
-     * entry 8, so one value covers them.
+     * **This is the one value here that is not Nocturne's**, so do not go looking
+     * for it in `VesselTheme.kt`: it is Campbell's slot 0, `0C0C0C`. Seed 30 gave
+     * the console the whole Campbell scheme rather than two retuned entries --
+     * `patches/wine/0052` quantises `38;5;n` and `38;2;r;g;b` to the nearest of
+     * sixteen, so the sixteen have to be a coherent set -- and this constant is
+     * what names slot 0 in it. It was pure black before that, and the two
+     * differ by 12/255 on each channel; agreeing with the scheme is worth more than
+     * a deviation nobody can see and nobody could later justify.
      *
-     * The cost, stated: a program asking for ANSI bright-black gets pure black.
-     * A shell that draws dark grey on black loses that distinction, which is a
-     * smaller loss than a console that does not look like one.
+     * **It is entry 0 now, where it used to be entry 8.** Seed 26 put the ground on
+     * slot 8 so `ScreenColors 0x87` would select it; that made slot 8 do double duty
+     * as "the background", and Claude Code's most frequent colour quantises to
+     * exactly slot 8 -- 297 sequences measured in the device's `vt-trace.log`,
+     * mostly `38;5;238`, which is RGB 68,68,68. Dark grey text on a dark grey ground
+     * is invisible text. `PrefixRegistry.consoleColours` has the whole measurement.
+     * The rim reasoning that used to be here is dropped rather than carried
+     * forward: `wndclass.hbrBackground` is `GetStockObject(BLACK_BRUSH)`
+     * (`programs/conhost/window.c:1927`), so what is painted outside the blit comes
+     * from the window class and not from a palette entry. Nothing in this value
+     * depends on which it was.
      */
-    const val CONSOLE_BG: Int = 0xFF000000.toInt()
+    const val CONSOLE_BG: Int = 0xFF0C0C0C.toInt()
 
     /** `surface` — cards, sheets, bars; here, dialogs and menus. */
     const val SURFACE: Int = 0xFF232532.toInt()

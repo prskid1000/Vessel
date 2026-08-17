@@ -56,12 +56,23 @@ class GuestPaletteTest {
     }
 
     @Test
+    fun `the console ground is Campbell's slot 0 and not a VesselTheme token`() {
+        // The one constant in GuestPalette that is deliberately not transcribed
+        // from VesselTheme.kt, so this test is the thing that stops someone
+        // "fixing" it back to a Nocturne value. Seed 30 gave the console the whole
+        // Campbell scheme -- `patches/wine/0052` quantises 38;5;n and 38;2;r;g;b to
+        // the nearest of sixteen, so a half-retuned set makes "nearest" wrong -- and
+        // this names slot 0 in it. It was 0xFF000000 up to seed 29.
+        assertEquals(0xFF0C0C0C.toInt(), GuestPalette.CONSOLE_BG)
+    }
+
+    @Test
     fun `every token is opaque, because a registry triplet has nowhere to put alpha`() {
         val tokens = listOf(
             GuestPalette.BG, GuestPalette.SURFACE, GuestPalette.TEXT, GuestPalette.ACCENT,
             GuestPalette.ACCENT_800, GuestPalette.ACCENT_100, GuestPalette.NEUTRAL_500,
             GuestPalette.NEUTRAL_600, GuestPalette.NEUTRAL_700, GuestPalette.NEUTRAL_800,
-            GuestPalette.NEUTRAL_900,
+            GuestPalette.NEUTRAL_900, GuestPalette.CONSOLE_BG,
         )
         assertTrue(tokens.all { (it ushr 24) == 0xFF })
     }
