@@ -178,7 +178,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(27, PrefixRegistry.SEED_VERSION)
+        assertEquals(28, PrefixRegistry.SEED_VERSION)
+        // 28 added CLAUDE_BIN to [toolsPath] and no key: Claude Code's installer
+        // puts claude.exe in the guest profile's .localin and tells the user to
+        // add it to PATH by hand. Seeded instead, and the bump is what carries it
+        // to prefixes that already exist.
         // 27 changed two values in [toolsPath] and added no key: Git's PATH entry
         // back to `clangarm64\bin` and `MSYSTEM` back to `CLANGARM64`, Tools 1.2.0
         // being the ARM64 payload again. It needed the bump because a prefix keeps

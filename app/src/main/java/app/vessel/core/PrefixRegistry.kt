@@ -196,8 +196,15 @@ object PrefixRegistry {
      * `MSYSTEM` still naming a `mingw64` prefix the payload does not contain —
      * `git` would resolve through `cmd\` and every helper behind it would not,
      * which reads as a working install until the first command that shells out.
+     * 28 put [CLAUDE_BIN] on the PATH. Claude Code's installer drops
+     * `claude.exe` into the guest profile's `.localin` and then prints a note
+     * telling the user to add that directory through System Properties; seeding
+     * it means the thing the Tools component exists to serve is reachable the
+     * moment it installs. Verified on the device -- 2.1.233, ARM64, at exactly
+     * that path -- and the bump is what carries it to prefixes that already
+     * exist, since a `.reg` merge replaces the PATH value whole.
      */
-    const val SEED_VERSION: Int = 27
+    const val SEED_VERSION: Int = 28
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -850,6 +857,33 @@ object PrefixRegistry {
                     """$PYTHON_DIR\Scripts""",
                     NODE_DIR,
                     PWSH_DIR,
+                    // **Where Claude Code installs itself, and it does not ask.**
+                    // `irm https://claude.ai/install.ps1 | iex` drops
+                    // `claude.exe` into the guest user's `.local\bin` and then
+                    // prints a setup note saying that directory is not on
+                    // PATH and to add it through System Properties -- a
+                    // dialog this container has no reason to make anyone
+                    // visit. Seeded here instead, so the toolchain the Tools
+                    // component exists to serve is reachable the moment it
+                    // is installed. Verified on the device: version 2.1.233,
+                    // installed to this exact path, ARM64.
+                    //
+                    // Literal rather than `%USERPROFILE%\.local\bin`, because
+                    // this seed writes REG_SZ only -- see [RegistryKind],
+                    // where the same constraint is load-bearing for the
+                    // emulator keys. An expandable string would be left
+                    // present, readable and silently unexpanded. It is why
+                    // the Windows entries above are literal too rather than
+                    // `%SystemRoot%`.
+                    //
+                    // The profile name is not ours: Wine takes it from the
+                    // user it runs as and Valve's tree defaults it to
+                    // `steamuser`; nothing in this app sets it. If that ever
+                    // changed, this entry would name a directory that does
+                    // not exist -- harmless by the rule this key already
+                    // follows, and something every Windows machine has
+                    // several of.
+                    CLAUDE_BIN,
                     // The JDK is the one tree whose PATH entry is not its root:
                     // a JDK root holds `bin`, `lib`, `conf` and `release`, and
                     // only `bin` has launchers in it. [JAVA_HOME] below names the
@@ -937,6 +971,15 @@ object PrefixRegistry {
      * has been measured on the device.
      */
     const val PWSH_DIR: String = """C:\Program Files\PowerShell"""
+
+    /**
+     * Claude Code's own install location, under the guest user's profile.
+     *
+     * Not a Vessel-installed tree and not part of the Tools component: the
+     * installer script puts it there and this seed only makes it reachable.
+     * See the note in [toolsPath] for why the profile name is literal.
+     */
+    const val CLAUDE_BIN: String = """C:\users\steamuser\.local\bin"""
 
     /**
      * Where the Temurin JDK tree of the Tools component installs. See [PYTHON_DIR].
