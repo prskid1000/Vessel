@@ -60,17 +60,27 @@ val bundledPackages = listOf(
     // selects the ICD); both `GpuProbe` and `patches/wine/0009` handle either
     // shape by asking the file which it is, so installing one by hand works.
     "turnip-26.3.0-devel-9c475fc3-icd-canoe.wcp",
-    // Git, Python, Node, PowerShell 7 and the Temurin JDK in one payload, all
-    // **ARM64** — so they run natively under Wine ARM64EC rather than through
-    // FEX. The one exception is inside Git: its MSYS2 shell layer
-    // (`usr/bin/bash.exe`, `msys-2.0.dll`) is x86-64 and always will be, msys-2.0
-    // having no ARM64 port, so that half is translated in either build. See
-    // native/pins.env for why 1.2.0 reversed 1.1.0's all-x64 decision — the
-    // wheel-ecosystem argument behind it was counted against PyPI and is false,
-    // and PowerShell x86-64 crashed on the device — and why zips rather than
-    // installers (TODO #17's open .msi failure). Bundled rather than side-loaded
-    // because installing the APK is meant to be the whole of setup, and a
-    // developer toolchain that needs a manual pick is one nobody has.
+    // Git, Python, Node, PowerShell 7, the Temurin JDK and GNU Unifont in one
+    // payload — the five programs all **ARM64**, so they run natively under Wine
+    // ARM64EC rather than through FEX. The one exception is inside Git: its MSYS2
+    // shell layer (`usr/bin/bash.exe`, `msys-2.0.dll`) is x86-64 and always will
+    // be, msys-2.0 having no ARM64 port, so that half is translated in either
+    // build. See native/pins.env for why 1.2.0 reversed 1.1.0's all-x64 decision —
+    // the wheel-ecosystem argument behind it was counted against PyPI and is
+    // false, and PowerShell x86-64 crashed on the device — and why zips rather
+    // than installers (TODO #17's open .msi failure). Bundled rather than
+    // side-loaded because installing the APK is meant to be the whole of setup,
+    // and a developer toolchain that needs a manual pick is one nobody has.
+    //
+    // **1.3.0 adds `Fonts/`, and it is the reason for the bump.** Measured on the
+    // device: `prefix/drive_c/windows/Fonts/` held zero files, so Claude Code's
+    // TUI drew every horizontal rule as `□□□□□` — a missing glyph, not a VT
+    // problem. Unifont covers the whole BMP; `PrefixRegistry.consoleColours` seeds
+    // it as `HKCU\Console\FaceName` and `SessionRuntime.installToolFonts` copies
+    // it in without replacing Wine's font directory. A font is not a toolchain,
+    // but it rides in this payload for the same structural reason everything else
+    // does: a container references exactly one component per type, so a `Fonts`
+    // package published as `Tools` would replace this one rather than join it.
     //
     // **The version in this name is load-bearing and this line has to move with
     // it.** `WcpInstaller.kt:290-305` will not unpack a package whose
@@ -79,18 +89,20 @@ val bundledPackages = listOf(
     // corollary is here: dist/ still holds whatever was built before, so leaving
     // the old name in this list ships a package the new one supersedes.
     //
-    // Still by a wide margin the largest thing in the APK, and 1.2.0 is slightly
-    // smaller than 1.1.0 rather than larger: the ARM64 archives are smaller than
-    // their x86-64 counterparts across all five trees (the JDK alone is 192.7 MB
-    // of download against 205.1 MB). Measured off `ls -l dist/`: the .wcp is
-    // 350,147,400 bytes = 333.9 MiB, against 1.1.0's 378,192,180 = 360.7 MiB.
-    // 11,850 files in the payload.
+    // Still by a wide margin the largest thing in the APK. Measured off
+    // `ls -l dist/` after the build: the .wcp is 350,462,596 bytes = 334.2 MiB,
+    // 11,852 files in the payload. Against 1.2.0's 350,147,400 = 333.9 MiB and
+    // 11,850 files, that is +315,196 bytes for two fonts whose raw size is
+    // 11,460,416 — Unifont's CFF outlines are bitmap-derived and compress about as
+    // well as anything in this repo. (1.1.0, all-x86-64, was 378,192,180 = 360.7
+    // MiB; the ARM64 archives are smaller across all five trees, the JDK alone
+    // 192.7 MB of download against 205.1 MB.)
     //
     // **The APK figure is not re-measured, because this change did not build
     // one.** The last `sideload/debug` APK on disk is 602,289,082 bytes = 574.4
     // MiB and it contains 1.1.0 — bigger than the 495.5 MiB this comment used to
     // record, from other components growing, not this one. Swapping 1.1.0 for
-    // 1.2.0 subtracts 28,044,780 bytes of asset, so ~547 MiB is arithmetic and
+    // 1.3.0 subtracts 27,729,584 bytes of asset, so ~547 MiB is arithmetic and
     // not a measurement; replace it with a real number the next time an APK is
     // built. That is the deliberate trade, and it is felt on every download,
     // every install and every first-run unpack; drop this line to take all of it
@@ -101,7 +113,7 @@ val bundledPackages = listOf(
     // existed. The rule that came out of it is the one applied above: a number is
     // labelled measured only where something was read off a file, and labelled
     // arithmetic where it was not.)
-    "tools-1.2.0-arm64.wcp",
+    "tools-1.3.0-arm64.wcp",
 )
 
 /** Copies the bill of materials into a generated assets root. */

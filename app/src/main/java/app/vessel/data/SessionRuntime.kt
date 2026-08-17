@@ -2373,6 +2373,92 @@ class SessionRuntime @Inject constructor(
                     log.line(LogSource.VESSEL, LogLevel.WARN, "tools: ${tree.prefixDir}: ${it.message}")
                 }
         }
+
+        // Not a [ToolsTree], deliberately — see [installToolFonts]. Wrapped the
+        // same way each tree is, so a font that will not copy does not cost the
+        // toolchain that already did.
+        runCatching { installToolFonts(source, layout, source.name, log) }
+            .onFailure {
+                log.line(LogSource.VESSEL, LogLevel.WARN, "tools: fonts: ${it.message}")
+            }
+    }
+
+    /**
+     * Copy the payload's fonts into `windows\Fonts`, leaving whatever else is
+     * there alone.
+     *
+     * **Why this is not a [ToolsTree].** `drive_c\windows\Fonts` is Wine's
+     * directory, not ours. [installToolTree] does `deleteTree(target)` and a
+     * rename, which is right for `C:\Program Files\Git` — a tree nothing else
+     * writes into — and wrong here twice over: it would throw away any font a
+     * guest program installed, and it would put this code in a fight with Wine
+     * over a directory Wine creates and populates itself. So this copies *files*
+     * in, creates the directory if it is absent, and touches nothing else in it.
+     *
+     * **Why there are any fonts to copy at all.** Measured on the device:
+     * `prefix/drive_c/windows/Fonts/` was empty, zero files, and Claude Code's
+     * TUI drew every horizontal rule as `□□□□□`. That is a missing glyph and not
+     * a VT problem — colours and text rendered correctly and `patches/wine/0052`
+     * already parses the escape sequences. What conhost had to choose from was
+     * the Wine component's `.fon` bitmap faces and non-monospace TTFs, plus the
+     * two Android contributes from `/system/fonts` (`CutiveMono.ttf`,
+     * `DroidSansMono.ttf`), none of which has a U+2500 block. GNU Unifont covers
+     * the whole BMP, and [PrefixRegistry.consoleColours] now names it in
+     * `HKCU\Console\FaceName`.
+     *
+     * **The version stamp, for the reason [installToolTree] grew one.** Keying
+     * "already installed" on the files being present let a container reference a
+     * new component version while running the old bytes; that cost a full test
+     * cycle. Same treatment here: a copy happens unless every font is present
+     * *and* the stamp names this component version.
+     *
+     * **The stamp sits beside the directory rather than inside it**, and that is
+     * not tidiness. `load_directory_fonts` in win32u hands *every* file in
+     * `windows\Fonts` to FreeType with no extension filter (win32u/font.c:6560-6571),
+     * so a dotfile in there is a failed `FT_New_Face` and a warning on every
+     * process start. One level up is a directory nothing scans.
+     */
+    private fun installToolFonts(
+        source: File,
+        layout: ContainerLayout,
+        /** The component's version code, which is the store directory's name. */
+        version: String,
+        log: SessionLog,
+    ) {
+        val from = File(source, FONTS_PAYLOAD_DIR)
+        // A payload without fonts is a legitimate older `Tools` component — 1.2.0
+        // and everything before it — not a broken one, so this is silence.
+        if (!from.isDirectory) return
+        val fonts = from.listFiles()?.filter { it.isFile }?.sortedBy { it.name }.orEmpty()
+        if (fonts.isEmpty()) {
+            log.line(LogSource.VESSEL, LogLevel.WARN, "tools: $FONTS_PAYLOAD_DIR/ is empty; no fonts installed")
+            return
+        }
+
+        val target = File(layout.prefix, FONTS_PREFIX_DIR)
+        val stamp = File(layout.prefix, FONTS_VERSION_STAMP)
+        if (fonts.all { File(target, it.name).isFile } &&
+            runCatching { stamp.readText().trim() }.getOrNull() == version
+        ) {
+            log.line(LogSource.VESSEL, LogLevel.INFO, "tools: $FONTS_PREFIX_DIR already installed from $version")
+            return
+        }
+
+        if (!target.isDirectory && !target.mkdirs()) error("could not create ${target.path}")
+        // Per file and overwriting, which is the whole difference from
+        // [installToolTree]: no staging directory and no rename, because there is
+        // nothing here to swap atomically — a font is one file, and a partly
+        // written one is caught next launch by the stamp not matching.
+        fonts.forEach { it.copyTo(File(target, it.name), overwrite = true) }
+        // After the copies, so a launch killed mid-copy leaves no stamp claiming
+        // a version the directory does not hold.
+        runCatching { stamp.writeText(version) }
+
+        log.line(
+            LogSource.VESSEL,
+            LogLevel.INFO,
+            "tools: ${fonts.size} font(s) into $FONTS_PREFIX_DIR (${fonts.joinToString(", ") { it.name }})",
+        )
     }
 
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
@@ -3146,6 +3232,29 @@ class SessionRuntime @Inject constructor(
          * PowerShell or the JDK collides with it.
          */
         const val TOOLS_VERSION_STAMP = ".vessel-tools-version"
+
+        /**
+         * The Tools payload's font directory, and where those fonts go.
+         *
+         * Not in [TOOLS_LAYOUT], and [installToolFonts] says why: the
+         * destination belongs to Wine, so it is written into rather than
+         * replaced. `build/tools.sh` creates the payload half.
+         */
+        const val FONTS_PAYLOAD_DIR = "Fonts"
+
+        /** Wine's own font directory — see [FONTS_PAYLOAD_DIR]. */
+        const val FONTS_PREFIX_DIR = "drive_c/windows/Fonts"
+
+        /**
+         * Which Tools version the fonts were copied from.
+         *
+         * Beside [FONTS_PREFIX_DIR] and not inside it, unlike
+         * [TOOLS_VERSION_STAMP]: win32u's `load_directory_fonts` hands every file
+         * in `windows\Fonts` to FreeType with no extension filter, so a stamp
+         * living there would be a failed `FT_New_Face` and a warning on every
+         * process start. `drive_c\windows` is not scanned.
+         */
+        const val FONTS_VERSION_STAMP = "drive_c/windows/.vessel-fonts-version"
 
         /**
          * The graphics translation layers, all optional.

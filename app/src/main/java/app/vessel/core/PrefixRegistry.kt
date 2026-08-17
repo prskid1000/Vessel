@@ -203,8 +203,20 @@ object PrefixRegistry {
      * moment it installs. Verified on the device -- 2.1.233, ARM64, at exactly
      * that path -- and the bump is what carries it to prefixes that already
      * exist, since a `.reg` merge replaces the PATH value whole.
+     * 29 named a console font. [consoleColours] gains `FaceName` = `Unifont`,
+     * which is the half of the box-drawing fix that is not a payload: Claude
+     * Code's TUI drew every horizontal rule as `□□□□□`, and the measurement was
+     * that `prefix/drive_c/windows/Fonts/` held zero files and this key had no
+     * `FaceName` at all, so conhost enumerated a face out of the Wine component's
+     * `.fon` bitmaps and Android's two mono TTFs, none of which has a U+2500
+     * block. Tools 1.3.0 ships GNU Unifont, whose family name was read out of the
+     * OTF's `name` table rather than guessed, and this points conhost at it.
+     * `FontSize` and `FontFamily` are deliberately left alone -- see
+     * [consoleColours] for why, and for what stays unverified. The bump is what
+     * carries it to prefixes that already exist: a `.reg` merge replaces values,
+     * so without it the font would arrive and nothing would select it.
      */
-    const val SEED_VERSION: Int = 28
+    const val SEED_VERSION: Int = 29
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -604,6 +616,21 @@ object PrefixRegistry {
     )
 
     /**
+     * The console font's family name, as `HKCU\Console\FaceName` wants it.
+     *
+     * Read out of `unifont-17.0.05.otf`'s `name` table — Windows-platform record,
+     * name ID 1 — and not assumed. `build/tools.sh` asserts the same string
+     * against `TOOLS_UNIFONT_FAMILY` in `native/pins.env` at build time, because
+     * a wrong face name here is silent: conhost matches by name and keeps its
+     * bitmap fallback when the name does not resolve, so the missing glyphs stay
+     * and nothing anywhere says why.
+     *
+     * The plane-1 file in the same payload is a *separate* family, `Unifont
+     * Upper`, which is why this can only ever be the BMP font.
+     */
+    private const val CONSOLE_FACE = "Unifont"
+
+    /**
      * The console's own colours, which are not the system's.
      *
      * **Every one of Windows' 31 system colours is already dark and the console
@@ -622,10 +649,56 @@ object PrefixRegistry {
      * Only the two entries this needs are overridden. The other fourteen are
      * ANSI colours that programs ask for by name and a shell that prints red
      * should get red, not a palette somebody redecorated.
+     *
+     * **`FaceName` is here too, and it is not about colour — it is what stops the
+     * console drawing boxes.** Measured on the device: Claude Code's TUI rendered
+     * every horizontal rule as `□□□□□`, `prefix/drive_c/windows/Fonts/` held zero
+     * files, and this key had no `FaceName` value at all. With `FaceName` empty
+     * conhost takes `init_window`'s `!config.face_name[0]` branch
+     * (`programs/conhost/window.c:2481-2483`) and picks a face by enumeration —
+     * out of the Wine component's `.fon` bitmap faces, its non-monospace TTFs,
+     * and the `CutiveMono.ttf` / `DroidSansMono.ttf` Android contributes. None of
+     * those has a U+2500 block, so a box was the right thing for the renderer to
+     * draw. Tools 1.3.0 puts GNU Unifont in `windows\Fonts` (see
+     * `SessionRuntime.installToolFonts`) and this names it.
+     *
+     * **`FontSize` is deliberately not set.** conhost's default cell is 16x8
+     * (`window.c:255-257`), which is exactly Unifont's native 16x16-on-a-16x8-cell
+     * glyph box, so the default is already the right answer and a value here could
+     * only make it wrong. If one is ever needed, note the packing: HIWORD is the
+     * height and LOWORD the width (`window.c:180-187`).
+     *
+     * **`FontFamily` is deliberately not set either.** conhost already defaults
+     * it to `FIXED_PITCH | FF_DONTCARE` (`window.c:255`) and needs nothing but
+     * `FaceName` to pick a face; a speculative pitch or family value can only
+     * make matching fail. Which matters more than usual here, because Unifont's
+     * own tables say it is *not* fixed pitch — `post.isFixedPitch` is 0 and
+     * PANOSE bProportion is 6 where 9 means Monospaced, both read off the OTF.
+     *
+     * **What is unverified, stated as such: nothing here has run on a device.**
+     * Reading the code says the pitch mismatch should not matter — with
+     * `FaceName` set, `set_first_font` and therefore `validate_font`'s 0x3f
+     * weight mask (`window.c:821-847`, the `FIXED_PITCH` and
+     * `lfCharSet == ui_charset` conditions) are never on the path at all, and
+     * win32u's `find_matching_face` resolves a named family before pitch is ever
+     * consulted (`dlls/win32u/font.c:2288-2303`). But `apply_config` reaches
+     * `CreateFontIndirectW`, which returns *some* font whatever happens, so the
+     * failure mode if that reading is wrong is a nearest match to a different
+     * face with the boxes still on screen — no error, no log line. The one thing
+     * that cannot be settled by reading is whether the glyphs appear.
+     *
+     * **And a real limitation rather than something to chase later: emoji cannot
+     * render in this console.** conhost uses a single face and does no font
+     * linking, emoji are plane 1, and the seeded face is the BMP font. The
+     * payload's `unifont_upper` is a separate family (`Unifont Upper`) so the
+     * higher planes exist for other guest programs; the console will not reach
+     * them, and Unifont's emoji are monochrome outlines with no colour-glyph path
+     * in conhost in any case.
      */
     val consoleColours: RegistryKey = RegistryKey(
         path = """HKEY_CURRENT_USER\Console""",
         values = listOf(
+            RegistryValue("FaceName", CONSOLE_FACE),
             RegistryValue.dword("ScreenColors", 0x87),
             RegistryValue.dword("PopupColors", 0x87),
             // Entry 8 is the ground; entry 7 is the text on it. The ground is

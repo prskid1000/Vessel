@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Package Git, Python, Node.js, PowerShell 7 and a JDK as one ARM64 `Tools`
-# component.
+# Package Git, Python, Node.js, PowerShell 7, a JDK and GNU Unifont as one ARM64
+# `Tools` component.
 #
 #   ./build/tools.sh            # -> dist/tools-<ver>-arm64.wcp
 #
@@ -62,7 +62,29 @@
 # Bash native and it does not touch the `fork()` emulation TerminalProfile.kt:56-70
 # measured pegging a core at 98%; PowerShell is still the answer to that.
 #
-# **Layout: Git/, Python/, Node/, Pwsh/, Java/ at the payload root.** The shipped
+# **Fonts/ is the sixth tree and the only one that is not a program.** GNU
+# Unifont, and it is here because the container had no fonts at all: measured on
+# the device, `prefix/drive_c/windows/Fonts/` is empty, `HKCU\Console` had no
+# `FaceName`, and Claude Code's TUI drew every horizontal rule as `□□□□□`. The
+# Wine component ships `.fon` bitmap faces and non-monospace TTFs; Android
+# contributes `CutiveMono.ttf` and `DroidSansMono.ttf`. Nothing in that set has a
+# U+2500 block, so a box was the correct thing for the renderer to draw.
+#
+# It is in the Tools payload rather than in a component of its own for the reason
+# every other tree is: a container references exactly one component per type, so a
+# `Fonts` package published as `Tools` would replace this one. See
+# TOOLS_UNIFONT_VERSION in native/pins.env for the whole measurement, why OTF,
+# why the hashes are computed rather than published, and what stays unverified.
+#
+# **`Fonts/` is also the one tree that does NOT install like the others.** It goes
+# into `drive_c\windows\Fonts`, which is Wine's directory and not ours —
+# `installToolTree` does `deleteTree(target)` and a rename, which would throw away
+# any font a guest program installed and fight Wine over a directory it owns. So
+# SessionRuntime has a separate, gentler step that copies the font *files* in and
+# leaves everything else alone. This script's only obligation is the directory
+# name.
+#
+# **Layout: Git/, Python/, Node/, Pwsh/, Java/, Fonts/ at the payload root.** The shipped
 # Git package put its tree flat at the root, which works exactly as long as there
 # is only one thing in the payload. Five trees need five names, and the names are the
 # contract `installTools()` reads — see TOOLS_LAYOUT there. Anything that flattens
@@ -100,43 +122,44 @@ VERSION="$TOOLS_VERSION"
 # decimal digits — the shipped Git package derives 25500 from "2.55.0.3" that way
 # — so a naive code from a version string like this one lands nowhere useful. It
 # is worth writing down what the derivation actually produces, because the number
-# is not the obvious one: version_code("1.2.0") is 10200, and vessel_version_code
-# multiplies by 100 for the revision, giving 1,020,000. That is BELOW the
-# 1,100,000 already on the device, so a derived code here would be adopted as
+# is not the obvious one: version_code("1.3.0") is 10300, and vessel_version_code
+# multiplies by 100 for the revision, giving 1,030,000. That is BELOW the
+# 1,200,000 already on the device, so a derived code here would be adopted as
 # older than what is installed and this build would change nothing — a scheme
 # that happens to be correct is not a scheme, and this time it would not even
 # happen to be correct.
 #
-# So the code is a literal. 1,200,000 reads as "1.2.0, revision 0" to a human
+# So the code is a literal. 1,300,000 reads as "1.3.0, revision 0" to a human
 # under the same 100-per-part convention the rest of the repo uses, it is
 # comfortably above the shipped Git component's 25500, and it leaves two digits
 # underneath for packaging-only revisions. TOOLS_REVISION is what those digits
 # are for; it is 0 and asserted to be, because a revision bump that this literal
 # silently ignored would be the same class of no-op as everything below.
 #
-# **That no-op has two faces, and the architecture switch walks straight at the
+# **That no-op has two faces, and every contents change walks straight at the
 # second one.** Being above the shipped Git is not enough:
 # WcpInstaller.kt:290-305 skips unpacking any package whose type+versionCode pair
-# the store already holds, and **1.1.0 at 1,100,000 is installed on the device
-# right now**. Rebuilding this payload as ARM64 under the same code would produce
-# a different .wcp, a different APK, a successful `adb install`, and a container
-# still running the x86-64 trees — the exact failure this change exists to fix,
-# invisibly not fixed. An architecture change is a contents change, so the minor
-# moves: TOOLS_VERSION is now 1.2.0. One bump, all five trees — they land
-# together, so there is nothing for a second bump to distinguish.
-VERSION_CODE=1200000
+# the store already holds, and **1.2.0 at 1,200,000 is installed on the device
+# right now**. Adding `Fonts/` under the same code would produce a different .wcp,
+# a different APK, a successful `adb install`, and a container whose
+# `windows\Fonts` is still empty — the exact failure this change exists to fix,
+# invisibly not fixed, with the boxes still on screen. So the minor moves:
+# TOOLS_VERSION is now 1.3.0. (1.2.0 moved for the same reason one step earlier,
+# when the five trees went from x86-64 to ARM64.)
+VERSION_CODE=1300000
 [ "${TOOLS_REVISION:-0}" = 0 ] || die "TOOLS_REVISION is ${TOOLS_REVISION}, but
-     VERSION_CODE above is the literal 1200000 and does not read it. Either fold
-     the revision into that literal by hand (1100000 + revision) or put the
+     VERSION_CODE above is the literal 1300000 and does not read it. Either fold
+     the revision into that literal by hand (1300000 + revision) or put the
      derivation back — silently ignoring it is how a rebuild ships under a code
      the store already has and installs nothing."
 # The floor is what is actually installed, not the oldest thing that ever was.
-# It used to be the shipped Git component's 25500; Tools 1.1.0 at 1,100,000 has
-# since been installed on the device, so that is the number a new build has to
-# clear. Anything at or under it is adopted as no newer than what is there and
-# the build looks exactly like a package that did not install.
-[ "$VERSION_CODE" -gt 1100000 ] || die "version code $VERSION_CODE is not above
-     Tools 1.1.0's 1100000, which is installed on the device, so
+# It used to be the shipped Git component's 25500, then Tools 1.1.0's 1,100,000;
+# Tools 1.2.0 at 1,200,000 has since been installed on the device, so that is the
+# number a new build has to clear. Anything at or under it is adopted as no newer
+# than what is there and the build looks exactly like a package that did not
+# install.
+[ "$VERSION_CODE" -gt 1200000 ] || die "version code $VERSION_CODE is not above
+     Tools 1.2.0's 1200000, which is installed on the device, so
      WcpInstaller would skip unpacking it and adoptLatest would refuse to move a
      container's Tools reference forward — this build would install nothing.
      See the version-code note in build/common.sh."
@@ -187,6 +210,17 @@ JAVA_ARCHIVE="OpenJDK${JAVA_MAJOR}U-jdk_aarch64_windows_hotspot_${TOOLS_JAVA_VER
 JAVA_URL="https://github.com/adoptium/temurin$JAVA_MAJOR-binaries/releases/download/${JAVA_DIRNAME/+/%2B}/$JAVA_ARCHIVE"
 
 GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+
+# GNU Unifont. Two files from one release directory on ftp.gnu.org, and no
+# architecture in either name — a font is data.
+#
+# `.otf` and not `.ttf`: 17.0.05 ships an OTF build only. unifoundry's
+# `font-builds/*.ttf` paths 404 for this release, and there is nothing to work
+# around — Wine hands every file in `windows\Fonts` to FreeType without looking at
+# the extension (win32u/font.c `load_directory_fonts`), and FreeType reads CFF.
+UNIFONT_BASE_URL="https://ftp.gnu.org/gnu/unifont/unifont-$TOOLS_UNIFONT_VERSION"
+UNIFONT_ARCHIVE="unifont-$TOOLS_UNIFONT_VERSION.otf"
+UNIFONT_UPPER_ARCHIVE="unifont_upper-$TOOLS_UNIFONT_VERSION.otf"
 
 # Downloads live in the work volume, not the repo: ~400 MB that a re-run should
 # not fetch again, and nothing here belongs in a bind mount. The JDK and
@@ -261,6 +295,8 @@ fetch_pinned "$NODE_URL"   "$TOOLS_NODE_SHA256"
 fetch_pinned "$PWSH_URL"   "$TOOLS_PWSH_SHA256"
 fetch_pinned "$JAVA_URL"   "$TOOLS_JAVA_SHA256"
 fetch_pinned "$GET_PIP_URL" "$TOOLS_GET_PIP_SHA256"
+fetch_pinned "$UNIFONT_BASE_URL/$UNIFONT_ARCHIVE"       "$TOOLS_UNIFONT_SHA256"
+fetch_pinned "$UNIFONT_BASE_URL/$UNIFONT_UPPER_ARCHIVE" "$TOOLS_UNIFONT_UPPER_SHA256"
 
 STAGE="$WORK_DIR/stage-$COMPONENT"
 rm -rf "$STAGE"
@@ -499,6 +535,102 @@ for f in release lib/modules bin/javac.exe; do
 done
 ok "Java: $(find "$STAGE/Java" -type f | wc -l) file(s)"
 
+# --- Fonts -------------------------------------------------------------------
+#
+# GNU Unifont, flat in `Fonts/`. No unpacking — these are the fonts, not archives
+# containing them.
+#
+# **The family name is asserted, not assumed, and that assertion is the whole
+# point of this block.** PrefixRegistry.consoleColours seeds
+# `HKCU\Console\FaceName` as a *string*, and conhost matches it by name:
+# `find_matching_face` in win32u looks the family up in `family_name_tree` and only
+# falls back to a pitch-based default if the name is not there
+# (win32u/font.c:2288-2303). A name that is one character off is not an error
+# anywhere — conhost keeps the bitmap fallback, the `□□□□□` boxes stay, and the
+# only evidence is a font that is installed and unused. So the name comes out of
+# the OTF's own `name` table and has to equal TOOLS_UNIFONT_FAMILY, which is the
+# same string PrefixRegistry writes.
+#
+# Read with struct rather than fontTools: this image has no fontTools, no
+# fc-query and no otfinfo (checked), and an sfnt `name` table is a table
+# directory, six fixed fields and a string pool. Name ID 1 is the family; the
+# Windows platform record (platform 3, encoding 1, UTF-16BE) is the one GDI reads
+# and therefore the one to check.
+otf_family_name() {
+  # <path> -> the Windows-platform name ID 1 string, on stdout
+  python3 -c '
+import struct, sys
+b = open(sys.argv[1], "rb").read()
+num = struct.unpack_from(">H", b, 4)[0]
+tables = {}
+for i in range(num):
+    p = 12 + 16 * i
+    off, ln = struct.unpack_from(">II", b, p + 8)
+    tables[b[p:p+4].decode("latin-1")] = (off, ln)
+if "name" not in tables:
+    sys.exit("no name table")
+o = tables["name"][0]
+fmt, count, str_off = struct.unpack_from(">HHH", b, o)
+for i in range(count):
+    plat, enc, lang, nid, ln, no = struct.unpack_from(">HHHHHH", b, o + 6 + 12 * i)
+    if plat == 3 and nid == 1:
+        sys.stdout.write(b[o+str_off+no : o+str_off+no+ln].decode("utf-16-be"))
+        break
+else:
+    sys.exit("no Windows-platform family name (platform 3, name ID 1)")
+' "$1"
+}
+
+log "staging fonts: GNU Unifont $TOOLS_UNIFONT_VERSION"
+mkdir -p "$STAGE/Fonts"
+cp "$CACHE/$UNIFONT_ARCHIVE"       "$STAGE/Fonts/$UNIFONT_ARCHIVE"
+cp "$CACHE/$UNIFONT_UPPER_ARCHIVE" "$STAGE/Fonts/$UNIFONT_UPPER_ARCHIVE"
+
+UNIFONT_FAMILY="$(otf_family_name "$STAGE/Fonts/$UNIFONT_ARCHIVE")" \
+  || die "could not read the family name out of $UNIFONT_ARCHIVE"
+[ "$UNIFONT_FAMILY" = "$TOOLS_UNIFONT_FAMILY" ] || die "$UNIFONT_ARCHIVE says its
+     family name is
+       '$UNIFONT_FAMILY'
+     but native/pins.env pins TOOLS_UNIFONT_FAMILY='$TOOLS_UNIFONT_FAMILY', which is
+     what PrefixRegistry.consoleColours writes to HKCU\\Console\\FaceName. conhost
+     matches that value by name and silently keeps its bitmap fallback when the
+     name does not resolve, so a mismatch here ships a font nothing uses and leaves
+     the box-drawing glyphs missing with no error anywhere. Fix both together."
+info "Fonts/$UNIFONT_ARCHIVE: family '$UNIFONT_FAMILY' (seeded as HKCU\\Console\\FaceName)"
+
+# `unifont_upper` is a SECOND FAMILY, not a style of the first, and that is worth
+# asserting rather than assuming: 'Unifont Upper' is what its name table says.
+# It matters because it settles what the console can and cannot do. conhost uses
+# one face and does no font linking, so **emoji cannot render in the console** —
+# they are plane 1, this file is where plane 1 lives, and the seeded face is the
+# BMP font. (Unifont's emoji are monochrome outlines anyway and conhost has no
+# colour-glyph path.) This file ships so the higher planes exist for other guest
+# programs, not because the console will reach them.
+UNIFONT_UPPER_FAMILY="$(otf_family_name "$STAGE/Fonts/$UNIFONT_UPPER_ARCHIVE")" \
+  || die "could not read the family name out of $UNIFONT_UPPER_ARCHIVE"
+[ "$UNIFONT_UPPER_FAMILY" != "$TOOLS_UNIFONT_FAMILY" ] || die "$UNIFONT_UPPER_ARCHIVE
+     reports the same family name as the base font ('$UNIFONT_UPPER_FAMILY'). Two
+     files claiming one family is one family with two faces, and GDI would then be
+     free to resolve HKCU\\Console\\FaceName to the plane-1 file, which has no
+     box-drawing glyphs in it. Upstream has always shipped these as separate
+     families; if that changed, seed a face name that names only the BMP file."
+info "Fonts/$UNIFONT_UPPER_ARCHIVE: family '$UNIFONT_UPPER_FAMILY' (planes 1-15; not the console face)"
+
+# **No verify_pe_arm64 here and nothing to verify.** A font is data, not code —
+# there is no IMAGE_FILE_HEADER to read and no architecture to get wrong. What
+# stands in for that check is the sfnt tag, because a truncated download or an
+# HTML error page saved under a `.otf` name would otherwise reach the device as a
+# font Wine silently declines to register. `OTTO` is the CFF-outline sfnt tag,
+# which is what "OTF build only" means for this release.
+for f in "$UNIFONT_ARCHIVE" "$UNIFONT_UPPER_ARCHIVE"; do
+  tag="$(head -c4 "$STAGE/Fonts/$f")"
+  [ "$tag" = "OTTO" ] || die "Fonts/$f does not start with the sfnt tag OTTO
+     (got '$tag'). 17.0.05 is an OTF/CFF release; a \`true\`/0x00010000 tag would
+     mean a TrueType build arrived instead, and anything else means this is not a
+     font at all."
+done
+ok "Fonts: $(find "$STAGE/Fonts" -type f | wc -l) file(s), $(du -sh "$STAGE/Fonts" | cut -f1)"
+
 # --- Provenance --------------------------------------------------------------
 #
 # Written here rather than through common.sh's write_provenance, and the reason
@@ -511,7 +643,7 @@ ok "Java: $(find "$STAGE/Java" -type f | wc -l) file(s)"
 # way, and `builtBy` says plainly what happened, as the hand-made Git package it
 # replaces already did.
 #
-# One version per upstream tree, because "1.2.0" answers nothing anyone would
+# One version per upstream tree, because "1.3.0" answers nothing anyone would
 # ask of this package.
 #
 # `targetDesc` states the mixture rather than rounding it to "ARM64", because the
@@ -524,10 +656,10 @@ write_tools_provenance() {
   "component": "$COMPONENT",
   "version": "$VERSION",
   "target": "arm64",
-  "targetDesc": "ARM64 Windows binaries, run natively under ARM64EC; Git's MSYS2 layer (usr/bin, msys-2.0.dll) is x86-64 and runs under FEX, no ARM64 port existing",
+  "targetDesc": "ARM64 Windows binaries, run natively under ARM64EC; Git's MSYS2 layer (usr/bin, msys-2.0.dll) is x86-64 and runs under FEX, no ARM64 port existing; Fonts/ is architecture-independent data",
   "sourceRepo": "upstream release archives; see native/pins.env",
-  "sourceRef": "git $TOOLS_GIT_VERSION, python $TOOLS_PYTHON_VERSION, node $TOOLS_NODE_VERSION, pwsh $TOOLS_PWSH_VERSION, temurin jdk $TOOLS_JAVA_VERSION",
-  "sourceSha": "$GIT_ARCHIVE $TOOLS_GIT_SHA256; $PYTHON_ARCHIVE $TOOLS_PYTHON_SHA256; $NODE_ARCHIVE $TOOLS_NODE_SHA256; $PWSH_ARCHIVE $TOOLS_PWSH_SHA256; $JAVA_ARCHIVE $TOOLS_JAVA_SHA256; get-pip.py $TOOLS_GET_PIP_SHA256",
+  "sourceRef": "git $TOOLS_GIT_VERSION, python $TOOLS_PYTHON_VERSION, node $TOOLS_NODE_VERSION, pwsh $TOOLS_PWSH_VERSION, temurin jdk $TOOLS_JAVA_VERSION, gnu unifont $TOOLS_UNIFONT_VERSION",
+  "sourceSha": "$GIT_ARCHIVE $TOOLS_GIT_SHA256; $PYTHON_ARCHIVE $TOOLS_PYTHON_SHA256; $NODE_ARCHIVE $TOOLS_NODE_SHA256; $PWSH_ARCHIVE $TOOLS_PWSH_SHA256; $JAVA_ARCHIVE $TOOLS_JAVA_SHA256; get-pip.py $TOOLS_GET_PIP_SHA256; $UNIFONT_ARCHIVE $TOOLS_UNIFONT_SHA256 (computed, GNU publishes no checksum list); $UNIFONT_UPPER_ARCHIVE $TOOLS_UNIFONT_UPPER_SHA256 (computed)",
   "cpuFlags": "none",
   "ndk": "n/a",
   "apiLevel": "n/a",
@@ -540,12 +672,12 @@ write_tools_provenance
 log "packaging"
 python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type Tools \
-  --name "Tools $VERSION — Git $TOOLS_GIT_VERSION, Python $TOOLS_PYTHON_VERSION, Node $TOOLS_NODE_VERSION, PowerShell $TOOLS_PWSH_VERSION, JDK $TOOLS_JAVA_VERSION (arm64)" \
+  --name "Tools $VERSION — Git $TOOLS_GIT_VERSION, Python $TOOLS_PYTHON_VERSION, Node $TOOLS_NODE_VERSION, PowerShell $TOOLS_PWSH_VERSION, JDK $TOOLS_JAVA_VERSION, Unifont $TOOLS_UNIFONT_VERSION (arm64)" \
   --version "$VERSION" \
   --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
-  --description "Git, Python, Node.js, PowerShell 7 and the Temurin JDK as ARM64 Windows binaries, installed into C:\\Program Files\\{Git,Python,Node,PowerShell,Java}. Git's MSYS2 shell layer is x86-64; no ARM64 port of msys-2.0 exists." \
+  --description "Git, Python, Node.js, PowerShell 7 and the Temurin JDK as ARM64 Windows binaries, installed into C:\\Program Files\\{Git,Python,Node,PowerShell,Java}, plus GNU Unifont into C:\\Windows\\Fonts as the console face — the prefix shipped with no fonts at all, so box-drawing glyphs came out as boxes. Git's MSYS2 shell layer is x86-64; no ARM64 port of msys-2.0 exists." \
   --out "$DIST_DIR/$COMPONENT-$VERSION-arm64.wcp"
 
 ok "dist/$COMPONENT-$VERSION-arm64.wcp"

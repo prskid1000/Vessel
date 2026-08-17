@@ -178,7 +178,12 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(28, PrefixRegistry.SEED_VERSION)
+        assertEquals(29, PrefixRegistry.SEED_VERSION)
+        // 29 added `FaceName` to [consoleColours] and no key: the prefix had no
+        // fonts at all, so conhost enumerated a bitmap face with no U+2500 block
+        // and Claude Code's rules came out as boxes. Tools 1.3.0 ships GNU
+        // Unifont and this names it. A `.reg` merge replaces values, so the bump
+        // is what carries it to prefixes that already exist.
         // 28 added CLAUDE_BIN to [toolsPath] and no key: Claude Code's installer
         // puts claude.exe in the guest profile's .localin and tells the user to
         // add it to PATH by hand. Seeded instead, and the bump is what carries it
@@ -199,8 +204,33 @@ class PrefixRegistryTest {
         // contents and added no key — 25 put PowerShell and the JDK on PATH and
         // added `JAVA_HOME` as a *value* in the Environment key that was already
         // there, and 27 rewrote two values that were already there — which is why
-        // this count has not moved with any of them.
+        // this count has not moved with any of them. Nor with 29, which added
+        // `FaceName` to [consoleColours]: `HKCU\Console` was already in the seed
+        // carrying the palette, and the console font belongs on the same key
+        // conhost reads everything else from.
         assertEquals(18, PrefixRegistry.seed.size)
+    }
+
+    @Test
+    fun `the console names a font that has the box-drawing glyphs`() {
+        val rendered = PrefixRegistry.render(listOf(PrefixRegistry.consoleColours))
+        // The family name out of `unifont-17.0.05.otf`'s own `name` table, which
+        // `build/tools.sh` asserts against `TOOLS_UNIFONT_FAMILY` at build time.
+        // conhost matches this by name and silently keeps its bitmap fallback if
+        // it does not resolve, so a typo here is a console still drawing `□□□□□`
+        // with nothing anywhere reporting a problem.
+        assertTrue(rendered.contains(""""FaceName"="Unifont""""))
+        // **Both of these are absent on purpose and the test is what keeps them
+        // absent.** conhost's default cell is already 16x8 (`window.c:255-257`),
+        // which is Unifont's native box, and it already defaults `FontFamily` to
+        // `FIXED_PITCH | FF_DONTCARE` and needs nothing but a face name to match.
+        // A speculative value for either can only make matching fail — which
+        // matters here because Unifont's own tables report it as *not* fixed pitch
+        // (`post.isFixedPitch` 0, PANOSE bProportion 6 where 9 is Monospaced).
+        assertFalse(rendered.contains("FontSize"))
+        assertFalse(rendered.contains("FontFamily"))
+        // Same key as the palette, because it is the same key conhost reads.
+        assertTrue(rendered.contains("""[HKEY_CURRENT_USER\Console]"""))
     }
 
     @Test
