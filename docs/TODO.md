@@ -166,6 +166,41 @@ and both were free to avoid.
   entirely, which made one session look like a fix. Worth a patch of its own;
   not this bug.
 
+  **UPDATE, and the recursion is fixed.** `patches/wine/0057` gave DirectWrite a
+  last-resort collection scan and the stack overflow is gone: zero in three
+  sessions with tracing off, where every previous session had one. VS Code now
+  reaches `StorageMainService`, writes its own `main.log` for the first time,
+  creates a window and checks for updates. What blocks it is now a different
+  fault, one layer down.
+
+  **Every Chromium child process dies in Wine's ARM64 unwinder.** Measured:
+
+      virtual_handle_fault unrepaired read fault at 0x0 from ...ea7df8   x7
+      gpu_process_host.cc:992  GPU process launch failed: error_code=40  x6
+      gpu_data_manager_impl_private.cc:418  GPU process isn't usable. Goodbye.
+      wine: Unhandled exception 0x80000003 (EXCEPTION_BREAKPOINT)
+
+  `...ea7df8` is `process_unwind_codes+0x88` in `dlls/ntdll/unwind.c`, and the
+  faulting instruction is the `ldr x9,[x8]` / `str x9,[x2,#0xf0]` pair that
+  compiles from
+
+      else if (*ptr == 0xea)  /* MSFT_OP_CONTEXT */
+      {
+          ARM64_NT_CONTEXT *src_ctx = (ARM64_NT_CONTEXT *)context->Sp;
+          *context = *src_ctx;
+
+  so `context->Sp` is NULL and the unwinder copies a whole context out of address
+  zero. Seven faults, six failed child launches: one per child. The FATAL and the
+  breakpoint are consequences, not causes, and neither the GPU nor the sandbox is
+  involved -- `--no-sandbox` changes nothing and the same `error_code=40` kills
+  the renderer and the GPU process alike, which is process creation rather than
+  graphics. The second fault address, `...e97cf0`, is `DbgUiRemoteBreakin`, which
+  is Wine's own "starting debugger" path reacting to the crash.
+
+  *Open question:* why an unwind runs at all during child-process startup, and
+  what leaves `Sp` at zero. A guard on `Sp == 0` would convert the crash into
+  something further along and is worth one build as a probe, not as a fix.
+
   *Done when:* VS Code opens a window. **Next step:** read
   `dwritefontcollection_FindFamilyName` and `create_matching_font` against what
   Skia's `SkFontMgr_DirectWrite` expects back, rather than guessing at another
