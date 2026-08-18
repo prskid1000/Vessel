@@ -8,10 +8,29 @@ than the entire address space and crashes with STATUS_NO_MEMORY. Clamping pure
 MEM_RESERVE requests (> 8 GB) to 8 GB allows map_view() to succeed.
 
 2. In ARM64EC translation under FEX, exception dispatches push ARM64EC_NT_XCONTEXT
-frames (3.3 KB each). Default small thread stacks (256 KB - 1 MB) overflow quickly
-during Electron / V8 JIT recursive execution. Raising the minimum stack floor in
-virtual_alloc_thread_stack() to 8 MB provides ample headroom.
+frames (3.3 KB each), and guest x64 code executes on the CHPE v2 emulator stack.
+The default CHPE stack was hardcoded to only 256 KB (0x40000), which overflows
+instantly during Electron / V8 JIT recursive execution and CreateWindowEx.
+Raising chpev2_stack_size and the virtual_alloc_thread_stack floor to 8 MB
+provides ample headroom.
 
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 9ee9239947f..76dbf7f71f5 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1247,7 +1247,11 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
+     if (is_arm64ec())
+     {
+         CHPE_V2_CPU_AREA_INFO *cpu_area;
+-        const SIZE_T chpev2_stack_size = 0x40000;
++        /* Vessel: Expand CHPE v2 emulator stack from 256 KB to at least 8 MB
++         * (or image MaximumStackSize). Guest x64 code under FEX runs on this
++         * emulator stack, and 256 KB overflows immediately during deep recursion,
++         * V8 compilation, and SEH dispatching. */
++        const SIZE_T chpev2_stack_size = max( (SIZE_T)8 * 1024 * 1024, max( reserve_size, commit_size ) );
+ 
+         /* emulator stack */
+         if ((status = virtual_alloc_thread_stack( &stack, limit_4g, 0, chpev2_stack_size, chpev2_stack_size, FALSE )))
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 index b18593e0f19..eb4468e23e9 100644
 --- a/dlls/ntdll/unix/virtual.c
