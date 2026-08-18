@@ -415,6 +415,32 @@ case, and where to look.
    *list composition* — `breadcrumbs` had to join `nodxr` rather than replace it —
    which is a different problem with a different fix.
 
+10. **`stack 0x20980` was never evidence of a small stack, and three Wine
+    revisions were spent believing it was.** The address is where a thread dies,
+    not how much room it had, and the range printed beside it says so. Six VS
+    Code Insiders sessions span revisions 41–44 and all four print the same
+    `(0x20000-0x21000-0x820000)` — 8 MB, including rev 41, which predates the
+    8 MB thread-stack floor (`0053`, rev 42), the CHPE emulator-stack raise
+    (`0053` again, rev 43) and the kernel/WoW64 raise (`0054`, rev 44) alike.
+    None of those three moved it. The 8 MB is the app's own: `Code -
+    Insiders.exe` carries `SizeOfStackReserve 0x800000` in its PE header, the
+    figure Chrome, Edge and Firefox all ship with, so the thread already had
+    exactly what Windows gives it.
+
+    The fault address is equally not a culprit. `0x6fffef9c34` is
+    `prepare_exception_arm64ec` entry **plus four** — its prologue, confirmed
+    against the shipped `ntdll.dll` by resolving the only ADRP/ADD pair in
+    `.text` that materialises `0040`'s format string. A delivery was already
+    under way and could not allocate its 3280 bytes; it is the last frame, never
+    the one that spent the stack. `0040`'s own counter, which fires between
+    256 KB and 16 KB remaining, printed nothing in any of the six sessions —
+    so exception delivery did not spend it either.
+
+    Raising a floor cannot answer a stack that is spent. `patches/wine/0055` adds
+    the two readings that can: one line per megabyte descended with the address
+    that grew it, and a Misra-Gries pass over the residue at death whose stride
+    between repeated return addresses gives frames × bytes-per-frame directly.
+
 ---
 
 ## Carried forward, not re-verified this session

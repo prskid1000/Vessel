@@ -1,0 +1,191 @@
+ntdll: name what consumed the stack, not only that it ran out.
+
+`virtual_setup_exception` reports the moment a thread's stack ran out and nothing
+whatever about what filled it. The address it prints is whichever frame was
+unlucky enough to touch the last page, which is why the same line has now been
+read twice without answering anything:
+
+  Resident Evil Requiem, 4 MB stack:
+    stack overflow 1776 bytes addr 0x7ffff09bf0 stack 0x20910 (0x20000-0x21000-0x420000)
+
+  VS Code Insiders, 8 MB stack:
+    stack overflow 1664 bytes addr 0x6fffef9c34 stack 0x20980 (0x20000-0x21000-0x820000)
+
+Both byte-identical across runs. Both land in `prepare_exception_arm64ec`'s
+prologue -- `0x6fffef9c34` is that function's entry plus four, confirmed against
+the shipped `ntdll.dll` by resolving the only ADRP/ADD pair in `.text` that
+materialises patch 0040's format string. So in both cases a delivery was already
+under way and could not allocate its 3280 bytes, and in both cases the stack was
+already gone before that delivery started: patch 0040's counter, which fires
+between 256 KB and 16 KB remaining, printed nothing at all in any of six
+sessions. Whatever spends the stack is not exception delivery.
+
+Raising the floor does not answer it either. 4 MB to 8 MB moved the wall and
+changed nothing else, and 8 MB is not a Wine number -- `Code - Insiders.exe`
+carries `SizeOfStackReserve` 0x800000 in its own PE header, the same 8 MB Chrome,
+Edge and Firefox ship with. The thread had exactly what Windows would have given
+it. So the question was never how much stack it had.
+
+Two readings, both bounded, both silent on a healthy session:
+
+1. `vessel_note_stack_growth` -- one line per megabyte a stack descends, with the
+address that grew it. `stack_info->limit` is already the high-water mark, since
+`grow_thread_stack` is the only thing that lowers StackLimit, so the megabyte
+being crossed needs no per-thread state. Eight lines for an 8 MB stack, none for
+a thread that stays under 1 MB, which is every healthy thread in a session.
+
+2. `vessel_dump_stack_residue` -- at the unrecoverable branch every byte between
+StackLimit and StackBase is still committed and still holds the frames that
+filled it, for the few microseconds before `abort_thread`. Misra-Gries over the
+live words with a fixed table finds the repeated addresses without allocating,
+and an exact second pass over the winner measures the distance between its
+occurrences. That distance is the reading this patch exists for: an address
+repeating N times at a constant stride S is N frames of S bytes, which separates
+genuine recursion from ordinary depth at an inflated cost per frame -- with two
+numbers rather than an argument. Addresses print raw; `WINEDEBUG` carries
+`+loaddll`, so the modules are already in the same log and resolving them is
+offline work.
+
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4983,6 +4983,119 @@
+ }
+ 
+ 
++/* Vessel: one line per megabyte a thread's stack descends, and the code that took it.
++ *
++ * `virtual_setup_exception` below reports the moment a stack ran out and says
++ * nothing whatever about what consumed it -- the address it prints is whichever
++ * frame was unlucky enough to touch the last page. VS Code Insiders dies that
++ * way at a byte-identical depth every run, and raising the floor from 4 MB to
++ * 8 MB moved the wall without changing the shape. So the question is not how
++ * much stack the thread was given but who walked it down.
++ *
++ * `stack_info->limit` is already the high-water mark: `grow_thread_stack` is the
++ * only thing that lowers StackLimit and it moves one host page at a time. The
++ * megabyte being crossed therefore reads off the pair (limit, page) with no
++ * per-thread state at all, and a frame large enough to skip several pages still
++ * crosses each boundary exactly once.
++ *
++ * Bounded by construction: one line per megabyte per thread -- eight for an 8 MB
++ * stack, and none at all for a thread that stays under 1 MB, which is every
++ * healthy thread in a session. */
++static void vessel_note_stack_growth( const char *page, const struct thread_stack_info *stack_info,
++                                      const EXCEPTION_RECORD *rec )
++{
++    SIZE_T before = stack_info->end - stack_info->limit;
++    SIZE_T after  = stack_info->end - page;
++
++    if ((after >> 20) == (before >> 20)) return;
++
++    ERR( "stack has descended to %u MB of %u, growing at %p\n",
++         (unsigned int)(after >> 20),
++         (unsigned int)((SIZE_T)(stack_info->end - stack_info->start) >> 20),
++         rec->ExceptionAddress );
++}
++
++
++/* Vessel: what the stack was full of, read before the thread is thrown away.
++ *
++ * At the unrecoverable branch in `virtual_setup_exception` every byte between
++ * StackLimit and StackBase is still committed and still holds the frames that
++ * filled it. So the one question the overflow line cannot answer -- genuine deep
++ * recursion, or ordinary depth at an inflated cost per frame -- is answerable
++ * here and nowhere else, and only for the few microseconds before `abort_thread`.
++ *
++ * Counting is Misra-Gries over the live words with a fixed table: no allocation,
++ * one pass, and safe to run from a signal handler. Its counts are lower bounds
++ * by design, which is why the winner is recounted exactly in a second pass. That
++ * second pass is the one that matters -- it measures the distance between
++ * consecutive occurrences, and that distance is the answer. A return address
++ * that repeats N times at a constant stride S is N frames of S bytes, and both
++ * numbers are then directly comparable against what the same call costs without
++ * emulation.
++ *
++ * Addresses are printed raw. `WINEDEBUG` carries `+loaddll`, so every module's
++ * load address is already in the same log and resolving them is offline work. */
++#define VESSEL_RESIDUE_SLOTS 16
++#define VESSEL_RESIDUE_MAX   ((SIZE_T)64 * 1024 * 1024)
++
++static void vessel_dump_stack_residue( const struct thread_stack_info *stack_info )
++{
++    struct { ULONG_PTR value; unsigned int count; } top[VESSEL_RESIDUE_SLOTS];
++    const ULONG_PTR *base, *end, *ptr, *prev = NULL;
++    SIZE_T words, stride_min = ~(SIZE_T)0, stride_max = 0;
++    unsigned int i, used = 0, best_count = 0, exact = 0;
++    ULONG_PTR best = 0;
++
++    base = (const ULONG_PTR *)stack_info->limit;
++    end  = (const ULONG_PTR *)stack_info->end;
++    if (base >= end) return;
++    if ((SIZE_T)((const char *)end - (const char *)base) > VESSEL_RESIDUE_MAX) return;
++    words = end - base;
++
++    for (ptr = base; ptr < end; ptr++)
++    {
++        ULONG_PTR v = *ptr;
++        BOOL placed = FALSE;
++
++        if (v < 0x10000) continue;  /* not an address, and the commonest word on any stack */
++
++        for (i = 0; i < used; i++) if (top[i].value == v) break;
++        if (i < used) { top[i].count++; continue; }
++        if (used < VESSEL_RESIDUE_SLOTS) { top[used].value = v; top[used].count = 1; used++; continue; }
++        for (i = 0; i < used; i++)
++            if (!--top[i].count && !placed) { top[i].value = v; top[i].count = 1; placed = TRUE; }
++    }
++
++    for (i = 0; i < used; i++)
++        if (top[i].count > best_count) { best_count = top[i].count; best = top[i].value; }
++
++    ERR( "stack residue: %u live words from %p to %p, %u candidates tracked\n",
++         (unsigned int)words, (const void *)base, (const void *)end, used );
++    for (i = 0; i < used; i++)
++        ERR( "stack residue:   at least x%u  %p\n", top[i].count, (void *)top[i].value );
++
++    if (!best) return;
++
++    for (ptr = base; ptr < end; ptr++)
++    {
++        if (*ptr != best) continue;
++        exact++;
++        if (prev)
++        {
++            SIZE_T d = (const char *)ptr - (const char *)prev;
++            if (d < stride_min) stride_min = d;
++            if (d > stride_max) stride_max = d;
++        }
++        prev = ptr;
++    }
++
++    ERR( "stack residue: %p occurs %u times, stride %u..%u bytes\n",
++         (void *)best, exact,
++         (unsigned int)(exact > 1 ? stride_min : 0),
++         (unsigned int)(exact > 1 ? stride_max : 0) );
++}
++
++
+ /***********************************************************************
+  *           virtual_handle_fault
+  */
+@@ -5015,7 +5128,11 @@
+             mprotect_range( page, host_page_size, 0, 0 );
+             ret = STATUS_GUARD_PAGE_VIOLATION;
+         }
+-        else ret = grow_thread_stack( page, &stack_info );
++        else
++        {
++            vessel_note_stack_growth( page, &stack_info, rec );
++            ret = grow_thread_stack( page, &stack_info );
++        }
+     }
+     else if (err == EXCEPTION_WRITE_FAULT)
+     {
+@@ -5137,6 +5254,7 @@
+         UINT diff = stack_info.start + host_page_size - stack;
+         ERR( "stack overflow %u bytes addr %p stack %p (%p-%p-%p)\n",
+              diff, rec->ExceptionAddress, stack, stack_info.start, stack_info.limit, stack_info.end );
++        vessel_dump_stack_residue( &stack_info );
+         abort_thread(1);
+     }
+     else if (stack < stack_info.limit)
