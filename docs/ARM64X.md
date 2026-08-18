@@ -145,4 +145,33 @@ and code -- a rebuild of the same commit would have installed and never been
 unpacked. See the note in `build/zink.sh` about the one-way scale change that
 introduces.
 
+## Built, measured, and turned off again
+
+`VESSEL_ARM64X=1` builds hybrids; the default does not, and the reason is a
+regression rather than a doubt about the format.
+
+What it fixed is real: a native ARM64 process could not load a single graphics
+DLL, and with hybrids it loads them all. `dxgi.dll` goes from `status=c000007b`
+to `Loaded ... : native`, the GPU process stops failing to launch, and Turnip is
+reached -- `Vulkan: driving the ICD libvulkan_freedreno.so`.
+
+What it did not fix: VS Code still does not paint. The renderer stalls at
+`uxtheme` and the GPU process goes quiet after loading `dxgi`, with no DXVK log
+line at all, so it never creates a device.
+
+What it broke: **Resident Evil Requiem**, which ran before. Twenty-two
+`unrepaired read fault` lines against zero in the run before it, dying inside its
+own exception handler -- `re9.exe + 0x9e835ae`, reached through
+`kernelbase!RaiseException` and the ARM64EC dispatch region -- after vkd3d had
+successfully brought a D3D12 device up. **Metro 2033 was unaffected**, and that
+narrows it: Metro is D3D11 through DXVK, Requiem is D3D12 through vkd3d. A hybrid
+DXVK is fine under x64 emulation; a hybrid vkd3d is not, and why is unknown.
+
+One more thing that cost a run and is worth knowing before the next attempt:
+**changing these components invalidates the FEX AOT code cache, and the failure is
+not graceful.** Wine skips stale code maps by image hash and says so, but the AOT
+compiler still produced eleven `Invalid instruction in entry block` errors and
+Requiem died before reaching `d3d12.dll`. Clearing `caches/fex` and `caches/mesa`
+fixed that particular failure and revealed the real one underneath.
+
 `docs/TODO.md` #57 carries the VS Code side of this.

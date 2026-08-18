@@ -116,10 +116,26 @@ EOF
 
 NATIVE_BUILD="$WORK_DIR/$COMPONENT-$NATIVE_TRIPLE"
 rm -rf "$NATIVE_BUILD"
-log "configuring $COMPONENT for $NATIVE_TRIPLE (native half of the hybrid)"
-meson setup "$NATIVE_BUILD" "$SRC"   --cross-file "$NATIVE_CROSS"   --buildtype release   -Dstrip=true   -Db_lto=false
-log "building $COMPONENT ($NATIVE_TRIPLE, objects only)"
-ninja -C "$NATIVE_BUILD" -j "$(build_jobs 1)"
+# **ARM64X is opt-in, and the default is off, because it regressed software
+# that worked.** Building these three as hybrids is what finally let an ARM64
+# build of VS Code load dxgi.dll instead of failing with
+# STATUS_INVALID_IMAGE_FORMAT -- a real bug, really fixed. It did not make VS
+# Code work: its renderer still does not paint. And Resident Evil Requiem,
+# which ran before, began faulting -- 22 unrepaired reads against zero in the
+# run before it, dying inside its own exception handler after vkd3d had brought
+# a D3D12 device up. Metro 2033 was unaffected, and Metro is D3D11 through DXVK
+# where Requiem is D3D12 through vkd3d.
+#
+# So the capability stays in the tree and the default does not use it. Build
+# hybrids with VESSEL_ARM64X=1. docs/ARM64X.md carries the recipe, and what is
+# still unknown is why a hybrid vkd3d misbehaves under x64 emulation when a
+# hybrid DXVK does not.
+if [ "${VESSEL_ARM64X:-0}" = 1 ]; then
+  log "configuring $COMPONENT for $NATIVE_TRIPLE (native half of the hybrid)"
+  meson setup "$NATIVE_BUILD" "$SRC"   --cross-file "$NATIVE_CROSS"   --buildtype release   -Dstrip=true   -Db_lto=false
+  log "building $COMPONENT ($NATIVE_TRIPLE, objects only)"
+  ninja -C "$NATIVE_BUILD" -j "$(build_jobs 1)"
+fi
 
 for PASS in 64 32; do
   case "$PASS" in
@@ -130,7 +146,7 @@ for PASS in 64 32; do
 
   # The hybrid applies to the 64-bit half only: syswow64 is i386 PE that FEX
   # translates, and there is no ARM64 view for it to carry.
-  if [ "$PASS" = 64 ]; then
+  if [ "$PASS" = 64 ] && [ "${VESSEL_ARM64X:-0}" = 1 ]; then
     arm64x_wrappers "$NATIVE_BUILD" "$MINGW_BIN/$TRIPLE-clang" "$MINGW_BIN/$TRIPLE-clang++"
     PASS_CC="$ARM64X_CC"; PASS_CXX="$ARM64X_CXX"
   else
