@@ -18,11 +18,13 @@ allows map_view() to succeed in the available address space while preserving
 normal on-demand page commits within the range.
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index a9f14ea..43f7eeb 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5629,6 +5629,24 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG ty
-     if ((type & MEM_RESERVE) || !base)
-     {
+@@ -13,6 +13,26 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+         if ((type & MEM_COMMIT) && commit_granularity_mask() != page_mask)
+             size = ROUND_SIZE( base, size, commit_granularity_mask() );
+ 
 +        /* Vessel: Handle Chromium / V8 Sandbox 1.5TB virtual memory reservations
 +         * on memory-constrained (e.g. 39-bit VA) Android ARM64 kernels.
 +         *
@@ -43,6 +45,6 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +            size = (SIZE_T)8 * 1024 * 1024 * 1024;
 +        }
 +
-         /* Vessel: a 16 KB host page rounds the *reservation* too, not only a
-          * later commit into it. Reserving and committing in one call is the
-          * common case, and rounding only the commit path left exactly that case
+         if (!(status = get_vprot_flags( protect, &vprot, FALSE )))
+         {
+             if (type & MEM_COMMIT) vprot |= VPROT_COMMITTED;
