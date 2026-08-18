@@ -124,6 +124,7 @@ and both were free to avoid.
   | the upscalers | already off before the symptom was reported |
   | the present path | reproduces on both DRI3 and the software copy |
   | the `0x100` write faults | handled probes; they recur for 1,500 lines while the game keeps rendering |
+  | the RE Engine 16-bit/`min16` quirk (`patches/vkd3d/0008`) | `re9.exe` launched against the installed `3000109` build with the quirk live; the walls were still missing |
 
   **The standing lead is downgraded, and here is why.** Every session log on
   this device prints `vkd3d_init_device_caps: Not all relevant pipeline stages
@@ -171,23 +172,29 @@ and both were free to avoid.
   entry in *Fixed, and waiting for the run that would prove it*). This blocker
   was never tested; it was only ever waiting behind a second, invisible one.
 
-  **`patches/vkd3d/0008` is shipped, installed, and has never once run against
-  RE9.** `re9.exe` is present as a string inside the installed
+  **`patches/vkd3d/0008` was tried, and it did not fix this.** `re9.exe` is
+  present as a string inside the installed
   `components/VKD3D/3000109/system32/d3d12core.dll`, the games container is
-  provisioned with that build, and it was installed 2026-08-17 13:15 — but no
-  `re9.exe` session exists in any retained log since, every retained
-  games-container session being PowerShell or Metro 2033. The quirk this
-  repo shipped for exactly this shape of bug — RE Engine's 16-bit math
-  overflowing and the GPU discarding the affected triangles, some meshes gone
-  and everything around them still drawing — has never been exercised here.
-  That makes it the single cheapest untried experiment on this entry: no
-  build, no patch, nothing left to write. One session, launch `re9.exe`, stand
-  in the basement, look at the walls.
+  provisioned with that build, and `re9.exe` has already been launched against
+  it — walls still missing. Added to the eliminated table above: the RE Engine
+  16-bit/`FORCE_MIN16_AS_32BIT` quirk is not this bug, and no shape match
+  survives it. The `re_hashes` half was already known not to apply (they are
+  RE2/RE4 shader hashes); the global 32-bit half was the part still in play,
+  and it is now the part that has been tested and lost.
 
-  *Done when:* the room has walls. **Next step:** one session standing in the
-  same basement — it now exercises `patches/vkd3d/0008` against RE9 for the
-  first time and reads the indirect counter for the first time, in the same
-  run. Nothing else in this entry needs doing first.
+  **What took a round trip to establish, and the discipline it earns.** No
+  `re9.exe` session survived in the retained log set, which this entry first
+  read as "never run" — wrong. It was run; the session's own log was deleted
+  afterward, so the record of a completed experiment was gone and the entry
+  had nothing left to distinguish that from an experiment nobody tried. A
+  claim standing on an absence is only as good as the reason for the absence,
+  and here the reason was housekeeping, not evidence. **Any run that tests a
+  hypothesis for #56 keeps its log**, full stop — this file has now paid once
+  for the alternative.
+
+  *Done when:* the room has walls. **Next step:** unchanged from before 0008
+  was tried — one session standing in the same basement, reading the indirect
+  counter, log kept this time. Nothing else in this entry needs doing first.
 ---
 
 ## Fixed, and waiting for the run that would prove it
