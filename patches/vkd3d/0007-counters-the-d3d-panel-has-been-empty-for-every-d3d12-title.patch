@@ -1,5 +1,5 @@
 diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
-index 84976e6a..e130133c 100644
+index 84976e6a..10d3bb67 100644
 --- a/libs/vkd3d/command.c
 +++ b/libs/vkd3d/command.c
 @@ -24,6 +24,8 @@
@@ -62,7 +62,21 @@ index 84976e6a..e130133c 100644
      if (!max_command_count)
          return;
  
-@@ -20963,6 +20981,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
+@@ -17158,6 +17176,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
+     arg_buffer_offset += sig_impl->argument_buffer_offset_for_command;
+     if (sig_impl->argument_buffer_offset_for_command)
+     {
++        /* VESSEL: this drops the whole ExecuteIndirect and the debug-marker label is the
++         * only trace of it — invisible without a GPU capture, and a batch discarded here
++         * is indistinguishable from one the application never issued. docs/TODO.md #56
++         * spent a session on exactly that ambiguity before this line existed. */
++        FIXME_ONCE("Discarding ExecuteIndirect: argument_buffer_offset_for_command %u, "
++                "max_command_count %u.\n", sig_impl->argument_buffer_offset_for_command,
++                max_command_count);
+         d3d12_command_list_debug_mark_label(list, "DGC skip", 1.0f, 0.0f, 0.0f, 1.0f);
+         return;
+     }
+@@ -20963,6 +20988,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
      TRACE("iface %p, NumBarrierGroups %u, D3D12_BARRIER_GROUP %p\n",
              iface, NumBarrierGroups, pBarrierGroups);
  
@@ -83,7 +97,7 @@ index 84976e6a..e130133c 100644
      if (d3d12_command_list_barrier_is_noop(list, NumBarrierGroups, pBarrierGroups))
      {
          d3d12_command_list_debug_mark_label(list, "Noop Barrier", 1.0f, 0.0f, 0.0f, 1.0f);
-@@ -21928,6 +21960,12 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
+@@ -21928,6 +21967,12 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
      if (!command_list_count)
          return;
  
@@ -341,10 +355,10 @@ index 00000000..66779133
 +}
 diff --git a/libs/vkd3d/vkd3d_vessel_stats.h b/libs/vkd3d/vkd3d_vessel_stats.h
 new file mode 100644
-index 00000000..53eaea62
+index 00000000..353af129
 --- /dev/null
 +++ b/libs/vkd3d/vkd3d_vessel_stats.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,156 @@
 +/*
 + * VESSEL: per-frame D3D12 counters, written where the host already looks.
 + *
@@ -369,17 +383,33 @@ index 00000000..53eaea62
 + * The numbers are therefore *the application's* draw count, not the driver's —
 + * which is the more useful of the two here, because the open question on this
 + * stack is what RE9 asks for, not what vkd3d does with it. It also means a call
-+ * that vkd3d declines to translate still counts. There is exactly one such case
-+ * on the draw paths (`begin_render_pass` failing, `command.c:8924`) and it logs
-+ * a WARN when it happens, so the discrepancy is never silent.
++ * that vkd3d declines to translate still counts. There are two such cases on
++ * the draw paths. `begin_render_pass` failing (`command.c:8928`) logs a WARN.
++ * `ExecuteIndirect`'s DGC-skip return (`command.c:17176-17181`) used to log
++ * nothing at all — a whole indirect batch discarded behind a GPU debug-marker
++ * label, invisible without a capture — and now logs a FIXME_ONCE naming the
++ * byte offset and the command count it dropped, so both paths that can eat a
++ * counted call now say so.
 + *
-+ * **`executeIndirects` is why this was built now.** Every session log on this
-+ * device carries `vkd3d_init_device_caps: Not all relevant pipeline stages are
-+ * supported by EXT_dgc. Skipping.`, so vkd3d falls back from device-generated
-+ * commands and every `ExecuteIndirect` goes through the compute-shader patching
-+ * path instead. RE Engine draws world geometry indirectly and props directly,
-+ * which is the shape of the geometry that is missing. Nothing on either side of
-+ * the stack could count those calls until now.
++ * **`executeIndirects` is why this was built now, but not for the reason the
++ * first version of this comment gave.** Every session log on this device
++ * carries `vkd3d_init_device_caps: Not all relevant pipeline stages are
++ * supported by EXT_dgc. Skipping.` — checked against Turnip's source and it is
++ * unconditional, not scene-dependent: Turnip implements no part of
++ * `VK_EXT_device_generated_commands`, so this line fires on every Turnip
++ * session regardless of what the application draws. It is not evidence about
++ * any one frame. What it does mean is that `requires_state_template` can never
++ * be true here (the gate is in `device.c`), so `ExecuteIndirect`'s
++ * compute-shader state-template branch is dead code on this device, not a live
++ * path most calls happen to skip. A command signature whose only action is a
++ * plain draw or dispatch falls through to a direct `vkCmdDrawIndirect` /
++ * `vkCmdDrawIndexedIndirect` / `*IndirectCount` call — no argument-buffer
++ * patching runs at all. The counters are still the right instrument for the
++ * same reason as always: RE Engine draws world geometry indirectly and props
++ * directly, which is the shape of the geometry that is missing, and the
++ * question worth answering is what the application *asks for* through that
++ * call, not what a patching pass that never runs would have done to it.
++ * Nothing on either side of the stack could count those calls until now.
 + *
 + * Off unless `VESSEL_GFX_STATS` names a path, and the environment is read once.
 + * When it is unset the cost is a relaxed load and a predictable branch per

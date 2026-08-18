@@ -125,21 +125,44 @@ and both were free to avoid.
   | the present path | reproduces on both DRI3 and the software copy |
   | the `0x100` write faults | handled probes; they recur for 1,500 lines while the game keeps rendering |
 
-  **The standing lead is the one line every session prints and nothing has yet
-  followed up:** `vkd3d_init_device_caps: Not all relevant pipeline stages are
-  supported by EXT_dgc. Skipping.` vkd3d therefore cannot use device-generated
-  commands and lowers every `ExecuteIndirect` to a compute pass that patches an
-  argument buffer. RE Engine draws world geometry indirectly and props through
-  conventional draws — which is the same split as the symptom, world missing and
-  props present. That is a shape match and not yet evidence.
+  **The standing lead is downgraded, and here is why.** Every session log on
+  this device prints `vkd3d_init_device_caps: Not all relevant pipeline stages
+  are supported by EXT_dgc. Skipping.` That was read as a clue about this
+  scene. It is not one: Turnip implements no part of
+  `VK_EXT_device_generated_commands` at all — zero matches across
+  `native/mesa/src/freedreno` — so the line fires on **every** Turnip session
+  regardless of what the title draws. It is unconditional noise, not evidence
+  about the basement.
 
-  **The instrument for it exists, shipped, installed — and has still never
-  produced a reading.** `patches/vkd3d/0007` counts `ExecuteIndirect` calls and
-  the commands they were given, per frame, on the `d3d · indirect` card. It was
-  built for this entry. A frame drawing a basement with no walls should still be
-  issuing indirect draws; if the counter is zero the fallback is not reached and
-  this lead is dead, and if it is large the lead survives and the next question
-  is what the patching pass produces.
+  **The mechanism read off that line does not exist either.** With EXT_dgc
+  unavailable, `requires_state_template` can never be true (the gate is in
+  `device.c`), so the compute-shader "patch the argument buffer" path is dead
+  code on this device. For a plain draw-only command signature, vkd3d's
+  fallback is a **direct passthrough** to `vkCmdDrawIndirect` /
+  `vkCmdDrawIndexedIndirect` / `*IndirectCount` — no compute patching runs.
+  RE Engine still draws world geometry indirectly and props conventionally,
+  the same split as the symptom, but "the patching pass corrupts it" was never
+  the right question, because there mostly is no patching pass to blame.
+
+  **There is a genuinely silent drop, and it no longer is one.** `command.c`
+  ~17176-17181 discarded a whole `ExecuteIndirect` behind only a GPU
+  debug-marker label — invisible without a capture, and logging nothing — when
+  `argument_buffer_offset_for_command` is nonzero. It is reachable only for
+  signatures that would have needed the state template, and those already log
+  a FIXME at signature-creation time (`command.c:25602`); RE9's log shows zero
+  such FIXMEs, so this path is probably not hit. "Probably" is exactly the
+  ambiguity that cost a session, so it now carries a `FIXME_ONCE` naming the
+  byte offset and the command count it drops (`patches/vkd3d/0007`,
+  `VKD3D_REVISION=10`).
+
+  **The instrument for the real question exists, shipped, installed — and has
+  still never produced a reading.** `patches/vkd3d/0007` counts
+  `ExecuteIndirect` calls and the commands they were given, per frame, on the
+  `d3d · indirect` card. A frame drawing a basement with no walls should still
+  be issuing indirect draws; a zero counter says the app stopped asking, a
+  nonzero one says it is still asking and the missing geometry is downstream
+  of the call vkd3d actually makes with it — the direct passthrough above, not
+  a patching pass.
 
   The 2026-08-17 session was supposed to be that run. vkd3d `3000107` was
   installed and verified on the device, and the counters still wrote nothing —
@@ -148,10 +171,23 @@ and both were free to avoid.
   entry in *Fixed, and waiting for the run that would prove it*). This blocker
   was never tested; it was only ever waiting behind a second, invisible one.
 
-  *Done when:* the room has walls. **Next step:** unchanged — one session
-  standing in the same basement, reading the indirect counter. What changed is
-  that the counter can now reach the panel. Nothing else in this entry needs
-  doing first.
+  **`patches/vkd3d/0008` is shipped, installed, and has never once run against
+  RE9.** `re9.exe` is present as a string inside the installed
+  `components/VKD3D/3000109/system32/d3d12core.dll`, the games container is
+  provisioned with that build, and it was installed 2026-08-17 13:15 — but no
+  `re9.exe` session exists in any retained log since, every retained
+  games-container session being PowerShell or Metro 2033. The quirk this
+  repo shipped for exactly this shape of bug — RE Engine's 16-bit math
+  overflowing and the GPU discarding the affected triangles, some meshes gone
+  and everything around them still drawing — has never been exercised here.
+  That makes it the single cheapest untried experiment on this entry: no
+  build, no patch, nothing left to write. One session, launch `re9.exe`, stand
+  in the basement, look at the walls.
+
+  *Done when:* the room has walls. **Next step:** one session standing in the
+  same basement — it now exercises `patches/vkd3d/0008` against RE9 for the
+  first time and reads the indirect counter for the first time, in the same
+  run. Nothing else in this entry needs doing first.
 ---
 
 ## Fixed, and waiting for the run that would prove it
