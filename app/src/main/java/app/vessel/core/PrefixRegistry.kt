@@ -367,7 +367,7 @@ object PrefixRegistry {
      * adds and replaces, so without it the fallback would only ever reach a
      * container created after this ships.
      */
-    const val SEED_VERSION: Int = 31
+    const val SEED_VERSION: Int = 32
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -1055,6 +1055,100 @@ object PrefixRegistry {
     internal val ANDROID_LINKED_FONTS: List<String> =
         listOf("NotoSansSymbols-Regular-Subsetted.ttf")
 
+    /**
+     * The Microsoft tier every other family already names, kept and kept first.
+     *
+     * **[FONT_LINK_CHAIN] fixed the console face and nothing else**, because the
+     * task that produced it was the console. Measured on the device afterwards, the
+     * prefix carries **33 SystemLink chains and 32 of them resolve to nothing**:
+     * `Arial`, `Tahoma`, `Courier New`, `Microsoft Sans Serif` and every `MingLiU`,
+     * `Meiryo` and `Yu Gothic UI` point at `MINGLIU.TTC`, `SIMSUN.TTC`,
+     * `BATANG.TTC`, `MSGOTHIC.TTC` and `SEGUISYM.TTF` -- Windows CJK faces that have
+     * never been on this device and, being proprietary, never can be. Wine writes
+     * those chains at prefix creation; they are correct on Windows and dead here. So
+     * every program that is not conhost asks for a fallback glyph and is told there
+     * is none, while the two Unifonts that would have answered sit in
+     * `windows\Fonts` reachable from exactly one family.
+     *
+     * **The Microsoft names are kept, and kept first, and cost nothing when
+     * absent.** `load_system_links` skips an entry whose file it cannot find --
+     * `find_face_from_filename` returns NULL and the entry is dropped with one
+     * TRACE -- so listing them is free on a device that has none. If somebody
+     * hand-installs one it is tried before Unifont, which is the ordering
+     * [FONT_LINK_CHAIN] argues for: put Unifont anywhere but last and it wins glyphs
+     * a real typeface would have drawn better.
+     *
+     * **One shared tier rather than each family's exact original list.** The 32
+     * chains are 25 permutations of the same fifteen filenames; reproducing all 25
+     * would enshrine some 200 lines of dead data that then has to track whatever
+     * `wine.inf` does next. What is lost is per-family preference order among fonts
+     * this container cannot have, which is a trade worth naming and taking.
+     *
+     * **Why the tier has to live inside our value rather than be left to Wine.**
+     * `add_gdi_font_link` returns the existing link for a name instead of making a
+     * second one, and `load_system_links` reads the registry *before* appending
+     * Wine's built-in defaults, so whatever this seed writes is walked first. A
+     * value of ours holding only Unifont would therefore put the backstop ahead of
+     * Wine's own defaults -- the one arrangement the chain is designed to avoid.
+     */
+    internal val WINDOWS_FALLBACK_TIER: List<String> = listOf(
+        "SEGOEUI.TTF,Segoe UI",
+        "MSGOTHIC.TTC,MS UI Gothic",
+        "MINGLIU.TTC,PMingLiU",
+        "SIMSUN.TTC,SimSun",
+        "BATANG.TTC,Batang",
+        "GULIM.TTC,Gulim",
+        "YUGOTHM.TTC,Yu Gothic UI",
+        "MSJH.TTC,Microsoft JhengHei UI",
+        "MSYH.TTC,Microsoft YaHei UI",
+        "MALGUN.TTF,Malgun Gothic",
+        "SEGUISYM.TTF,Segoe UI Symbol",
+    )
+
+    /**
+     * Every family the prefix already carries a dead chain for.
+     *
+     * Read off the device from `system.reg` rather than invented: these are exactly
+     * the names Wine seeds under `FontLink\SystemLink`, minus [CONSOLE_FACE], which
+     * has its own chain and no Microsoft tier to preserve. Seeding a name Wine does
+     * not use would be harmless but pointless; missing one leaves that family with
+     * the dead chain this exists to replace.
+     */
+    internal val FONT_LINK_FAMILIES: List<String> = listOf(
+        "Arial",
+        "Arial Bold",
+        "Courier New",
+        "Courier New Bold",
+        "Lucida Sans Unicode",
+        "Meiryo",
+        "Meiryo Bold",
+        "Meiryo UI",
+        "Meiryo UI Bold",
+        "Microsoft JhengHei",
+        "Microsoft JhengHei Bold",
+        "Microsoft JhengHei UI",
+        "Microsoft JhengHei UI Bold",
+        "Microsoft JhengHei UI Light",
+        "Microsoft Sans Serif",
+        "MingLiU",
+        "MingLiU-ExtB",
+        "MingLiU_HKSCS",
+        "MingLiU_HKSCS-ExtB",
+        "MS Gothic",
+        "MS Mincho",
+        "MS PGothic",
+        "MS PMincho",
+        "MS UI Gothic",
+        "PMingLiU",
+        "PMingLiU-ExtB",
+        "Tahoma",
+        "Yu Gothic UI",
+        "Yu Gothic UI Bold",
+        "Yu Gothic UI Light",
+        "Yu Gothic UI Semibold",
+        "Yu Gothic UI Semilight",
+    )
+
     init {
         // Checked at class load rather than in a test alone, because the cost of
         // getting it wrong is a tier that quietly does not exist and the check is
@@ -1142,7 +1236,14 @@ object PrefixRegistry {
         // device, which is the same hive and the same `Software` subtree, so
         // nothing redirects between what `regedit` writes and what win32u reads.
         path = FONT_LINK_KEY,
-        values = listOf(RegistryValue.multiSz(CONSOLE_FACE, FONT_LINK_CHAIN)),
+        values = buildList {
+            // The console face keeps the chain seed 31 measured: it is not a family
+            // Wine seeds, so there is no Microsoft tier of its own to preserve.
+            add(RegistryValue.multiSz(CONSOLE_FACE, FONT_LINK_CHAIN))
+            FONT_LINK_FAMILIES.forEach { family ->
+                add(RegistryValue.multiSz(family, WINDOWS_FALLBACK_TIER + FONT_LINK_CHAIN))
+            }
+        },
     )
 
     /**

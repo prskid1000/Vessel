@@ -179,7 +179,18 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(31, PrefixRegistry.SEED_VERSION)
+        assertEquals(32, PrefixRegistry.SEED_VERSION)
+        // 32 finishes what 31 started. 31 gave the console face a fallback chain and
+        // left every other family with the one Wine writes at prefix creation, and
+        // those were measured on the device afterwards: 33 chains, 32 of which
+        // resolve to nothing at all, every entry naming a Windows CJK face that has
+        // never been on this phone. So conhost stopped drawing tofu and every GUI
+        // program went on being told there is no fallback glyph, with the two
+        // Unifonts sitting in `windows\Fonts` reachable from one family. This seeds
+        // all 32, each as the Microsoft names first -- free when absent, since an
+        // entry whose file is not found is skipped -- then the same chain 31
+        // measured, so Unifont stays last and only ever answers what nothing else
+        // could.
         // 31 added [fontLink], which is the first key the seed has gained since 23
         // and the first REG_MULTI_SZ it has ever written. It retires the premise
         // seeds 29 and 30 shared: each swapped one console face for another because
