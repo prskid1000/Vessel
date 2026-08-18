@@ -1,0 +1,38 @@
+ntdll: expand default kernel stack and WoW64 auxiliary stack sizes.
+
+1. Expands kernel_stack_size from 1 MB (0x100000) to 4 MB (0x400000). On Android,
+the Unix side of ntdll hosts Vulkan layers (Adreno tools, Turnip), Xlib/XCB dispatching,
+GStreamer pipelines, and FEX JIT compiler translation contexts. Providing a 4 MB
+kernel stack prevents stack exhaustion and reduces kernel guard page faults.
+
+2. Expands the 64-bit WoW64 auxiliary stack from 256 KB (0x40000) to 1 MB (0x100000),
+providing ample headroom for 32-bit processes calling into 64-bit Wine subsystems.
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index fe81db547fa..bfc0edb5025 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2307,7 +2307,7 @@ BOOL fsync_help_simulated_pulse;
+ BOOL localsystem_sid;
+ BOOL simulate_writecopy;
+ BOOL wine_allocs_2g_limit;
+-SIZE_T kernel_stack_size = 0x100000;
++SIZE_T kernel_stack_size = 0x400000; /* Vessel: 4 MB kernel stack for Vulkan/Xlib/FEX runtime */
+ long long ram_reporting_bias;
+ char *release_reserved_memory_low_bound;
+ BOOL alert_simulate_sched_quantum;
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 76dbf7f71f5..52b4ae89826 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1218,8 +1218,8 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
+         SIZE_T cpusize = sizeof(WOW64_CPURESERVED) +
+             ((get_machine_context_size( main_image_info.Machine ) + 7) & ~7) + sizeof(ULONG64);
+ 
+-        /* 64-bit stack */
+-        if ((status = virtual_alloc_thread_stack( &stack, limit_4g, 0, 0x40000, 0x40000, TRUE ))) return status;
++        /* 64-bit stack (Vessel: expand WoW64 auxiliary stack from 256 KB to 1 MB) */
++        if ((status = virtual_alloc_thread_stack( &stack, limit_4g, 0, 0x100000, 0x100000, TRUE ))) return status;
+         cpu = (WOW64_CPURESERVED *)(((ULONG_PTR)stack.StackBase - cpusize) & ~15);
+         cpu->Machine = main_image_info.Machine;
+ 
