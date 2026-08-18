@@ -101,6 +101,77 @@ and both were free to avoid.
 
 ## The blockers, in order
 
+- [ ] **#57 — VS Code recurses until its stack is gone, and the recursion is
+  Chromium failing to match a font.** `Code - Insiders.exe` dies on startup with
+
+      virtual:virtual_setup_exception stack overflow 1664 bytes
+        addr 0x6fffef9c34 stack 0x20980 (0x20000-0x21000-0x820000)
+
+  byte-identical across sixteen sessions and five Wine revisions. Wine 49's
+  residue reader (`patches/wine/0055`) measured it: **5,224 frames of 1,600
+  bytes, which is the whole 8 MB.**
+
+  **The cycle, named.** A whole-frame dump gave five return addresses, and the
+  outermost resolves through a string constant sitting beside it in `.rdata`:
+
+      sans\0..\..\ui\gfx\platform_font_skia.cc\0Could not find any font:
+
+  So `Code+0x21dadc0` is Chromium's `ui/gfx/platform_font_skia.cc` default-font
+  initialisation, `"sans"` is its `kFallbackFontFamilyName`, and the chain is
+
+      platform_font_skia default-font init
+        -> Code+0x704000 -> Code+0x704580 -> Code+0x704850  (refcounted
+           singleton accessor, CFG-dispatched virtual call)
+        -> gdi32 ARM64EC entry thunk `$ientry_thunk$cdecl$i8$i8i8`
+        -> back into the default-font init
+
+  `Code+0x714b00` is the lazy constructor: a once-flag at `0xcdad0f6` tested with
+  `jne` past the body, then `new(0x70)`, a vtable, `0x200000101` and a float
+  `1.0` — `FontRenderParams`. **The flag is set after construction, so a
+  re-entry during construction recurses without bound.** Chromium never reaches
+  its own `Could not find any font:` fatal because it recurses first.
+
+  **So the fault is "Chromium cannot match a font"; the recursion is how that
+  failure presents.** Every frame carries a UTF-16 `"Tahoma"` LOGFONT at weight
+  400 — a font that demonstrably exists in the prefix.
+
+  **Ten hypotheses eliminated, each on the device.** None are to be re-run:
+
+  | eliminated | how |
+  |---|---|
+  | the stack is too small | the exe's own `SizeOfStackReserve` is 0x800000; 8 MB is what Windows gives it too. Revisions 42-44 were spent here |
+  | V8's JS stack guard | `--js-flags=--stack-size=512`, confirmed on the command line, no change |
+  | nested ARM64EC exception delivery | `0040`'s counter fires between 256 KB and 16 KB remaining and never printed once |
+  | dead GDI font-link chains | 32 of 33 resolved to nothing; `0056` fixed them; crash unchanged |
+  | missing font families | `Arial`, `Times New Roman`, `Courier New` substituted onto installed fonts; no change |
+  | the GDI font layer failing | `+font` shows it succeeding: metrics return, glyph metrics cached, varied widths |
+  | `--in-process-gpu` | dropping it let JS reach `vx.main`; the browser process still loses its main thread |
+  | the `.node` modules not self-registering | the real error is `Unable to open registry key` from `GetStringRegKey`, so they load and run |
+  | Chromium's own errors | registry key, MAC address, `DCompositionCreateDevice3`, First-Party Sets, DNS: all logged and survived |
+  | generic family names | `sans`, `sans-serif`, `serif`, `monospace` substituted onto real fonts; no change |
+
+  **Why the last one failed, and it is the lead.** Skia reaches fonts through
+  **DirectWrite**, and `FontSubstitutes` is a GDI mechanism Wine's `dwrite` never
+  consults. Every font fix so far has been on the GDI side of a stack Chromium
+  does not use for this. The `dwrite` trace shows
+  `dwritefontcollection_FindFamilyName L"Tahoma"` succeeding and `L"sans"`
+  failing, so the question is what Skia does with what it gets back.
+
+  **Also measured, and separate.** Wine's DirectWrite fallback is quadratic here:
+  `fallback_map_characters` walks `mapping->families_count` entries calling
+  `create_matching_font` on each, and the system fallback table names dozens of
+  Noto faces absent from this device, so every lookup misses and rescans the
+  whole collection — about 1,000 `localizedstrings` calls per
+  `MapCharacters`. With the trace on it is slow enough to mask the crash
+  entirely, which made one session look like a fix. Worth a patch of its own;
+  not this bug.
+
+  *Done when:* VS Code opens a window. **Next step:** read
+  `dwritefontcollection_FindFamilyName` and `create_matching_font` against what
+  Skia's `SkFontMgr_DirectWrite` expects back, rather than guessing at another
+  substitution. **Keep the log** for any run that tests a hypothesis.
+---
+
 - [ ] **#56 — the world is not drawn.** Standing inside a house basement, the
   room's own geometry is missing while the city outside is visible through where
   the walls should be, and props render as unlit black. The game is interactive

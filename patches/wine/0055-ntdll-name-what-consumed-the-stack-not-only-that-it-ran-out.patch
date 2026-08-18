@@ -61,9 +61,32 @@ left; the first dying thread takes them and any second is silent, which is the
 right trade for a diagnostic. Addresses print raw -- `WINEDEBUG` carries
 `+loaddll`, so every module's load address is already in the same log.
 
+**The first real reading, and what it settled.** VS Code Insiders, Wine 46:
+
+  stack residue: 1048064 live words from 0x21000 to 0x820000
+  stack residue: commonest interval 1600 bytes, seen 108875 time(s);
+                 8384512 bytes of stack is 5240 such frames
+  stack residue:   0x1407048b3 repeats 5224 time(s) at that interval
+
+5,224 frames of 1,600 bytes, which is the whole 8 MB, and `0x1407048b3` is in
+the guest image's own range -- `Code - Insiders.exe` loads at `0x140000000`, so
+RVA `0x7048b3`. Its `.pdata` puts that inside a 218-byte function at `0x704850`,
+four bytes past a CFG-dispatched virtual call. So the recursion is in the
+application's own x86-64 code, not in Wine, and it is unbounded rather than
+merely deep: the same 5,240 levels would exhaust the same 8 MB on Windows, where
+this application does not crash. Nothing here is an emulation cost per frame.
+
+That is the opposite of what raising a floor assumes, and it is why the
+instrument was worth the two revisions it took to get right.
+
+`VESSEL_RESIDUE_PRINT` exists because the first version named the first six
+distinct values it met rather than the commonest, and only one of them was a
+return address. The cycle is 1,600 bytes and must contain several; naming them
+in frequency order is what shows whether it crosses into Wine at all.
+
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5108,6 +5108,131 @@
+@@ -5108,6 +5108,173 @@
  }
  
  
@@ -105,7 +128,8 @@ right trade for a diagnostic. Addresses print raw -- `WINEDEBUG` carries
 + * load address is already in the same log and resolving them is offline work. */
 +#define VESSEL_RESIDUE_SLOTS   4096u                    /* last-seen table, power of two */
 +#define VESSEL_RESIDUE_STRIDES 4096u                    /* strides to 64 KB, 16-byte units */
-+#define VESSEL_RESIDUE_NAMED   6u                       /* addresses named at the winning stride */
++#define VESSEL_RESIDUE_NAMED   32u                      /* distinct values tracked at that stride */
++#define VESSEL_RESIDUE_PRINT   12u                      /* how many are printed, commonest first */
 +#define VESSEL_RESIDUE_MAX     ((SIZE_T)64 * 1024 * 1024)
 +
 +static ULONG_PTR    vessel_seen_value[VESSEL_RESIDUE_SLOTS];
@@ -117,7 +141,7 @@ right trade for a diagnostic. Addresses print raw -- `WINEDEBUG` carries
 +    static int taken;
 +
 +    const ULONG_PTR *base, *end;
-+    unsigned int best_bucket = 0, best_hits = 0, named = 0, i;
++    unsigned int best_bucket = 0, best_hits = 0, named = 0, shown, i;
 +    SIZE_T words, stride, stride_words, at;
 +
 +    if (!__sync_bool_compare_and_swap( &taken, 0, 1 )) return;
@@ -185,9 +209,50 @@ right trade for a diagnostic. Addresses print raw -- `WINEDEBUG` carries
 +            if (named < VESSEL_RESIDUE_NAMED) { value[named] = v; count[named] = 1; named++; }
 +        }
 +
-+        for (i = 0; i < named; i++)
++        /* commonest first, because the cycle's own return addresses are the ones
++         * that recur once per frame while everything else is data carried along
++         * with them. Selection sort over at most 32 entries, in a function that is
++         * about to abort the thread: correctness over cleverness. */
++        for (shown = 0; shown < named && shown < VESSEL_RESIDUE_PRINT; shown++)
++        {
++            unsigned int pick = 0, k;
++
++            for (k = 1; k < named; k++) if (count[k] > count[pick]) pick = k;
 +            ERR( "stack residue:   %p repeats %u time(s) at that interval\n",
-+                 (void *)value[i], count[i] + 1 );
++                 (void *)value[pick], count[pick] + 1 );
++            count[pick] = 0;
++        }
++    }
++
++    /* pass three: one whole frame, because the spine is not the whole story.
++     *
++     * The two passes above only name words that recur at the stride -- the
++     * cycle's own return addresses. Everything a frame holds that *varies*, which
++     * includes the arguments and any callee reached through a shared thunk, is
++     * invisible to them. Three static analyses failed to identify the gdi32
++     * function this cycle calls (exports, .pdata, ARM64EC entry-thunk inversion)
++     * because it is internal and reached by signature; the bytes that would say
++     * so are sitting in every frame and were being filtered out.
++     *
++     * A frame from the middle of the recursion rather than either end: the
++     * outermost frames are the descent into the loop and the innermost are
++     * whatever was half-built when the stack ran out, while the middle is the
++     * steady state repeating 5,000 times. Printed raw, four words to a line, so
++     * a 1,600-byte frame costs 50 lines once. */
++    {
++        const ULONG_PTR *frame = base + ((words / 2) / stride_words) * stride_words;
++        SIZE_T k;
++
++        if (frame + stride_words <= end)
++        {
++            ERR( "stack residue: one frame at %p, %u words of %u bytes\n",
++                 (const void *)frame, (unsigned int)stride_words, (unsigned int)stride );
++            for (k = 0; k + 4 <= stride_words; k += 4)
++                ERR( "stack residue:   +%03x  %016lx %016lx %016lx %016lx\n",
++                     (unsigned int)(k * sizeof(ULONG_PTR)),
++                     (unsigned long)frame[k], (unsigned long)frame[k + 1],
++                     (unsigned long)frame[k + 2], (unsigned long)frame[k + 3] );
++        }
 +    }
 +}
 +
@@ -195,7 +260,7 @@ right trade for a diagnostic. Addresses print raw -- `WINEDEBUG` carries
  /***********************************************************************
   *           virtual_setup_exception
   */
-@@ -5137,6 +5262,7 @@
+@@ -5137,6 +5304,7 @@
          UINT diff = stack_info.start + host_page_size - stack;
          ERR( "stack overflow %u bytes addr %p stack %p (%p-%p-%p)\n",
               diff, rec->ExceptionAddress, stack, stack_info.start, stack_info.limit, stack_info.end );

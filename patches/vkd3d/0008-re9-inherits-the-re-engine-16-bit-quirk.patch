@@ -1,8 +1,47 @@
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
-index 63a82c33..f6a1c930 100644
+index 63a82c33..bd9cca53 100644
 --- a/libs/vkd3d/device.c
 +++ b/libs/vkd3d/device.c
-@@ -1019,6 +1019,29 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
+@@ -802,6 +802,38 @@ static const struct vkd3d_shader_quirk_info re4_quirks = {
+     re_hashes, ARRAY_SIZE(re_hashes), VKD3D_SHADER_QUIRK_FORCE_MIN16_AS_32BIT,
+ };
+ 
++/* Resident Evil Requiem. One dispatch per indirect draw, and the barrier between
++ * them is the suspect.
++ *
++ * Measured on the device with patches/vkd3d/0007's counters, in the scene that
++ * is missing its walls:
++ *
++ *   executeIndirectsPerFrame 196.0   dispatchesPerFrame 195.2
++ *   executeIndirectCommandsPerFrame 219.0   drawCallsPerFrame 33.0
++ *
++ * Almost exactly one compute dispatch per indirect draw, which is GPU-driven
++ * culling: a compute pass writes the draw arguments and an indirect draw
++ * consumes them. No CPU-side counter can see whether that worked --
++ * max_command_count is the count the application *stated*, never the one the
++ * GPU wrote -- so a draw that reads a zero or stale count loses its geometry
++ * while ExecuteIndirect still counts 196. That is the symptom exactly: world
++ * geometry drawn indirectly disappears while props drawn conventionally survive.
++ *
++ * The same quirk exists upstream for the same shape twice over. Witcher 3:
++ * "the game will write VBO data in a CS ... missing synchronization here by
++ * game (no UAV -> VBO barrier) and forcing barriers fixes a ton of glitches on
++ * both NV and RADV." Horizon Forbidden West: "a clear CS that is followed up by
++ * overwriting it without proper barrier."
++ *
++ * Alone rather than added to re4_quirks, so the experiment has one variable.
++ * FORCE_MIN16_AS_32BIT was tried on this device and did not bring the walls
++ * back; it also costs 32-bit math on every shader that asked for 16-bit, and
++ * carrying a quirk that has been tested and lost would make a later reading
++ * impossible to attribute. docs/TODO.md #56. */
++static const struct vkd3d_shader_quirk_info re9_quirks = {
++    NULL, 0, VKD3D_SHADER_QUIRK_FORCE_COMPUTE_BARRIER,
++};
++
+ static const struct vkd3d_shader_quirk_hash mhr_hashes[] = {
+     /* Shader is extremely sensitive to nocontract behavior.
+      * There some places where catastrophic cancellation occurs
+@@ -1019,6 +1051,31 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
      { VKD3D_STRING_COMPARE_EXACT, "re7.exe", &re_quirks },
      /* Resident Evil 4 (2050650) */
      { VKD3D_STRING_COMPARE_EXACT, "re4.exe", &re4_quirks },
@@ -25,10 +64,12 @@ index 63a82c33..f6a1c930 100644
 +     * the device. None of them can tell one mesh from another; a shader quirk
 +     * can, and this engine has needed exactly this one three times before.
 +     *
-+     * Unverified. re_hashes are RE2/RE4 shader hashes and will not match this
-+     * game's shaders, so what this actually applies is the global
-+     * FORCE_MIN16_AS_32BIT half. */
-+    { VKD3D_STRING_COMPARE_EXACT, "re9.exe", &re4_quirks },
++     * Tried, and it lost. re_hashes are RE2/RE4 shader hashes and never matched
++     * this game, so what ran was the global FORCE_MIN16_AS_32BIT half; re9.exe
++     * was launched against it on the device and the walls were still missing.
++     * The fp16 theory is eliminated, and this entry now points at re9_quirks
++     * above, which carries the barrier instead. */
++    { VKD3D_STRING_COMPARE_EXACT, "re9.exe", &re9_quirks },
      /* Monster Hunter Rise (1446780) */
      { VKD3D_STRING_COMPARE_EXACT, "MonsterHunterRise.exe", &mhr_quirks },
      /* Witcher 3 (2023) (292030) */
