@@ -609,6 +609,7 @@ double for one container and *N+1* times for *N*.
 | Claude Code `win32-arm64` | ~60 MiB | ~60 MiB | ~120 MiB | **unverified** — size not probed |
 | PowerShell 7.6.5 `win-arm64` | 94.9 MiB | ~270 MiB | ~540 MiB | archive measured, unpacked estimated |
 | Chrome ARM64 (`Chrome-bin`) | 161.5 MiB MSI | ~450 MiB | ~900 MiB | MSI measured, unpacked estimated |
+| Firefox ESR 140.13.0 `win64-aarch64` (shipped in 1.6.0) | 65.5 MiB installer | **248 MiB** | ~496 MiB | **measured** — `build/tools.sh` prints both |
 | Claude Desktop (Electron arm64) | ~120 MiB | ~450 MiB | ~900 MiB | **unverified** |
 
 **Read this table twice.** Git alone already costs three quarters of a gigabyte

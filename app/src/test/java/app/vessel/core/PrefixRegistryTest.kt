@@ -621,10 +621,13 @@ class PrefixRegistryTest {
         // The seed's own rule is that it never names a directory the build does
         // not deliver, and the inverse is what this checks: build/tools.sh lays
         // out Git, Python, Node, PowerShell and the JDK,
-        // SessionRuntime.TOOLS_LAYOUT copies all five into the prefix, and a
+        // SessionRuntime.TOOLS_LAYOUT copies all of them into the prefix, and a
         // program that is installed but not on PATH is one nobody can run
         // without typing a path. `Scripts` is included because that is where pip
         // puts console scripts.
+        //
+        // Firefox is the deliberate exception and is asserted absent below
+        // rather than left unmentioned.
         val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data.split(";")
         assertTrue("git", path.contains("""${PrefixRegistry.GIT_DIR}\cmd"""))
         assertTrue("msys2 userland", path.contains("""${PrefixRegistry.GIT_DIR}\usr\bin"""))
@@ -637,6 +640,14 @@ class PrefixRegistryTest {
         // while looking entirely correct.
         assertTrue("java", path.contains("""${PrefixRegistry.JAVA_DIR}\bin"""))
         assertTrue("not the JDK root", !path.contains(PrefixRegistry.JAVA_DIR))
+        // **The one tree in the payload that is deliberately off PATH.** Every
+        // other entry here is a toolchain something resolves by name from a
+        // shell; a browser is started by tapping it, and TerminalProfile.FIREFOX
+        // launches it by the full path its `installedAt` names. Adding it would
+        // cost every PATH lookup in the prefix a directory to serve a case that
+        // does not exist. Asserted rather than assumed, so that adding it later
+        // is a decision somebody makes on purpose.
+        assertTrue("firefox stays off PATH", !path.contains(PrefixRegistry.FIREFOX_DIR))
     }
 
     @Test

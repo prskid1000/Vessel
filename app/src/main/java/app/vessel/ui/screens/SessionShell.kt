@@ -744,7 +744,20 @@ fun SessionLauncher(
                             // its real icon arrives.
                             else -> VIcons.File
                         },
-                        bitmap = rememberBuiltInIcon(containerId, option.profile.program),
+                        // **The full path when the profile has one**, on exactly
+                        // the reasoning `openTerminal` gives for launching that
+                        // way: `iconForBuiltIn` resolves a bare name against
+                        // `drive_c\windows` and `system32`, which is where Wine's
+                        // own programs live and is not where a component's are.
+                        // The comment above about `pwsh.exe` carrying a real icon
+                        // has been wrong since it was written for this reason —
+                        // the bare name never resolved, so PowerShell kept its
+                        // stand-in glyph for ever. Firefox would have done the
+                        // same.
+                        bitmap = rememberBuiltInIcon(
+                            containerId,
+                            option.profile.installedAt ?: option.profile.program,
+                        ),
                         caption = option.profile.shortLabel,
                         description = option.unavailable ?: "Open ${option.profile.label}",
                         enabled = option.enabled,

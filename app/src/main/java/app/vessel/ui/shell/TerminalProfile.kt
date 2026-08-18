@@ -171,6 +171,35 @@ enum class TerminalProfile(
     ),
 
     /**
+     * A web browser, and the second entry here that Wine does not provide.
+     *
+     * **Firefox, because the alternative is Chromium and Chromium does not paint
+     * here yet.** VS Code is Electron; `patches/wine/0057` fixed the DirectWrite
+     * fallback that was killing it before it ran any JavaScript, and its renderer
+     * still stalls. Shipping a Chromium browser would most likely ship that stall
+     * with a different icon, so this is Gecko. `native/pins.env` carries the rest
+     * of the comparison — the Gecko forks, and why ESR rather than stable.
+     *
+     * **Not `viaConsole`, obviously, but worth saying why it is not `iexplore`
+     * either.** The note at the top of this file records that Wine's
+     * `iexplore.exe` is a thin shell over `mshtml` rather than a browser; it is
+     * the reason this entry had to come from the payload instead of from Wine.
+     *
+     * **Expect software compositing.** This is a classic ARM64 PE and every
+     * graphics DLL Vessel ships is ARM64EC, which an ARM64 loader refuses by
+     * machine type — so there is no D3D11 for it to find and Gecko falls back to
+     * software WebRender. That is a supported Gecko configuration rather than a
+     * failure, and `docs/ARM64X.md` is the fix that is currently opt-in.
+     */
+    FIREFOX(
+        label = "Firefox",
+        program = "firefox.exe",
+        installedAt = """C:\Program Files\Mozilla Firefox\firefox.exe""",
+        missingReason = "Firefox arrives with the Tools component",
+        viaConsole = false,
+    ),
+
+    /**
      * Wine's file manager, beside Vessel's own C: browser rather than instead
      * of it.
      *
@@ -320,6 +349,11 @@ enum class TerminalProfile(
         get() = when (this) {
             COMMAND_PROMPT -> "cmd"
             POWERSHELL -> "pwsh"
+            // The one caption here that is not a command you would type, because
+            // nothing types this one — see [FIREFOX], which is deliberately off
+            // `PATH`. "web" says what the button is for in the three characters
+            // the others use to say what they are.
+            FIREFOX -> "web"
             WINE_EXPLORER -> "files"
             NOTEPAD -> "notepad"
             REGEDIT -> "reg"

@@ -147,7 +147,7 @@ val bundledPackages = listOf(
     // existed. The rule that came out of it is the one applied above: a number is
     // labelled measured only where something was read off a file, and labelled
     // arithmetic where it was not.)
-    "tools-1.5.0-arm64.wcp",
+    "tools-1.6.0-arm64.wcp",
 )
 
 /** Copies the bill of materials into a generated assets root. */

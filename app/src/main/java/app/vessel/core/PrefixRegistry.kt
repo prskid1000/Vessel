@@ -1531,6 +1531,24 @@ object PrefixRegistry {
     const val PWSH_DIR: String = """C:\Program Files\PowerShell"""
 
     /**
+     * Where the Firefox tree of the Tools component installs.
+     *
+     * **Not on [toolsPath], and that is the difference between this and every
+     * other directory around it.** The rest of the payload is a toolchain that
+     * something resolves by name from a shell; a browser is started by tapping
+     * it. Putting `firefox.exe` on `PATH` would add a name to every `PATH` lookup
+     * in the prefix to serve a case that does not exist, so the launcher names
+     * the full path instead — see `TerminalProfile.FIREFOX`, whose `installedAt`
+     * is this directory plus `firefox.exe`.
+     *
+     * `Mozilla Firefox` is the directory a Windows install uses, spelled out here
+     * for the reason [PWSH_DIR] is: this is what a user sees in `C:\Program Files`.
+     * The payload directory is the shorter `Firefox`, and
+     * `SessionRuntime.TOOLS_LAYOUT` is where the two are mapped.
+     */
+    const val FIREFOX_DIR: String = """C:\Program Files\Mozilla Firefox"""
+
+    /**
      * Claude Code's own install location, under the guest user's profile.
      *
      * Not a Vessel-installed tree and not part of the Tools component: the

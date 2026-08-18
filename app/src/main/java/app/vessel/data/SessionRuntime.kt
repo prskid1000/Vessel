@@ -3352,6 +3352,18 @@ class SessionRuntime @Inject constructor(
             // `bin`, which is also the one directory of this tree that goes on
             // PATH ([PrefixRegistry.JAVA_DIR] plus `\bin`).
             ToolsTree("Java", "drive_c/Program Files/Java", "bin/java.exe"),
+            // The browser, and the one tree here that is not a toolchain — it is
+            // not on `PATH` and nothing resolves it by name. What reaches it is
+            // [app.vessel.ui.shell.TerminalProfile.FIREFOX], which names this
+            // exact `firefox.exe` as its `installedAt` — tested before the tile
+            // is offered, and used as the launch target because a bare name
+            // would go to `PATH` and find nothing.
+            //
+            // `Mozilla Firefox` in the prefix and `Firefox` in the payload, on
+            // the same split as PowerShell above: the installed name is the one a
+            // Windows machine uses and a user would type, and the payload name is
+            // only ever typed in `build/tools.sh`.
+            ToolsTree("Firefox", "drive_c/Program Files/Mozilla Firefox", "firefox.exe"),
         )
 
         /**
