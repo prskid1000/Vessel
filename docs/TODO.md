@@ -196,6 +196,7 @@ and both were free to avoid.
   | the present path | reproduces on both DRI3 and the software copy |
   | the `0x100` write faults | handled probes; they recur for 1,500 lines while the game keeps rendering |
   | the RE Engine 16-bit/`min16` quirk (`patches/vkd3d/0008`) | `re9.exe` launched against the installed `3000109` build with the quirk live; the walls were still missing |
+  | the compute-barrier quirk (`FORCE_COMPUTE_BARRIER`) | `re9.exe` run on vkd3d `3000111`, prefix `d3d12core.dll` verified byte-identical to that build; walls still missing. `patches/vkd3d/0008` is deleted — the tree carries no RE9 quirk |
 
   **The standing lead is downgraded, and here is why.** Every session log on
   this device prints `vkd3d_init_device_caps: Not all relevant pipeline stages

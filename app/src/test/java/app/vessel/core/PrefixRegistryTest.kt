@@ -179,7 +179,17 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(33, PrefixRegistry.SEED_VERSION)
+        assertEquals(34, PrefixRegistry.SEED_VERSION)
+        // 34 does two things. The console scheme moves from Campbell to Cursor's
+        // terminal colours, which is VS Code's Dark Modern, because the terminal
+        // this console is used for is Claude Code inside Cursor and matching what
+        // the same output looks like on the desktop is worth more than matching
+        // the typeface's origin. And the fallback chain grows from three entries
+        // to ten: seed 31 excluded CJK, Arabic, Hebrew, Devanagari, Thai and
+        // emoji for reasons that were all about conhost -- no double-width cells,
+        // no shaping -- and every one of them is a GUI program's chain too, where
+        // DirectWrite shapes and lays out properly. They are symlinked out of
+        // /system/fonts, so the payload does not grow by a byte.
         // 33 takes 32 back out again, and the reason is worth keeping. 32 seeded a
         // live fallback chain for all 32 families Wine writes; the import worked and
         // every one of them was stamped back inside the same session, because
@@ -335,20 +345,42 @@ class PrefixRegistryTest {
         // has to be the same string `HKCU\Console\FaceName` carries or the chain
         // hangs off a family nothing selects.
         assertTrue(rendered, rendered.contains(""""Cascadia Mono"=hex(7):"""))
-        // The whole run, pinned. Decoded, this is
-        // `NotoSansSymbols-Regular-Subsetted.ttf`, `unifont-17.0.05.otf`,
-        // `unifont_upper-17.0.05.otf`, each NUL-terminated, then the NUL that ends
-        // the sequence. The two Unifont names carry a version, which is why
+        // Head and tail pinned as literals rather than all ten entries: the run is
+        // 273 bytes at seed 34 and a wall of hex nobody reads is a test that gets
+        // regenerated rather than checked. What the literals have to catch is the
+        // encoding -- one byte per character -- and the ordering rule, which lives
+        // at the two ends. The middle is asserted by count.
+        //
+        // Head: `NotoSansSymbols-Regular-Subsetted.ttf`, first because the symbol
+        // tiers are what the TUI actually draws and the only ones measured glyph by
+        // glyph.
+        assertTrue(
+            rendered.contains(
+                "hex(7):4e,6f,74,6f,53,61,6e,73,53,79,6d,62,6f,6c,73,2d,52,65,67,75," +
+                    "6c,61,72,2d,53,75,62,73,65,74,74,65,64,2e,74,74,66,00",
+            ),
+        )
+        // Tail: both Unifonts, last, then the NUL that ends the sequence. Last is
+        // the design -- Unifont anywhere earlier wins glyphs a real typeface would
+        // have drawn better. Their names carry a version, which is why
         // `native/pins.env` spells them as literals and `build/tools.sh` asserts
         // them against the files it staged.
         assertTrue(
             rendered.contains(
-                "hex(7):4e,6f,74,6f,53,61,6e,73,53,79,6d,62,6f,6c,73,2d,52,65,67,75," +
-                    "6c,61,72,2d,53,75,62,73,65,74,74,65,64,2e,74,74,66,00,75,6e,69," +
-                    "66,6f,6e,74,2d,31,37,2e,30,2e,30,35,2e,6f,74,66,00,75,6e,69,66," +
-                    "6f,6e,74,5f,75,70,70,65,72,2d,31,37,2e,30,2e,30,35,2e,6f,74,66," +
-                    "00,00",
+                "75,6e,69,66,6f,6e,74,2d,31,37,2e,30,2e,30,35,2e,6f,74,66,00,75,6e," +
+                    "69,66,6f,6e,74,5f,75,70,70,65,72,2d,31,37,2e,30,2e,30,35,2e,6f," +
+                    "74,66,00,00",
             ),
+        )
+        // Every entry is NUL-terminated and the sequence ends with one more, so a
+        // chain of N names carries N+1 zero bytes. This is what notices an entry
+        // being dropped in the middle, which neither literal above would.
+        val run = rendered.substringAfter(""""Cascadia Mono"=hex(7):""")
+            .substringBefore("\n")
+        assertEquals(
+            "one NUL per entry plus the terminator, in " + run,
+            PrefixRegistry.FONT_LINK_CHAIN.size + 1,
+            run.split(",").count { it.trim() == "00" },
         )
         // `\Registry\Machine\...` in `system_link_keyW` (font.c:107-118), so
         // HKEY_LOCAL_MACHINE. A per-user copy would be read by nothing.
@@ -429,10 +461,10 @@ class PrefixRegistryTest {
         // assumed. `ColorTable%02d`, because that is the format conhost reads them
         // back with (`window.c:153`): `ColorTable8` would be silently ignored.
         val campbell = listOf(
-            "0C0C0C", "C50F1F", "13A10E", "C19C00",
-            "0037DA", "881798", "3A96DD", "CCCCCC",
-            "767676", "E74856", "16C60C", "F9F1A5",
-            "3B78FF", "B4009E", "61D6D6", "F2F2F2",
+            "1E1E1E", "CD3131", "0DBC79", "E5E510",
+            "2472C8", "BC3FBC", "11A8CD", "CCCCCC",
+            "666666", "F14C4C", "23D18B", "F5F543",
+            "3B8EEA", "D670D6", "29B8DB", "E5E5E5",
         )
         campbell.forEachIndexed { i, srgb ->
             val swapped = srgb.substring(4, 6) + srgb.substring(2, 4) + srgb.substring(0, 2)
@@ -441,7 +473,7 @@ class PrefixRegistryTest {
         }
         // Slot 0 is the console's ground and comes from the constant that names it
         // rather than from a literal in the table, so this pins the two together.
-        assertEquals(0xFF0C0C0C.toInt(), GuestPalette.CONSOLE_BG)
+        assertEquals(0xFF1E1E1E.toInt(), GuestPalette.CONSOLE_BG)
     }
 
     @Test

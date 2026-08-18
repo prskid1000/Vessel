@@ -36,7 +36,8 @@ object GuestPalette {
      * console into a navy pane that blended into the desktop behind it.
      *
      * **This is the one value here that is not Nocturne's**, so do not go looking
-     * for it in `VesselTheme.kt`: it is Campbell's slot 0, `0C0C0C`. Seed 30 gave
+     * for it in `VesselTheme.kt`: it is the console scheme's slot 0, `1E1E1E`,
+     * which is Cursor's terminal background. Seed 30 gave
      * the console the whole Campbell scheme rather than two retuned entries --
      * `patches/wine/0052` quantises `38;5;n` and `38;2;r;g;b` to the nearest of
      * sixteen, so the sixteen have to be a coherent set -- and this constant is
@@ -56,7 +57,7 @@ object GuestPalette {
      * from the window class and not from a palette entry. Nothing in this value
      * depends on which it was.
      */
-    const val CONSOLE_BG: Int = 0xFF0C0C0C.toInt()
+    const val CONSOLE_BG: Int = 0xFF1E1E1E.toInt()
 
     /** `surface` — cards, sheets, bars; here, dialogs and menus. */
     const val SURFACE: Int = 0xFF232532.toInt()

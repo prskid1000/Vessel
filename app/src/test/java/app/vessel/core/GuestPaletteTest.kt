@@ -56,14 +56,16 @@ class GuestPaletteTest {
     }
 
     @Test
-    fun `the console ground is Campbell's slot 0 and not a VesselTheme token`() {
+    fun `the console ground is the terminal scheme's slot 0, not a VesselTheme token`() {
         // The one constant in GuestPalette that is deliberately not transcribed
         // from VesselTheme.kt, so this test is the thing that stops someone
         // "fixing" it back to a Nocturne value. Seed 30 gave the console the whole
         // Campbell scheme -- `patches/wine/0052` quantises 38;5;n and 38;2;r;g;b to
         // the nearest of sixteen, so a half-retuned set makes "nearest" wrong -- and
-        // this names slot 0 in it. It was 0xFF000000 up to seed 29.
-        assertEquals(0xFF0C0C0C.toInt(), GuestPalette.CONSOLE_BG)
+        // this names slot 0 in it. It was 0xFF000000 up to seed 29 and Campbell's
+        // 0C0C0C from 30; seed 34 moved the scheme to Cursor's terminal colours,
+        // which is VS Code's Dark Modern, and 1E1E1E is its background.
+        assertEquals(0xFF1E1E1E.toInt(), GuestPalette.CONSOLE_BG)
     }
 
     @Test

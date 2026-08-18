@@ -1,0 +1,149 @@
+dwrite: a fallback table that names nothing installed is not a fallback.
+
+`system_fallback` maps every script to Noto faces -- 59 families, and this device
+has none of them, cannot ship them, and never will. So when Chromium asks
+DirectWrite to map a character its base font cannot draw,
+`fallback_map_characters` runs its whole loop, creates nothing, and takes
+
+    *ret_font = NULL;  *ret_length = length;  return S_OK;
+
+which is *success, and no font*. That answer is what breaks VS Code. Chromium
+reads it as "try the fallback family", asks for `kFallbackFontFamilyName`
+("sans"), gets the same answer, and its default-font initialisation in
+`ui/gfx/platform_font_skia.cc` re-enters itself -- the once-flag is only set
+after construction, so the retry recurses. Measured on the device with
+`patches/wine/0055`'s residue reader: **5,224 frames of 1,600 bytes, the whole
+8 MB stack**, byte-identical across sixteen sessions. Chromium never even reaches
+its own `Could not find any font:` fatal, because it recurses before it gets
+there. docs/TODO.md #57.
+
+The trace is unambiguous about the shape:
+
+    FindFamilyName L"Tahoma"            364 lines of collection scan
+    MapCharacters ..., L"Tahoma", 400, 0, 5, position 0, length 1
+    FindFamilyName L"Tahoma"  x2
+    FindFamilyName L"sans"
+    MapCharacters ..., L"sans", 400, 0, 5
+
+One character, and nothing in the table can supply it.
+
+**Meanwhile the font that would answer is installed.** Unifont covers 58,911 BMP
+codepoints and sits in `windows\Fonts`, reachable by name and by handle, and
+unreachable from this path because the table does not name it. So when the table
+misses entirely, this asks the collection itself and takes the first family
+holding the character.
+
+**Where it runs, and where it does not.** Only on the two paths that were about
+to return no font: the character having no mapping at all, and the mapping's
+families all failing to be created or to support the input. On a machine with the
+Noto faces installed the table hits first and this never executes. On one without
+them it is the difference between a font and a recursion.
+
+Not free -- it walks the collection creating a matching font per family -- and
+bounded by the fact that it only runs where the alternative is failure, and where
+a caller told "no font" will immediately ask again for something else that is
+also not there. That retry is what this replaces.
+
+**This is the DirectWrite half of a bug already fixed on the GDI half.**
+`patches/wine/0056` gives GDI's SystemLink chains a tier that resolves, for the
+same reason: the defaults name Microsoft CJK faces that are absent here. Skia
+reaches fonts through DirectWrite and consults neither `SystemLink` nor
+`FontSubstitutes`, so the GDI fix could never have reached it -- which is why
+four separate font fixes on the GDI side changed nothing about this crash.
+
+--- a/dlls/dwrite/analyzer.c
++++ b/dlls/dwrite/analyzer.c
+@@ -2503,6 +2503,71 @@
+     return mapped;
+ }
+ 
++/* Vessel: a last resort, because this device has none of the 59 families the
++ * system fallback table names.
++ *
++ * `system_fallback` maps every script to Noto faces. On Windows they are present
++ * or installable; here they are neither, so `fallback_map_characters` below runs
++ * its whole loop, creates nothing, and takes the path that returns
++ *
++ *     *ret_font = NULL;  *ret_length = length;  return S_OK;
++ *
++ * -- success, and no font. Chromium reads that as "try the fallback family",
++ * asks for `kFallbackFontFamilyName` ("sans"), gets the same answer, and its
++ * default-font initialisation in `ui/gfx/platform_font_skia.cc` re-enters
++ * itself: the once-flag is only set after construction, so the retry recurses.
++ * Measured on the device at 5,224 frames of 1,600 bytes, which is the whole 8 MB
++ * stack. See docs/TODO.md #57 -- VS Code cannot start because of this.
++ *
++ * Meanwhile the fonts that would answer are installed and reachable, just never
++ * named by the table. So when the table misses entirely, ask the collection
++ * itself: the first family holding the character wins. On a machine that has the
++ * Noto faces this never runs, because the table hits first; on one that does not
++ * it is the difference between a font and a recursion.
++ *
++ * Scanning a collection is not free, and it is bounded by the fact that it only
++ * runs where the alternative is failure -- and where a caller told "no font"
++ * will ask again for something else that also is not there. */
++static HRESULT vessel_fallback_scan_collection(IDWriteFontCollection *collection,
++        IDWriteTextAnalysisSource *source, UINT32 position, UINT32 length,
++        DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
++        IDWriteFont **ret_font, UINT32 *ret_length)
++{
++    IDWriteFontFamily *family;
++    IDWriteFont3 *font3;
++    UINT32 count, i, mapped;
++    IDWriteFont *font;
++
++    if (!collection) return E_FAIL;
++
++    count = IDWriteFontCollection_GetFontFamilyCount(collection);
++    for (i = 0; i < count; ++i)
++    {
++        if (FAILED(IDWriteFontCollection_GetFontFamily(collection, i, &family))) continue;
++
++        if (SUCCEEDED(IDWriteFontFamily_GetFirstMatchingFont(family, weight, stretch, style, &font)))
++        {
++            if (SUCCEEDED(IDWriteFont_QueryInterface(font, &IID_IDWriteFont3, (void **)&font3)))
++            {
++                if ((mapped = fallback_font_get_supported_length(font3, source, position, length)))
++                {
++                    TRACE("last-resort fallback matched family %u for %u character(s)\n", i, mapped);
++                    IDWriteFont_Release(font);
++                    IDWriteFontFamily_Release(family);
++                    *ret_font = (IDWriteFont *)font3;
++                    *ret_length = mapped;
++                    return S_OK;
++                }
++                IDWriteFont3_Release(font3);
++            }
++            IDWriteFont_Release(font);
++        }
++        IDWriteFontFamily_Release(family);
++    }
++
++    return E_FAIL;
++}
++
+ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallback, IDWriteTextAnalysisSource *source,
+         UINT32 position, UINT32 text_length, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
+         DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
+@@ -2544,6 +2609,10 @@
+ 
+     if (!mapping)
+     {
++        if (SUCCEEDED(vessel_fallback_scan_collection(fallback->systemcollection, source, position, mapped,
++                weight, style, stretch, ret_font, ret_length)))
++            return S_OK;
++
+         *ret_font = NULL;
+         *ret_length = mapped;
+ 
+@@ -2570,6 +2639,10 @@
+     }
+ 
+     /* Mapping was found, but either font couldn't be created or there's no font that supports given input. */
++    if (SUCCEEDED(vessel_fallback_scan_collection(fallback->systemcollection, source, position, mapped,
++            weight, style, stretch, ret_font, ret_length)))
++        return S_OK;
++
+     *ret_font = NULL;
+     *ret_length = length;
+ 

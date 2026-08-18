@@ -367,7 +367,7 @@ object PrefixRegistry {
      * adds and replaces, so without it the fallback would only ever reach a
      * container created after this ships.
      */
-    const val SEED_VERSION: Int = 33
+    const val SEED_VERSION: Int = 34
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -792,9 +792,17 @@ object PrefixRegistry {
     /**
      * Campbell, the sixteen console colours, as `0xFFRRGGBB`.
      *
-     * Windows Terminal's default scheme, and chosen rather than invented for two
-     * reasons. It is the palette Cascadia Mono was designed alongside, so the pair
-     * is what Microsoft actually ships and looks at; and a console palette is not
+     * **Cursor's terminal scheme, which is VS Code's `Dark Modern`.** Seed 31 used
+     * Windows Terminal's Campbell, on the argument that it is what Cascadia Mono
+     * was designed alongside. That is still true and no longer the deciding
+     * fact: the terminal this console is actually used for is Claude Code inside
+     * Cursor, and matching what the same output looks like on the desktop is
+     * worth more than matching the typeface's origin. The values are VS Code's
+     * `terminal.ansi*` tokens verbatim.
+     *
+     * The structural argument for taking a *published* scheme rather than
+     * inventing one is unchanged, and it is the reason this is not half-retuned:
+     * a console palette is not
      * sixteen independent choices — `patches/wine/0052`'s parser quantises
      * `38;5;n` and `38;2;r;g;b` to the nearest of these sixteen, so the *set* has to
      * be coherent or "nearest" starts landing in the wrong place. Half-retuning it
@@ -811,22 +819,22 @@ object PrefixRegistry {
      * the rendered values.
      */
     private val CAMPBELL: List<Int> = listOf(
-        GuestPalette.CONSOLE_BG,  // 00 black          0C0C0C
-        0xFFC50F1F.toInt(),       // 01 red            C50F1F
-        0xFF13A10E.toInt(),       // 02 green          13A10E
-        0xFFC19C00.toInt(),       // 03 yellow         C19C00
-        0xFF0037DA.toInt(),       // 04 blue           0037DA
-        0xFF881798.toInt(),       // 05 magenta        881798
-        0xFF3A96DD.toInt(),       // 06 cyan           3A96DD
+        GuestPalette.CONSOLE_BG,  // 00 black          1E1E1E
+        0xFFCD3131.toInt(),       // 01 red            CD3131
+        0xFF0DBC79.toInt(),       // 02 green          0DBC79
+        0xFFE5E510.toInt(),       // 03 yellow         E5E510
+        0xFF2472C8.toInt(),       // 04 blue           2472C8
+        0xFFBC3FBC.toInt(),       // 05 magenta        BC3FBC
+        0xFF11A8CD.toInt(),       // 06 cyan           11A8CD
         0xFFCCCCCC.toInt(),       // 07 white          CCCCCC
-        0xFF767676.toInt(),       // 08 bright black   767676
-        0xFFE74856.toInt(),       // 09 bright red     E74856
-        0xFF16C60C.toInt(),       // 10 bright green   16C60C
-        0xFFF9F1A5.toInt(),       // 11 bright yellow  F9F1A5
-        0xFF3B78FF.toInt(),       // 12 bright blue    3B78FF
-        0xFFB4009E.toInt(),       // 13 bright magenta B4009E
-        0xFF61D6D6.toInt(),       // 14 bright cyan    61D6D6
-        0xFFF2F2F2.toInt(),       // 15 bright white   F2F2F2
+        0xFF666666.toInt(),       // 08 bright black   666666
+        0xFFF14C4C.toInt(),       // 09 bright red     F14C4C
+        0xFF23D18B.toInt(),       // 10 bright green   23D18B
+        0xFFF5F543.toInt(),       // 11 bright yellow  F5F543
+        0xFF3B8EEA.toInt(),       // 12 bright blue    3B8EEA
+        0xFFD670D6.toInt(),       // 13 bright magenta D670D6
+        0xFF29B8DB.toInt(),       // 14 bright cyan    29B8DB
+        0xFFE5E5E5.toInt(),       // 15 bright white   E5E5E5
     )
 
     /**
@@ -1027,7 +1035,24 @@ object PrefixRegistry {
      * bigger. Counted out of each font's own `cmap` on 2026-08-17.
      */
     internal val FONT_LINK_CHAIN: List<String> = listOf(
+        // The symbol tiers first: these are what the TUI actually draws, and they
+        // are the two that were measured glyph by glyph rather than assumed.
         "NotoSansSymbols-Regular-Subsetted.ttf",
+        "NotoSansSymbols-Regular-Subsetted2.ttf",
+        // Then a real typeface per script. Every one of these is a designed face
+        // rather than a 16x16 bitmap, so where one answers the result is a font
+        // and not a fallback that merely avoids tofu.
+        "NotoSansCJK-Regular.ttc",
+        "NotoNaskhArabic-Regular.ttf",
+        "NotoSansHebrew-Regular.ttf",
+        "NotoSansDevanagari-VF.ttf",
+        "NotoSansThai-Regular.ttf",
+        // Emoji shapes, drawn rather than approximated. Monochrome here: the face
+        // is COLR version 1 and `dlls/dwrite/font.c` FIXMEs COLRv1 outright, so
+        // what renders is the base outline layer. Still a proper emoji glyph,
+        // which Unifont's is not.
+        "NotoColorEmoji.ttf",
+        // The backstop, last, and last is the whole point -- see above.
         "unifont-17.0.05.otf",
         "unifont_upper-17.0.05.otf",
     )
@@ -1043,17 +1068,38 @@ object PrefixRegistry {
      * `TRACE` line (`win32u/font.c:2076`) -- so the relationship is expressed as a
      * subset of the chain and checked below rather than left to two files agreeing.
      *
-     * One entry, and the shortness is the decision. Measured on the device: 211
-     * fonts in `/system/fonts`, of which `NotoSansSymbols-Regular-Subsetted.ttf`
-     * (708,968 bytes, 4,616 codepoints) covers all five spinner glyphs, all five
-     * status marks and 100% of Box Drawing, Block Elements and Braille.
+     * **Eight entries, where seed 31 had one, and the reason the other seven were
+     * excluded no longer holds.** That decision was made for conhost: CJK is
+     * mis-positioned there because it has no double-width cells, and the complex
+     * scripts need shaping it does not do, so a better face bought nothing a
+     * console could show. Every one of those objections is about *conhost*. The
+     * same chain is what a GUI program falls back through, and DirectWrite shapes
+     * Arabic and Devanagari properly and lays CJK out at its real width -- so on
+     * that side the difference between Unifont's 16x16 bitmap and Noto Sans CJK is
+     * the whole difference between legible and not. Excluding them was right for
+     * the surface being fixed at the time and wrong as a general rule, which is
+     * the correction rather than a reversal.
+     *
+     * They cost nothing: `/system/fonts` holds 208 faces and these are symlinked,
+     * so the payload does not grow by a byte. Measured on the device:
+     * `NotoSansSymbols-Regular-Subsetted.ttf` (708,968 bytes, 4,616 codepoints)
+     * covers all five spinner glyphs, all five status marks and 100% of Box
+     * Drawing, Block Elements and Braille.
      * `NotoSansSymbols-Regular-Subsetted2.ttf` (32,996 bytes, 124 codepoints) covers
      * none of that set and `DroidSansMono.ttf` almost nothing, so neither earns a
      * tier. See [FONT_LINK_CHAIN] for why CJK, the complex scripts and colour emoji
      * were measured on the device and deliberately left out.
      */
-    internal val ANDROID_LINKED_FONTS: List<String> =
-        listOf("NotoSansSymbols-Regular-Subsetted.ttf")
+    internal val ANDROID_LINKED_FONTS: List<String> = listOf(
+        "NotoSansSymbols-Regular-Subsetted.ttf",
+        "NotoSansSymbols-Regular-Subsetted2.ttf",
+        "NotoSansCJK-Regular.ttc",
+        "NotoNaskhArabic-Regular.ttf",
+        "NotoSansHebrew-Regular.ttf",
+        "NotoSansDevanagari-VF.ttf",
+        "NotoSansThai-Regular.ttf",
+        "NotoColorEmoji.ttf",
+    )
 
     /**
      * **Why this seed writes one family and not the other thirty-two.**
