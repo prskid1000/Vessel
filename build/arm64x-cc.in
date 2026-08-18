@@ -1,0 +1,66 @@
+#!/bin/sh
+# Vessel: a compiler shim that turns meson's ARM64EC link into an ARM64X one.
+#
+# Meson compiles and links in one pass and has no notion of a hybrid image, so
+# there is nowhere to hand it a second object set. This sits in the cross file's
+# `c`/`cpp` slot instead: it passes compiles straight through, and on a link it
+# appends the native half.
+#
+# What makes that possible is that the *clang driver* accepts the MSVC spelling
+# through -Wl. `-Wl,/machine:arm64x` is taken; `-Xlinker -machine:arm64x` and
+# `-Wl,--machine=arm64x` are both rejected. See docs/ARM64X.md.
+#
+# The native objects are found by target directory rather than by a manifest:
+# meson puts a target's objects in `<name>.p/`, and the two build trees are
+# configured from the same source with the same target list, so `dxgi.dll.p` in
+# the native tree is exactly the other half of `dxgi.dll.p` in this one. Pairing
+# them any other way -- one archive for the whole component, say -- collides
+# symbols across DLLs.
+#
+# The native CRT and import libraries are explicit because the driver only adds
+# the EC ones. Without dllcrt2.o the native view has no DllMainCRTStartup; without
+# the import libraries its _CRT_INIT cannot find Sleep.
+REAL="@REAL@"
+NATIVE_BUILD="@NATIVE_BUILD@"
+NATIVE_LIB="@NATIVE_LIB@"
+OBJDUMP="@OBJDUMP@"
+
+out=""
+prev=""
+for a in "$@"; do
+    [ "$prev" = "-o" ] && out="$a"
+    prev="$a"
+done
+
+# Only DLLs. Meson's own sanity check links a test executable, and so do its
+# feature probes; those have no native half by construction and must pass
+# straight through, or configure fails with "cannot compile programs".
+case "$out" in
+    *.dll)
+        base=$(basename "$out")
+        natdir=$(find "$NATIVE_BUILD" -type d -name "$base.p" 2>/dev/null | head -1)
+        if [ -n "$natdir" ]; then
+            set -- "$@" -Wl,/machine:arm64x
+            # Resources belong to the image once, not once per view. Both halves
+            # compile the same version.rc, and linking both is a hard error:
+            # "duplicate resource: type VERSIONINFO (ID 16)". The EC side already
+            # carries it, so the native copy is dropped. Detected by section
+            # rather than by filename, because what meson calls a windres output
+            # varies with the .rc it was given.
+            for o in "$natdir"/*.o; do
+                [ -f "$o" ] || continue
+                if "$OBJDUMP" -h "$o" 2>/dev/null | grep -q '[.]rsrc'; then continue; fi
+                set -- "$@" "$o"
+            done
+            set -- "$@" "$NATIVE_LIB/dllcrt2.o" \
+                        "$NATIVE_LIB/libmingw32.a" "$NATIVE_LIB/libmingwex.a" \
+                        "$NATIVE_LIB/libmsvcrt.a" "$NATIVE_LIB/libkernel32.a" \
+                        "$NATIVE_LIB/libucrt.a"
+        else
+            echo "arm64x-cc: no native half for $base under $NATIVE_BUILD" >&2
+            exit 1
+        fi
+        ;;
+esac
+
+exec "$REAL" "$@"

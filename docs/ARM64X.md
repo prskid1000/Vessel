@@ -104,8 +104,45 @@ was present and pointed somewhere empty. Here the graphics stack is present,
 built, installed and correct — and in a format the process asking for it cannot
 load.
 
-## Status
+## How it is wired
 
-Not implemented. The recipe above is verified end to end on a toy DLL in the
-`vessel-build` image; the meson wiring for DXVK, vkd3d and Zink is not written.
+`build/arm64x-cc.in` is a compiler shim. Meson goes in its `c`/`cpp` slot, not
+its link args, because meson links in the same pass it compiles and has nowhere
+to accept a second object set. The shim passes compiles through untouched and, on
+a link, appends the native half.
+
+Each of `build/{dxvk,vkd3d,zink}.sh` now builds the native `aarch64-w64-mingw32`
+tree first -- `ninja` and not `ninja install`, because what ships is the one
+hybrid and not two DLLs -- and then configures the ARM64EC pass through the shim.
+`arm64x_wrappers` in `build/common.sh` generates it.
+
+Three details that are not obvious and each cost a build:
+
+- **Only DLLs.** Meson's sanity check and its feature probes link *executables*,
+  which have no native half by construction. Treating that as fatal fails
+  configure with "Compiler /work/arm64x-cc cannot compile programs".
+- **Resources belong to the image once.** Both halves compile the same
+  `version.rc`, and linking both is a hard error: `duplicate resource: type
+  VERSIONINFO (ID 16)`. The native copy is dropped, detected by section rather
+  than filename because what meson names a windres output follows the `.rc`.
+- **vkd3d's widl discovery had to move above the pass loop**, because the native
+  tree configures before it and needs the same generator.
+
+Verified on the output rather than assumed -- all twelve `system32` DLLs:
+
+    dxvk    d3d10core d3d11 d3d8 d3d9 dxgi        coff-arm64x
+    vkd3d   d3d12 d3d12core                       coff-arm64x
+    zink    libEGL libGLESv1_CM libGLESv2         coff-arm64x
+            libgallium_wgl opengl32               coff-arm64x
+    all     syswow64/                             coff-i386
+
+`syswow64` stays i386: it is x86 PE that FEX translates, and there is no ARM64
+view for it to carry.
+
+Zink gained a revision of its own (`ZINK_REVISION`) because Mesa's `VERSION`
+plus a commit cannot move a version code, and `ComponentStore` is keyed by type
+and code -- a rebuild of the same commit would have installed and never been
+unpacked. See the note in `build/zink.sh` about the one-way scale change that
+introduces.
+
 `docs/TODO.md` #57 carries the VS Code side of this.

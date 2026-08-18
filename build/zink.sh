@@ -74,6 +74,25 @@ MESA_VERSION="$(tr -d '[:space:]' < "$SRC/VERSION" 2>/dev/null || true)"
 [ -n "$MESA_VERSION" ] || die "no VERSION file in $SRC — is this really a Mesa tree?"
 VERSION="$MESA_VERSION-${SOURCE_SHA:0:8}"
 
+# Vessel: Mesa's VERSION plus a commit is not enough to move a version code.
+# `ComponentStore` is keyed by type and version code, so a package whose code
+# already exists on the phone is treated as bytes the device has and is never
+# unpacked -- it builds, installs, and does nothing, silently. Rebuilding the
+# same Mesa commit as ARM64X is exactly that case, so this carries a revision
+# of its own like every other component. Bump ZINK_REVISION in native/pins.env
+# whenever what this produces changes without the source moving.
+#
+# **This changes the scale of the code, once, and it cannot be undone.** Mesa's
+# version already reaches six digits -- version_code("26.3.0-devel") is 260300 --
+# and vessel_version_code multiplies by a further 100, so the first revisioned
+# build is 26030001 against the 260300 that shipped before it. Higher still wins,
+# so the store adopts it and nothing breaks. But reverting to the unrevisioned
+# call would emit 260300 again, which is *lower* than what is already on the
+# phone, and `adoptLatest` only ever moves forward -- the package would install
+# and never be chosen. If this ever has to go back, the revision goes up, not
+# away.
+VERSION_CODE="$(vessel_version_code "$MESA_VERSION" "${ZINK_REVISION:-0}")"
+
 # pkg_config_libdir points at an empty directory ON PURPOSE. In a cross build
 # meson resolves `auto` features with the BUILD machine's pkg-config, and will
 # report that the container's x86-64 Linux zlib/expat/zstd satisfy a
@@ -120,6 +139,55 @@ grep -q "targets/libgl-gdi" "$SRC/src/gallium/meson.build" \
 # WINEDLLOVERRIDES says opengl32=n and whose syswow64 has no opengl32.dll cannot
 # start a 32-bit wined3d-linked program at all, and the error it prints names
 # d3dcompiler rather than OpenGL.
+# Vessel: the native ARM64 half, built first and never installed.
+#
+# Its objects are the other half of the hybrid the 64-bit pass links below, and
+# `arm64x_wrappers` pairs them per target by directory name. Nothing here reaches
+# the payload -- `ninja` and not `ninja install` -- because what ships is the one
+# ARM64X image, not two. docs/ARM64X.md.
+NATIVE_TRIPLE=aarch64-w64-mingw32
+NATIVE_CC="$MINGW_BIN/$NATIVE_TRIPLE-clang"
+[ -x "$NATIVE_CC" ] || die "no compiler for $NATIVE_TRIPLE at $NATIVE_CC
+   (an ARM64X build needs llvm-mingw's aarch64 target as well as arm64ec)"
+
+NATIVE_CROSS="$WORK_DIR/$COMPONENT-$NATIVE_TRIPLE.ini"
+cat > "$NATIVE_CROSS" <<EOF
+[binaries]
+c = '$MINGW_BIN/$NATIVE_TRIPLE-clang'
+cpp = '$MINGW_BIN/$NATIVE_TRIPLE-clang++'
+ar = '$MINGW_BIN/llvm-ar'
+strip = '$MINGW_BIN/llvm-strip'
+windres = '$MINGW_BIN/$NATIVE_TRIPLE-windres'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+EOF
+
+NATIVE_BUILD="$WORK_DIR/$COMPONENT-$NATIVE_TRIPLE"
+rm -rf "$NATIVE_BUILD"
+log "configuring $COMPONENT for $NATIVE_TRIPLE (native half of the hybrid)"
+meson setup "$NATIVE_BUILD" "$SRC" \
+  --cross-file "$NATIVE_CROSS" \
+  --default-library=static \
+  -Dbuildtype=release \
+  -Db_ndebug=true \
+  -Db_lto=false \
+  -Dllvm=disabled \
+  -Dplatforms=windows \
+  -Dgallium-drivers=zink \
+  -Dvulkan-drivers= \
+  -Dvideo-codecs= \
+  -Degl=enabled \
+  -Dgles1=enabled \
+  -Dgles2=enabled \
+  -Dspirv-tools=disabled \
+  -Dstrip=true
+log "building $COMPONENT ($NATIVE_TRIPLE, objects only)"
+ninja -C "$NATIVE_BUILD" -j "$(build_jobs 1)"
+
 for PASS in 64 32; do
   case "$PASS" in
     # cpu_family is 'aarch64' even though the triple is arm64ec: the code
@@ -131,6 +199,15 @@ for PASS in 64 32; do
     32) TRIPLE=i686-w64-mingw32;    OUTDIR=syswow64; CPU_FAMILY=x86;     CPU=i686 ;;
     *)  die "unhandled pass $PASS" ;;
   esac
+
+  # The hybrid applies to the 64-bit half only: syswow64 is i386 PE that FEX
+  # translates, and there is no ARM64 view for it to carry.
+  if [ "$PASS" = 64 ]; then
+    arm64x_wrappers "$NATIVE_BUILD" "$MINGW_BIN/$TRIPLE-clang" "$MINGW_BIN/$TRIPLE-clang++"
+    PASS_CC="$ARM64X_CC"; PASS_CXX="$ARM64X_CXX"
+  else
+    PASS_CC="$MINGW_BIN/$TRIPLE-clang"; PASS_CXX="$MINGW_BIN/$TRIPLE-clang++"
+  fi
 
   TRIPLE_CC="$MINGW_BIN/$TRIPLE-clang"
   [ -x "$TRIPLE_CC" ] || die "no compiler for $TRIPLE at $TRIPLE_CC
@@ -151,8 +228,8 @@ for PASS in 64 32; do
   CROSS="$WORK_DIR/$COMPONENT-$TRIPLE.ini"
   cat > "$CROSS" <<EOF
 [binaries]
-c = '$MINGW_BIN/$TRIPLE-clang'
-cpp = '$MINGW_BIN/$TRIPLE-clang++'
+c = '$PASS_CC'
+cpp = '$PASS_CXX'
 ar = '$MINGW_BIN/llvm-ar'
 strip = '$MINGW_BIN/llvm-strip'
 windres = '$MINGW_BIN/$TRIPLE-windres'
@@ -303,6 +380,7 @@ python3 "$COMMON_SH_DIR/package_wcp.py" \
   --type OpenGL \
   --name "Zink $VERSION ARM64EC ($TARGET_NAME)" \
   --version "$VERSION" \
+  --version-code "$VERSION_CODE" \
   --payload "$STAGE" \
   --provenance "$STAGE/provenance.json" \
   --description "Mesa Zink desktop OpenGL over Vulkan, arm64ec system32 + i386 syswow64, built from $COMPONENT_REF @ ${SOURCE_SHA:0:12} for $TARGET_DESC" \

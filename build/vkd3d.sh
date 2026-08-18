@@ -67,12 +67,75 @@ fi
 # build fails there, patch it under patches/vkd3d/ — apply_patches will pick it
 # up once the directory exists.
 
+# vkd3d-proton generates its COM headers from .idl at configure time and hard
+# requires widl. There is never a plain `widl` here: mingw-w64-tools installs
+# it prefixed, and llvm-mingw ships its own i686 copy. widl emits
+# architecture-independent C headers, so any of them will do — including for
+# the arm64ec pass, which has no widl of its own.
+WIDL=""
+for cand in /usr/bin/x86_64-w64-mingw32-widl \
+            /usr/bin/i686-w64-mingw32-widl \
+            "$MINGW_BIN/i686-w64-mingw32-widl" \
+            "$(command -v widl 2>/dev/null || true)"; do
+  if [ -n "$cand" ] && [ -x "$cand" ]; then WIDL="$cand"; break; fi
+done
+[ -n "$WIDL" ] || die "no widl found. vkd3d-proton cannot configure without it.
+   Install mingw-w64-tools (provides x86_64-w64-mingw32-widl)."
+#
+# Hoisted above the pass loop by the ARM64X work: the native ARM64 half
+# configures before that loop runs and needs the same generator.
+info "widl: $WIDL"
+
+# Vessel: the native ARM64 half, built first and never installed.
+#
+# Its objects are the other half of the hybrid the 64-bit pass links below, and
+# `arm64x_wrappers` pairs them per target by directory name. Nothing here reaches
+# the payload -- `ninja` and not `ninja install` -- because what ships is the one
+# ARM64X image, not two. docs/ARM64X.md.
+NATIVE_TRIPLE=aarch64-w64-mingw32
+NATIVE_CC="$MINGW_BIN/$NATIVE_TRIPLE-clang"
+[ -x "$NATIVE_CC" ] || die "no compiler for $NATIVE_TRIPLE at $NATIVE_CC
+   (an ARM64X build needs llvm-mingw's aarch64 target as well as arm64ec)"
+
+NATIVE_CROSS="$WORK_DIR/$COMPONENT-$NATIVE_TRIPLE.ini"
+cat > "$NATIVE_CROSS" <<EOF
+[binaries]
+c = '$MINGW_BIN/$NATIVE_TRIPLE-clang'
+cpp = '$MINGW_BIN/$NATIVE_TRIPLE-clang++'
+ar = '$MINGW_BIN/llvm-ar'
+strip = '$MINGW_BIN/llvm-strip'
+windres = '$MINGW_BIN/$NATIVE_TRIPLE-windres'
+widl-mingw-tools-fallback = '$WIDL'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+EOF
+
+NATIVE_BUILD="$WORK_DIR/$COMPONENT-$NATIVE_TRIPLE"
+rm -rf "$NATIVE_BUILD"
+log "configuring $COMPONENT for $NATIVE_TRIPLE (native half of the hybrid)"
+meson setup "$NATIVE_BUILD" "$SRC"   --cross-file "$NATIVE_CROSS"   --buildtype release   -Dstrip=true   -Db_lto=false
+log "building $COMPONENT ($NATIVE_TRIPLE, objects only)"
+ninja -C "$NATIVE_BUILD" -j "$(build_jobs 1)"
+
 for PASS in 64 32; do
   case "$PASS" in
     64) TRIPLE=arm64ec-w64-mingw32; OUTDIR=system32; CPU_FAMILY=aarch64; CPU=aarch64 ;;
     32) TRIPLE=i686-w64-mingw32;    OUTDIR=syswow64; CPU_FAMILY=x86;     CPU=i686 ;;
     *)  die "unhandled pass $PASS" ;;
   esac
+
+  # The hybrid applies to the 64-bit half only: syswow64 is i386 PE that FEX
+  # translates, and there is no ARM64 view for it to carry.
+  if [ "$PASS" = 64 ]; then
+    arm64x_wrappers "$NATIVE_BUILD" "$MINGW_BIN/$TRIPLE-clang" "$MINGW_BIN/$TRIPLE-clang++"
+    PASS_CC="$ARM64X_CC"; PASS_CXX="$ARM64X_CXX"
+  else
+    PASS_CC="$MINGW_BIN/$TRIPLE-clang"; PASS_CXX="$MINGW_BIN/$TRIPLE-clang++"
+  fi
 
   TRIPLE_CC="$MINGW_BIN/$TRIPLE-clang"
   [ -x "$TRIPLE_CC" ] || die "no compiler for $TRIPLE at $TRIPLE_CC
@@ -90,27 +153,11 @@ for PASS in 64 32; do
     done
   fi
 
-  # vkd3d-proton generates its COM headers from .idl at configure time and hard
-  # requires widl. There is never a plain `widl` here: mingw-w64-tools installs
-  # it prefixed, and llvm-mingw ships its own i686 copy. widl emits
-  # architecture-independent C headers, so any of them will do — including for
-  # the arm64ec pass, which has no widl of its own.
-  WIDL=""
-  for cand in /usr/bin/x86_64-w64-mingw32-widl \
-              /usr/bin/i686-w64-mingw32-widl \
-              "$MINGW_BIN/i686-w64-mingw32-widl" \
-              "$(command -v widl 2>/dev/null || true)"; do
-    if [ -n "$cand" ] && [ -x "$cand" ]; then WIDL="$cand"; break; fi
-  done
-  [ -n "$WIDL" ] || die "no widl found. vkd3d-proton cannot configure without it.
-     Install mingw-w64-tools (provides x86_64-w64-mingw32-widl)."
-  info "widl: $WIDL"
-
   CROSS="$WORK_DIR/$COMPONENT-$TRIPLE.ini"
   cat > "$CROSS" <<EOF
 [binaries]
-c = '$MINGW_BIN/$TRIPLE-clang'
-cpp = '$MINGW_BIN/$TRIPLE-clang++'
+c = '$PASS_CC'
+cpp = '$PASS_CXX'
 ar = '$MINGW_BIN/llvm-ar'
 strip = '$MINGW_BIN/llvm-strip'
 windres = '$MINGW_BIN/$TRIPLE-windres'

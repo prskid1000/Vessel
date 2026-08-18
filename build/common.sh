@@ -150,6 +150,44 @@ lto_flag() {
   if [ "${VESSEL_LTO:-0}" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
 
+# Vessel: the compiler shims that make meson emit ARM64X instead of ARM64EC.
+#
+# **A pure ARM64EC DLL cannot be loaded by a native ARM64 process.** It declares
+# machine type 0x8664 so x64 loaders take it, and a classic ARM64 loader refuses
+# it with STATUS_INVALID_IMAGE_FORMAT -- which is why the ARM64 build of VS Code
+# loads Wine's DLLs, all ARM64X, and not one of ours. A prefix has a single
+# system32, so the only format that serves both an emulated x64 process and a
+# native ARM64 one is the hybrid. docs/ARM64X.md has the whole argument.
+#
+# Meson has no notion of a hybrid image and links in the same pass it compiles,
+# so this goes in the cross file's `c`/`cpp` slot rather than into link args:
+# [arm64x-cc.in] passes compiles through untouched and appends the native half on
+# a link. Callers build the native tree first and hand its path in here.
+#
+# Sets ARM64X_CC and ARM64X_CXX.
+arm64x_wrappers() {
+  local native_build="$1" ec_cc="$2" ec_cxx="$3"
+  local here nat_lib tmpl
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  tmpl="$here/arm64x-cc.in"
+  nat_lib="$LLVM_MINGW/aarch64-w64-mingw32/lib"
+
+  [ -f "$tmpl" ] || die "arm64x: missing $tmpl"
+  # The native CRT is not optional and its absence is silent at configure time:
+  # the link fails much later with "DllMainCRTStartup (native symbol)".
+  [ -f "$nat_lib/dllcrt2.o" ] || die "arm64x: no native CRT at $nat_lib
+     (llvm-mingw must carry the aarch64 target, not only arm64ec)"
+  [ -d "$native_build" ] || die "arm64x: native build tree $native_build does not exist
+     (build the aarch64 pass before configuring the arm64ec one)"
+
+  ARM64X_CC="$WORK_DIR/arm64x-cc"
+  ARM64X_CXX="$WORK_DIR/arm64x-cxx"
+
+  sed -e "s|@REAL@|$ec_cc|" -e "s|@NATIVE_BUILD@|$native_build|"       -e "s|@NATIVE_LIB@|$nat_lib|" -e "s|@OBJDUMP@|$MINGW_BIN/llvm-objdump|"       "$tmpl" > "$ARM64X_CC"
+  sed -e "s|@REAL@|$ec_cxx|" -e "s|@NATIVE_BUILD@|$native_build|"       -e "s|@NATIVE_LIB@|$nat_lib|" -e "s|@OBJDUMP@|$MINGW_BIN/llvm-objdump|"       "$tmpl" > "$ARM64X_CXX"
+  chmod +x "$ARM64X_CC" "$ARM64X_CXX"
+}
+
 # Returns 0 if the compiler accepts the flag. Used so tuning is either applied
 # or reported — never dropped in silence.
 probe_cflag() {
