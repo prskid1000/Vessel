@@ -1,0 +1,48 @@
+ntdll: clamp oversized virtual memory reservations for Chromium / V8.
+
+Modern Chromium and Electron (VS Code, Discord, browsers) allocate a 1.47 TB
+(0x15800000000) or 512 GB (0x8000000000) MEM_RESERVE virtual memory cage for
+V8 pointer compression sandbox security.
+
+On Android ARM64 kernels built with 39-bit virtual addressing (CONFIG_ARM64_VA_BITS_39),
+the entire user address space is only 512 GB. A 1.5 TB reservation request is
+physically impossible to satisfy and returns STATUS_NO_MEMORY (error:
+"virtual:allocate_virtual_memory out of memory for allocation, base 0x0 size 15800000000"),
+killing the process immediately on startup.
+
+V8 only uses this address space for pointer sandboxing and typically commits
+between a few hundred megabytes and 4 GB of actual heap inside it.
+
+Clamping pure MEM_RESERVE requests (> 8 GB) at base NULL to an 8 GB ceiling
+allows map_view() to succeed in the available address space while preserving
+normal on-demand page commits within the range.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5629,6 +5629,24 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG ty
+     if ((type & MEM_RESERVE) || !base)
+     {
++        /* Vessel: Handle Chromium / V8 Sandbox 1.5TB virtual memory reservations
++         * on memory-constrained (e.g. 39-bit VA) Android ARM64 kernels.
++         *
++         * Modern V8 in 64-bit builds (Chromium, Electron, VS Code) calls
++         * VirtualAlloc(NULL, 0x15800000000, MEM_RESERVE, PAGE_NOACCESS) to create
++         * a 1.47 TB (or 512 GB) pointer-compression sandbox cage. On Android
++         * kernels with 39-bit virtual addressing (512 GB total user space), this
++         * is physically larger than the entire userland address space, causing
++         * map_view to return STATUS_NO_MEMORY and fatally crash the process.
++         *
++         * V8 only ever commits a few hundred MB to 4 GB inside this reservation.
++         * Clamping oversized pure reservations (> 8 GB) to 8 GB allows map_view
++         * to succeed within the available address space.
++         */
++        if ((type & MEM_RESERVE) && !(type & MEM_COMMIT) && !base && size > ((SIZE_T)8 * 1024 * 1024 * 1024))
++        {
++            WARN( "oversized reservation of 0x%lx bytes clamped to 8 GB for Chromium/V8\n", size );
++            size = (SIZE_T)8 * 1024 * 1024 * 1024;
++        }
++
+         /* Vessel: a 16 KB host page rounds the *reservation* too, not only a
+          * later commit into it. Reserving and committing in one call is the
+          * common case, and rounding only the commit path left exactly that case
