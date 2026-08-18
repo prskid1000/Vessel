@@ -148,13 +148,33 @@ own `libc++_shared.so` is resolved out of that same directory.
 
 ## Verifying on device
 
+**Building a component is not half of shipping it — the APK is the delivery
+mechanism.** `sideload` copies every `.wcp` named in `app/build.gradle.kts`'s
+bill of materials out of `dist/` and into the APK's assets at build time, and
+unpacks them on first run. So a freshly built component reaches the phone by
+rebuilding and reinstalling the APK, and by no other route:
+
 ```bash
+docker run --rm -v "$PWD:/src" -v vessel-work:/work vessel-build ./build/wine.sh
+./gradlew :app:assembleSideloadDebug
 adb install -r app/build/outputs/apk/sideload/debug/app-sideload-debug.apk
-adb push dist/fex-2608-canoe.wcp /sdcard/Download/
 ```
 
-Then install the package from the Components screen (Settings ▸ Components). A
-component built for the wrong architecture fails silently at load time in most
+**There is no screen that installs a `.wcp` from storage, and this document used
+to say there was.** Pushing a package to `/sdcard/Download/` accomplishes
+nothing: no code reads it. `ComponentDownloadService` does exist and is gated to
+`sideload` by `CAN_INSTALL_COMPONENTS`, but it fetches from a remote catalogue
+rather than from local storage, and nothing on the home screen invokes it. The
+instruction that stood here — *install the package from the Components screen
+(Settings ▸ Components)* — named a screen this app has never had.
+
+**And the revision has to move.** `ComponentStore` is keyed by type *and* version
+code, so a package whose code already exists on the phone is treated as bytes the
+device already has and is never unpacked. A rebuilt component with an unchanged
+`*_REVISION` in `native/pins.env` therefore builds, bundles, installs, and does
+nothing at all — silently. Bump it in the same commit as the patch.
+
+A component built for the wrong architecture fails silently at load time in most
 Winlator-family apps — Vessel's driver and component screens read back what
 actually loaded, so check there rather than assuming.
 
