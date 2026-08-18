@@ -1,27 +1,34 @@
-ntdll: clamp oversized virtual memory reservations for Chromium / V8.
+ntdll: clamp oversized virtual memory reservations and ensure adequate thread stack for ARM64EC / V8.
 
-Modern Chromium and Electron (VS Code, Discord, browsers) allocate a 1.47 TB
+1. Modern Chromium and Electron (VS Code, Discord, browsers) allocate a 1.47 TB
 (0x15800000000) or 512 GB (0x8000000000) MEM_RESERVE virtual memory cage for
-V8 pointer compression sandbox security.
+V8 pointer compression sandbox security. On Android ARM64 kernels built with
+39-bit virtual addressing (512 GB total user space), this is physically larger
+than the entire address space and crashes with STATUS_NO_MEMORY. Clamping pure
+MEM_RESERVE requests (> 8 GB) to 8 GB allows map_view() to succeed.
 
-On Android ARM64 kernels built with 39-bit virtual addressing (CONFIG_ARM64_VA_BITS_39),
-the entire user address space is only 512 GB. A 1.5 TB reservation request is
-physically impossible to satisfy and returns STATUS_NO_MEMORY (error:
-"virtual:allocate_virtual_memory out of memory for allocation, base 0x0 size 15800000000"),
-killing the process immediately on startup.
-
-V8 only uses this address space for pointer sandboxing and typically commits
-between a few hundred megabytes and 4 GB of actual heap inside it.
-
-Clamping pure MEM_RESERVE requests (> 8 GB) at base NULL to an 8 GB ceiling
-allows map_view() to succeed in the available address space while preserving
-normal on-demand page commits within the range.
+2. In ARM64EC translation under FEX, exception dispatches push ARM64EC_NT_XCONTEXT
+frames (3.3 KB each). Default small thread stacks (256 KB - 1 MB) overflow quickly
+during Electron / V8 JIT recursive execution. Raising the minimum stack floor in
+virtual_alloc_thread_stack() to 8 MB provides ample headroom.
 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index b18593e0f19..d0830ac1d50 100644
+index b18593e0f19..eb4468e23e9 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5716,6 +5716,26 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+@@ -4791,7 +4791,10 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+     if (!commit_size) commit_size = main_image_info.CommittedStackSize;
+ 
+     size = max( reserve_size, commit_size );
+-    if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
++    /* Vessel: ARM64EC translation frames and V8/Electron recursive workloads require
++     * a generous stack (at least 8 MB). Default 256KB-1MB stacks overflow quickly under
++     * ARM64EC_NT_XCONTEXT exception dispatching. */
++    if (size < 8 * 1024 * 1024) size = 8 * 1024 * 1024;
+     size = ROUND_SIZE( 0, size, granularity_mask );
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+@@ -5716,6 +5719,26 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
          if ((type & MEM_COMMIT) && commit_granularity_mask() != page_mask)
              size = ROUND_SIZE( base, size, commit_granularity_mask() );
  
