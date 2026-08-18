@@ -1,0 +1,152 @@
+win32u: a font-link chain that ends in nothing is not a chain.
+
+`update_font_system_link_info` writes 32 SystemLink values from a hardcoded
+table, and every entry in every one of them names a Microsoft CJK face --
+MINGLIU.TTC, SIMSUN.TTC, BATANG.TTC, MSGOTHIC.TTC, SEGUISYM.TTF. Those are
+correct on Windows. On an Android phone they are not present, cannot be shipped,
+and never resolve. Measured in a container:
+
+  chains: 33   with at least one resolvable font: 1   entirely dead: 32
+
+The one that resolves is `Cascadia Mono`, which Vessel seeds itself and Wine
+therefore does not overwrite. Everything else -- Tahoma, and so `MS Shell Dlg`,
+and so every dialog and every Chromium window -- asks for a fallback glyph and is
+told there is none, while Unifont sits installed in `windows\Fonts` reachable
+from exactly one family.
+
+**The registry is not where this can be fixed, and that was established the
+expensive way.** Seeding all 32 values works, and then `update_codepage` reaches
+
+    /* already set correctly, but, as a HACK, update font link
+       info anyway, so that old Proton prefixes are fixed */
+    update_font_system_link_info();
+
+which rewrites all 32 from the table on *every* font init, changed or not. The
+seeded values were watched reverting inside a single session, after `regedit` had
+imported them and before the first window was drawn. A seed can only add names
+Wine does not write; it can never keep one it does.
+
+So the tail is appended here instead, to every value the function writes:
+
+    NotoSansSymbols-Regular-Subsetted.ttf   symlinked from /system/fonts
+    unifont-17.0.05.otf                     the BMP, 58,911 glyphs
+    unifont_upper-17.0.05.otf               above the BMP, 59,057 glyphs
+
+**Appended, and last.** `load_system_links` drops an entry whose file
+`find_face_from_filename` cannot locate, with one TRACE, so this is inert on a
+machine that has the real CJK fonts and is the only tier that answers on one that
+does not. Last matters on its own: put Unifont anywhere earlier and it wins
+glyphs a real typeface would have drawn better, which is the one way to make this
+change look like a regression.
+
+**Why the NUL arithmetic is what it is.** `len` counts the sequence's own
+terminating NUL, so it is dropped before the tail is copied in. Appending without
+dropping it would leave every tail entry sitting *after* the NUL that ends the
+sequence, where `load_system_links` -- which walks until it meets an empty entry
+-- would never read one of them: a change that writes the right bytes and links
+nothing. Verified against a standalone harness before building: two original
+entries plus three tail entries, walked the way `load_system_links` walks them,
+double-NUL terminated.
+
+Two fonts and not one because a TrueType glyph id is 16 bits: 58,911 + 59,057 is
+117,968 glyphs against a ceiling of 65,535, so the BMP and everything above it
+cannot share a file.
+
+**These three filenames are also spelled in `native/pins.env` and asserted against
+the staged payload by `build/tools.sh`.** A Unifont version bump changes the
+filename, and a stale name here does not fail loudly -- it resolves to nothing and
+the chain quietly ends where it began. That is this patch's maintenance cost and
+it is written down rather than left to be found.
+
+--- a/dlls/win32u/font.c
++++ b/dlls/win32u/font.c
+@@ -1672,6 +1672,38 @@
+     "MSYH.TTC,Microsoft YaHei UI\0"
+     "SEGUISYM.TTF,Segoe UI Symbol\0";
+ 
++/* Vessel: the tier that ends every chain, because on this device every chain
++ * Wine writes above ends in nothing.
++ *
++ * The lists above name MINGLIU.TTC, SIMSUN.TTC, BATANG.TTC, MSGOTHIC.TTC and
++ * SEGUISYM.TTF -- Microsoft CJK faces that are correct on Windows, are not
++ * present on an Android phone, cannot be shipped with one, and never resolve.
++ * Measured in a container: 33 SystemLink chains, 32 of them with zero resolvable
++ * entries. So every program that is not conhost asks for a fallback glyph and is
++ * told there is none, while the fonts that would have answered sit installed.
++ *
++ * This cannot be fixed from the registry, which is where it was tried first.
++ * `update_font_system_link_info` rewrites all of these values from the table
++ * above, and the HACK in `update_codepage` calls it on every font init even when
++ * nothing changed, so a seeded value is stamped back before the first window is
++ * drawn. Verified by seeding all 32 and watching them revert inside one session.
++ *
++ * Appended rather than substituted, and last rather than first: an entry whose
++ * file `find_face_from_filename` cannot locate is dropped with one TRACE, so this
++ * is inert on a machine that has the real fonts, and on one that does not it is
++ * the only tier that answers. Last matters -- put Unifont anywhere else and it
++ * wins glyphs a real typeface would have drawn better.
++ *
++ * **These three filenames are also spelled in `native/pins.env` and asserted
++ * against the staged payload by `build/tools.sh`.** A Unifont version bump
++ * changes the filename, and a stale name here does not fail loudly: it resolves
++ * to nothing and the chain quietly ends where it began. That is this patch's
++ * maintenance cost, written down rather than left to be discovered. */
++static const char vessel_system_link_tail[] =
++    "NotoSansSymbols-Regular-Subsetted.ttf\0"
++    "unifont-17.0.05.otf\0"
++    "unifont_upper-17.0.05.otf\0";
++
+ static const char system_link_tahoma_non_cjk[] =
+     "MSGOTHIC.TTC,MS UI Gothic\0"
+     "MINGLIU.TTC,PMingLiU\0"
+@@ -2992,6 +3024,32 @@
+     free( valueW );
+ }
+ 
++/* Vessel: [set_multi_value_key] with [vessel_system_link_tail] appended.
++ *
++ * `len` counts the sequence's own terminating NUL, so it is dropped before the
++ * tail is copied in -- otherwise the tail would sit after the NUL that ends the
++ * sequence, and `load_system_links`, which walks until it meets an empty entry,
++ * would never read one of them. On allocation failure this writes exactly what
++ * upstream would have: a chain without the tail is what this device has today
++ * and is strictly better than no chain at all. */
++static void vessel_set_multi_value_key( HKEY hkey, const WCHAR *name, const char *value, UINT len )
++{
++    UINT head = len ? len - 1 : 0;
++    char *joined;
++
++    if (!value || !(joined = malloc( head + sizeof(vessel_system_link_tail) )))
++    {
++        if (value) ERR( "malloc of %u failed, writing the chain without a fallback tier\n",
++                        (unsigned int)(head + sizeof(vessel_system_link_tail)) );
++        set_multi_value_key( hkey, name, value, len );
++        return;
++    }
++    memcpy( joined, value, head );
++    memcpy( joined + head, vessel_system_link_tail, sizeof(vessel_system_link_tail) );
++    set_multi_value_key( hkey, name, joined, head + sizeof(vessel_system_link_tail) );
++    free( joined );
++}
++
+ static void update_font_system_link_info(void)
+ {
+     HKEY hkey;
+@@ -3030,12 +3088,12 @@
+                     break;
+                 }
+             }
+-            set_multi_value_key(hkey, link_reg->font_name, link, len);
++            vessel_set_multi_value_key(hkey, link_reg->font_name, link, len);
+         }
+-        set_multi_value_key(hkey, arialW, link, len);
+-        set_multi_value_key(hkey, arial_boldW, link, len);
+-        set_multi_value_key(hkey, courier_newW, link, len);
+-        set_multi_value_key(hkey, courier_new_boldW, link, len);
++        vessel_set_multi_value_key(hkey, arialW, link, len);
++        vessel_set_multi_value_key(hkey, arial_boldW, link, len);
++        vessel_set_multi_value_key(hkey, courier_newW, link, len);
++        vessel_set_multi_value_key(hkey, courier_new_boldW, link, len);
+         NtClose( hkey );
+     }
+ }

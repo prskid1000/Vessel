@@ -179,7 +179,16 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(32, PrefixRegistry.SEED_VERSION)
+        assertEquals(33, PrefixRegistry.SEED_VERSION)
+        // 33 takes 32 back out again, and the reason is worth keeping. 32 seeded a
+        // live fallback chain for all 32 families Wine writes; the import worked and
+        // every one of them was stamped back inside the same session, because
+        // `update_font_system_link_info` rewrites them from a hardcoded table and
+        // the HACK in `update_codepage` calls it on every font init whether anything
+        // changed or not. A seed can add a name Wine does not write, which is why
+        // `Cascadia Mono` survives, and can never keep one it does. The tier those
+        // families needed is appended inside Wine by `patches/wine/0056` instead, so
+        // this key is back to the single value 31 measured.
         // 32 finishes what 31 started. 31 gave the console face a fallback chain and
         // left every other family with the one Wine writes at prefix creation, and
         // those were measured on the device afterwards: 33 chains, 32 of which
