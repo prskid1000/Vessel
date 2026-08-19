@@ -1,0 +1,99 @@
+freedreno/ir3: say so when a shader needs more reconvergence points than exist.
+
+`ir3_shader_branchstack_hw()` finishes with
+
+    align(MIN2(v->branchstack, v->compiler->max_branchstack), 2)
+
+and that `MIN2` is a silent truncation. `max_branchstack` is 64. Past it the
+hardware has nowhere left to park a diverged thread, so the thread is not
+parked and never reactivated, and the wave continues with an active mask that
+no longer says which threads are live. Arithmetic still produces numbers, the
+shader still returns, and no layer reports anything.
+
+**Subgroup operations are where a wrong mask stops being invisible.** `ballot`,
+`elect` and the ballot scans do not merely run *under* the active mask, they
+are questions *about* it, so a mask that is wrong makes them return wrong
+answers rather than run slowly. A shader that ballots to count its live lanes
+and scans to find its own index among them -- the ordinary way to build a list
+on the GPU -- then writes its results to the wrong places.
+
+**The limit is far easier to reach on a8xx than anywhere else.** It is the only
+device in `freedreno_devices.py` with `has_dual_wave_dispatch`, which is what
+makes `ir3_calc_reconvergence` run the analysis a second time with
+`wave_pair_divergence`, and that pass deliberately treats *every* two-way
+branch as divergent (`ir3_reconvergence.c:225`) because a pair of co-issued
+waves may diverge where a single wave cannot. A shader with deeply nested
+control flow therefore accumulates far more outstanding reconvergence points
+here than the same shader does on a7xx. a8xx is also the only generation with
+no list under `src/freedreno/ci`, so nothing has ever tested this path.
+
+**This fixes nothing, and says so.** Spilling the branchstack is the fix, and
+it is still an open question in the tree's own words --
+`ir3_get_reg_independent_max_waves()` carries "TODO: Could we spill branchstack
+or is there other way around? Blob just explodes in such case." What this
+removes is the silence. A miscompile of this kind currently presents as a game
+rendering the wrong thing, with every layer in the stack reporting success;
+after this the driver names it, for every shader and every title.
+
+Chosen over any behavioural change deliberately. `has_dual_wave_dispatch`
+programs no register -- it appears only in `ir3_compiler.c:275` sizing the
+branchstack pool and in the gate above -- so clearing it would not stop the
+hardware co-issuing waves, only stop the compiler compensating for it. There is
+no safe global switch here, and a warning cannot regress a title that works.
+
+diff --git a/src/freedreno/ir3/ir3_reconvergence.c b/src/freedreno/ir3/ir3_reconvergence.c
+index b0d24342520..168e76193e3 100644
+--- a/src/freedreno/ir3/ir3_reconvergence.c
++++ b/src/freedreno/ir3/ir3_reconvergence.c
+@@ -63,6 +63,7 @@
+ #include "util/rb_tree.h"
+ #include "util/u_worklist.h"
+ #include "util/ralloc.h"
++#include "util/log.h"
+ 
+ struct logical_edge {
+    struct uinterval_node node;
+@@ -420,4 +421,43 @@ ir3_calc_reconvergence(struct ir3_shader_variant *so)
+    }
+ 
+    calc_reconvergence(so, false);
++
++   /* Say so when the shader needs more reconvergence points than the hardware
++    * has, because nothing else does.
++    *
++    * ir3_shader_branchstack_hw() ends in
++    *
++    *    align(MIN2(v->branchstack, v->compiler->max_branchstack), 2)
++    *
++    * and that MIN2 is a silent truncation. Past max_branchstack the hardware
++    * has nowhere left to park a diverged thread, so it is not parked and not
++    * reactivated -- the wave carries on with an active mask that no longer
++    * describes which threads are really live. Arithmetic still produces
++    * numbers, the shader still returns, and nothing anywhere reports a
++    * problem. A subgroup operation is where it becomes visible: ballot,
++    * elect and the scans all answer questions *about* the active mask, so a
++    * wrong mask is a wrong answer rather than a slow one.
++    *
++    * The limit is easier to reach than it looks on a8xx. It is the only
++    * device with has_dual_wave_dispatch, which runs the pass above a second
++    * time with wave_pair_divergence, and that pass deliberately treats every
++    * two-way branch as divergent -- a pair of co-issued waves may diverge
++    * where a single wave cannot. A shader with deeply nested control flow
++    * therefore counts far more outstanding reconvergence points here than on
++    * any other generation, and a8xx is also the one generation with no CI
++    * list under src/freedreno/ci.
++    *
++    * This does not fix anything. Spilling the branchstack is the fix and is
++    * still an open TODO in ir3_get_reg_independent_max_waves(). What it
++    * removes is the silence, for every shader and every title, so a
++    * miscompile of this kind is reported by the driver instead of being
++    * mistaken for a game bug.
++    */
++   if (so->compiler && so->branchstack > so->compiler->max_branchstack) {
++      mesa_logw("%s: needs a branchstack of %u but the hardware has %u; "
++                "reconvergence points past the limit are dropped, and any "
++                "subgroup operation in this shader may see the wrong active "
++                "mask.",
++                so->name, so->branchstack, so->compiler->max_branchstack);
++   }
+ }
