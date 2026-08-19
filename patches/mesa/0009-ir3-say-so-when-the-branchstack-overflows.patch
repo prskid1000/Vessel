@@ -4,11 +4,11 @@ freedreno/ir3: say so when a shader needs more reconvergence points than exist.
 
     align(MIN2(v->branchstack, v->compiler->max_branchstack), 2)
 
-and that `MIN2` is a silent truncation. `max_branchstack` is 64. Past it the
-hardware has nowhere left to park a diverged thread, so the thread is not
-parked and never reactivated, and the wave continues with an active mask that
-no longer says which threads are live. Arithmetic still produces numbers, the
-shader still returns, and no layer reports anything.
+and that `MIN2` is a silent truncation. Past the cap the hardware has nowhere
+left to park a diverged thread, so the thread is not parked and never
+reactivated, and the wave continues with an active mask that no longer says
+which threads are live. Arithmetic still produces numbers, the shader still
+returns, and no layer reports anything.
 
 **Subgroup operations are where a wrong mask stops being invisible.** `ballot`,
 `elect` and the ballot scans do not merely run *under* the active mask, they
@@ -27,6 +27,16 @@ control flow therefore accumulates far more outstanding reconvergence points
 here than the same shader does on a7xx. a8xx is also the only generation with
 no list under `src/freedreno/ci`, so nothing has ever tested this path.
 
+**It writes to stderr, and not through `mesa_logw()`, and that is the point of
+the patch rather than a detail of it.** On Android `mesa_log()` defaults to
+`MESA_LOG_CONTROL_ANDROID` (`src/util/log.c`) and goes to logcat -- a ring
+buffer that rolls in minutes, and which a host capturing the guest's output
+never sees at all. The first version of this patch used `mesa_logw()` and
+produced exactly the failure it exists to prevent: a run that said nothing,
+indistinguishable from a run with nothing to say. `xmlconfig.c` reaches for
+stderr in the same situation and explains why in a comment -- "don't use
+XML_WARNING, we want the user to see this!"
+
 **This fixes nothing, and says so.** Spilling the branchstack is the fix, and
 it is still an open question in the tree's own words --
 `ir3_get_reg_independent_max_waves()` carries "TODO: Could we spill branchstack
@@ -35,30 +45,24 @@ removes is the silence. A miscompile of this kind currently presents as a game
 rendering the wrong thing, with every layer in the stack reporting success;
 after this the driver names it, for every shader and every title.
 
-Chosen over any behavioural change deliberately. `has_dual_wave_dispatch`
-programs no register -- it appears only in `ir3_compiler.c:275` sizing the
-branchstack pool and in the gate above -- so clearing it would not stop the
-hardware co-issuing waves, only stop the compiler compensating for it. There is
-no safe global switch here, and a warning cannot regress a title that works.
-
 diff --git a/src/freedreno/ir3/ir3_reconvergence.c b/src/freedreno/ir3/ir3_reconvergence.c
-index b0d24342520..168e76193e3 100644
+index b0d24342520..171ae6836fb 100644
 --- a/src/freedreno/ir3/ir3_reconvergence.c
 +++ b/src/freedreno/ir3/ir3_reconvergence.c
 @@ -63,6 +63,7 @@
  #include "util/rb_tree.h"
  #include "util/u_worklist.h"
  #include "util/ralloc.h"
-+#include "util/log.h"
++#include <stdio.h>
  
  struct logical_edge {
     struct uinterval_node node;
-@@ -420,4 +421,43 @@ ir3_calc_reconvergence(struct ir3_shader_variant *so)
+@@ -420,4 +421,55 @@ ir3_calc_reconvergence(struct ir3_shader_variant *so)
     }
  
     calc_reconvergence(so, false);
 +
-+   /* Say so when the shader needs more reconvergence points than the hardware
++   /* Say so when a shader needs more reconvergence points than the hardware
 +    * has, because nothing else does.
 +    *
 +    * ir3_shader_branchstack_hw() ends in
@@ -83,6 +87,15 @@ index b0d24342520..168e76193e3 100644
 +    * any other generation, and a8xx is also the one generation with no CI
 +    * list under src/freedreno/ci.
 +    *
++    * **stderr, and not mesa_logw().** On Android mesa_log() defaults to
++    * MESA_LOG_CONTROL_ANDROID (src/util/log.c) and goes to logcat, which is a
++    * ring buffer that rolls in minutes and which a host capturing the guest's
++    * output never sees. A warning about a miscompile that is itself lost is
++    * worth nothing -- this was written with mesa_logw() first and produced
++    * exactly that: a silent run that could not be told apart from a clean
++    * one. xmlconfig.c reaches for stderr for the same reason and says so:
++    * "don't use XML_WARNING, we want the user to see this!"
++    *
 +    * This does not fix anything. Spilling the branchstack is the fix and is
 +    * still an open TODO in ir3_get_reg_independent_max_waves(). What it
 +    * removes is the silence, for every shader and every title, so a
@@ -90,10 +103,13 @@ index b0d24342520..168e76193e3 100644
 +    * mistaken for a game bug.
 +    */
 +   if (so->compiler && so->branchstack > so->compiler->max_branchstack) {
-+      mesa_logw("%s: needs a branchstack of %u but the hardware has %u; "
-+                "reconvergence points past the limit are dropped, and any "
-+                "subgroup operation in this shader may see the wrong active "
-+                "mask.",
-+                so->name, so->branchstack, so->compiler->max_branchstack);
++      fprintf(stderr,
++              "ir3: %s needs a branchstack of %u but the hardware has %u; "
++              "reconvergence points past the limit are dropped, and any "
++              "subgroup operation in this shader may see the wrong active "
++              "mask.
++",
++              so->name ? so->name : "<shader>", so->branchstack,
++              so->compiler->max_branchstack);
 +   }
  }
