@@ -248,10 +248,12 @@ and both were free to avoid.
   "These shaders clamp the wave size to 32, but misses this in a few places of
   course ..." — PRAGMATA is Capcom RE Engine too. Requiem simply had no entry.
   Applied game-wide rather than by hash: the quirk gates itself on the
-  workgroup being exactly 32 threads (`dxil_waveops.cpp`), so it reaches every
-  shader at risk and is inert for the rest. Confirmed on device — vkd3d
-  `3000116`, `Detected game re9.exe, adding shader quirks`, and the room has
-  walls.
+  entry point name, not the executable: all five shaders dumped from Requiem
+  carry `PersistentClusterCulling`, byte-identical to the name PRAGMATA already
+  matches, because it is RE Engine's own culling pass rather than anything
+  per-game. One entry therefore covers both titles and any later one shipping
+  the pass unchanged. Confirmed on device — vkd3d `3000116`, `Detected game
+  re9.exe, adding shader quirks`, and the room has walls.
 
   **What this entry cost, and the one lesson worth keeping.** Six theories died
   before it: LRZ, UBWC, tiling, depth compression, the upscalers, the present

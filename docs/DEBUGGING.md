@@ -175,6 +175,100 @@ When another runtime works on the same hardware, **diff the runtimes before
 instrumenting yours**. What differs is a short list; what you wrote is a long
 one.
 
+## Read what the shader assumes about the device
+
+**The longest-running bug in this project was in the application, and sixteen
+hypotheses about the driver died first.**
+
+`#56` -- half a room's geometry missing, deterministically, with no error from
+any layer -- was RE Engine's culling shaders reading `WaveGetLaneCount()` and
+clamping it to their 32-thread group in three places out of five. On a device
+reporting 64 the unclamped reads stride twice as far as the lanes that exist,
+so every second cluster is never processed. The driver was correct throughout.
+
+What made it invisible is worth naming, because the same properties will
+reappear:
+
+- **It is arithmetic, so it is perfectly deterministic.** That reads like a
+  driver bug -- races are not this stable -- and it was used as evidence for
+  one.
+- **Nothing failed.** No validation error, no `VK_ERROR`, no FIXME. The shader
+  ran and did exactly what it was told, and what it was told was wrong. The
+  audio bug of 2026-08-16 has the identical shape: a WASAPI mix format that
+  was float32 while the code said int16, with every layer reporting success.
+- **The damage was partial**, which invites the theory that something is
+  corrupting *some* state. It was partial because the 128-thread variants of
+  the same shaders clamp correctly and only the 32-thread ones are wrong.
+- **It works on desktop.** NVIDIA reports a 32-wide wave and RADV picks wave32
+  for small compute groups, so the assumption holds there and nowhere in the
+  title's own testing would it have shown.
+
+So: **when a title misbehaves on one device and not another, read what the
+shader assumes about the device before deciding the device is wrong.** The
+assumptions worth checking first are the ones a desktop GPU makes true by
+accident -- wave width, subgroup size, workgroup packing, and anything derived
+from them.
+
+### The disassembly said so hours before anyone understood it
+
+This is the part to actually learn from. The shaders were dumped with
+`VKD3D_SHADER_DUMP_PATH`, disassembled with `spirv-dis`, and the output
+contained, side by side:
+
+    %364 = OpExtInst %uint %320 UMin %uint_32 %363   ; clamped
+    %403 = OpIMul  %uint %402 %401                   ; raw, unclamped
+
+That asymmetry was printed, read, written down as "exactly where a wave-size
+assumption could break" -- and then not followed, because a compiler warning
+elsewhere in the same session looked more like a lead. The warning was noise.
+
+**A noticed anomaly that is not chased is worse than one never seen**, because
+it is spent: nobody looks again. When something reads as odd enough to write
+down, resolve it to a yes or a no before moving to the next hypothesis.
+
+### The instruments that found it, in the order they were used
+
+Recorded because half of them contributed nothing and it was not obvious in
+advance which half.
+
+| # | Instrument | What it gave |
+|---|---|---|
+| 1 | `VKD3D_SHADER_DEBUG=warn` | five `no candidate for ladder merging` warnings. **The lead was false** -- the restructurer's output is valid and faithful -- but it named five shaders out of thousands, which is the only reason the next step was tractable |
+| 2 | `VKD3D_SHADER_DUMP_PATH` | every translated shader written out as `<hash>.spv` / `.dxil`. Forces `pipeline_library_ignore_spirv`, so the run is a full rebuild and slow |
+| 3 | pairing 1 and 2 by thread id | the five hashes. The warning does not name a shader; the dump does not say which warned. Both in one fresh-compile session is what joins them |
+| 4 | `spirv-dis` (`spirv-tools` in the build image) | the disassembly, where the unclamped `SubgroupSize` read sits four lines from the clamped one |
+| 5 | `VKD3D_SHADER_OVERRIDE` | **the decisive one.** Replacing the five with rewritten modules changed the picture, which proved they execute in that scene. Nothing else could establish relevance rather than correlation |
+| 6 | `strings` on the `.dxil` | the entry point name `PersistentClusterCulling`, which is what connects this title to the one upstream already fixed |
+| 7 | `freedreno_devices.py` / `tu_device.cc` | `threadsize_base = 64`, unoverridden -- the other half of the arithmetic |
+| 8 | `grep` in `application_shader_quirks[]` | PRAGMATA's entry, the fix, and the comment describing the identical mistake |
+| 9 | the `components:` session line | that the built driver was the one that ran. Added *because* of this bug; three separate times it was answered by pulling `provisioned.json` off the device by hand |
+
+Two things generalise from that table.
+
+**A false lead that narrows the search is still worth having.** The ladder
+warning was noise about the actual defect and indispensable anyway: it cut
+thousands of shaders to five. Do not discard an instrument because its theory
+turned out wrong -- ask what it selected.
+
+**Relevance and correctness are separate questions, and relevance comes
+first.** For weeks the entry had a list of suspects and no way to ask "does
+this even run in the broken scene?". `VKD3D_SHADER_OVERRIDE` answers exactly
+that, in one run, by substitution -- and the answer reframed everything that
+followed. Reach for a substitution instrument before another observation one.
+
+### Check whether upstream already fixed it for a sibling title
+
+vkd3d-proton had shipped the fix three months earlier, for PRAGMATA, under the
+comment *"These shaders clamp the wave size to 32, but misses this in a few
+places of course ..."*. PRAGMATA is the same engine from the same studio, and
+the entry point name -- `PersistentClusterCulling` -- is byte-identical in
+both. Grepping the vendored tree for the symptom's vocabulary (`wave`,
+`subgroup`, `WaveGetLaneCount`) in `application_shader_quirks[]` would have
+found it in a minute.
+
+**A per-title workaround table is a list of bugs other people have already
+diagnosed.** Read it before instrumenting anything.
+
 ## Tools that work here, and one that does not
 
 - `WINEDEBUG=+seh,+unwind` gives a clean ARM64 unwind and named the FEX config
