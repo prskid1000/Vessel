@@ -48,11 +48,15 @@ picture"**. The game loads, runs, holds a frame rate and plays sound; what it
 does not do is draw the world. Everything below the graphics layer — Wine's
 virtual memory, FEX's translation, the exception path, the loader, the critical
 sections — has been chased to the bottom and is no longer where the failures are.
-**The live blocker is #56, and it is the first one in this file that produces no
-error message at all.**
+**#56 is fixed as of 2026-08-19, and it was never a driver bug.** The one
+blocker in this file that produced no error message at all turned out to produce
+none because nothing had failed: RE Engine's culling shaders read
+`WaveGetLaneCount()` and clamp it to their threadgroup in three places out of
+five, so on a device reporting 64 where they assume 32 they skip every second
+item and draw half the room. `patches/vkd3d/0008`.
 
-Audio came right on 2026-08-16 and the shape of that bug is worth carrying into
-#56, because it is the same shape. Six theories died before the real one:
+Audio came right on 2026-08-16 and the shape of that bug was carried into #56,
+where it turned out to be the same shape exactly. Six theories died before the real one:
 `oss_get_mix_format` reported int16, but a WASAPI shared-mode mix format has been
 32-bit float on every Windows since Vista, so Wwise wrote float samples into an
 int16 stream. Nothing logged an error — the stack was doing exactly what it was
@@ -207,370 +211,68 @@ and both were free to avoid.
   substitution. **Keep the log** for any run that tests a hypothesis.
 ---
 
-- [ ] **#56 — the world is not drawn.** Standing inside a house basement, the
-  room's own geometry is missing while the city outside is visible through where
-  the walls should be, and props render as unlit black. The game is interactive
-  and does not fault.
+- [x] **#56 — the world is not drawn. Fixed 2026-08-19: the shaders ask for the
+  wave size and are told twice what they expect.** Standing inside a house
+  basement, the room's own geometry was missing while the city outside showed
+  through where the walls should be. Interactive, no fault, no error logged by
+  any layer, deterministic to the object.
 
-  **It is a transition, not a constant, and that was not recorded until
-  2026-08-19.** The street outside renders correctly. Corruption begins on
-  entering the region where the house is, and inside it the exterior buildings
-  draw where the interior should be. A globally broken capability would break
-  everywhere; something specific to that content triggers this, which is why the
-  flag sweeps below all came back identical.
+  **The cause.** RE Engine's cluster-culling compute shaders read
+  `WaveGetLaneCount()` six times. Three reads go through `UMin(32,
+  SubgroupSize)`. The load-bearing ones do not:
 
-  **The failure is downstream of submission. Measured 2026-08-19, and it is the
-  only positive constraint this entry has.** Walking into the room, the `d3d`
-  card moved:
+      base    = waveSize * groupIdx
+      offset  = base + WavePrefixCountBits(true)   // lane rank, 0..31
+      stride += waveSize
+      groups  = ceil(count / waveSize)
 
-      draws/frame   1.0/25.7/55.0  ->  1.0/83.2/183.0
-      gpu %              41.6 mean  ->  61.3 mean, 95 peak
+  The shader means wave size to equal its threadgroup, 32. Turnip reports 64 --
+  `threadsize_base` defaults to 64 (`freedreno_dev_info.py:108`) and neither
+  `a7xx_base` nor `a8xx_base` overrides it. Lane ranks then cover 0..31 of a
+  window advanced by 64, and `ceil(count / 64)` dispatches half the groups.
+  **Exactly every second item is never processed.**
 
-  The game submits *more* geometry there and the GPU executes it. That kills
-  four families at once: game-side culling, a resource failing to load, an
-  `ExecuteIndirect` being dropped, and the `0x100` faults. Whatever is wrong
-  happens to work that is issued and run.
+  **Why it looked like a driver bug for weeks, and was not.** Every property
+  that made this hard to find falls out of that one line of arithmetic:
 
-  **The log contains almost no graphics error, warning or FIXME** — which was
-  long the strongest fact here, because it rules out every failure that announces
-  itself. It is no longer quite true: `VKD3D_SHADER_DEBUG=warn` produces five
-  `dxil-spirv: There is no candidate for ladder merging.` warnings
-  (`cfg_structurizer.cpp:6299`), on the shader compile threads, on a fresh
-  compile only. They are the one compiler-level complaint this bug has ever
-  produced and are the current lead.
-
-  **The five have been dumped and disassembled, and they are one subsystem,
-  not five unrelated shaders.** `spirv-tools` is in the build image now, so
-  the `.spv` files the dump row writes can be read. Pairing the warnings to
-  the dump by thread gave five hashes; disassembling them gives this:
-
-  | hash | LocalSize | lines | ladder phis |
-  |---|---|---|---|
-  | `7f36f1848d191aa8` | 128 | 2627 | 54 |
-  | `a9b1e2c0dcdbd0fe` | 32 | 2626 | 54 |
-  | `86453e3039839573` | 128 | 1982 | 45 |
-  | `b677d48c0873c782` | 32 | 1981 | 45 |
-  | `a88b8df304ef3bd2` | 32 | 1956 | 46 |
-
-  Two matched pairs differing by a single line and their threadgroup size —
-  the same shader compiled at 128 and at 32 — plus one more. Every one is
-  `GLCompute` with an identical capability set: `GroupNonUniformBallot`,
-  `GroupNonUniformShuffle`, `RuntimeDescriptorArray`,
-  `StorageBufferArrayNonUniformIndexing`, `PhysicalStorageBufferAddresses`.
-  They all read the `SubgroupSize` builtin and clamp it with
-  `UMin(32, SubgroupSize)`, so they are written to adapt to wave size rather
-  than assume one.
-
-  **All five pass `spirv-val` clean.** That matters more than it looks. The
-  restructurer complained, but it did not emit illegal SPIR-V, so nothing
-  downstream — Turnip, ir3 — is being handed something malformed. Whatever is
-  wrong here is a *semantic* difference, not a validity one, which is why no
-  layer in the stack has ever logged a word about it.
-
-  **What they do.** The opcode mix in `a88b8df304ef3bd2`, and the others are
-  the same shape:
-
-      OpGroupNonUniformBallot          29     OpAtomicIAdd              15
-      OpGroupNonUniformBallotBitCount  28     OpAtomicCompareExchange    2
-        of which ExclusiveScan         16     OpAtomicOr                 2
-      OpGroupNonUniformBroadcastFirst  16     OpAtomicUMin               1
-      OpGroupNonUniformElect            3     OpControlBarrier           1
-
-  Ballot, then an exclusive bit-count for this lane's slot, then one elected
-  lane does an `atomicAdd` to reserve a run, then `BroadcastFirst` hands the
-  base back to the wave. That is **subgroup-compacted atomic append**, the
-  standard way a GPU-driven pass writes a variable-length output list —
-  visible instances, surviving draws, a culled index buffer. Repeated 29 times
-  in one shader, it is the whole point of the shader, not an incidental use.
-
-  **Why that shape is worth pursuing, stated as the hypothesis it is.** A
-  ballot's answer depends on exactly which lanes are active where it executes.
-  dxil-spirv could not structurise this control flow — that is what the
-  warning says — and the 45 to 54 `frontier_phi_*.ladder` and `ladder_phi_*`
-  values in each module are the rewrite it produced instead. A rewritten CFG
-  reaches the same ballot with a different active mask, a different mask gives
-  different compaction offsets, and different offsets put a **different subset**
-  of objects in the output list. The symptom is a wrong subset of objects
-  drawn, in a scene the CPU still has full knowledge of — collision holds
-  against walls that are not rendered. The shapes match. That is a reason to
-  test, not a finding.
-
-  **The gap, and it is the only one that matters: there is still no evidence
-  these run in that room.** A warning at compile time says a shader was hard
-  to translate. It does not say the shader is wrong, and it does not say it
-  executes in the basement. Every previous lead in this entry died at exactly
-  this step, and this one is not exempt.
-
-  **This is not a new discovery, and that is the strongest thing about it.**
-  `patches/mesa/0007` already describes this exact loop -- "ballot for the
-  active count, an exclusive scan for this lane's index, one lane doing the
-  `atomicAdd`, `WaveReadLaneFirst` to share the base back" -- found in **33 of
-  the 2,867 shaders one session compiled**, and fixed a *hang* by taking
-  128-wide waves away from a8xx. The five shaders here are the same machinery.
-  It no longer hangs. The question is whether it is still producing wrong
-  answers where it used to produce none.
-
-  That patch also records the rewrite that worked: "all 33 loops rewritten to
-  a per-lane `atomicAdd`, each assembled and `spirv-val` clean", kept out of
-  the tree because a per-shader override is the wrong place to fix a driver
-  defect. **It is the right place to test one.**
-
-  **The experiment is staged and takes one run.** Each of the five is
-  disassembled, rewritten by four substitutions, reassembled and validated:
-
-      Elect                     -> true            every lane elects itself
-      BallotBitCount Reduce     -> pred ? 1 : 0    it reserves one slot, its own
-      BallotBitCount Exclusive  -> 0               which is at offset zero
-      BroadcastFirst x          -> x               and the base is already mine
-
-  Between 12 and 17 reductions, 16 to 21 scans and broadcasts, and 3 elects per
-  shader, with nothing left untraced. The *set* of items written is unchanged;
-  only their order is, and an append order was never guaranteed. What is
-  removed is every dependence on the wave agreeing about which lanes are
-  active -- which is the whole hypothesis, deleted from the shader.
-
-  If the room renders, the mechanism is confirmed and the work moves to the
-  driver. If it does not, all five die together and the ladder-merging warning
-  is noise. Unlike a stub, this one keeps the game rendering either way, so a
-  partial result is still readable.
-
-  **The global fix is deliberately not written yet, and here is why.** The ask
-  is a driver change so this cannot happen to any shader in any title again,
-  and that is the right target -- but it changes wave behaviour for every
-  shader this device ever runs, and the two candidates are different work:
-
-  | if the run says | the fix is |
+  | observation | why |
   |---|---|
-  | the wave pair diverges across subgroup ops | dispatch single-wave for shaders that use them, rather than relying on join-point marking to hold a pair together |
-  | the restructured CFG is what breaks the mask | it is a dxil-spirv defect, reported upstream with these five as the reproducer, and worked around here by wave-size or full-subgroup pipeline flags |
+  | perfectly deterministic | it is arithmetic, not a race |
+  | collision holds against invisible walls | the CPU never sees it; only the GPU's output list is short |
+  | not one error in any layer | nothing failed — the shader ran and did what it was told |
+  | only *some* geometry missing | the `LocalSize 128` shaders in the same set clamp to 128 and are correct |
+  | fine on desktop | NVIDIA reports 32; RADV picks wave32 for small compute groups |
 
-  Committing to either before the run is how six theories died in this entry
-  already, and `07493a0` is in this log for shipping a global build change that
-  regressed a title that worked. One run separates them.
+  **The fix is `patches/vkd3d/0008`**, and upstream had already written it for
+  the same engine. `device.c` carries `pragmata_hashes` under the comment
+  "These shaders clamp the wave size to 32, but misses this in a few places of
+  course ..." — PRAGMATA is Capcom RE Engine too. Requiem simply had no entry.
+  Applied game-wide rather than by hash: the quirk gates itself on the
+  workgroup being exactly 32 threads (`dxil_waveops.cpp`), so it reaches every
+  shader at risk and is inert for the rest. Confirmed on device — vkd3d
+  `3000116`, `Detected game re9.exe, adding shader quirks`, and the room has
+  walls.
 
-  **THE RUN HAPPENED, AND THE PICTURE CHANGED. The five shaders run in that
-  scene.** 2026-08-19, session `1787132262073`. All five overrides were loaded
-  -- `vkd3d_shader_replace_path` names each hash -- the ladder-merging warnings
-  went to **zero** because those five no longer pass through the translator,
-  and the title ran to a playable frame with no device loss. The user's report
-  was immediate and unambiguous: *"di complete messeup up"*, *"looks very
-  bad"*.
+  **What this entry cost, and the one lesson worth keeping.** Six theories died
+  before it: LRZ, UBWC, tiling, depth compression, the upscalers, the present
+  path, placed-versus-committed resources, `instruction_qa_checks`,
+  `descriptor_qa_checks`, `skip_application_workarounds`, the whole upstream
+  stack being old, an RE Engine 16-bit quirk, a compute-barrier quirk, 64-bit
+  image atomics, a GPU capture route that produced 1.5 GB and zero command
+  streams, and finally a dxil-spirv ladder-merging warning that turned out to
+  be noise. Every one of them was a driver hypothesis. **The answer was in the
+  shader, and it had been printed on screen hours before it was understood** —
+  `UMin(32, SubgroupSize)` beside a raw `OpLoad %SubgroupSize` in the same
+  disassembly, noted as "exactly where a wave-size assumption could break" and
+  then not followed. When a title misbehaves on one device and not another,
+  read what the shader assumes about the device before deciding the device is
+  wrong.
 
-  **That is the relevance question answered.** A stub could have told us this
-  and nothing else; the rewrite told us this while the game kept rendering.
-  Only two things have ever moved this picture -- `has_64b_image_atomics =
-  False`, and now replacing these five shaders. Every flag sweep in the table
-  above came back identical. **These shaders draw this scene.**
-
-  **The rewrite itself was wrong, and the way it was wrong is the next
-  clue.** `Elect -> true` and `BroadcastFirst -> identity` were applied to
-  *every* site, not only to the append reservations they were reasoned about.
-  Those two substitutions are safe only where an elected lane reserves a run
-  and broadcasts the base back. Elsewhere `Elect` guards work that must happen
-  once per wave -- doing it 64 times is not equivalent -- and `BroadcastFirst`
-  is dxil-spirv's way of making a value provably uniform, which identity
-  destroys. 3 elects and 16-21 broadcasts were rewritten per shader; only the
-  handful feeding an `OpAtomicIAdd` should have been.
-
-  So "worse" does not confirm the mechanism, and must not be read as though it
-  did. It confirms *relevance* only. The next rewrite is the narrow one:
-  starting from each `OpAtomicIAdd` whose operand is a `BallotBitCount Reduce`,
-  rewrite only that site's ballot, scan, elect and broadcast, and leave every
-  other subgroup op alone.
-
-  Measured, for the record -- draws/frame `1.0/36.8/73.0`, presented fps
-  `5.4/28.2/57.0`.
-
-  **And a correction, made the same day the number was written down.** That
-  reading was compared against a later baseline session that reached
-  `1.0/49.1/139.2`, and the gap was read as the override suppressing
-  submission. It is not evidence of anything: the two sessions were not in the
-  same scene state -- one had the lights off, which legitimately draws less.
-  **draws/frame is only comparable within a single session.** The street-to-
-  room transition at the top of this entry is a within-session measurement and
-  stands; any comparison of one launch's counts against another's does not,
-  and none should be made again.
-
-  **The dual-wave path is the only ir3 code in this driver no test has ever
-  run.** Looked up while pricing `VK_KHR_shader_maximal_reconvergence`, and it
-  is worth more than that extension is:
-
-  - `has_dual_wave_dispatch` appears **once** in the whole device table
-    (`freedreno_devices.py:1376`, `a8xx_base`). No other generation sets it.
-  - `src/freedreno/ci/` has fail, flake and skip lists for a200 through a750.
-    **There is no a8xx list at all.**
-  - a750 has **zero** subgroup failures and **zero** reconvergence failures --
-    one flake on a660, two skipped for being slow. ir3's reconvergence is
-    solid on the generation CTS actually runs on.
-  - and a750 does not use dual-wave dispatch.
-
-  So `ir3_calc_reconvergence`'s wave pass -- `calc_reconvergence(so, true)`,
-  `wave_reconvergence_point`, the conservative "treat every two-way branch as
-  divergent" at `ir3_reconvergence.c:225` -- runs only on a8xx, exists only
-  because subgroup ops can break across a wave pair, and has never been
-  covered by a test on any device. The one untested path is the one whose
-  stated purpose is the failure being investigated.
-
-  **Maximal reconvergence itself is not the lever it looks like.** Advertising
-  it is one line, and it is mostly a claim rather than machinery -- of the six
-  Mesa drivers that expose it, four have no code behind it at all, and the
-  only real consumer in the tree (`radv_shader.c:955`) *disables* an NGG
-  culling optimisation rather than implementing a guarantee. ir3 already has
-  the structure it describes: a branchstack that parks threads and a `(jp)`
-  that reactivates them. But it would not reach these shaders. dxil-spirv
-  emits `MaximallyReconvergesKHR` for compute only under
-  `force_maximal_reconvergence` (`dxil_converter.cpp:7734`), which vkd3d does
-  not set; the automatic triggers are fragment helper-lane and quad-derivative
-  cases. SM 6.7 additionally needs `VK_KHR_shader_quad_control`, which Turnip
-  does not implement in any form.
-
-  **What has been eliminated, so none of it is re-run.** Each was tested on the
-  device, against the same scene:
-
-  | eliminated | how |
-  |---|---|
-  | shader and pipeline caches | invalidated; the rebuild was watched happening and the picture did not change |
-  | the ir3 compiler | run with `IR3_SHADER_DEBUG` variations plus `nocache`, since the flags do not invalidate the cache on their own |
-  | LRZ, and LRZ fast-clear | `TU_DEBUG=nolrz`, `nolrzfc` |
-  | UBWC | `TU_DEBUG=noubwc`, and separately `patches/vkd3d/0006` |
-  | tiling versus direct rendering | `TU_DEBUG=sysmem`, `nobin`, `forcebin` |
-  | driver-side batching | `TU_DEBUG=flushall` |
-  | vkd3d's initial layout transition | `force_initial_transition` off |
-  | placed versus committed resources | `patches/vkd3d/0006` |
-  | the upscalers | already off before the symptom was reported |
-  | the present path | reproduces on both DRI3 and the software copy |
-  | the `0x100` write faults | 116 access violations in one session, 40 of them a write to `0x100`, all unwinding to one instruction. Spread evenly from startup to exit across several threads, so they fire while the street renders correctly too. The faulting addresses move between runs — they are FEX JIT addresses, not stable code |
-  | depth compression | `VKD3D_CONFIG=disable_depth_compression`, confirmed reaching the game in `vkd3d_config_flags_init_once`. **Not the same as UBWC above, which is colour** |
-  | shader instruction validation | `VKD3D_CONFIG=instruction_qa_checks` — upstream's own workaround for RE9 issue #2852 — reported nothing and changed nothing |
-  | descriptor validation | `VKD3D_CONFIG=descriptor_qa_checks`, likewise silent, on a title the log confirms uses `VK_EXT_descriptor_buffer` and `VK_EXT_mutable_descriptor_type` |
-  | vkd3d's per-title workarounds | `VKD3D_CONFIG=skip_application_workarounds`. vkd3d recognises `re9.exe` by hash (`ed6f44f228a0a503`) and none of its 49 entries is the cause |
-  | invariant vertex position | `VKD3D_CONFIG=no_invariant_position` |
-  | the whole upstream stack being old | 2026-08-19 moved Wine to `34e7d58e`, vkd3d to master `4b9ab838` (+277 commits, including an RE Engine shader quirk for PRAGMATA), DXVK to v3.0.2, Turnip to `260309`. Unchanged |
-  | the RE Engine 16-bit/`min16` quirk (`patches/vkd3d/0008`) | `re9.exe` launched against the installed `3000109` build with the quirk live; the walls were still missing |
-  | the compute-barrier quirk (`FORCE_COMPUTE_BARRIER`) | `re9.exe` run on vkd3d `3000111`, prefix `d3d12core.dll` verified byte-identical to that build; walls still missing. `patches/vkd3d/0008` is deleted — the tree carries no RE9 quirk |
-
-  **The one change that has ever altered the picture, and it is not a fix.**
-  `has_64b_image_atomics = False` for a8xx made the room look *worse*, and every
-  other hypothesis in this entry produced output identical to the last. Two
-  things follow. Requiem uses 64-bit typed atomics — removing them made it fall
-  back to something poorer, which it could not do if it were not using them. And
-  Turnip's implementation of them is at least partly working, or removing it
-  could not have cost anything. So the atomics are exonerated as the cause, and
-  the visibility-buffer reading of the symptom — depth and primitive id packed
-  into one 64-bit value, resolved with `InterlockedMax` — moves from speculation
-  to plausible. The patch is deleted; the driver ships them on.
-
-  The evidence that made it worth trying is still true and still not about this
-  bug: `ci/freedreno-a750-fails.txt` shows ir3 *asserting* on the 64-bit image
-  path (`ir3_image.c:101`, three `r64ui` tests marked `Crash`), a vkd3d test
-  fails there under the comment "Enabled by EXT_shader_image_atomic_int64", and
-  WinNative-Emu ships A8xx Turnip with the extension disabled. That is a driver
-  gap worth knowing about; it is not this.
-
-  **The GPU capture route is built and does not answer the question yet.**
-  `FD_RD_DUMP` is a diagnostics row now (Off / Commands / Commands and buffers),
-  freedreno's `cffdump` builds against this tree and decodes our chip id
-  correctly, and captures land in the container's `tmp`. What comes out is not
-  usable: a 1.5 GB intact capture holds 5,354 `RD_GPUADDR` sections and 5,354
-  `RD_BUFFER_CONTENTS` sections totalling 4.7 GB, and **no `RD_CMDSTREAM_ADDR`
-  section at all**. Turnip writes one per entry in `dump_cmds`
-  (`tu_queue.cc:536-541`), so the captured submits carry buffers and no command
-  buffers, and a decoder has nothing to start from — zero draw packets on a frame
-  the `d3d` card measured at 83 draws. Why `dump_cmds` is empty is Turnip-side
-  work on the a8xx submit path, not a setting, and is where this resumes.
-
-  **Two corrections to this entry, both of which cost sessions.**
-
-  *`nolrz` never tested depth.* It is listed above as eliminating LRZ and it
-  does — the low-resolution Z *optimisation*. The depth test runs underneath it
-  either way, so a fault in the compare op, the clear value, the viewport range
-  or the buffer format would survive that flag untouched and was read as "depth
-  is fine". Depth compression is now eliminated separately; the depth *state* is
-  still only reachable through a capture.
-
-  *A flag that is set is not a flag that ran.* Five device sessions on
-  2026-08-19 tested nothing, each silently: `VKD3D_SHADER_MODEL` does not exist
-  in this vkd3d at all (`d3d12_device_caps_init_shader_model` reads no
-  environment); `VKD3D_CONFIG` is in `RESERVED_SESSION_ENV` so the free-text env
-  table drops it, and it must be a `vkd3dconfig` row; `FD_RD_DUMP` was declared,
-  composed, and then dropped by the `DIAGNOSTIC_SESSION_ENV` allowlist
-  (`SessionEnvironment.kt:2308`); a Mesa edit made in the checkout was destroyed
-  by `fetch_source`'s `git checkout --force` before the build ran; and
-  `build/turnip.sh` defaulted to the HAL while the APK ships the ICD, so a driver
-  change went into a package nothing installs. **Read the value back out of the
-  running guest before believing an experiment happened** —
-  `vkd3d_config_flags_init_once` prints the composed `VKD3D_CONFIG`, and that one
-  line would have caught four of the five.
-
-  **The standing lead is downgraded, and here is why.** Every session log on
-  this device prints `vkd3d_init_device_caps: Not all relevant pipeline stages
-  are supported by EXT_dgc. Skipping.` That was read as a clue about this
-  scene. It is not one: Turnip implements no part of
-  `VK_EXT_device_generated_commands` at all — zero matches across
-  `native/mesa/src/freedreno` — so the line fires on **every** Turnip session
-  regardless of what the title draws. It is unconditional noise, not evidence
-  about the basement.
-
-  **The mechanism read off that line does not exist either.** With EXT_dgc
-  unavailable, `requires_state_template` can never be true (the gate is in
-  `device.c`), so the compute-shader "patch the argument buffer" path is dead
-  code on this device. For a plain draw-only command signature, vkd3d's
-  fallback is a **direct passthrough** to `vkCmdDrawIndirect` /
-  `vkCmdDrawIndexedIndirect` / `*IndirectCount` — no compute patching runs.
-  RE Engine still draws world geometry indirectly and props conventionally,
-  the same split as the symptom, but "the patching pass corrupts it" was never
-  the right question, because there mostly is no patching pass to blame.
-
-  **There is a genuinely silent drop, and it no longer is one.** `command.c`
-  ~17176-17181 discarded a whole `ExecuteIndirect` behind only a GPU
-  debug-marker label — invisible without a capture, and logging nothing — when
-  `argument_buffer_offset_for_command` is nonzero. It is reachable only for
-  signatures that would have needed the state template, and those already log
-  a FIXME at signature-creation time (`command.c:25602`); RE9's log shows zero
-  such FIXMEs, so this path is probably not hit. "Probably" is exactly the
-  ambiguity that cost a session, so it now carries a `FIXME_ONCE` naming the
-  byte offset and the command count it drops (`patches/vkd3d/0007`,
-  `VKD3D_REVISION=10`).
-
-  **The instrument for the real question exists, shipped, installed — and has
-  still never produced a reading.** `patches/vkd3d/0007` counts
-  `ExecuteIndirect` calls and the commands they were given, per frame, on the
-  `d3d · indirect` card. A frame drawing a basement with no walls should still
-  be issuing indirect draws; a zero counter says the app stopped asking, a
-  nonzero one says it is still asking and the missing geometry is downstream
-  of the call vkd3d actually makes with it — the direct passthrough above, not
-  a patching pass.
-
-  The 2026-08-17 session was supposed to be that run. vkd3d `3000107` was
-  installed and verified on the device, and the counters still wrote nothing —
-  because **neither producer could open `VESSEL_GFX_STATS` at all**, for a reason
-  that had nothing to do with this entry and is now fixed host-side (see the
-  entry in *Fixed, and waiting for the run that would prove it*). This blocker
-  was never tested; it was only ever waiting behind a second, invisible one.
-
-  **`patches/vkd3d/0008` was tried, and it did not fix this.** `re9.exe` is
-  present as a string inside the installed
-  `components/VKD3D/3000109/system32/d3d12core.dll`, the games container is
-  provisioned with that build, and `re9.exe` has already been launched against
-  it — walls still missing. Added to the eliminated table above: the RE Engine
-  16-bit/`FORCE_MIN16_AS_32BIT` quirk is not this bug, and no shape match
-  survives it. The `re_hashes` half was already known not to apply (they are
-  RE2/RE4 shader hashes); the global 32-bit half was the part still in play,
-  and it is now the part that has been tested and lost.
-
-  **What took a round trip to establish, and the discipline it earns.** No
-  `re9.exe` session survived in the retained log set, which this entry first
-  read as "never run" — wrong. It was run; the session's own log was deleted
-  afterward, so the record of a completed experiment was gone and the entry
-  had nothing left to distinguish that from an experiment nobody tried. A
-  claim standing on an absence is only as good as the reason for the absence,
-  and here the reason was housekeeping, not evidence. **Any run that tests a
-  hypothesis for #56 keeps its log**, full stop — this file has now paid once
-  for the alternative.
-
-  *Done when:* the room has walls. **Next step:** unchanged from before 0008
-  was tried — one session standing in the same basement, reading the indirect
-  counter, log kept this time. Nothing else in this entry needs doing first.
+  Three driver changes were made chasing it and two of them stay on merit:
+  `patches/mesa/0009` prints the branchstack when it exceeds the cap, because
+  nothing in Mesa ever printed it; `patches/vkd3d/0008` is the fix.
+  `patches/mesa/0010` raised the cap and is a measured no-op here — see its own
+  entry.
 ---
 
 ## Fixed, and waiting for the run that would prove it
