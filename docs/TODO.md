@@ -379,9 +379,17 @@ and both were free to avoid.
   other subgroup op alone.
 
   Measured, for the record -- draws/frame `1.0/36.8/73.0`, presented fps
-  `5.4/28.2/57.0`, against a street baseline of `1.0/25.7/55.0` and a room
-  reading of `1.0/83.2/183.0`. The room's signature never appeared, which is
-  consistent with the geometry that defines it not being submitted at all.
+  `5.4/28.2/57.0`.
+
+  **And a correction, made the same day the number was written down.** That
+  reading was compared against a later baseline session that reached
+  `1.0/49.1/139.2`, and the gap was read as the override suppressing
+  submission. It is not evidence of anything: the two sessions were not in the
+  same scene state -- one had the lights off, which legitimately draws less.
+  **draws/frame is only comparable within a single session.** The street-to-
+  room transition at the top of this entry is a within-session measurement and
+  stands; any comparison of one launch's counts against another's does not,
+  and none should be made again.
 
   **The dual-wave path is the only ir3 code in this driver no test has ever
   run.** Looked up while pricing `VK_KHR_shader_maximal_reconvergence`, and it
