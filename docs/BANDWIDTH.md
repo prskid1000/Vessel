@@ -547,7 +547,8 @@ answers, and `xcb_dri3_open` answering `nfd = 0` is *handled*, not fatal
 (`wsi_common_x11.c:144-147` returns −1, `:173-175` then assumes a compatible
 local device) — but reading is not running.
 
-**Ranked seventh, not first, deliberately.** `docs/TODO.md:472-477` records that
+**Ranked seventh, not first, deliberately.** `docs/DEBUGGING.md`
+("Corrections that must not be re-learned") records that
 present-path work costs ~0.5 ms against frame times in the tens of milliseconds,
 and §7 measured the stack GPU-bound at 95%. 1.5 ms a frame is real and it is
 also not where the frame is going.

@@ -581,7 +581,8 @@ field on `AppShortcut`.
 
 ## 8. TODO #17: how to tell an MSI failure from an MSIX one
 
-`docs/TODO.md:370-376` records a measured, open, unexplained failure: `msiexec`
+`docs/DEBUGGING.md` ("Resolved, in brief") records a measured, open,
+unexplained failure: `msiexec`
 loads `msi.dll`, `cabinet.dll`, `wintrust.dll` and `comctl32.dll`, draws a
 window, and the payload never lands in `C:\Program Files`.
 
