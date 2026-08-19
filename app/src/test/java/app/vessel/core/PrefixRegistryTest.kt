@@ -626,7 +626,7 @@ class PrefixRegistryTest {
         // without typing a path. `Scripts` is included because that is where pip
         // puts console scripts.
         //
-        // Firefox is the deliberate exception and is asserted absent below
+        // Pale Moon is the deliberate exception and is asserted absent below
         // rather than left unmentioned.
         val path = PrefixRegistry.toolsPath.values.single { it.name == "PATH" }.data.split(";")
         assertTrue("git", path.contains("""${PrefixRegistry.GIT_DIR}\cmd"""))
@@ -642,12 +642,12 @@ class PrefixRegistryTest {
         assertTrue("not the JDK root", !path.contains(PrefixRegistry.JAVA_DIR))
         // **The one tree in the payload that is deliberately off PATH.** Every
         // other entry here is a toolchain something resolves by name from a
-        // shell; a browser is started by tapping it, and TerminalProfile.FIREFOX
+        // shell; a browser is started by tapping it, and TerminalProfile.PALE_MOON
         // launches it by the full path its `installedAt` names. Adding it would
         // cost every PATH lookup in the prefix a directory to serve a case that
         // does not exist. Asserted rather than assumed, so that adding it later
         // is a decision somebody makes on purpose.
-        assertTrue("firefox stays off PATH", !path.contains(PrefixRegistry.FIREFOX_DIR))
+        assertTrue("pale moon stays off PATH", !path.contains(PrefixRegistry.PALEMOON_DIR))
     }
 
     @Test

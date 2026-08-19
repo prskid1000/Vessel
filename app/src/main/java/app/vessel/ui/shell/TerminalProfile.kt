@@ -173,29 +173,34 @@ enum class TerminalProfile(
     /**
      * A web browser, and the second entry here that Wine does not provide.
      *
-     * **Firefox, because the alternative is Chromium and Chromium does not paint
-     * here yet.** VS Code is Electron; `patches/wine/0057` fixed the DirectWrite
-     * fallback that was killing it before it ran any JavaScript, and its renderer
-     * still stalls. Shipping a Chromium browser would most likely ship that stall
-     * with a different icon, so this is Gecko. `native/pins.env` carries the rest
-     * of the comparison — the Gecko forks, and why ESR rather than stable.
+     * **Pale Moon, because Firefox was measured here and does not work.** Four
+     * consecutive sessions ended on the same line — `RoGetActivationFactory`
+     * failing to find `Windows.System.Profile.WindowsIntegrityPolicy`, a WinRT
+     * namespace Wine does not ship — with no window, no content process and 0%
+     * CPU. Goanna forked Gecko before 2017 and so predates the Windows app model
+     * entirely; it never makes the call. It is also single-process, which is the
+     * other thing neither Firefox nor VS Code got through.
      *
-     * **Not `viaConsole`, obviously, but worth saying why it is not `iexplore`
-     * either.** The note at the top of this file records that Wine's
-     * `iexplore.exe` is a thin shell over `mshtml` rather than a browser; it is
-     * the reason this entry had to come from the payload instead of from Wine.
+     * **The cost is real and is not hidden here: this browser cannot render much
+     * of the modern web.** A 2017-era engine is the same fact that makes it start
+     * and makes sites break. It is the browser that works, not the browser that
+     * is good.
      *
-     * **Expect software compositing.** This is a classic ARM64 PE and every
-     * graphics DLL Vessel ships is ARM64EC, which an ARM64 loader refuses by
-     * machine type — so there is no D3D11 for it to find and Gecko falls back to
-     * software WebRender. That is a supported Gecko configuration rather than a
-     * failure, and `docs/ARM64X.md` is the fix that is currently opt-in.
+     * **x86-64, deliberately**, where everything else in the payload is ARM64.
+     * That is what lets it load Vessel's ARM64EC graphics DLLs at all; see
+     * `SessionRuntime.TOOLS_LAYOUT` and native/pins.env. It costs FEX translation
+     * on the browser's own code and buys back the entire graphics stack.
+     *
+     * **Not `viaConsole`, obviously, and not `iexplore` either.** The note at the
+     * top of this file records that Wine's `iexplore.exe` is a thin shell over
+     * `mshtml` rather than a browser; that is why this entry has to come from the
+     * payload.
      */
-    FIREFOX(
-        label = "Firefox",
-        program = "firefox.exe",
-        installedAt = """C:\Program Files\Mozilla Firefox\firefox.exe""",
-        missingReason = "Firefox arrives with the Tools component",
+    PALE_MOON(
+        label = "Pale Moon",
+        program = "palemoon.exe",
+        installedAt = """C:\Program Files\Pale Moon\palemoon.exe""",
+        missingReason = "Pale Moon arrives with the Tools component",
         viaConsole = false,
     ),
 
@@ -350,10 +355,10 @@ enum class TerminalProfile(
             COMMAND_PROMPT -> "cmd"
             POWERSHELL -> "pwsh"
             // The one caption here that is not a command you would type, because
-            // nothing types this one — see [FIREFOX], which is deliberately off
+            // nothing types this one — see [PALE_MOON], which is deliberately off
             // `PATH`. "web" says what the button is for in the three characters
             // the others use to say what they are.
-            FIREFOX -> "web"
+            PALE_MOON -> "web"
             WINE_EXPLORER -> "files"
             NOTEPAD -> "notepad"
             REGEDIT -> "reg"

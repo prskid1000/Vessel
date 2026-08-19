@@ -3352,18 +3352,18 @@ class SessionRuntime @Inject constructor(
             // `bin`, which is also the one directory of this tree that goes on
             // PATH ([PrefixRegistry.JAVA_DIR] plus `\bin`).
             ToolsTree("Java", "drive_c/Program Files/Java", "bin/java.exe"),
-            // The browser, and the one tree here that is not a toolchain — it is
-            // not on `PATH` and nothing resolves it by name. What reaches it is
-            // [app.vessel.ui.shell.TerminalProfile.FIREFOX], which names this
-            // exact `firefox.exe` as its `installedAt` — tested before the tile
-            // is offered, and used as the launch target because a bare name
-            // would go to `PATH` and find nothing.
+            // The browser, and the two things that make it unlike everything
+            // above it. It is not a toolchain -- nothing resolves it by name and
+            // it is not on `PATH`; what reaches it is
+            // [app.vessel.ui.shell.TerminalProfile.PALE_MOON], which names this
+            // exact `palemoon.exe` as its `installedAt`.
             //
-            // `Mozilla Firefox` in the prefix and `Firefox` in the payload, on
-            // the same split as PowerShell above: the installed name is the one a
-            // Windows machine uses and a user would type, and the payload name is
-            // only ever typed in `build/tools.sh`.
-            ToolsTree("Firefox", "drive_c/Program Files/Mozilla Firefox", "firefox.exe"),
+            // And it is x86-64 where the other five are ARM64, on purpose. An
+            // x86-64 process loads our ARM64EC graphics DLLs natively; a classic
+            // ARM64 one gets STATUS_INVALID_IMAGE_FORMAT and cannot. Firefox was
+            // here first, was ARM64, and never drew a window -- native/pins.env
+            // carries that measurement.
+            ToolsTree("PaleMoon", "drive_c/Program Files/Pale Moon", "palemoon.exe"),
         )
 
         /**

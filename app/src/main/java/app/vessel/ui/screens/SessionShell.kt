@@ -752,8 +752,7 @@ fun SessionLauncher(
                         // The comment above about `pwsh.exe` carrying a real icon
                         // has been wrong since it was written for this reason —
                         // the bare name never resolved, so PowerShell kept its
-                        // stand-in glyph for ever. Firefox would have done the
-                        // same.
+                        // stand-in glyph for ever. Pale Moon would do the same.
                         bitmap = rememberBuiltInIcon(
                             containerId,
                             option.profile.installedAt ?: option.profile.program,

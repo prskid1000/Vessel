@@ -175,22 +175,22 @@ VERSION="$TOOLS_VERSION"
 # exactly as it does today. A font-linking change is the worst possible candidate
 # for this no-op, because a chain that silently degrades to its base font is what
 # the design does on purpose when a file is missing. So the minor moves:
-# TOOLS_VERSION is now 1.6.0. (1.2.0 through 1.5.0 all moved for the same reason,
-# one to four steps earlier.)
-VERSION_CODE=1600000
+# TOOLS_VERSION is now 1.7.0. (1.2.0 through 1.6.0 all moved for the same reason,
+# one to five steps earlier.)
+VERSION_CODE=1700000
 [ "${TOOLS_REVISION:-0}" = 0 ] || die "TOOLS_REVISION is ${TOOLS_REVISION}, but
-     VERSION_CODE above is the literal 1600000 and does not read it. Either fold
+     VERSION_CODE above is the literal 1700000 and does not read it. Either fold
      the revision into that literal by hand (1500000 + revision) or put the
      derivation back — silently ignoring it is how a rebuild ships under a code
      the store already has and installs nothing."
 # The floor is what is actually installed, not the oldest thing that ever was.
 # It used to be the shipped Git component's 25500, then Tools 1.1.0's 1,100,000,
 # then 1.2.0's 1,200,000, then 1.3.0's 1,300,000, then 1.4.0's 1,400,000; Tools
-# 1.5.0 at 1,500,000 has since been built and published, so that is the number a
-# new build has to clear. Anything at or under it is adopted as no newer than what
+# 1.6.0 at 1,600,000 has since been built and installed on the device, so that is
+# the number a new build has to clear. Anything at or under it is adopted as no newer than what
 # is there and the build looks exactly like a package that did not install.
-[ "$VERSION_CODE" -gt 1500000 ] || die "version code $VERSION_CODE is not above
-     Tools 1.5.0's 1500000, which is published, so
+[ "$VERSION_CODE" -gt 1600000 ] || die "version code $VERSION_CODE is not above
+     Tools 1.6.0's 1600000, which is installed on the device, so
      WcpInstaller would skip unpacking it and adoptLatest would refuse to move a
      container's Tools reference forward — this build would install nothing.
      See the version-code note in build/common.sh."
@@ -221,20 +221,16 @@ NODE_URL="https://nodejs.org/dist/v$TOOLS_NODE_VERSION/$NODE_ARCHIVE"
 PWSH_ARCHIVE="PowerShell-$TOOLS_PWSH_VERSION-win-arm64.zip"
 PWSH_URL="https://github.com/PowerShell/PowerShell/releases/download/v$TOOLS_PWSH_VERSION/$PWSH_ARCHIVE"
 
-# Firefox ESR. A sixth spelling of ARM64 — `win64-aarch64`, and in the directory
-# rather than the file name, because the file name is the same for every
-# architecture Mozilla builds. That is why the URL carries it and FIREFOX_ARCHIVE
-# does not.
+# Pale Moon. No architecture in the URL at all -- upstream spells it in the file
+# name (`win64`) and nowhere else, which makes this the only one of the six that
+# needs no per-upstream ARM64 spelling.
 #
-# The spaces in "Firefox Setup …" are real and are part of the published name, so
-# the URL percent-encodes them while the cache file keeps them. This is the one
-# fetch here that passes fetch_pinned's optional third argument: its default is
-# `basename "$url"`, which off this URL would cache a file literally called
-# `Firefox%20Setup%20…` — legal, and wrong in the log and on disk. So the archive
-# name is written out with its spaces and the URL with its `%20` by hand, one
-# spelling each, both visible on the same screen.
-FIREFOX_ARCHIVE="Firefox Setup $TOOLS_FIREFOX_VERSION.exe"
-FIREFOX_URL="https://archive.mozilla.org/pub/firefox/releases/$TOOLS_FIREFOX_VERSION/win64-aarch64/en-US/Firefox%20Setup%20$TOOLS_FIREFOX_VERSION.exe"
+# `rm-us` and not the `download.php?mirror=us&bits=64&type=7z` the site links:
+# that is a 303 to exactly this path, and a redirect resolved at build time is a
+# pin that moves. Resolved and recorded on 2026-08-19.
+PALEMOON_DIRNAME="palemoon"
+PALEMOON_ARCHIVE="palemoon-$TOOLS_PALEMOON_VERSION.win64.7z"
+PALEMOON_URL="https://rm-us.palemoon.org/release/$PALEMOON_ARCHIVE"
 
 # Temurin spells its build identifier three different ways in three places and
 # native/pins.env pins it once, so the other two are derived here rather than
@@ -357,7 +353,31 @@ print("0x%04X" % struct.unpack_from("<H", b, struct.unpack_from("<I", b, 0x3c)[0
   info "$label: $out  Machine=$machine"
 }
 
-fetch_pinned "$FIREFOX_URL" "$TOOLS_FIREFOX_SHA256" "$FIREFOX_ARCHIVE"
+# The mirror of verify_pe_arm64, for the one tree that is deliberately not ARM64.
+#
+# It exists so that "this is x86-64" is asserted rather than assumed, exactly as
+# the ARM64 case is. A Pale Moon build that arrived as ARM64 would be a different
+# browser than the one native/pins.env argues for, and the whole argument turns
+# on the architecture: an x86-64 process loads our ARM64EC graphics DLLs, and a
+# classic ARM64 one gets STATUS_INVALID_IMAGE_FORMAT. Silently shipping the wrong
+# one would reproduce the Firefox failure under a new name.
+verify_pe_x64() {
+  local exe="$1" label="${2:-$1}" out machine
+  [ -f "$exe" ] || die "$label: expected a file at $exe and there is none"
+  out="$(file -b "$exe")"
+  grep -Eqi 'PE32\+ executable' <<< "$out" || die "$label is not a 64-bit PE: $out"
+  grep -Eqi 'x86-64' <<< "$out" || die "$label is not x86-64: $out"
+  machine="$(python3 -c 'import struct,sys
+b=open(sys.argv[1],"rb").read(0x400)
+print("0x%04X" % struct.unpack_from("<H", b, struct.unpack_from("<I", b, 0x3c)[0] + 4))' "$exe")"
+  [ "$machine" = "0x8664" ] || die "$label has IMAGE_FILE_HEADER.Machine $machine,
+     not 0x8664 (IMAGE_FILE_MACHINE_AMD64). 0xAA64 is ARM64 — the wrong release
+     asset, and an ARM64 browser is the configuration that was measured not to
+     work here. \`file\` said: $out"
+  info "$label: $out  Machine=$machine"
+}
+
+fetch_pinned "$PALEMOON_URL" "$TOOLS_PALEMOON_SHA256"
 fetch_pinned "$GIT_URL"    "$TOOLS_GIT_SHA256"
 fetch_pinned "$PYTHON_URL" "$TOOLS_PYTHON_SHA256"
 fetch_pinned "$NODE_URL"   "$TOOLS_NODE_SHA256"
@@ -605,49 +625,44 @@ for f in release lib/modules bin/javac.exe; do
 done
 ok "Java: $(find "$STAGE/Java" -type f | wc -l) file(s)"
 
-# --- Firefox -----------------------------------------------------------------
+# --- Pale Moon ---------------------------------------------------------------
 #
-# **The installer is a 7-Zip SFX and `core/` inside it is the browser.** This is
-# the same shape as Git's portable release two blocks up, with one difference
-# worth stating: Git's SFX *is* the tree, so it extracts to `Git/` whole, while
-# Mozilla's carries installer scaffolding — `setup.exe`, a `Core Files` manifest,
-# the uninstaller — around a `core/` directory that is exactly what a Firefox
-# installation looks like on disk. Taking `core/` and discarding the rest is what
-# turns an installer into a portable tree; there is no supported "portable"
-# download to use instead.
+# **Plain 7z with one wrapper directory**, so this is Node's block rather than
+# Git's: upstream ships no installer at all, and the whole tree sits under
+# `palemoon/`. Flattened for the reason Node's is -- a version-free directory
+# name is one the prefix path and PrefixRegistry.PALEMOON_DIR can both hold still.
 #
-# **Nothing is run.** Same rule as Git's `post-install.bat`: an installer executed
-# on the build host bakes the build host's answers into the payload.
-log "unpacking Firefox $TOOLS_FIREFOX_VERSION"
-FIREFOX_TMP="$WORK_DIR/$COMPONENT-firefox"
-rm -rf "$FIREFOX_TMP"
-mkdir -p "$FIREFOX_TMP"
-7z x -bso0 -bsp0 -o"$FIREFOX_TMP" -y "$CACHE/$FIREFOX_ARCHIVE" \
-  || die "7z could not unpack $FIREFOX_ARCHIVE"
-[ -d "$FIREFOX_TMP/core" ] \
-  || die "expected core/ inside $FIREFOX_ARCHIVE and there is none; found:
-     $(ls "$FIREFOX_TMP")
-     Mozilla's Windows installer has carried the browser in core/ for years. If
-     that has changed, this block and the FIREFOX_DIR path in PrefixRegistry both
-     have to move with it."
-mv "$FIREFOX_TMP/core" "$STAGE/Firefox"
-rm -rf "$FIREFOX_TMP"
+# **This tree is x86-64 and that is the design, not a compromise.** Every other
+# program here is ARM64 to avoid FEX; the browser is translated on purpose,
+# because an x86-64 process loads ARM64EC DLLs natively and a classic ARM64 one
+# cannot. Firefox 140 ESR was ARM64, could not load `dxgi.dll` at all, and never
+# drew a window across four measured sessions. native/pins.env has that in full.
+log "unpacking Pale Moon $TOOLS_PALEMOON_VERSION"
+PALEMOON_TMP="$WORK_DIR/$COMPONENT-palemoon"
+rm -rf "$PALEMOON_TMP"
+mkdir -p "$PALEMOON_TMP"
+7z x -bso0 -bsp0 -o"$PALEMOON_TMP" -y "$CACHE/$PALEMOON_ARCHIVE"   || die "7z could not unpack $PALEMOON_ARCHIVE"
+[ -d "$PALEMOON_TMP/$PALEMOON_DIRNAME" ]   || die "expected $PALEMOON_DIRNAME/ inside $PALEMOON_ARCHIVE; found:
+     $(ls "$PALEMOON_TMP")"
+mv "$PALEMOON_TMP/$PALEMOON_DIRNAME" "$STAGE/PaleMoon"
+rm -rf "$PALEMOON_TMP"
 
-verify_pe_arm64 "$STAGE/Firefox/firefox.exe" "Firefox/firefox.exe"
-# xul.dll is where Gecko actually lives — firefox.exe is a ~700 KB launcher and
-# would be ARM64 in a payload whose engine was not. This is the same distinction
-# the Java block draws between java.exe and jvm.dll, and for the same reason: the
-# JIT is in the library, and a JIT running under FEX is the cost this whole
-# payload is built ARM64 to avoid.
-verify_pe_arm64 "$STAGE/Firefox/xul.dll" "Firefox/xul.dll"
-# A Gecko tree that is missing any of these is a partial extraction rather than a
-# browser: omni.ja is the packaged front end, the two ANGLE libraries are what
-# WebGL binds to, and `browser/omni.ja` is the Firefox application on top of the
-# platform. All four exist in every release build.
-for f in omni.ja browser/omni.ja libEGL.dll libGLESv2.dll; do
-  [ -e "$STAGE/Firefox/$f" ] || die "Firefox payload is missing $f"
+verify_pe_x64 "$STAGE/PaleMoon/palemoon.exe" "PaleMoon/palemoon.exe"
+# Goanna itself, on the same reasoning the Java block gives for jvm.dll over
+# java.exe: the launcher is small and the engine is where the work and the JIT
+# are. An ARM64 xul.dll here would mean the wrong archive entirely.
+verify_pe_x64 "$STAGE/PaleMoon/xul.dll" "PaleMoon/xul.dll"
+# A Goanna tree missing any of these is a partial extraction rather than a
+# browser. Note these are NOT Firefox's sentinels, and the first build here
+# asserted Firefox's and failed: Pale Moon forked before `omni.ja` existed, so
+# the packaged resources are a loose `chrome/` tree and the descriptors are the
+# old pair. `application.ini` names the application, `platform.ini` the Goanna
+# under it, `dependentlibs.list` is the load order the launcher reads, and
+# `browser/` is the application half of the tree.
+for f in application.ini platform.ini dependentlibs.list browser; do
+  [ -e "$STAGE/PaleMoon/$f" ] || die "Pale Moon payload is missing $f"
 done
-ok "Firefox: $(find "$STAGE/Firefox" -type f | wc -l) file(s), $(du -sh "$STAGE/Firefox" | cut -f1)"
+ok "PaleMoon: $(find "$STAGE/PaleMoon" -type f | wc -l) file(s), $(du -sh "$STAGE/PaleMoon" | cut -f1)"
 
 # --- Fonts -------------------------------------------------------------------
 #
