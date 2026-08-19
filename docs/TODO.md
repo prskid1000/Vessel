@@ -348,6 +348,39 @@ and both were free to avoid.
   already, and `07493a0` is in this log for shipping a global build change that
   regressed a title that worked. One run separates them.
 
+  **The dual-wave path is the only ir3 code in this driver no test has ever
+  run.** Looked up while pricing `VK_KHR_shader_maximal_reconvergence`, and it
+  is worth more than that extension is:
+
+  - `has_dual_wave_dispatch` appears **once** in the whole device table
+    (`freedreno_devices.py:1376`, `a8xx_base`). No other generation sets it.
+  - `src/freedreno/ci/` has fail, flake and skip lists for a200 through a750.
+    **There is no a8xx list at all.**
+  - a750 has **zero** subgroup failures and **zero** reconvergence failures --
+    one flake on a660, two skipped for being slow. ir3's reconvergence is
+    solid on the generation CTS actually runs on.
+  - and a750 does not use dual-wave dispatch.
+
+  So `ir3_calc_reconvergence`'s wave pass -- `calc_reconvergence(so, true)`,
+  `wave_reconvergence_point`, the conservative "treat every two-way branch as
+  divergent" at `ir3_reconvergence.c:225` -- runs only on a8xx, exists only
+  because subgroup ops can break across a wave pair, and has never been
+  covered by a test on any device. The one untested path is the one whose
+  stated purpose is the failure being investigated.
+
+  **Maximal reconvergence itself is not the lever it looks like.** Advertising
+  it is one line, and it is mostly a claim rather than machinery -- of the six
+  Mesa drivers that expose it, four have no code behind it at all, and the
+  only real consumer in the tree (`radv_shader.c:955`) *disables* an NGG
+  culling optimisation rather than implementing a guarantee. ir3 already has
+  the structure it describes: a branchstack that parks threads and a `(jp)`
+  that reactivates them. But it would not reach these shaders. dxil-spirv
+  emits `MaximallyReconvergesKHR` for compute only under
+  `force_maximal_reconvergence` (`dxil_converter.cpp:7734`), which vkd3d does
+  not set; the automatic triggers are fragment helper-lane and quad-derivative
+  cases. SM 6.7 additionally needs `VK_KHR_shader_quad_control`, which Turnip
+  does not implement in any form.
+
   **What has been eliminated, so none of it is re-run.** Each was tested on the
   device, against the same scene:
 
