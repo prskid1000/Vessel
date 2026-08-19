@@ -599,12 +599,23 @@ class SessionRuntime @Inject constructor(
 
         units = GuestUnits()
         val log = logs.open(containerId, startedAt, profile.diagnostics.limits)
+        // **The header no longer names component versions, because at this
+        // point it cannot know them.**
+        //
+        // It printed `profile.wineBuild`, `profile.driver` and
+        // `profile.d3dLayer`, which are labels `ContainerRepository` computes
+        // and persists when a container is drafted or saved. They are stale by
+        // construction -- nothing recomputes them when adoption moves a
+        // reference -- and they are printed here *before* `adoptLatest` runs a
+        // hundred lines below, so even a fresh one would describe the previous
+        // session. They also named DXVK as `d3d` on a Direct3D 12 title, where
+        // vkd3d is the layer that matters.
+        //
+        // The `components:` line written after adoption is the honest version
+        // of this, and it reads the same reference the staging step does.
         log.header(
             listOf(
                 "container  ${profile.name}",
-                "wine       ${profile.wineBuild}",
-                "driver     ${profile.driver}",
-                "d3d        ${profile.d3dLayer}",
                 "desktop    $geometry @ ${fpsLimit?.let { "$it fps" } ?: "unlimited"}",
                 "upscaler   $upscaler",
             ),

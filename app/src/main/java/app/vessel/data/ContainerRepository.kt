@@ -137,19 +137,56 @@ class ContainerRepository @Inject constructor(
     private suspend fun resolveLabels(profile: ContainerProfile): ContainerProfile {
         components.refresh()
         val manifest = manifests.load().getOrNull()
-        fun labelFor(componentType: ComponentType): String {
+
+        // **A package id does not identify a build, and these labels used to
+        // pretend it did.**
+        //
+        // An id is a name plus a version *name* -- `turnip-26.3.0-devel-9c475
+        // fc3-icd-canoe`, `vkd3d-3.0.1-canoe` -- and every rebuild at the same
+        // upstream ref produces that same string. This device holds seven
+        // Turnip builds and nine of vkd3d under two ids, so the card showed one
+        // label for all of them and no screen could tell which was running.
+        // `versionCode` is what actually separates them, and it is what
+        // adoption, staging and pruning all key on.
+        //
+        // It also resolved `@latest` rather than the container's own reference,
+        // so the card named the newest *installed* build while the session ran
+        // whatever `provisioned.json` pointed at. Those differ exactly when it
+        // matters: a component was just installed and this container has not
+        // adopted it yet.
+        suspend fun stamp(componentType: ComponentType, fallback: String): String {
+            val code = componentStore.directoryFor(profile.id, componentType)
+                ?.name?.toIntOrNull() ?: return fallback
+            val pinned = components.snapshot()
+                .firstOrNull { it.type == componentType && it.versionCode == code }
+            return "${pinned?.id ?: componentType.label} · $code"
+        }
+
+        fun selectorFor(componentType: ComponentType): String {
             val spec = manifest?.allParams?.firstOrNull {
                 it.type == ParamType.COMPONENT && it.componentType == componentType.wire
             }
-            val selector = (spec?.let { profile.params[it.key] } as? ParamValue.Text)?.value
+            return (spec?.let { profile.params[it.key] } as? ParamValue.Text)?.value
                 ?: (spec?.defaultValue() as? ParamValue.Text)?.value
                 ?: LATEST
-            return components.label(componentType, selector)
         }
+
+        // The selector-resolved label is the fallback, not the answer: it is
+        // what a container that has never been provisioned shows, since it has
+        // no reference to read yet.
         return profile.copy(
-            wineBuild = components.label(ComponentType.WINE, LATEST),
-            driver = labelFor(ComponentType.TURNIP),
-            d3dLayer = labelFor(ComponentType.DXVK),
+            wineBuild = stamp(
+                ComponentType.WINE,
+                components.label(ComponentType.WINE, LATEST),
+            ),
+            driver = stamp(
+                ComponentType.TURNIP,
+                components.label(ComponentType.TURNIP, selectorFor(ComponentType.TURNIP)),
+            ),
+            d3dLayer = stamp(
+                ComponentType.DXVK,
+                components.label(ComponentType.DXVK, selectorFor(ComponentType.DXVK)),
+            ),
         )
     }
 
