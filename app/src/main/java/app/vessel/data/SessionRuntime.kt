@@ -712,6 +712,38 @@ class SessionRuntime @Inject constructor(
         // installed, listed as installed, and not loaded, and the session that
         // followed was read as evidence about the new build when it had run the
         // old one. A container that is behind now says so in its own log.
+        // **Say which build of every component this session actually runs, every
+        // time, whether or not anything is wrong.**
+        //
+        // The header three lines above prints `wine`, `driver` and `d3d`, and
+        // all three are *labels* -- `ContainerRepository` recomputes them from
+        // `LATEST` for the container card, and nothing selects a component from
+        // them. What a session actually loads is the reference in
+        // `provisioned.json`, which they do not read. So the header can name the
+        // newest build while the session runs an older one, and it names DXVK as
+        // `d3d` even for a Direct3D 12 title, where the layer that matters is
+        // vkd3d -- which appears nowhere in the log at all. FEX, Tools and
+        // OpenGL do not appear either.
+        //
+        // [staleReferences] below is not this. It speaks only when a container
+        // is *behind*, which leaves the ordinary case -- everything current --
+        // recording nothing about what ran. Answering "did the new build load"
+        // then means reading `provisioned.json` off the device by hand, which
+        // is exactly what this file's comments describe going wrong five times.
+        //
+        // Read through [ComponentStore.directoryFor], which is the same call
+        // the staging step uses, so this line cannot disagree with what is
+        // copied into the prefix a moment later.
+        val running = ComponentType.entries.mapNotNull { type ->
+            components.directoryFor(containerId, type)?.let { "${type.label} ${it.name}" }
+        }
+        log.line(
+            LogSource.VESSEL,
+            LogLevel.INFO,
+            if (running.isEmpty()) "components: none referenced"
+            else "components: ${running.joinToString(", ")}",
+        )
+
         for ((type, versions) in components.staleReferences(containerId)) {
             val (referenced, newest) = versions
             log.line(
