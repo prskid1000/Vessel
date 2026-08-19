@@ -75,6 +75,8 @@ import java.io.File
 import java.nio.file.Files
 import javax.inject.Inject
 import javax.inject.Singleton
+import app.vessel.core.vkd3dShaderDumpDir
+import app.vessel.core.vkd3dShaderOverrideDir
 
 /**
  * DESIGN.md's five session states, plus the one before any of them.
@@ -1365,6 +1367,19 @@ class SessionRuntime @Inject constructor(
 
         runCatching { ensureScriptsDirectory(layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: ${it.message}") }
+
+        // vkd3d writes shader dumps into a directory it does not create, and a
+        // path it cannot write to yields no shaders and no error. Made every
+        // launch, whether or not the row is on: an empty directory costs a stat,
+        // and it removes one more way for a diagnostic to fail in silence.
+        runCatching {
+            val dumps = vkd3dShaderDumpDir(layout.tmp)
+            if (!dumps.isDirectory) dumps.mkdirs()
+            val overrides = vkd3dShaderOverrideDir(layout.tmp)
+            if (!overrides.isDirectory) overrides.mkdirs()
+        }.onFailure {
+            current.log.line(LogSource.VESSEL, LogLevel.WARN, "shader dumps: ${it.message}")
+        }
 
         return BootstrapOutcome.Applied
     }

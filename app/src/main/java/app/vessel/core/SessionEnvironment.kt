@@ -629,6 +629,15 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // reachable from no document at all.
     "FD_RD_DUMP",
     "FD_RD_DUMP_PATH",
+    // Where vkd3d writes every compiled shader. Reserved for the reason its
+    // neighbours are: a document that could choose this path could have the
+    // guest writing outside the container. The row is a switch; the path is
+    // derived below.
+    "VKD3D_SHADER_DUMP_PATH",
+    // Where a replaced shader is read from. Reserved for a stronger reason than
+    // its neighbour: a document that could choose this path could make the guest
+    // run shader code from anywhere on the device.
+    "VKD3D_SHADER_OVERRIDE",
     // Owned by the display server, which is the only thing that knows whether a
     // shared-memory socket got bound and where. A manifest param naming it would
     // point winex11 at a socket nothing is listening on, and patch 0005 answers
@@ -888,6 +897,15 @@ val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     // say why. Both names are needed: FD_RD_DUMP alone writes beside the working
     // directory, and the path is what puts captures somewhere readable.
     "FD_RD_DUMP",
+    // Where vkd3d writes compiled shaders. Here for the same reason FD_RD_DUMP
+    // above it is: the row composes the variable and this set is what lets it
+    // leave the app. Also in [RESERVED_SESSION_ENV], as this set must be a
+    // strict subset of it, so the path cannot be chosen by a document.
+    "VKD3D_SHADER_DUMP_PATH",
+    // Its counterpart: the dump writes `<hash>.spv` files, this reads them back
+    // in place of translating. Also reserved above, as this set must stay a
+    // strict subset of that one.
+    "VKD3D_SHADER_OVERRIDE",
     // **`VKD3D_CONFIG` is here for one word: `breadcrumbs`.**
     //
     // It stays in [RESERVED_SESSION_ENV] — this set is a strict subset — so no
@@ -1336,6 +1354,25 @@ const val VKD3D_QUEUE_PROFILE_FILE_NAME: String = "vkd3d-queue-profile.json"
 
 /** The submission timeline for a container. */
 fun vkd3dQueueProfileFile(tmp: File): File = File(tmp, VKD3D_QUEUE_PROFILE_FILE_NAME)
+
+/**
+ * Where vkd3d writes compiled shaders when the dump row is on.
+ *
+ * A directory rather than a file, and one vkd3d expects to exist already: it
+ * opens files inside it and a path it cannot write to produces no shaders and no
+ * complaint. `SessionRuntime` creates it.
+ */
+fun vkd3dShaderDumpDir(tmp: File): File = File(tmp, "shaders")
+
+/**
+ * Where vkd3d reads replacement shaders from when the override row is on.
+ *
+ * Deliberately not [vkd3dShaderDumpDir]. A dump is thousands of files and gets
+ * cleared; an override is the handful somebody chose, and pointing the two at
+ * one directory would mean every dumped shader silently replaced itself and a
+ * clear-out threw away the experiment.
+ */
+fun vkd3dShaderOverrideDir(tmp: File): File = File(tmp, "shader-override")
 
 /**
  * The environment a session is started with — `docs/LOGGING.md` as code.
@@ -2332,6 +2369,20 @@ fun sessionEnvironment(
         // same reason: this is the only place that knows the container's paths,
         // and a document that could choose it could have the driver writing
         // outside the container.
+        // The shader dump names a directory rather than a file, and vkd3d does
+        // not create it -- an unwritable path is silence, not an error. Derived
+        // here for the reason the profile above is, and created by
+        // SessionRuntime before the guest starts.
+        if (key == "VKD3D_SHADER_OVERRIDE") {
+            environment[key] =
+                if (value == Emit.ON) vkd3dShaderOverrideDir(paths.tmp).absolutePath else ""
+        }
+
+        if (key == "VKD3D_SHADER_DUMP_PATH") {
+            environment[key] =
+                if (value == Emit.ON) vkd3dShaderDumpDir(paths.tmp).absolutePath else ""
+        }
+
         if (key == "FD_RD_DUMP" && value.isNotEmpty()) {
             environment["FD_RD_DUMP_PATH"] = paths.tmp.absolutePath
         }

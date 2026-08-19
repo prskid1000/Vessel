@@ -158,7 +158,22 @@ fun VMetricGraph(
         // percentage — which is what makes a labelled Y axis honest at all. The
         // largest ceiling wins so a series normalised against a smaller one
         // still lands inside the box.
-        val ceiling = series.maxOf { it.ceiling }
+        // **`maxOf` throws on an empty list, and this runs inside the draw
+        // pass.** `java.util.NoSuchElementException` from here is not a blank
+        // card, it is `FATAL EXCEPTION: main` — the whole app, from
+        // `DrawBackgroundModifier.draw`, with no way for a caller to catch it.
+        // Opening the metrics panel did exactly that, twice, nine seconds apart.
+        //
+        // A card legitimately has no series: every one of them is built from
+        // `seriesOrNull`, which returns nothing until a reading exists, so any
+        // card is empty for the first moments of a session and a card for a
+        // counter the title never touches is empty for all of it. The guard four
+        // lines up already knows this — `series.isNotEmpty()` is part of
+        // `labelled` — and the ceiling was left unguarded beside it.
+        //
+        // 1 rather than 0: the ceiling is a divisor when a point is normalised,
+        // and swapping a crash for a division by zero would be no better.
+        val ceiling = series.maxOfOrNull { it.ceiling } ?: 1
         val fractions = floatArrayOf(0f, 0.5f, 1f)
 
         // **The gutter is measured, not guessed.** It was a flat 30 dp, and

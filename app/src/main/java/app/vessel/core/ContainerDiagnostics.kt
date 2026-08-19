@@ -1181,6 +1181,69 @@ val LOGGABLES: List<Loggable> = listOf(
     // `full` is deliberately not offered as a level. It adds every buffer's
     // contents to the commands, and the difference is between a capture you can
     // copy off the phone and one you cannot.
+    // **Every shader the title compiles, written out with its hash.**
+    //
+    // The companion to VKD3D_SHADER_DEBUG: that says a shader failed to
+    // translate, this says *which*. docs/TODO.md #56 needs exactly that pairing
+    // -- five `dxil-spirv: There is no candidate for ladder merging` warnings
+    // with no way to tell which of the title's thousands of shaders produced
+    // them.
+    //
+    // **It disables the SPIR-V cache, and that is not a side effect but the
+    // point.** vkd3d enforces `pipeline_library_ignore_spirv` whenever this is
+    // set (`vkd3d_instance_deduce_config_flags_from_environment` says so in the
+    // log), because a dump of cached shaders would show nothing being compiled.
+    // So the launch after switching this on rebuilds every pipeline. That is one
+    // slow start, not a permanent cost, and it is why this is a switch rather
+    // than something left on.
+    //
+    // The path is derived from the container, not typed here -- see
+    // SessionEnvironment, which owns the directories, and creates it.
+    // **Run a shader from disk instead of the one the translator produced.**
+    //
+    // The other half of the dump row below. `vkd3d_shader_main.c:102` builds
+    // `<path>/<hash>.spv` and loads it in place of translating that shader, and
+    // the dump writes files under exactly that name -- so a session can be
+    // dumped, one shader edited or neutered, dropped in, and the next run uses
+    // it.
+    //
+    // **It is the only thing here that can prove a shader causes something.**
+    // A warning from the translator says a shader was hard to compile; it does
+    // not say the shader is wrong, or that it runs in the scene being
+    // investigated. Replacing it and watching the picture change does. See
+    // docs/TODO.md #56, which has five named shaders and no way to tell whether
+    // they matter.
+    //
+    // Empty is off, so a container with nothing in the directory behaves
+    // normally; a hash with no file falls through to ordinary translation.
+    Loggable(
+        name = "VKD3D_SHADER_OVERRIDE",
+        emit = Emit.Variable("VKD3D_SHADER_OVERRIDE", ""),
+        levels = listOf("", Emit.ON),
+        labels = mapOf("" to "Off", Emit.ON to "On"),
+        baseline = "",
+        secondary = "Load a shader from the override directory instead of " +
+            "compiling it, matched by hash.",
+        addAt = Emit.ON,
+        caution = "Forces a full pipeline rebuild while on, like the dump. " +
+            "A shader with no file in the directory is translated normally, " +
+            "so an empty directory changes nothing.",
+        levelIsMachine = true,
+    ),
+    Loggable(
+        name = "VKD3D_SHADER_DUMP_PATH",
+        emit = Emit.Variable("VKD3D_SHADER_DUMP_PATH", ""),
+        levels = listOf("", Emit.ON),
+        labels = mapOf("" to "Off", Emit.ON to "On"),
+        baseline = "",
+        secondary = "Write every shader the title compiles, named by hash, " +
+            "so a translation warning can be tied to a shader.",
+        addAt = Emit.ON,
+        caution = "Forces a full pipeline rebuild -- vkd3d ignores the " +
+            "cached SPIR-V while this is on, so the next launch is slow and " +
+            "the one after it is too. Dumps land beside the container.",
+        levelIsMachine = true,
+    ),
     Loggable(
         name = "FD_RD_DUMP",
         emit = Emit.Variable("FD_RD_DUMP", ""),

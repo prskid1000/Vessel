@@ -31,6 +31,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       meson python3-mako python3-yaml python3-packaging \
       # Mesa codegen and shader tooling
       bison flex glslang-tools libarchive-tools gettext \
+      # SPIR-V disassembler and assembler, for reading what dxil-spirv emitted.
+      # `spirv-dis` turns a .spv into text and `spirv-as` turns it back, which is
+      # the only way to inspect or edit a translated shader -- docs/TODO.md #56
+      # has five that dxil-spirv could not structurise, and the diagnostics
+      # screen can now feed an edited one back through VKD3D_SHADER_OVERRIDE.
+      # `spirv-val` says whether the result is still legal before the device
+      # finds out the hard way.
+      spirv-tools \
       # Wine's host-side tools
       autoconf automake libtool \
     && rm -rf /var/lib/apt/lists/*
