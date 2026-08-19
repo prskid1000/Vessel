@@ -1161,6 +1161,48 @@ val LOGGABLES: List<Loggable> = listOf(
         oneSessionFrom = "0",
         levelIsMachine = true,
     ),
+    // **The only instrument here that records what the GPU was actually told
+    // to do.** Everything else on this screen is something a layer says about
+    // itself; this is freedreno's own capture of the command stream, which
+    // Mesa's rddecompiler and crashdec read offline.
+    //
+    // It exists for the case the log cannot reach. docs/TODO.md #56 is that
+    // case: draws per frame rise entering the room that renders wrongly and the
+    // GPU load rises with them, so the geometry is submitted and executed and
+    // still does not appear. Depth state, compare op, clear value and LRZ
+    // direction are all in the capture and none of them are in any log.
+    //
+    // `trigger` rather than plain `enable`, and that is the whole reason this is
+    // usable: with it, Turnip creates `<path>/<name>_trigger` and captures only
+    // when a number is written into that file (freedreno_rd_output.c:185-189).
+    // Plain `enable` records every submission from launch, which on a game is
+    // gigabytes before you reach the thing you wanted to look at.
+    //
+    // `full` is deliberately not offered as a level. It adds every buffer's
+    // contents to the commands, and the difference is between a capture you can
+    // copy off the phone and one you cannot.
+    Loggable(
+        name = "FD_RD_DUMP",
+        emit = Emit.Variable("FD_RD_DUMP", ""),
+        levels = listOf("", "enable,trigger", "enable,trigger,full"),
+        labels = mapOf(
+            "" to "Off",
+            "enable,trigger" to "Commands",
+            "enable,trigger,full" to "Commands and buffers",
+        ),
+        baseline = "",
+        secondary = "Record the GPU command stream for chosen frames, for " +
+            "offline inspection with Mesa's tools.",
+        addAt = "enable,trigger",
+        caution = "Writes nothing until a frame is triggered, then writes a " +
+            "large file per submit. Captures land beside the container, not " +
+            "in the session log. Commands alone cannot be decoded down to " +
+            "draws -- the buffers the draws live in are recorded by address " +
+            "and not by content -- so reach for Commands and buffers when " +
+            "the question is what was drawn, and expect a stall while it " +
+            "waits on the previous submission.",
+        levelIsMachine = true,
+    ),
     Loggable(
         name = MESA_LOG_VAR,
         emit = Emit.Variable(MESA_LOG_VAR, FIXED_MESA_LOG),
@@ -1518,6 +1560,48 @@ val LOGGABLES: List<Loggable> = listOf(
         caution = "Costs a transition per placed resource. Try it when geometry is " +
             "flat white or sorts through walls; it does nothing for a title that " +
             "already initialises correctly.",
+    ),
+    // — the two QA passes ---------------------------------------------------
+    //
+    // **Instrumentation, not workarounds, and that is why only these two are
+    // here.** The pair that shipped beside them in one debugging session --
+    // `skip_application_workarounds` and `no_invariant_position` -- change what
+    // the game gets rather than what it reports, and neither belongs on a
+    // diagnostics screen: the first switches off every per-title fix vkd3d
+    // ships (49 of them, `device.c`), so leaving it on regresses games that
+    // currently work; the second drops the guarantee that a vertex position
+    // computes identically across passes, which engines rely on for depth
+    // pre-pass and shadow matching. A switch that quietly breaks a working
+    // title is not a diagnostic.
+    //
+    // These two only ever *add* checks. They cannot change what a correct
+    // program draws; they can only report that something was already wrong.
+    vkd3dConfigFlag(
+        flag = "instruction_qa_checks",
+        secondary = "Instrument every shader instruction and report the ones " +
+            "that read or write out of bounds.",
+        // Three separate costs, and the third is the one that surprises people.
+        // Every shader is rewritten with validation code. `ExecuteCommandLists`
+        // loses its fast exit -- without QA, `if (!qa_checks && !count)` returns
+        // immediately, and with it a command buffer is built on every submit
+        // (`command.c:24625`). And the flag is folded into the pipeline cache key
+        // (`device.c:11292`), so turning it on means a full shader rebuild and a
+        // second cache -- which is why a session with it on starts slowly and the
+        // one after it does too.
+        caution = "Rewrites every shader and rebuilds the pipeline cache. The " +
+            "first launch after switching this is slow, and frame rate is not " +
+            "a measurement while it is on.",
+    ),
+    vkd3dConfigFlag(
+        flag = "descriptor_qa_checks",
+        secondary = "Check every descriptor a shader reads and report a heap " +
+            "slot that holds nothing, or the wrong kind of thing.",
+        // The cheaper of the two -- it validates descriptor access rather than
+        // every instruction -- but it shares the submit-path and cache-key costs
+        // above, so it is not free either.
+        caution = "Same shader rebuild and cache split as the instruction " +
+            "checks. Worth reaching for first on a bindless-heavy title, " +
+            "where a bad descriptor is likelier than a bad instruction.",
     ),
     vkd3dConfigFlag(
         flag = "breadcrumbs_sync",

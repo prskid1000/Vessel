@@ -210,9 +210,34 @@ and both were free to avoid.
 - [ ] **#56 — the world is not drawn.** Standing inside a house basement, the
   room's own geometry is missing while the city outside is visible through where
   the walls should be, and props render as unlit black. The game is interactive
-  and does not fault. **The log contains no graphics error, warning or FIXME of
-  any kind** — which is itself the strongest fact in this entry, because it rules
-  out every failure that announces itself and leaves only ones that do not.
+  and does not fault.
+
+  **It is a transition, not a constant, and that was not recorded until
+  2026-08-19.** The street outside renders correctly. Corruption begins on
+  entering the region where the house is, and inside it the exterior buildings
+  draw where the interior should be. A globally broken capability would break
+  everywhere; something specific to that content triggers this, which is why the
+  flag sweeps below all came back identical.
+
+  **The failure is downstream of submission. Measured 2026-08-19, and it is the
+  only positive constraint this entry has.** Walking into the room, the `d3d`
+  card moved:
+
+      draws/frame   1.0/25.7/55.0  ->  1.0/83.2/183.0
+      gpu %              41.6 mean  ->  61.3 mean, 95 peak
+
+  The game submits *more* geometry there and the GPU executes it. That kills
+  four families at once: game-side culling, a resource failing to load, an
+  `ExecuteIndirect` being dropped, and the `0x100` faults. Whatever is wrong
+  happens to work that is issued and run.
+
+  **The log contains almost no graphics error, warning or FIXME** — which was
+  long the strongest fact here, because it rules out every failure that announces
+  itself. It is no longer quite true: `VKD3D_SHADER_DEBUG=warn` produces five
+  `dxil-spirv: There is no candidate for ladder merging.` warnings
+  (`cfg_structurizer.cpp:6299`), on the shader compile threads, on a fresh
+  compile only. They are the one compiler-level complaint this bug has ever
+  produced and are the current lead.
 
   **What has been eliminated, so none of it is re-run.** Each was tested on the
   device, against the same scene:
@@ -229,9 +254,68 @@ and both were free to avoid.
   | placed versus committed resources | `patches/vkd3d/0006` |
   | the upscalers | already off before the symptom was reported |
   | the present path | reproduces on both DRI3 and the software copy |
-  | the `0x100` write faults | handled probes; they recur for 1,500 lines while the game keeps rendering |
+  | the `0x100` write faults | 116 access violations in one session, 40 of them a write to `0x100`, all unwinding to one instruction. Spread evenly from startup to exit across several threads, so they fire while the street renders correctly too. The faulting addresses move between runs — they are FEX JIT addresses, not stable code |
+  | depth compression | `VKD3D_CONFIG=disable_depth_compression`, confirmed reaching the game in `vkd3d_config_flags_init_once`. **Not the same as UBWC above, which is colour** |
+  | shader instruction validation | `VKD3D_CONFIG=instruction_qa_checks` — upstream's own workaround for RE9 issue #2852 — reported nothing and changed nothing |
+  | descriptor validation | `VKD3D_CONFIG=descriptor_qa_checks`, likewise silent, on a title the log confirms uses `VK_EXT_descriptor_buffer` and `VK_EXT_mutable_descriptor_type` |
+  | vkd3d's per-title workarounds | `VKD3D_CONFIG=skip_application_workarounds`. vkd3d recognises `re9.exe` by hash (`ed6f44f228a0a503`) and none of its 49 entries is the cause |
+  | invariant vertex position | `VKD3D_CONFIG=no_invariant_position` |
+  | the whole upstream stack being old | 2026-08-19 moved Wine to `34e7d58e`, vkd3d to master `4b9ab838` (+277 commits, including an RE Engine shader quirk for PRAGMATA), DXVK to v3.0.2, Turnip to `260309`. Unchanged |
   | the RE Engine 16-bit/`min16` quirk (`patches/vkd3d/0008`) | `re9.exe` launched against the installed `3000109` build with the quirk live; the walls were still missing |
   | the compute-barrier quirk (`FORCE_COMPUTE_BARRIER`) | `re9.exe` run on vkd3d `3000111`, prefix `d3d12core.dll` verified byte-identical to that build; walls still missing. `patches/vkd3d/0008` is deleted — the tree carries no RE9 quirk |
+
+  **The one change that has ever altered the picture, and it is not a fix.**
+  `has_64b_image_atomics = False` for a8xx made the room look *worse*, and every
+  other hypothesis in this entry produced output identical to the last. Two
+  things follow. Requiem uses 64-bit typed atomics — removing them made it fall
+  back to something poorer, which it could not do if it were not using them. And
+  Turnip's implementation of them is at least partly working, or removing it
+  could not have cost anything. So the atomics are exonerated as the cause, and
+  the visibility-buffer reading of the symptom — depth and primitive id packed
+  into one 64-bit value, resolved with `InterlockedMax` — moves from speculation
+  to plausible. The patch is deleted; the driver ships them on.
+
+  The evidence that made it worth trying is still true and still not about this
+  bug: `ci/freedreno-a750-fails.txt` shows ir3 *asserting* on the 64-bit image
+  path (`ir3_image.c:101`, three `r64ui` tests marked `Crash`), a vkd3d test
+  fails there under the comment "Enabled by EXT_shader_image_atomic_int64", and
+  WinNative-Emu ships A8xx Turnip with the extension disabled. That is a driver
+  gap worth knowing about; it is not this.
+
+  **The GPU capture route is built and does not answer the question yet.**
+  `FD_RD_DUMP` is a diagnostics row now (Off / Commands / Commands and buffers),
+  freedreno's `cffdump` builds against this tree and decodes our chip id
+  correctly, and captures land in the container's `tmp`. What comes out is not
+  usable: a 1.5 GB intact capture holds 5,354 `RD_GPUADDR` sections and 5,354
+  `RD_BUFFER_CONTENTS` sections totalling 4.7 GB, and **no `RD_CMDSTREAM_ADDR`
+  section at all**. Turnip writes one per entry in `dump_cmds`
+  (`tu_queue.cc:536-541`), so the captured submits carry buffers and no command
+  buffers, and a decoder has nothing to start from — zero draw packets on a frame
+  the `d3d` card measured at 83 draws. Why `dump_cmds` is empty is Turnip-side
+  work on the a8xx submit path, not a setting, and is where this resumes.
+
+  **Two corrections to this entry, both of which cost sessions.**
+
+  *`nolrz` never tested depth.* It is listed above as eliminating LRZ and it
+  does — the low-resolution Z *optimisation*. The depth test runs underneath it
+  either way, so a fault in the compare op, the clear value, the viewport range
+  or the buffer format would survive that flag untouched and was read as "depth
+  is fine". Depth compression is now eliminated separately; the depth *state* is
+  still only reachable through a capture.
+
+  *A flag that is set is not a flag that ran.* Five device sessions on
+  2026-08-19 tested nothing, each silently: `VKD3D_SHADER_MODEL` does not exist
+  in this vkd3d at all (`d3d12_device_caps_init_shader_model` reads no
+  environment); `VKD3D_CONFIG` is in `RESERVED_SESSION_ENV` so the free-text env
+  table drops it, and it must be a `vkd3dconfig` row; `FD_RD_DUMP` was declared,
+  composed, and then dropped by the `DIAGNOSTIC_SESSION_ENV` allowlist
+  (`SessionEnvironment.kt:2308`); a Mesa edit made in the checkout was destroyed
+  by `fetch_source`'s `git checkout --force` before the build ran; and
+  `build/turnip.sh` defaulted to the HAL while the APK ships the ICD, so a driver
+  change went into a package nothing installs. **Read the value back out of the
+  running guest before believing an experiment happened** —
+  `vkd3d_config_flags_init_once` prints the composed `VKD3D_CONFIG`, and that one
+  line would have caught four of the five.
 
   **The standing lead is downgraded, and here is why.** Every session log on
   this device prints `vkd3d_init_device_caps: Not all relevant pipeline stages

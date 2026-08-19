@@ -1,0 +1,66 @@
+conhost: pasting types the terminating NUL as a character.
+
+`paste_clipboard` turns clipboard text into key events, and sizes the loop with
+
+    unsigned int i, len = GlobalSize(h) / sizeof(WCHAR);
+
+`GlobalSize` reports the size of the *allocation*, not the length of the string.
+A `CF_UNICODETEXT` handle is NUL-terminated by contract, and conhost's own copy
+path writes that terminator deliberately -- `copy_selection` sets
+`*end = '\0'` on the last row and then `GlobalReAlloc`s to a size that includes
+it. So the block always holds at least one WCHAR of NUL past the text, plus
+whatever the allocator rounded up to.
+
+The loop then faithfully types all of it. Pasting `abc` sends a, b, c and then a
+literal U+0000 as `uChar.UnicodeChar`, which the console renders as a box,
+because a box is what a font draws for a character with no glyph.
+
+Reported on the device pasting an API token out of Android's clipboard into
+PowerShell: the token itself arrived intact and was followed by boxes. That is
+the shape this predicts -- the text is never corrupted, it is only ever followed
+by however many NULs the allocation carried.
+
+**Truncating at the first NUL cannot lose real text**, which is the reason this
+is a two-line fix rather than a heuristic. `CF_UNICODETEXT` is NUL-terminated,
+so the first NUL *is* the end of the string; anything after it is padding by
+definition. Nothing that is legitimately on a text clipboard contains an embedded
+NUL.
+
+The same expression appears nowhere else in conhost. The other `GlobalSize`
+callers in the tree are in `dlls/ole32/clipboard.c`, which moves arbitrary
+structured-storage payloads rather than text -- truncating those at a zero byte
+would be actively wrong, so they are left alone.
+
+diff --git a/programs/conhost/window.c b/programs/conhost/window.c
+index f8fc7016af1..2784d4ef6fb 100644
+--- a/programs/conhost/window.c
++++ b/programs/conhost/window.c
+@@ -1060,12 +1060,28 @@ static void paste_clipboard( struct console *console )
+     if (h && (ptr = GlobalLock( h )))
+     {
+         unsigned int i, len = GlobalSize(h) / sizeof(WCHAR);
+         INPUT_RECORD ir[2];
+         SHORT sh;
+
++        /* Vessel: the string, not the allocation.
++         *
++         * GlobalSize reports the size of the block, which holds the
++         * terminating NUL and whatever the allocator rounded up to. The loop
++         * below turns every WCHAR in that range into a key event, so pasting
++         * `abc` types a, b, c and then a literal U+0000 -- which the console
++         * draws as a box, because that is what a font does with a character
++         * that has no glyph. Reported on the device pasting an API token from
++         * Android's clipboard: the token arrived correct and was followed by
++         * boxes.
++         *
++         * CF_UNICODETEXT is NUL-terminated by contract, so the first NUL is
++         * the end of the text and everything after it is padding. */
++        for (i = 0; i < len; i++) if (!ptr[i]) break;
++        len = i;
++
+         ir[0].EventType = KEY_EVENT;
+         ir[0].Event.KeyEvent.wRepeatCount = 0;
+         ir[0].Event.KeyEvent.dwControlKeyState = 0;
+         ir[0].Event.KeyEvent.bKeyDown = TRUE;
+
+         /* generate the corresponding input records */

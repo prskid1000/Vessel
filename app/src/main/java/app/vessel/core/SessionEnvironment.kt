@@ -622,6 +622,13 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // outside the container.
     "TU_DEBUG_FILE",
     "MESA_GPU_TRACEFILE",
+    // The GPU command-stream capture, and where it lands. Reserved for the
+    // reason MESA_GPU_TRACEFILE above it is: a container document that could
+    // choose this path could have the driver writing outside the container.
+    // FD_RD_DUMP is a declared row; FD_RD_DUMP_PATH is derived beside it and is
+    // reachable from no document at all.
+    "FD_RD_DUMP",
+    "FD_RD_DUMP_PATH",
     // Owned by the display server, which is the only thing that knows whether a
     // shared-memory socket got bound and where. A manifest param naming it would
     // point winex11 at a socket nothing is listening on, and patch 0005 answers
@@ -867,6 +874,20 @@ val DIAGNOSTIC_SESSION_ENV: Set<String> = setOf(
     "FEX_SILENTLOG",
     "MESA_LOG",
     "MESA_LOG_LEVEL",
+    // freedreno's own capture of the GPU command stream, and the path it writes
+    // to. The only instrument on this surface that records what the hardware was
+    // actually told to do rather than what a layer says about itself -- depth
+    // compare op, clear value, viewport range and LRZ direction are all in a
+    // capture and in no log, which is why docs/TODO.md #56 outlasted six sessions
+    // of reading logs.
+    //
+    // **A declared row is not enough on its own, and that is what this set is
+    // for.** The row composes the variable; this list decides whether it leaves
+    // the app. FD_RD_DUMP was declared, composed, and dropped at the `continue`
+    // below in silence -- an empty capture directory and nothing in the log to
+    // say why. Both names are needed: FD_RD_DUMP alone writes beside the working
+    // directory, and the path is what puts captures somewhere readable.
+    "FD_RD_DUMP",
     // **`VKD3D_CONFIG` is here for one word: `breadcrumbs`.**
     //
     // It stays in [RESERVED_SESSION_ENV] — this set is a strict subset — so no
@@ -2303,6 +2324,16 @@ fun sessionEnvironment(
             if (value == Emit.ON) vkd3dQueueProfileFile(paths.tmp).absolutePath else ""
         } else {
             value
+        }
+
+        // FD_RD_DUMP names a destination too, and unlike the profile it names a
+        // *directory* that Turnip both writes captures into and creates its
+        // trigger file in (freedreno_rd_output.c:185-189). Derived here for the
+        // same reason: this is the only place that knows the container's paths,
+        // and a document that could choose it could have the driver writing
+        // outside the container.
+        if (key == "FD_RD_DUMP" && value.isNotEmpty()) {
+            environment["FD_RD_DUMP_PATH"] = paths.tmp.absolutePath
         }
     }
 
