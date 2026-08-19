@@ -18,6 +18,15 @@ on:
         description: The pins.env key that versions this component
         required: true
         type: string
+      source:
+        # The *source tree* the component is built from, which is not always
+        # its own name: turnip and zink are both built out of mesa, and
+        # patches/ is keyed on the source. Defaults to the component name,
+        # which is right for every component that owns its tree.
+        description: Source tree name, for locating patches/<source>/
+        required: false
+        default: ''
+        type: string
       publish:
         description: Attach the built package to the components release
         required: false
@@ -70,8 +79,30 @@ jobs:
           key='${{ inputs.ref_var }}'
           now=$(grep -E "^${key}=" native/pins.env || true)
           before=$(git show HEAD~1:native/pins.env 2>/dev/null | grep -E "^${key}=" || true)
-          patches_changed=$(git diff --name-only HEAD~1 HEAD -- "patches/${{ inputs.component }}/" | wc -l)
-          if [ "$now" != "$before" ] || [ "$patches_changed" -gt 0 ]; then
+          # Keyed on the *source*, not the component. These were the same
+          # string until turnip and zink -- both built from mesa -- looked for
+          # patches/turnip/ and patches/zink/, neither of which has ever
+          # existed. The check found nothing, always, so the gate fell through
+          # to the ref comparison, and a mesa patch reached a build only when
+          # MESA_REF happened to move in the same commit. turnip.yml already
+          # carried a comment saying exactly this about its path filter; the
+          # filter was fixed and this, one layer down, was not.
+          # Not named `source`: that is a shell builtin, and quoting keeps an
+          # empty default from turning the assignment into a syntax error.
+          patch_dir='${{ inputs.source }}'
+          patch_dir="${patch_dir:-${{ inputs.component }}}"
+          patches_changed=$(git diff --name-only HEAD~1 HEAD -- "patches/${patch_dir}/" | wc -l)
+
+          # A revision bump is a rebuild request. vessel_version_code() folds
+          # it into the package version and ComponentStore only adopts a build
+          # whose code is higher, so bumping the revision without producing a
+          # package leaves the device on the old one with nothing to say that
+          # anything was meant to change.
+          rev_key=$(echo "${{ inputs.component }}" | tr "a-z" "A-Z")_REVISION
+          rev_now=$(grep -E "^${rev_key}=" native/pins.env || true)
+          rev_before=$(git show HEAD~1:native/pins.env 2>/dev/null | grep -E "^${rev_key}=" || true)
+
+          if [ "$now" != "$before" ] || [ "$patches_changed" -gt 0 ] || [ "$rev_now" != "$rev_before" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"

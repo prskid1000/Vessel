@@ -25,6 +25,8 @@ jobs:
     uses: ./.github/workflows/_component.yml
     with:
       component: zink
+      # Built out of mesa, so its patches live in patches/mesa/.
+      source: mesa
       # Zink shares the Turnip checkout, so MESA_REF is what versions it.
       # If ZINK_MESA_REF is ever set in pins.env, change this to match — the
       # reusable workflow only rebuilds when the named key actually moves.

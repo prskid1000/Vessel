@@ -32,4 +32,6 @@ jobs:
     uses: ./.github/workflows/_component.yml
     with:
       component: turnip
+      # Built out of mesa, so its patches live in patches/mesa/.
+      source: mesa
       ref_var: MESA_REF
