@@ -1,0 +1,88 @@
+freedreno/turnip: round-robin wave dispatch wherever the hardware does not charge for it.
+
+Round-robin exists for persistent-thread compute. Such a shader spins pulling
+work from a queue, and every wave has to keep advancing -- without fairness one
+that will not yield can starve the rest, and the loop stops making progress.
+
+Today it arrives one shader at a time. dxil-spirv signals the need per shader
+(`NonSemantic.dxil-spirv.quirks` -> `spirv_to_nir.c` ->
+`occupancy_bounded_workgroup_fairness` -> `ir3_shader.c` ->
+`cs.round_robin_mode`), which only helps a title somebody has already diagnosed
+and written a quirk for. Globally it is reachable only through
+`TU_DEBUG=COMPUTE_ROUND_ROBIN`, which is to say not at all in a shipped build.
+
+**Everything expensive about the mode is gated on `round_robin_errata`, not on
+the mode itself.** `ir3.c:305` caps occupancy at 8 waves and calls `exit(1)` for
+a barrier shader that needs more than that; `ir3_get_min_reg_count` inflates the
+minimum register count to enforce the cap. Both check the errata bit first and
+return immediately when it is clear:
+
+    if (v->cs.round_robin_mode && compiler->info->props.round_robin_errata) {
+       if (waves_per_wg > 8 && v->has_barrier) { ...; exit(1); }
+       max_waves = MIN2(max_waves, 8);
+    }
+
+a8xx sets `round_robin_errata = False` (`freedreno_devices.py:1377`). None of
+those paths is taken there and the mode reduces to a single register write --
+`tu_shader.cc`, `computerrmodeen`. The driver charges nothing.
+
+That gating is also the explanation for the current default. On a6xx and a7xx,
+where the errata is set, turning this on globally really would be costly, so
+`TU_DEBUG` is the right home for it *there*. Keyed on the errata rather than on
+the debug flag, it turns on exactly where it is free and stays off exactly where
+it is not. Nothing changes for any generation that has the errata.
+
+**What is not established is the hardware-side cost**, and this patch does not
+claim otherwise. Interleaving waves instead of running them to completion can
+cost cache locality, which is invisible from the source and would show up as
+frame rate. If a title regresses, this is the first line to put back.
+
+The immediate motivation is `docs/DEBUGGING.md` #56: RE Engine's culling shaders
+are persistent-thread loops, and upstream pairs their wave-size quirk with
+`ENABLE_FAIR_SCHEDULING` for exactly this reason. Every other engine doing the
+same thing on this device currently gets nothing, because nobody has written it
+a quirk.
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index f081e3ffc27..a93e66a193e 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -104,7 +104,37 @@ tu_physical_device_compiler_options_init(struct tu_physical_device *device,
+     * device.
+     */
+    device->compiler_options.no_multi_pos = TU_DEBUG(NOMULTIPOS);
+-   device->compiler_options.compute_round_robin = TU_DEBUG(COMPUTE_ROUND_ROBIN);
++   /* Round-robin wave dispatch, on wherever the hardware does not charge for
++    * it, rather than only when a shader asks.
++    *
++    * It exists for persistent-thread compute: a loop that spins pulling work
++    * from a queue needs every wave to keep advancing, and without fairness one
++    * that will not yield can starve the rest. dxil-spirv signals the need per
++    * shader (`NonSemantic.dxil-spirv.quirks` -> `spirv_to_nir.c` ->
++    * `occupancy_bounded_workgroup_fairness` -> `ir3_shader.c` ->
++    * `cs.round_robin_mode`), which works only for a title someone has already
++    * diagnosed and added a quirk for.
++    *
++    * **Everything expensive about it is gated on `round_robin_errata`, not on
++    * the mode itself.** `ir3.c:305` caps occupancy at 8 waves and kills the
++    * process for a barrier shader that needs more; `ir3_get_min_reg_count`
++    * inflates the minimum register count to enforce that cap. Both return
++    * immediately when the errata bit is clear. On a chip without it the mode
++    * is one register write -- `tu_shader.cc`, `computerrmodeen` -- and the
++    * driver charges nothing at all.
++    *
++    * That gating is why upstream leaves this to TU_DEBUG globally: on a6xx and
++    * a7xx, where the errata is set, a global default really would be costly.
++    * Keyed on the errata instead of on the debug flag, it turns on exactly
++    * where it is free.
++    *
++    * What is not established is the hardware-side cost. Interleaving waves
++    * rather than running them to completion can cost cache locality, and that
++    * is invisible from here -- it would show up as frame rate. If a title
++    * regresses, this line is the first thing to put back.
++    */
++   device->compiler_options.compute_round_robin =
++      TU_DEBUG(COMPUTE_ROUND_ROBIN) || !device->info->props.round_robin_errata;
+ }
+ 
+ static int
