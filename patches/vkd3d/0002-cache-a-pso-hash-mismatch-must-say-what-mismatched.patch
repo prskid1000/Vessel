@@ -1,60 +1,61 @@
 diff --git a/libs/vkd3d/cache.c b/libs/vkd3d/cache.c
-index f34cf887..a93689ad 100644
+index 14a57556..1611d8b9 100644
 --- a/libs/vkd3d/cache.c
 +++ b/libs/vkd3d/cache.c
-@@ -455,10 +455,45 @@ HRESULT d3d12_cached_pipeline_state_validate(struct d3d12_device *device,
+@@ -455,10 +455,46 @@ HRESULT d3d12_cached_pipeline_state_validate(struct d3d12_device *device,
      /* Verify the expected PSO state that was used. This must match, or we have to fail compilation as per API spec. */
      if (compat->state_desc_compat_hash != pso_compat->compat.state_desc_compat_hash)
      {
-+        /* Vessel: say which hashes, and whether the shaders are the same shaders.
++        /* Vessel: say which hashes, and whether the shaders are the same
++         * shaders.
 +         *
-+         * "PSO compatibility hash mismatch" on its own cannot separate the two
-+         * things it might mean, and they have opposite conclusions:
++         * "PSO compatibility hash mismatch" on its own cannot separate the
++         * two things it might mean, and they have opposite conclusions:
 +         *
 +         *  - the application handed back a blob it captured for a genuinely
-+         *    different pipeline state, which this is *required* to reject -- the
-+         *    contract is E_INVALIDARG and the application recompiles -- or
-+         *  - the same pipeline state hashed differently on two occasions, which
-+         *    would be a defect here and would make the cache worthless.
++         *    different pipeline state, which this is *required* to reject --
++         *    the contract is E_INVALIDARG and the application recompiles; or
++         *  - the same pipeline state hashed differently on two occasions,
++         *    which would be a defect here and make the cache worthless.
 +         *
-+         * The DXBC hashes separate them, and they are already in hand. They are
-+         * derived from shader bytecode alone, so if they are equal while the
-+         * state hash is not, the application is presenting the same shaders under
-+         * different state -- render target formats, sample description, DSV
-+         * format -- and the rejection is correct. If they differ too, the blob
-+         * belongs to another pipeline entirely. And if one expected hash shows up
-+         * against several different stored ones inside a single run, the
-+         * instability is ours and the first reading is wrong.
++         * The DXBC hashes separate them and are already in hand. They derive
++         * from shader bytecode alone, so equal shader hashes beside an
++         * unequal state hash means the application is presenting the same
++         * shaders under different state -- render target formats, sample
++         * description, DSV format -- and the rejection is correct. If they
++         * differ too, the blob belongs to another pipeline entirely.
 +         *
-+         * Printed at whichever level the surrounding code had already chosen, so
-+         * this adds detail to a line that was being emitted anyway rather than
-+         * adding a line to a run that is already noisy.
-+         */
-+        bool same_shaders = memcmp(compat->dxbc_blob_hashes, pso_compat->compat.dxbc_blob_hashes,
++         * Printed at whichever level the surrounding code had already
++         * chosen, so this adds detail to a line that was being emitted
++         * anyway rather than adding a line to a noisy run. */
++        bool same_shaders = memcmp(compat->dxbc_blob_hashes,
++                pso_compat->compat.dxbc_blob_hashes,
 +                sizeof(compat->dxbc_blob_hashes)) == 0;
 +
-         if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_PIPELINE_LIBRARY_LOG)
+         if (VKD3D_CONFIG_FLAG_IS_SET(PIPELINE_LIBRARY_LOG))
 -            INFO("PSO compatibility hash mismatch.\n");
 +        {
 +            INFO("PSO compatibility hash mismatch: expected %016"PRIx64", blob has %016"PRIx64", shaders %s.\n",
-+                    compat->state_desc_compat_hash, pso_compat->compat.state_desc_compat_hash,
++                    compat->state_desc_compat_hash,
++                    pso_compat->compat.state_desc_compat_hash,
 +                    same_shaders ? "identical" : "also differ");
 +        }
          else
 -            WARN("PSO compatibility hash mismatch.\n");
 +        {
 +            WARN("PSO compatibility hash mismatch: expected %016"PRIx64", blob has %016"PRIx64", shaders %s.\n",
-+                    compat->state_desc_compat_hash, pso_compat->compat.state_desc_compat_hash,
++                    compat->state_desc_compat_hash,
++                    pso_compat->compat.state_desc_compat_hash,
 +                    same_shaders ? "identical" : "also differ");
 +        }
          return E_INVALIDARG;
      }
  
 diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
-index ce7f54ec..2006a179 100644
+index 6dde6140..a85bb22d 100644
 --- a/libs/vkd3d/state.c
 +++ b/libs/vkd3d/state.c
-@@ -5899,6 +5899,41 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
+@@ -6415,6 +6415,41 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
  
          if (FAILED(hr))
          {

@@ -1363,6 +1363,9 @@ class SessionRuntime @Inject constructor(
         runCatching { installTools(container, layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "tools: ${it.message}") }
 
+        runCatching { ensureScriptsDirectory(layout, current.log) }
+            .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: ${it.message}") }
+
         return BootstrapOutcome.Applied
     }
 
@@ -2329,6 +2332,35 @@ class SessionRuntime @Inject constructor(
      *
      * Skipped entirely when the component is absent, which is the common case.
      */
+    /**
+     * Make `C:\Scripts`, which is on the machine PATH and is the user's.
+     *
+     * **Every launch, not once at provisioning, and both halves of that matter.**
+     * A prefix provisioned before [PrefixRegistry.SCRIPTS_DIR] existed has the
+     * PATH entry the moment the seed re-runs but would never get the directory;
+     * and a directory the user is invited to put files in is one they may also
+     * delete, after which the PATH entry points at nothing. Making it every time
+     * costs a stat on a directory that almost always already exists.
+     *
+     * Nothing is ever written into it and nothing is ever removed from it. That
+     * is the difference between this and every other directory the runtime
+     * creates: `installToolTree` renames a whole tree into place and deletes
+     * what was there, which is exactly why a user's own scripts must not live
+     * inside a component's directory.
+     */
+    private suspend fun ensureScriptsDirectory(
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val dir = File(layout.prefix, GUEST_SCRIPTS_DIR)
+        if (dir.isDirectory) return@withContext
+        if (dir.mkdirs()) {
+            log.line(LogSource.VESSEL, LogLevel.INFO, "scripts: created ${PrefixRegistry.SCRIPTS_DIR}")
+        } else {
+            log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: could not create ${dir.path}")
+        }
+    }
+
     private suspend fun installTools(
         containerId: String,
         layout: ContainerLayout,
@@ -3383,6 +3415,9 @@ class SessionRuntime @Inject constructor(
             sentinel = "cmd/git.exe",
             msys2 = true,
         )
+
+        /** [app.vessel.core.PrefixRegistry.SCRIPTS_DIR] as a path under the prefix. */
+        const val GUEST_SCRIPTS_DIR = "drive_c/Scripts"
 
         /** Where a tools tree is assembled before it is renamed into place. */
         const val STAGING_SUFFIX = ".staging"

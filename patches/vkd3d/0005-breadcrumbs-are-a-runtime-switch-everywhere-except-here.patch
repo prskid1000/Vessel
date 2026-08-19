@@ -55,19 +55,18 @@ is printed. `force_initial_transition` remains the switch that changes behaviour
 and it is checked before either.
 
 diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+index 1286b32b..59c48bee 100644
 --- a/libs/vkd3d/resource.c
 +++ b/libs/vkd3d/resource.c
-@@ -4614,11 +4614,25 @@
-     if (desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
-     {
-         if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_FORCE_INITIAL_TRANSITION))
+@@ -4771,7 +4771,21 @@ HRESULT d3d12_resource_create_placed(struct d3d12_device *device, const D3D12_RE
+         if (!VKD3D_CONFIG_FLAG_IS_SET(FORCE_INITIAL_TRANSITION))
          {
  #ifdef VKD3D_ENABLE_BREADCRUMBS
 -            object->initial_layout_transition_validate_only = true;
 +            /* Vessel: the runtime flag, not merely the compile-time one.
 +             *
 +             * Every other breadcrumb site in this file checks it -- the placed
-+             * resource registration eleven lines down, and the unregister in
++             * resource registration below, and the unregister in
 +             * d3d12_resource_destroy. Without it a build with breadcrumbs
 +             * compiled in reports every placed RTV and DSV on every submission
 +             * whether or not a trace was asked for: 46,591 lines and 93% of one
@@ -75,12 +74,10 @@ diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
 +             * were describing. Behaviour is identical either way -- both
 +             * branches leave the resource untransitioned -- so this only decides
 +             * whether the line is printed. */
-+            if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_BREADCRUMBS)
++            if (VKD3D_CONFIG_FLAG_IS_SET(BREADCRUMBS))
 +                object->initial_layout_transition_validate_only = true;
 +            else
 +                object->initial_layout_transition = 0;
  #else
              object->initial_layout_transition = 0;
  #endif
-         }
-     }

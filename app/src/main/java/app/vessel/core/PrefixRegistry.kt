@@ -367,7 +367,7 @@ object PrefixRegistry {
      * adds and replaces, so without it the fallback would only ever reach a
      * container created after this ships.
      */
-    const val SEED_VERSION: Int = 34
+    const val SEED_VERSION: Int = 36
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -941,6 +941,32 @@ object PrefixRegistry {
         path = """HKEY_CURRENT_USER\Console""",
         values = listOf(
             RegistryValue("FaceName", CONSOLE_FACE),
+            // **Drag-to-select, which does not work at all without this.**
+            // Wine's conhost defaults `quick_edit` to 0 (programs/conhost/window.c:265)
+            // and reads this value to override it (window.c:214). With it off,
+            // `WM_LBUTTONDOWN` is not treated as the start of a selection --
+            // every mouse gate in the window proc reads
+            // `console->window->quick_edit || console->window->in_selection`
+            // (window.c:2159, 2184, 2200) -- so the click is forwarded to the
+            // program instead and a drag does nothing visible.
+            //
+            // On: drag selects, Enter copies the selection (window.c:1106 calls
+            // `copy_selection`), and right-click opens the Mark/Copy/Paste
+            // popup, because `menu_mask` also defaults to 0 and the test is
+            // `(wparam & (MK_CONTROL|MK_SHIFT)) == menu_mask` -- so a plain
+            // right-click with no modifier held matches. That is the whole of
+            // what a console does on a laptop, and it was one dword away.
+            //
+            // **What it costs**, since it is not free: a program that reads
+            // mouse input itself no longer gets left-clicks while QuickEdit is
+            // on. For `cmd`, `pwsh` and a TUI that does not use the mouse this
+            // is nothing; for a full-screen mouse-driven console program it
+            // would matter, and `winecfg` cannot reach this setting because
+            // Vessel strips the Win32 caption (patches/wine/0010), so the
+            // window menu that would normally toggle it is unreachable. That
+            // trade is taken deliberately: text selection is the thing people
+            // actually do in this console.
+            RegistryValue.dword("QuickEdit", 1),
             // Background index 0, foreground index 15 — see above for why this
             // pair and not another: `create_screen_buffer`'s own fill is 0x000F.
             RegistryValue.dword("ScreenColors", 0x0F),
@@ -1447,6 +1473,11 @@ object PrefixRegistry {
                     // only `bin` has launchers in it. [JAVA_HOME] below names the
                     // root, which is what Java tooling actually asks for.
                     """$JAVA_DIR\bin""",
+                    // Last, deliberately. This is the only entry Vessel does
+                    // not own the contents of, so a script dropped in it must
+                    // not be able to shadow a component's binary by name -- a
+                    // file called `git.cmd` here should lose to Git.
+                    SCRIPTS_DIR,
                 ).joinToString(";"),
             ),
             // **Which MSYS2 prefix the shell belongs to, and it has to be set
@@ -1556,6 +1587,27 @@ object PrefixRegistry {
      * See the note in [toolsPath] for why the profile name is literal.
      */
     const val CLAUDE_BIN: String = """C:\users\steamuser\.local\bin"""
+
+    /**
+     * A place for the user's own scripts, on `PATH` and always present.
+     *
+     * **The one directory here that Vessel neither installs nor owns the
+     * contents of.** Everything else on [toolsPath] is a tree some component
+     * delivers; this is empty on a fresh prefix and stays empty until somebody
+     * puts something in it. That is the point — without it, running your own
+     * `.bat` or `.ps1` means typing a path or dropping the file somewhere that
+     * belongs to a component and will be deleted the next time that component
+     * updates (`installToolTree` renames the whole tree into place).
+     *
+     * At the end of `PATH`, so nothing here can shadow a real tool by accident;
+     * a script called `git.cmd` should lose to Git.
+     *
+     * `SessionRuntime.ensureScriptsDirectory` creates it on every launch rather
+     * than at provisioning, because a directory the user may delete has to come
+     * back, and because a prefix provisioned before this existed would otherwise
+     * carry a PATH entry pointing at nothing.
+     */
+    const val SCRIPTS_DIR: String = """C:\Scripts"""
 
     /**
      * Where the Temurin JDK tree of the Tools component installs. See [PYTHON_DIR].

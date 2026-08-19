@@ -1,16 +1,16 @@
 diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
-index a35626f8..b3e88ef0 100644
+index 146f2a67..926eed55 100644
 --- a/src/dxvk/dxvk_device.cpp
 +++ b/src/dxvk/dxvk_device.cpp
-@@ -2,6 +2,7 @@
- #include "dxvk_instance.h"
- #include "dxvk_latency_builtin.h"
+@@ -4,6 +4,7 @@
  #include "dxvk_latency_reflex.h"
+ #include "dxvk_shader_cache.h"
+ #include "dxvk_shader_ir.h"
 +#include "dxvk_vessel_stats.h"
  
  namespace dxvk {
    
-@@ -543,9 +544,17 @@ namespace dxvk {
+@@ -615,9 +616,17 @@ namespace dxvk {
      latencyInfo.frameId = frameId;
  
      m_submissionQueue.present(presentInfo, latencyInfo, status);
@@ -214,10 +214,10 @@ index 00000000..bdcf81d8
 +
 +}
 diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
-index f58db33e..fcf26dee 100644
+index 6b12f95c..73c4b47d 100644
 --- a/src/dxvk/meson.build
 +++ b/src/dxvk/meson.build
-@@ -115,6 +115,7 @@ dxvk_src = [
+@@ -80,6 +80,7 @@ dxvk_src = [
    'dxvk_sparse.cpp',
    'dxvk_staging.cpp',
    'dxvk_stats.cpp',

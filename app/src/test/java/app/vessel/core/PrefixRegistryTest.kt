@@ -179,7 +179,19 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(34, PrefixRegistry.SEED_VERSION)
+        assertEquals(36, PrefixRegistry.SEED_VERSION)
+        // 36 seeds HKCU\Console\QuickEdit. Wine's conhost defaults it off, and
+        // with it off a mouse drag in the console selects nothing at all -- the
+        // click goes to the program instead. On, a drag selects, Enter copies
+        // and right-click opens Mark/Copy/Paste, which is what a console does
+        // on a desktop.
+        // 35 adds C:\Scripts to the machine PATH -- a directory Vessel
+        // creates and never writes into, so a user has somewhere to put their
+        // own scripts that a component update will not delete. It is last on
+        // PATH so nothing dropped there can shadow a real tool, and
+        // SessionRuntime.ensureScriptsDirectory makes it on every launch
+        // rather than at provisioning, because a prefix seeded before this
+        // existed would otherwise carry a PATH entry pointing at nothing.
         // 34 does two things. The console scheme moves from Campbell to Cursor's
         // terminal colours, which is VS Code's Dark Modern, because the terminal
         // this console is used for is Claude Code inside Cursor and matching what
@@ -648,6 +660,10 @@ class PrefixRegistryTest {
         // does not exist. Asserted rather than assumed, so that adding it later
         // is a decision somebody makes on purpose.
         assertTrue("pale moon stays off PATH", !path.contains(PrefixRegistry.PALEMOON_DIR))
+        // The user's own scripts directory: present, and last, so a file
+        // called `git.cmd` in it loses to Git rather than shadowing it.
+        assertTrue("scripts on PATH", path.contains(PrefixRegistry.SCRIPTS_DIR))
+        assertEquals("scripts last", PrefixRegistry.SCRIPTS_DIR, path.last())
     }
 
     @Test

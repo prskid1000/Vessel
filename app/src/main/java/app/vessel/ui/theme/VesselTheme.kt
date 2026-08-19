@@ -37,6 +37,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 
 /**
  * Nocturne, as Vessel expresses it.
@@ -793,8 +796,15 @@ fun VesselTheme(
     content: @Composable () -> Unit,
 ) {
     val scheme = remember(colors) { colors.toMaterialScheme() }
+    val base = LocalDensity.current
+    val widthDp = LocalConfiguration.current.screenWidthDp
+    val scale = uiScaleFor(widthDp)
+    val scaled = remember(base, scale) {
+        if (scale == 1f) base else Density(base.density * scale, base.fontScale)
+    }
     MaterialTheme(colorScheme = scheme) {
         CompositionLocalProvider(
+            LocalDensity provides scaled,
             LocalVColors provides colors,
             LocalVMetrics provides metrics,
             LocalVType provides type,
@@ -1001,3 +1011,48 @@ fun Modifier.vRuleBelow(color: Color): Modifier = drawBehind {
     val y = size.height - 0.5f
     drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
 }
+
+/**
+ * How much to enlarge the interface, from the width of the window.
+ *
+ * **Density, not a redesign.** Multiplying density scales every dp in the
+ * app at once and preserves every relationship between elements, so it cannot
+ * produce a layout that was never tested -- it produces the tested layout,
+ * larger. A responsive design that used the width for a second column would be
+ * better and is a different piece of work.
+ *
+ * The steps are coarse on purpose. Fine-grained scaling makes text reflow at
+ * widths nobody chose, and the point here is only that a 44 dp control on a
+ * mirrored desktop should not read as a stamp.
+ *
+ * Capped at 2x: beyond that the interface stops looking scaled and starts
+ * looking zoomed, and touch targets are sized for fingers rather than for the
+ * screen being wide.
+ *
+ * Below [WIDE_DP] nothing happens at all, so a phone is byte-identical to what
+ * it was.
+ */
+private fun uiScaleFor(widthDp: Int): Float {
+    return when {
+        widthDp >= HUGE_DP -> 1.8f
+        widthDp >= LARGE_DP -> 1.5f
+        widthDp >= WIDE_DP -> 1.25f
+        else -> 1.0f
+    }
+}
+
+/**
+ * Above any phone this app targets, so a phone is never scaled.
+ *
+ * Measured on the device: 1264x2780 at density 480 is 3.0x, so landscape is
+ * 927 dp and portrait is 421. 900 was below that and the phone scaled itself
+ * by 1.25x on the one display the metrics were chosen against. 1100 clears
+ * 927 with room for a taller phone.
+ */
+private const val WIDE_DP = 1100
+
+/** A tablet, or a window given most of a laptop screen. */
+private const val LARGE_DP = 1500
+
+/** A desktop-sized window, where phone dp are unreadable. */
+private const val HUGE_DP = 2000

@@ -33,7 +33,7 @@ val bundledPackages = listOf(
     // and `wine-11.14-canoe.wcp` beside it in dist/ can never be adopted again.
     "wine-proton-exp-11.0-canoe.wcp",
     "fex-2608-canoe.wcp",
-    "dxvk-2.7.1-canoe.wcp",
+    "dxvk-3.0.2-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",
     "zink-26.3.0-devel-9c475fc3-canoe.wcp",
     // The ICD build of Turnip, and not the HAL build beside it in `dist/`. Only

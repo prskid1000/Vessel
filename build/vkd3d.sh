@@ -26,7 +26,7 @@ VERSION="${VKD3D_REF#v}"
 # so an unchanged code makes the rebuild a silent no-op on the device.
 VERSION_CODE="$(vessel_version_code "$VERSION" "${VKD3D_REVISION:-0}")"
 
-fetch_source "$COMPONENT" "$VKD3D_REPO" "$VKD3D_REF"
+fetch_source "$COMPONENT" "$VKD3D_REPO" "$VKD3D_REF" "${VKD3D_EXACT:-}"
 
 SRC="$NATIVE_DIR/$COMPONENT"
 STAGE="$WORK_DIR/stage-$COMPONENT"

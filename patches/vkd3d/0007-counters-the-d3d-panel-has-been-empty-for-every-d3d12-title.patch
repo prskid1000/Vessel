@@ -1,5 +1,5 @@
 diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
-index 84976e6a..10d3bb67 100644
+index 085b9f3c..04e1ff2b 100644
 --- a/libs/vkd3d/command.c
 +++ b/libs/vkd3d/command.c
 @@ -24,6 +24,8 @@
@@ -11,7 +11,7 @@ index 84976e6a..10d3bb67 100644
  #ifdef VKD3D_ENABLE_RENDERDOC
  #include "vkd3d_renderdoc.h"
  #endif
-@@ -8907,6 +8909,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
+@@ -9267,6 +9269,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
              iface, vertex_count_per_instance, instance_count,
              start_vertex_location, start_instance_location);
  
@@ -20,7 +20,7 @@ index 84976e6a..10d3bb67 100644
      d3d12_command_list_flush_dgc_batch(list);
  
      if (list->predication.fallback_enabled)
-@@ -8992,6 +8996,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
+@@ -9336,6 +9340,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
              iface, index_count_per_instance, instance_count, start_vertex_location,
              base_vertex_location, start_instance_location);
  
@@ -29,7 +29,7 @@ index 84976e6a..10d3bb67 100644
      d3d12_command_list_flush_dgc_batch(list);
  
      if (!d3d12_command_list_update_index_buffer(list))
-@@ -9158,6 +9164,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
+@@ -9506,6 +9512,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
  
      TRACE("iface %p, x %u, y %u, z %u.\n", iface, x, y, z);
  
@@ -38,16 +38,16 @@ index 84976e6a..10d3bb67 100644
      d3d12_command_list_check_render_pass_validation(list, "Dispatch called within a render pass.\n", true);
      d3d12_command_list_flush_dgc_batch(list);
  
-@@ -13109,6 +13117,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
+@@ -13896,6 +13904,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
  
      TRACE("iface %p, barrier_count %u, barriers %p.\n", iface, barrier_count, barriers);
  
 +    VKD3D_VESSEL_COUNT(barriers, barrier_count);
 +
-     d3d12_command_list_flush_dgc_batch(list);
-     d3d12_command_list_end_current_render_pass(list, false);
-     d3d12_command_list_end_transfer_batch(list);
-@@ -17119,6 +17129,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
+     /* Ignore enhanced barriers. They are much harder to reason about due to the transient nature of Vulkan-style
+      * barriers. This is more or less just a workaround too for terribly written games,
+      * so keep it as simple as it can be for now. */
+@@ -18153,6 +18163,14 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
              iface, command_signature, max_command_count, arg_buffer, arg_buffer_offset,
              count_buffer, count_buffer_offset);
  
@@ -62,7 +62,7 @@ index 84976e6a..10d3bb67 100644
      if (!max_command_count)
          return;
  
-@@ -17158,6 +17176,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
+@@ -18194,6 +18212,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
      arg_buffer_offset += sig_impl->argument_buffer_offset_for_command;
      if (sig_impl->argument_buffer_offset_for_command)
      {
@@ -76,7 +76,7 @@ index 84976e6a..10d3bb67 100644
          d3d12_command_list_debug_mark_label(list, "DGC skip", 1.0f, 0.0f, 0.0f, 1.0f);
          return;
      }
-@@ -20963,6 +20988,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
+@@ -22241,6 +22266,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
      TRACE("iface %p, NumBarrierGroups %u, D3D12_BARRIER_GROUP %p\n",
              iface, NumBarrierGroups, pBarrierGroups);
  
@@ -97,7 +97,7 @@ index 84976e6a..10d3bb67 100644
      if (d3d12_command_list_barrier_is_noop(list, NumBarrierGroups, pBarrierGroups))
      {
          d3d12_command_list_debug_mark_label(list, "Noop Barrier", 1.0f, 0.0f, 0.0f, 1.0f);
-@@ -21928,6 +21967,12 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
+@@ -23232,6 +23271,12 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comm
      if (!command_list_count)
          return;
  
@@ -129,7 +129,7 @@ index 477b3663..f48bd8bc 100644
  
  if enable_renderdoc
 diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
-index 8dd2cc10..4c2e4f2e 100644
+index 5f2e9355..70c71e8b 100644
 --- a/libs/vkd3d/swapchain.c
 +++ b/libs/vkd3d/swapchain.c
 @@ -23,6 +23,8 @@
@@ -141,7 +141,7 @@ index 8dd2cc10..4c2e4f2e 100644
  
  static inline bool vkd3d_swapchain_present_mode_parse(const char *string, VkPresentModeKHR *present_mode)
  {
-@@ -3163,6 +3165,17 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
+@@ -3113,6 +3115,17 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
      VKD3D_REGION_END(queue_present);
      vkd3d_queue_release(chain->queue->vkd3d_queue);
  

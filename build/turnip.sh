@@ -22,9 +22,22 @@ COMPONENT_REF="$MESA_REF"
 
 # --- ICD mode ------------------------------------------------------------------
 #
-#   VESSEL_TURNIP_ICD=1 ./build/turnip.sh    # -> dist/turnip-<ver>-icd-<target>.wcp
+#   ./build/turnip.sh                        # -> dist/turnip-<ver>-icd-<target>.wcp
+#   VESSEL_TURNIP_HAL=1 ./build/turnip.sh    # -> dist/turnip-<ver>-<target>.wcp
 #
-# The default build is an **Android Vulkan HAL**: `-Dplatforms=android,x11` makes
+# **The ICD is the default, and it is the default because it is what ships.**
+# app/build.gradle.kts names `turnip-<ver>-icd-<target>.wcp` in its bill of
+# materials -- the APK carries the ICD and nothing else. This script defaulting
+# to the HAL meant a plain `./build/turnip.sh` produced a package the APK does
+# not reference: the build succeeded, dist/ gained a new file, the version code
+# went up, and the phone kept running the previous ICD. That happened, and it
+# cost a device session testing a driver change that was never installed. A
+# default that silently builds the thing nobody ships is a trap, so the default
+# moved rather than the person being expected to remember.
+#
+# The HAL is still buildable and still described below; it is now opt-in.
+#
+# The Android Vulkan HAL: `-Dplatforms=android,x11` makes
 # Mesa export exactly one dynamic symbol, `HMI`, so the only thing that can load
 # the driver is Android's own `libvulkan.so`, with libadrenotools redirecting its
 # HAL lookup. That is what ships, and for headless rendering it is correct and
@@ -66,14 +79,17 @@ COMPONENT_REF="$MESA_REF"
 # `system = 'linux'` is also the truthful description of what this build is: a
 # normal Linux Vulkan ICD that happens to be linked against bionic and talks to
 # /dev/kgsl. It is the shape Termux's freedreno ICD package already ships.
-if [ "${VESSEL_TURNIP_ICD:-0}" = "1" ]; then
-  TURNIP_PLATFORMS=x11
-  TURNIP_VARIANT=icd
-  TURNIP_MESON_SYSTEM=linux
-else
+# VESSEL_TURNIP_ICD is still honoured so an existing command line keeps working;
+# it is now the default rather than the switch, and VESSEL_TURNIP_HAL is what
+# turns it off.
+if [ "${VESSEL_TURNIP_HAL:-0}" = "1" ] || [ "${VESSEL_TURNIP_ICD:-1}" = "0" ]; then
   TURNIP_PLATFORMS=android,x11
   TURNIP_VARIANT=hal
   TURNIP_MESON_SYSTEM=android
+else
+  TURNIP_PLATFORMS=x11
+  TURNIP_VARIANT=icd
+  TURNIP_MESON_SYSTEM=linux
 fi
 
 fetch_source "$SOURCE_NAME" "$MESA_REPO" "$MESA_REF" "${MESA_SHA:-}"
