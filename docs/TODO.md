@@ -348,6 +348,41 @@ and both were free to avoid.
   already, and `07493a0` is in this log for shipping a global build change that
   regressed a title that worked. One run separates them.
 
+  **THE RUN HAPPENED, AND THE PICTURE CHANGED. The five shaders run in that
+  scene.** 2026-08-19, session `1787132262073`. All five overrides were loaded
+  -- `vkd3d_shader_replace_path` names each hash -- the ladder-merging warnings
+  went to **zero** because those five no longer pass through the translator,
+  and the title ran to a playable frame with no device loss. The user's report
+  was immediate and unambiguous: *"di complete messeup up"*, *"looks very
+  bad"*.
+
+  **That is the relevance question answered.** A stub could have told us this
+  and nothing else; the rewrite told us this while the game kept rendering.
+  Only two things have ever moved this picture -- `has_64b_image_atomics =
+  False`, and now replacing these five shaders. Every flag sweep in the table
+  above came back identical. **These shaders draw this scene.**
+
+  **The rewrite itself was wrong, and the way it was wrong is the next
+  clue.** `Elect -> true` and `BroadcastFirst -> identity` were applied to
+  *every* site, not only to the append reservations they were reasoned about.
+  Those two substitutions are safe only where an elected lane reserves a run
+  and broadcasts the base back. Elsewhere `Elect` guards work that must happen
+  once per wave -- doing it 64 times is not equivalent -- and `BroadcastFirst`
+  is dxil-spirv's way of making a value provably uniform, which identity
+  destroys. 3 elects and 16-21 broadcasts were rewritten per shader; only the
+  handful feeding an `OpAtomicIAdd` should have been.
+
+  So "worse" does not confirm the mechanism, and must not be read as though it
+  did. It confirms *relevance* only. The next rewrite is the narrow one:
+  starting from each `OpAtomicIAdd` whose operand is a `BallotBitCount Reduce`,
+  rewrite only that site's ballot, scan, elect and broadcast, and leave every
+  other subgroup op alone.
+
+  Measured, for the record -- draws/frame `1.0/36.8/73.0`, presented fps
+  `5.4/28.2/57.0`, against a street baseline of `1.0/25.7/55.0` and a room
+  reading of `1.0/83.2/183.0`. The room's signature never appeared, which is
+  consistent with the geometry that defines it not being submitted at all.
+
   **The dual-wave path is the only ir3 code in this driver no test has ever
   run.** Looked up while pricing `VK_KHR_shader_maximal_reconvergence`, and it
   is worth more than that extension is:
