@@ -68,6 +68,7 @@ import app.vessel.ui.components.VAppIcon
 import app.vessel.ui.components.VButtonStyle
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
+import app.vessel.ui.components.VProgramArt
 import app.vessel.ui.components.VRule
 import app.vessel.ui.components.rememberBuiltInIcon
 import app.vessel.ui.components.rememberProgramIcon
@@ -424,6 +425,9 @@ private fun TaskbarWindow(
         val owned = rememberProgramIcon(owner)
         val builtIn = rememberBuiltInIcon(containerId, window.program)
         val icon = owned ?: builtIn
+        // Ours only when neither list produced the program's own — same order
+        // the launcher uses, and the same reason.
+        val art = if (icon == null) VProgramArt.forProgram(window.program) else null
         val glyph = windowGlyph(window.program)
 
         when {
@@ -433,6 +437,12 @@ private fun TaskbarWindow(
                 modifier = Modifier.size(Vessel.metrics.iconMd),
                 contentScale = ContentScale.Fit,
                 filterQuality = FilterQuality.Medium,
+            )
+
+            art != null -> Image(
+                imageVector = art,
+                contentDescription = null,
+                modifier = Modifier.size(Vessel.metrics.iconMd),
             )
 
             glyph != null ->
@@ -757,6 +767,7 @@ fun SessionLauncher(
                             containerId,
                             option.profile.installedAt ?: option.profile.program,
                         ),
+                        art = VProgramArt.forProgram(option.profile.program),
                         caption = option.profile.shortLabel,
                         description = option.unavailable ?: "Open ${option.profile.label}",
                         enabled = option.enabled,
@@ -818,6 +829,15 @@ private fun LauncherAction(
      * not running yet.
      */
     bitmap: ImageBitmap? = null,
+    /**
+     * Vessel's own colour mark, for a program that ships no icon to extract.
+     *
+     * Between [bitmap] and [icon] in priority, because that is the order of
+     * truthfulness: the program's own icon first, then ours, then a tinted
+     * glyph. Drawn with `Image` rather than `Icon` — see [VProgramArt] for why
+     * the two cannot share a call.
+     */
+    art: ImageVector? = null,
 ) {
     val alpha = if (enabled) 1f else Vessel.colors.disabledAlpha
     Column(
@@ -836,6 +856,12 @@ private fun LauncherAction(
                 modifier = Modifier.size(Vessel.metrics.iconMd).alpha(alpha),
                 contentScale = ContentScale.Fit,
                 filterQuality = FilterQuality.Medium,
+            )
+        } else if (art != null) {
+            Image(
+                imageVector = art,
+                contentDescription = null,
+                modifier = Modifier.size(Vessel.metrics.iconMd).alpha(alpha),
             )
         } else {
             Icon(

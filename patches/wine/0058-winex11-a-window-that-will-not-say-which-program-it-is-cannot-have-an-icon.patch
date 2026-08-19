@@ -1,0 +1,78 @@
+winex11: a window that will not say which program it is cannot have an icon.
+
+`set_initial_wm_hints` sets `WM_CLASS` to a Steam constant and nothing else:
+
+    static char steam_proton[] = "steam_proton";
+    const char *app_id = getenv("SteamAppId");
+    if (app_id && *app_id) {
+        snprintf(proton_app_class, ..., "steam_app_%s", app_id);
+        class_hints->res_name  = proton_app_class;
+        class_hints->res_class = proton_app_class;
+    } else {
+        class_hints->res_name  = steam_proton;
+        class_hints->res_class = steam_proton;
+    }
+
+Unconditionally -- there is no branch that uses `process_name`, which
+`x11drv_main.c` has already computed and lowercased for exactly this purpose.
+This is Proton's change, not Wine's: upstream sets `res_name = process_name` and
+`res_class = "Wine"`, and Valve replaces both so the Steam overlay and Steam's
+compositor can key on the app id. Vessel has no Steam client, no overlay and no
+app id, so `SteamAppId` is never set and **every window in every container
+reports `steam_proton`**.
+
+That name is the only thing a window carries that says which program drew it, and
+Vessel's shell reads it twice:
+
+  * `XServerDisplay.programName()` trims `WM_CLASS` to a bare filename, and
+    `ProgramIcons.iconForBuiltIn` looks that name up under `drive_c\windows` and
+    `system32`. `steam_proton` is not a file, so the lookup returns null.
+  * `SessionShell`'s taskbar matches the same string against each shortcut's
+    executable. `steam_proton` equals no shortcut either.
+
+Both fall through to the letter fallback, so the taskbar draws a monogram for
+every window ever opened -- `W` for winecfg, taken from the *title* rather than
+the program, because the program name never matched anything. The launcher was
+unaffected and that is what made this confusing to find: it names executables
+itself (`TerminalProfile.installedAt`) instead of asking the window, so winecfg
+has a correct icon in the launcher and a letter in the taskbar at the same time,
+from the same prefix, in the same session.
+
+**Restoring the name rather than deleting the Steam one.** `res_class` keeps the
+Steam value, because that is the half a window manager groups by and the half
+anything keying on Proton would read; `res_name` goes back to `process_name`,
+which is the half that identifies the instance and the half upstream Wine has
+always put the executable in. A window manager that groups by class sees no
+change. Vessel's shell reads a real filename and both lookups above start
+matching.
+
+`process_name` is already `.exe`-suffixed and lowercased at
+`x11drv_main.c:460-473` -- appname after the last separator, downcased character
+by character, then converted -- so it is exactly the form `programName()` expects
+and needs no further trimming. It can be NULL if that allocation failed, so the
+fallback keeps the Steam value rather than passing NULL to Xlib.
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index ce37a4c4d5e..c17dbaec8dd 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1255,12 +1255,19 @@ static void set_initial_wm_hints( Display *display, Window window )
+             class_hints->res_class = proton_app_class;
+         }else{
+             class_hints->res_name = steam_proton;
+             class_hints->res_class = steam_proton;
+         }
+ 
++        /* Vessel: res_class stays whatever Proton chose above -- that is the
++         * half a window manager groups by. res_name goes back to the executable,
++         * which is what upstream Wine puts there and the only thing the shell can
++         * use to find a window's icon or match it to a shortcut. Without this
++         * every taskbar button draws a letter. */
++        if (process_name) class_hints->res_name = process_name;
++
+         XSetClassHint( display, window, class_hints );
+         XFree( class_hints );
+     }
+ 
+     /* set the WM_CLIENT_MACHINE and WM_LOCALE_NAME properties */
+     XSetWMProperties(display, window, NULL, NULL, NULL, 0, NULL, NULL, NULL);
