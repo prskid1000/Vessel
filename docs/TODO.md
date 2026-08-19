@@ -301,16 +301,52 @@ and both were free to avoid.
   executes in the basement. Every previous lead in this entry died at exactly
   this step, and this one is not exempt.
 
-  **The relevance test is staged and takes one run.** Five 140-byte modules —
-  a `GLCompute` entry point, matching `LocalSize`, `OpReturn` — assembled with
-  `spirv-as`, validated, and placed in the container's `tmp/shader-override`
-  under the five hashes. Turn the `VKD3D_SHADER_OVERRIDE` row on and walk into
-  the room. If the picture is **unchanged**, none of the five executes there,
-  all five die together, and the ladder-merging warning is noise. If it
-  **changes at all** — better, worse, or differently broken — this is the
-  subsystem, and the next step is a targeted edit rather than a stub. Either
-  answer is worth more than the last six flag sweeps combined, because it is
-  the first experiment here that cannot come back identical.
+  **This is not a new discovery, and that is the strongest thing about it.**
+  `patches/mesa/0007` already describes this exact loop -- "ballot for the
+  active count, an exclusive scan for this lane's index, one lane doing the
+  `atomicAdd`, `WaveReadLaneFirst` to share the base back" -- found in **33 of
+  the 2,867 shaders one session compiled**, and fixed a *hang* by taking
+  128-wide waves away from a8xx. The five shaders here are the same machinery.
+  It no longer hangs. The question is whether it is still producing wrong
+  answers where it used to produce none.
+
+  That patch also records the rewrite that worked: "all 33 loops rewritten to
+  a per-lane `atomicAdd`, each assembled and `spirv-val` clean", kept out of
+  the tree because a per-shader override is the wrong place to fix a driver
+  defect. **It is the right place to test one.**
+
+  **The experiment is staged and takes one run.** Each of the five is
+  disassembled, rewritten by four substitutions, reassembled and validated:
+
+      Elect                     -> true            every lane elects itself
+      BallotBitCount Reduce     -> pred ? 1 : 0    it reserves one slot, its own
+      BallotBitCount Exclusive  -> 0               which is at offset zero
+      BroadcastFirst x          -> x               and the base is already mine
+
+  Between 12 and 17 reductions, 16 to 21 scans and broadcasts, and 3 elects per
+  shader, with nothing left untraced. The *set* of items written is unchanged;
+  only their order is, and an append order was never guaranteed. What is
+  removed is every dependence on the wave agreeing about which lanes are
+  active -- which is the whole hypothesis, deleted from the shader.
+
+  If the room renders, the mechanism is confirmed and the work moves to the
+  driver. If it does not, all five die together and the ladder-merging warning
+  is noise. Unlike a stub, this one keeps the game rendering either way, so a
+  partial result is still readable.
+
+  **The global fix is deliberately not written yet, and here is why.** The ask
+  is a driver change so this cannot happen to any shader in any title again,
+  and that is the right target -- but it changes wave behaviour for every
+  shader this device ever runs, and the two candidates are different work:
+
+  | if the run says | the fix is |
+  |---|---|
+  | the wave pair diverges across subgroup ops | dispatch single-wave for shaders that use them, rather than relying on join-point marking to hold a pair together |
+  | the restructured CFG is what breaks the mask | it is a dxil-spirv defect, reported upstream with these five as the reproducer, and worked around here by wave-size or full-subgroup pipeline flags |
+
+  Committing to either before the run is how six theories died in this entry
+  already, and `07493a0` is in this log for shipping a global build change that
+  regressed a title that worked. One run separates them.
 
   **What has been eliminated, so none of it is re-run.** Each was tested on the
   device, against the same scene:
