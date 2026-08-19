@@ -45,6 +45,54 @@ ok()   { printf '%s  ok%s %s\n' "$_C_GRN" "$_C_RESET" "$*"; }
 warn() { printf '%swarn:%s %s\n' "$_C_YEL" "$_C_RESET" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$_C_RED" "$_C_RESET" "$*" >&2; exit 1; }
 
+# --- The work directory must be case-sensitive -------------------------------
+
+# A case-insensitive WORK_DIR miscompiles, and the error names the wrong thing.
+#
+# The image sets VESSEL_WORK_DIR=/work (Dockerfile), which is also where the
+# repo is usually mounted -- and on a Windows host that bind mount is NTFS,
+# which is case-insensitive. libX11 then builds with its own include/X11 on the
+# header path, bionic's <locale.h> does #include <xlocale.h>, and that resolves
+# to libX11's Xlocale.h rather than the NDK's. locale_t is never declared and
+# the NDK's own headers stop parsing:
+#
+#   locale.h:102:26: error: nullability specifier '_Nonnull' cannot be applied
+#                           to non-pointer type 'int'
+#   locale.h:101:30: error: unknown type name 'locale_t'
+#
+# Whatever fails next reports something unrelated -- x11-sysroot.sh blames the
+# version pin in native/pins.env -- and none of it points here. Two whole builds
+# went into finding it. CI never sees this, because a Linux runner is
+# case-sensitive, so nothing upstream of a local build catches it either.
+#
+# Probed rather than inferred from the platform: a Docker named volume mounted
+# at this very path is case-sensitive, so the host OS does not decide it and
+# uname cannot answer the question.
+_case_probe="$WORK_DIR/.vessel-case-probe"
+rm -rf "$_case_probe"
+mkdir -p "$_case_probe"
+: > "$_case_probe/Xlocale.h"
+if [ -e "$_case_probe/xlocale.h" ]; then
+  rm -rf "$_case_probe"
+  die "the work directory is on a case-insensitive filesystem:
+
+     $WORK_DIR
+
+   libX11 ships include/X11/Xlocale.h, and there the NDK's #include <xlocale.h>
+   finds that instead of its own -- so locale_t vanishes and the NDK headers
+   stop compiling, several steps before anything blames the right thing.
+
+   Point VESSEL_WORK_DIR at a case-sensitive path. Inside the build image any
+   path that is not the bind mount will do, and a named volume also keeps the
+   downloaded tarballs between runs:
+
+     docker volume create vessel-work
+     docker run --rm -v \"\$(pwd):/work\" -w /work -v vessel-work:/tmp/vessel-build -e VESSEL_WORK_DIR=/tmp/vessel-build vessel-build:latest ./build/turnip.sh"
+fi
+rm -rf "$_case_probe"
+unset _case_probe
+
+
 # --- Configuration -----------------------------------------------------------
 
 load_config() {
