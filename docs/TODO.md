@@ -239,6 +239,79 @@ and both were free to avoid.
   compile only. They are the one compiler-level complaint this bug has ever
   produced and are the current lead.
 
+  **The five have been dumped and disassembled, and they are one subsystem,
+  not five unrelated shaders.** `spirv-tools` is in the build image now, so
+  the `.spv` files the dump row writes can be read. Pairing the warnings to
+  the dump by thread gave five hashes; disassembling them gives this:
+
+  | hash | LocalSize | lines | ladder phis |
+  |---|---|---|---|
+  | `7f36f1848d191aa8` | 128 | 2627 | 54 |
+  | `a9b1e2c0dcdbd0fe` | 32 | 2626 | 54 |
+  | `86453e3039839573` | 128 | 1982 | 45 |
+  | `b677d48c0873c782` | 32 | 1981 | 45 |
+  | `a88b8df304ef3bd2` | 32 | 1956 | 46 |
+
+  Two matched pairs differing by a single line and their threadgroup size —
+  the same shader compiled at 128 and at 32 — plus one more. Every one is
+  `GLCompute` with an identical capability set: `GroupNonUniformBallot`,
+  `GroupNonUniformShuffle`, `RuntimeDescriptorArray`,
+  `StorageBufferArrayNonUniformIndexing`, `PhysicalStorageBufferAddresses`.
+  They all read the `SubgroupSize` builtin and clamp it with
+  `UMin(32, SubgroupSize)`, so they are written to adapt to wave size rather
+  than assume one.
+
+  **All five pass `spirv-val` clean.** That matters more than it looks. The
+  restructurer complained, but it did not emit illegal SPIR-V, so nothing
+  downstream — Turnip, ir3 — is being handed something malformed. Whatever is
+  wrong here is a *semantic* difference, not a validity one, which is why no
+  layer in the stack has ever logged a word about it.
+
+  **What they do.** The opcode mix in `a88b8df304ef3bd2`, and the others are
+  the same shape:
+
+      OpGroupNonUniformBallot          29     OpAtomicIAdd              15
+      OpGroupNonUniformBallotBitCount  28     OpAtomicCompareExchange    2
+        of which ExclusiveScan         16     OpAtomicOr                 2
+      OpGroupNonUniformBroadcastFirst  16     OpAtomicUMin               1
+      OpGroupNonUniformElect            3     OpControlBarrier           1
+
+  Ballot, then an exclusive bit-count for this lane's slot, then one elected
+  lane does an `atomicAdd` to reserve a run, then `BroadcastFirst` hands the
+  base back to the wave. That is **subgroup-compacted atomic append**, the
+  standard way a GPU-driven pass writes a variable-length output list —
+  visible instances, surviving draws, a culled index buffer. Repeated 29 times
+  in one shader, it is the whole point of the shader, not an incidental use.
+
+  **Why that shape is worth pursuing, stated as the hypothesis it is.** A
+  ballot's answer depends on exactly which lanes are active where it executes.
+  dxil-spirv could not structurise this control flow — that is what the
+  warning says — and the 45 to 54 `frontier_phi_*.ladder` and `ladder_phi_*`
+  values in each module are the rewrite it produced instead. A rewritten CFG
+  reaches the same ballot with a different active mask, a different mask gives
+  different compaction offsets, and different offsets put a **different subset**
+  of objects in the output list. The symptom is a wrong subset of objects
+  drawn, in a scene the CPU still has full knowledge of — collision holds
+  against walls that are not rendered. The shapes match. That is a reason to
+  test, not a finding.
+
+  **The gap, and it is the only one that matters: there is still no evidence
+  these run in that room.** A warning at compile time says a shader was hard
+  to translate. It does not say the shader is wrong, and it does not say it
+  executes in the basement. Every previous lead in this entry died at exactly
+  this step, and this one is not exempt.
+
+  **The relevance test is staged and takes one run.** Five 140-byte modules —
+  a `GLCompute` entry point, matching `LocalSize`, `OpReturn` — assembled with
+  `spirv-as`, validated, and placed in the container's `tmp/shader-override`
+  under the five hashes. Turn the `VKD3D_SHADER_OVERRIDE` row on and walk into
+  the room. If the picture is **unchanged**, none of the five executes there,
+  all five die together, and the ladder-merging warning is noise. If it
+  **changes at all** — better, worse, or differently broken — this is the
+  subsystem, and the next step is a targeted edit rather than a stub. Either
+  answer is worth more than the last six flag sweeps combined, because it is
+  the first experiment here that cannot come back identical.
+
   **What has been eliminated, so none of it is re-run.** Each was tested on the
   device, against the same scene:
 
