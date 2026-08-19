@@ -42,12 +42,12 @@ same day. The stack that does it: Wine ARM64EC plus FEX, DXVK and vkd3d-proton o
 Turnip, a D3D12 device, a 1920x1080 swapchain, over three thousand pipelines,
 Wwise audio, and a Media Foundation backend behind `IMFSourceReader`.
 
-**The frontier has moved again, and this is the third time in three days.** It
-went from "does it start" to "does it load" to **"is it drawing the right
-picture"**. The game loads, runs, holds a frame rate and plays sound; what it
-does not do is draw the world. Everything below the graphics layer — Wine's
-virtual memory, FEX's translation, the exception path, the loader, the critical
-sections — has been chased to the bottom and is no longer where the failures are.
+**The frontier moved four times in five days: does it start, does it load, is
+it drawing the right picture — and now it is.** The game loads, runs, holds a
+frame rate, plays sound and draws the world. Everything below the graphics
+layer — Wine's virtual memory, FEX's translation, the exception path, the
+loader, the critical sections — was chased to the bottom days ago and is not
+where the failures are.
 **#56 is fixed as of 2026-08-19, and it was never a driver bug.** The one
 blocker in this file that produced no error message at all turned out to produce
 none because nothing had failed: RE Engine's culling shaders read
@@ -257,10 +257,11 @@ regression gets attributed to the wrong change three days later.
   which are the only thing in the family that says whether a frame was GPU-bound
   or CPU-bound rather than how much work was in it.
 
-  *Done when:* a Requiem session fills the `d3d · indirect` card, which is also
-  the next step for #56. Both builds shipped and installed (DXVK `2070101`, vkd3d
-  `3000107`, verified on device by the counter strings in the DLLs themselves) —
-  and **the run produced no counters anyway**, see the next item.
+  *Done when:* a Requiem session fills the `d3d · indirect` card. Both builds
+  shipped and installed (DXVK `2070101`, vkd3d `3000107`, verified on device by
+  the counter strings in the DLLs themselves) — and **the run produced no
+  counters anyway**, see the next item. It was once the next step for #56; that
+  entry closed without it, so this is now wanted for its own sake.
 
 ---
 
