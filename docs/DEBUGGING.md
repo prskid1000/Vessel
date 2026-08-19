@@ -392,11 +392,22 @@ The decisive one was `VKD3D_SHADER_OVERRIDE`: substituting the five shaders
 changed the picture, which established that they run in the broken scene at
 all. Every earlier hypothesis had died for want of exactly that.
 
-Three driver changes were made chasing it and two of them stay on merit:
-`patches/mesa/0009` prints the branchstack when it exceeds the cap, because
-nothing in Mesa ever printed it; `patches/vkd3d/0008` is the fix.
-`patches/mesa/0010` raised the cap and is a measured no-op here — it was kept
-only until the measurement existed, and the measurement now says remove it.
+**Two driver changes were made chasing this and only one of them survived,
+which is the point.** `patches/vkd3d/0008` is the fix. `patches/mesa/0009`
+prints the branchstack when it exceeds the cap, and stays because nothing in
+Mesa ever printed it — the number was unobtainable, which is why the theory
+could not be killed for so long.
+
+`patches/mesa/0010` raised that cap from 64 to the register's 127 and is
+**deleted**. Once `0009` could be heard it reported nothing, on a title whose
+shaders peak at a nesting depth of 12–14: the truncation `0010` prevents never
+happens here. Keeping it would have meant carrying a change to wave occupancy,
+guarded by hand-written logic against an `exit(1)` path, on a branch no shader
+takes — with no CI on this generation to catch a regression. `07493a0` is in
+this repo's log for shipping exactly that shape of change. **A fix for a
+problem you have confirmed beats a fix for one you have only imagined**; if a
+shader ever does exceed the cap, `0009` will name it and the patch can come
+back with a case to test against.
 
 ## Resolved, in brief
 
