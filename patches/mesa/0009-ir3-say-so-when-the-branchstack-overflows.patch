@@ -45,8 +45,9 @@ removes is the silence. A miscompile of this kind currently presents as a game
 rendering the wrong thing, with every layer in the stack reporting success;
 after this the driver names it, for every shader and every title.
 
+
 diff --git a/src/freedreno/ir3/ir3_reconvergence.c b/src/freedreno/ir3/ir3_reconvergence.c
-index b0d24342520..171ae6836fb 100644
+index b0d24342520..2505507f36f 100644
 --- a/src/freedreno/ir3/ir3_reconvergence.c
 +++ b/src/freedreno/ir3/ir3_reconvergence.c
 @@ -63,6 +63,7 @@
@@ -57,7 +58,7 @@ index b0d24342520..171ae6836fb 100644
  
  struct logical_edge {
     struct uinterval_node node;
-@@ -420,4 +421,55 @@ ir3_calc_reconvergence(struct ir3_shader_variant *so)
+@@ -420,4 +421,51 @@ ir3_calc_reconvergence(struct ir3_shader_variant *so)
     }
  
     calc_reconvergence(so, false);
@@ -87,28 +88,24 @@ index b0d24342520..171ae6836fb 100644
 +    * any other generation, and a8xx is also the one generation with no CI
 +    * list under src/freedreno/ci.
 +    *
-+    * **stderr, and not mesa_logw().** On Android mesa_log() defaults to
-+    * MESA_LOG_CONTROL_ANDROID (src/util/log.c) and goes to logcat, which is a
-+    * ring buffer that rolls in minutes and which a host capturing the guest's
-+    * output never sees. A warning about a miscompile that is itself lost is
-+    * worth nothing -- this was written with mesa_logw() first and produced
-+    * exactly that: a silent run that could not be told apart from a clean
-+    * one. xmlconfig.c reaches for stderr for the same reason and says so:
++    * stderr, and not mesa_logw(). On Android mesa_log() defaults to
++    * MESA_LOG_CONTROL_ANDROID (src/util/log.c) and goes to logcat, a ring
++    * buffer that rolls in minutes and that a host capturing the guest output
++    * never sees. This was written with mesa_logw() first and produced exactly
++    * that: a silent run indistinguishable from one with nothing to say.
++    * xmlconfig.c reaches for stderr in the same situation and says why --
 +    * "don't use XML_WARNING, we want the user to see this!"
 +    *
 +    * This does not fix anything. Spilling the branchstack is the fix and is
 +    * still an open TODO in ir3_get_reg_independent_max_waves(). What it
-+    * removes is the silence, for every shader and every title, so a
-+    * miscompile of this kind is reported by the driver instead of being
-+    * mistaken for a game bug.
++    * removes is the silence, for every shader and every title.
 +    */
 +   if (so->compiler && so->branchstack > so->compiler->max_branchstack) {
 +      fprintf(stderr,
 +              "ir3: %s needs a branchstack of %u but the hardware has %u; "
 +              "reconvergence points past the limit are dropped, and any "
 +              "subgroup operation in this shader may see the wrong active "
-+              "mask.
-+",
++              "mask.\n",
 +              so->name ? so->name : "<shader>", so->branchstack,
 +              so->compiler->max_branchstack);
 +   }
