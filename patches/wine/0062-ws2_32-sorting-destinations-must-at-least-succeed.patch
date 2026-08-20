@@ -1,0 +1,115 @@
+diff --git a/include/winsock2.h b/include/winsock2.h
+--- a/include/winsock2.h
++++ b/include/winsock2.h
+@@ -378,6 +378,7 @@
+ #define WS_SIO_ADDRESS_LIST_QUERY             _WSAIOR(WS_IOC_WS2,22)
+ #define WS_SIO_ADDRESS_LIST_CHANGE            _WSAIO(WS_IOC_WS2,23)
+ #define WS_SIO_QUERY_TARGET_PNP_HANDLE        _WSAIOR(WS_IOC_WS2,24)
++#define WS_SIO_ADDRESS_LIST_SORT              _WSAIORW(WS_IOC_WS2,25)
+ #define WS_SIO_GET_INTERFACE_LIST             WS__IOR('t', 127, ULONG)
+ #else /* USE_WS_PREFIX */
+ #undef IOC_VOID
+@@ -426,6 +427,7 @@
+ #define SIO_ADDRESS_LIST_QUERY     _WSAIOR(IOC_WS2,22)
+ #define SIO_ADDRESS_LIST_CHANGE    _WSAIO(IOC_WS2,23)
+ #define SIO_QUERY_TARGET_PNP_HANDLE _WSAIOR(IOC_WS2,24)
++#define SIO_ADDRESS_LIST_SORT      _WSAIORW(IOC_WS2,25)
+ #define SIO_GET_INTERFACE_LIST     _IOR ('t', 127, ULONG)
+ #endif /* USE_WS_PREFIX */
+ 
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -2208,6 +2208,7 @@
+         /* IOCTL_NAME(SIO_ACQUIRE_PORT_RESERVATION); */
+         IOCTL_NAME(SIO_ADDRESS_LIST_CHANGE);
+         IOCTL_NAME(SIO_ADDRESS_LIST_QUERY);
++        IOCTL_NAME(SIO_ADDRESS_LIST_SORT);
+         IOCTL_NAME(SIO_ASSOCIATE_HANDLE);
+         /* IOCTL_NAME(SIO_ASSOCIATE_PORT_RESERVATION);
+         IOCTL_NAME(SIO_BASE_HANDLE);
+@@ -2474,6 +2475,84 @@
+         return ret ? -1 : 0;
+     }
+ 
++    /* Destination address selection, RFC 6724. The caller hands in a list of
++     * addresses one name resolved to and gets the same addresses back, best
++     * first, so it knows which to try.
++     *
++     * ORDER IS PRESERVED rather than computed, and that is a deliberate limit
++     * with a reason: a real ordering needs a source address for each candidate,
++     * which needs the routing table, and Wine has no route lookup to ask. An
++     * invented order would be worse than the resolver's own, not better.
++     *
++     * Succeeding matters more than sorting, which is why this exists at all.
++     * Callers do not treat this ioctl as advisory: Chromium's AddressSorterWin
++     * fails the whole resolution when it returns an error, so an unimplemented
++     * ioctl turns "we could not rank these" into "this name does not resolve".
++     * That failure only became reachable once dnsapi could report a server list
++     * -- before that Chromium never started its own resolver, so it never got
++     * as far as sorting. See dlls/dnsapi/android.c. */
++    case SIO_ADDRESS_LIST_SORT:
++    {
++        const SOCKET_ADDRESS_LIST *in_list = in_buff;
++        SOCKET_ADDRESS_LIST *out_list = out_buff;
++        DWORD i, count, total, offset;
++        char *payload;
++
++        TRACE("-> SIO_ADDRESS_LIST_SORT request\n");
++
++        if (!in_buff || in_size < FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address[0]))
++        {
++            SetLastError( WSAEFAULT );
++            return -1;
++        }
++
++        count = in_list->iAddressCount;
++        if (in_size < FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address[count]))
++        {
++            SetLastError( WSAEINVAL );
++            return -1;
++        }
++
++        total = FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address[count]);
++        for (i = 0; i < count; i++)
++        {
++            if (!in_list->Address[i].lpSockaddr || in_list->Address[i].iSockaddrLength <= 0)
++            {
++                SetLastError( WSAEINVAL );
++                return -1;
++            }
++            total = (total + sizeof(ULONG_PTR) - 1) & ~(sizeof(ULONG_PTR) - 1);
++            total += in_list->Address[i].iSockaddrLength;
++        }
++
++        if (!out_buff || out_size < total)
++        {
++            *ret_size = total;
++            SetLastError( WSAEFAULT );
++            return -1;
++        }
++
++        /* The sockaddrs are copied into the caller's output buffer and the
++         * pointers rewritten to point there. Handing back the input pointers
++         * would alias two buffers the caller is entitled to free separately. */
++        out_list->iAddressCount = count;
++        offset = FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address[count]);
++        payload = out_buff;
++        for (i = 0; i < count; i++)
++        {
++            DWORD len = in_list->Address[i].iSockaddrLength;
++
++            offset = (offset + sizeof(ULONG_PTR) - 1) & ~(sizeof(ULONG_PTR) - 1);
++            memcpy( payload + offset, in_list->Address[i].lpSockaddr, len );
++            out_list->Address[i].lpSockaddr = (SOCKADDR *)(payload + offset);
++            out_list->Address[i].iSockaddrLength = len;
++            offset += len;
++        }
++
++        *ret_size = total;
++        return 0;
++    }
++
+     case SIO_ADDRESS_LIST_QUERY:
+     {
+         DWORD size, total;

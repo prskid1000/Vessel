@@ -1,0 +1,58 @@
+diff --git a/programs/ipconfig/ipconfig.c b/programs/ipconfig/ipconfig.c
+--- a/programs/ipconfig/ipconfig.c
++++ b/programs/ipconfig/ipconfig.c
+@@ -306,6 +306,7 @@
+         IP_ADAPTER_UNICAST_ADDRESS *addr;
+         WCHAR physaddr_buf[3 * MAX_ADAPTER_ADDRESS_LENGTH], addr_buf[54];
+         IP_ADAPTER_GATEWAY_ADDRESS_LH *gateway;
++        IP_ADAPTER_DNS_SERVER_ADDRESS *dns;
+ 
+         ipconfig_message_printfW(STRING_ADAPTER_FRIENDLY, iftype_to_string(p->IfType), p->FriendlyName);
+         ipconfig_printfW(L"\n");
+@@ -341,6 +342,29 @@
+         else
+             print_field(STRING_DEFAULT_GATEWAY, L"");
+ 
++        /* After the gateway, which is where Windows' own ipconfig /all puts it.
++         * GetAdaptersAddresses fills this list unless GAA_FLAG_SKIP_DNS_SERVER
++         * is passed, and it is not, so the servers were already in the reply --
++         * ipconfig simply never read them, on any platform. Only /all prints
++         * them, because plain ipconfig does not on Windows either.
++         *
++         * Empty rather than skipped when an adapter has none, for the same
++         * reason the gateway above is: a field that disappears cannot be told
++         * apart from a field nobody asked for. */
++        if (p->FirstDnsServerAddress)
++        {
++            if (socket_address_to_string(addr_buf, ARRAY_SIZE(addr_buf), &p->FirstDnsServerAddress->Address))
++                print_field(STRING_DNS_SERVERS, addr_buf);
++
++            for (dns = p->FirstDnsServerAddress->Next; dns; dns = dns->Next)
++            {
++                if (socket_address_to_string(addr_buf, ARRAY_SIZE(addr_buf), &dns->Address))
++                    print_value(addr_buf);
++            }
++        }
++        else
++            print_field(STRING_DNS_SERVERS, L"");
++
+         ipconfig_printfW(L"\n");
+     }
+     free(adapters);
+diff --git a/programs/ipconfig/ipconfig.h b/programs/ipconfig/ipconfig.h
+--- a/programs/ipconfig/ipconfig.h
++++ b/programs/ipconfig/ipconfig.h
+@@ -43,3 +43,4 @@
+ #define STRING_DEFAULT_GATEWAY  120
+ #define STRING_IP6_ADDRESS      121
+ #define STRING_PRIMARY_DNS_SUFFIX 122
++#define STRING_DNS_SERVERS      123
+diff --git a/programs/ipconfig/ipconfig.rc b/programs/ipconfig/ipconfig.rc
+--- a/programs/ipconfig/ipconfig.rc
++++ b/programs/ipconfig/ipconfig.rc
+@@ -48,4 +48,5 @@
+     STRING_NO, "No"
+     STRING_DEFAULT_GATEWAY, "Default gateway"
+     STRING_IP6_ADDRESS, "IPv6 address"
++    STRING_DNS_SERVERS, "DNS servers"
+ }
