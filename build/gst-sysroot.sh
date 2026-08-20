@@ -46,7 +46,25 @@ setup_ndk
 SYSROOT="$WORK_DIR/androidsysroot"
 SRC_CACHE="$WORK_DIR/gst-src"
 BUILD_ROOT="$WORK_DIR/gst-build"
-STAMPS="$BUILD_ROOT/.stamps"
+# INSIDE $SYSROOT, and that placement is the whole point of it.
+#
+# A per-package stamp is a claim that the package's files are in the sysroot, so
+# it has to die with them. It used to live under $BUILD_ROOT, which x11-sysroot.sh
+# does not touch: that script's `rm -rf "$SYSROOT" "$BUILD_ROOT"` clears the
+# shared sysroot and *its own* build root, so every stamp here survived a wipe
+# that had just deleted everything it vouched for. The next run then skipped the
+# whole stack -- "glib-2.88.3 already installed in the sysroot" -- and died at the
+# first thing that looked for a file rather than a stamp:
+#
+#     error: no glib-2.0.pc in the sysroot.
+#
+# The header above says an X11 rebuild must force a GStreamer rebuild, and folds
+# x11-sysroot's stamp into PIN_ID to make it so. That is correct and it fired --
+# but it only governs $STAMP, the all-or-nothing gate, and the per-package stamps
+# were consulted after it. Keeping them here makes the invariant structural
+# instead of remembered: the wipe that invalidates them is the wipe that removes
+# them, and no future caller has to know the two scripts share a directory.
+STAMPS="$SYSROOT/.vessel-gst-stamps"
 STAMP="$SYSROOT/.vessel-gst-sysroot"
 
 # glib-mkenums and glib-genmarshal are run by meson's `gnome` module through
@@ -166,9 +184,10 @@ PACKAGES=(
 # tree whose config.h still says winegstreamer is off. It covers the whole list
 # plus x11-sysroot.sh's own stamp.
 #
-# $STAMPS/<name> (in the build tree) is per package, so that editing the
-# gst-plugins-bad line does not rebuild GLib. Once any package rebuilds, every
-# package after it rebuilds too -- they link against it.
+# $STAMPS/<name> (in the sysroot, see its definition for why there and not in
+# the build tree) is per package, so that editing the gst-plugins-bad line does
+# not rebuild GLib. Once any package rebuilds, every package after it rebuilds
+# too -- they link against it.
 
 "$COMMON_SH_DIR/x11-sysroot.sh" \
   || die "x11-sysroot.sh failed; the GStreamer stack installs into the same sysroot"
