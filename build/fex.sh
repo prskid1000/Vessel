@@ -124,10 +124,28 @@ for TRIPLE in arm64ec-w64-mingw32 aarch64-w64-mingw32; do
     FEX_LTO=False
   fi
 
+  # Symbols without moving the code. `-g` changes what the compiler *records*,
+  # not what it emits, so a `-g` build's .text matches the shipped Release
+  # .text instruction for instruction -- which is the entire point. An offset
+  # read off a running Release DLL only resolves against symbols if the code
+  # did not move, so RelWithDebInfo is the wrong tool here: it is -O2 against
+  # Release's -O3, and every offset would land in a different function.
+  #
+  # Off by default because the debug info roughly triples the DLL, and the
+  # shipped artifact should not carry it. Turn it on only to name an address.
+  if [ "${VESSEL_FEX_DEBUGINFO:-0}" = 1 ]; then
+    FEX_DEBUG_FLAGS="-g"
+    info "adding -g (VESSEL_FEX_DEBUGINFO=1) -- symbols for offset resolution"
+  else
+    FEX_DEBUG_FLAGS=""
+  fi
+
   cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DMINGW_TRIPLE="$TRIPLE" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="$FEX_DEBUG_FLAGS" \
+    -DCMAKE_CXX_FLAGS="$FEX_DEBUG_FLAGS" \
     -DTUNE_CPU=oryon-1 \
     -DENABLE_LTO="$FEX_LTO" \
     -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
