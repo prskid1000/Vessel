@@ -1,0 +1,180 @@
+diff --git a/dlls/dnsapi/android.c b/dlls/dnsapi/android.c
+--- a/dlls/dnsapi/android.c
++++ b/dlls/dnsapi/android.c
+@@ -83,6 +83,7 @@
+ #include <sys/types.h>
+ 
+ #include <netinet/in.h>
++#include <arpa/inet.h>
+ #include <arpa/nameser.h>
+ #include <android/multinetwork.h>
+ 
+@@ -216,18 +217,160 @@
+  * were removed in Android 8, and the only current source is
+  * ConnectivityManager/LinkProperties on the Java side.
+  *
+- * DNS_ERROR_NO_DNS_SERVERS is therefore the truthful answer and not a
+- * placeholder -- it is exactly what libresolv.c returns when the resolver
+- * reports none, so every caller already handles it, and patches/wine/0015
+- * already stops iphlpapi treating an adapter with no server list as a failure.
+- * Resolution itself is unaffected: queries go to netd, which knows the servers
+- * even though we cannot name them. */
++ * So the Java side is asked, and hands the answer down in VESSEL_DNS_SERVERS --
++ * a comma-separated list of address literals, set once per session from
++ * ConnectivityManager. See SessionRuntime.deviceDnsServers, which is where the
++ * scope suffix is stripped off an IPv6 link-local before it gets here, because
++ * inet_pton rejects `fe80::1%wlan0' and those are exactly the servers a phone on
++ * Wi-Fi is handed.
++ *
++ * Unset -- no permission, no active network, or a session started before this
++ * existed -- still returns DNS_ERROR_NO_DNS_SERVERS, which is the truthful
++ * answer and not a placeholder: it is what libresolv.c returns when the resolver
++ * reports none, every caller already handles it, and patches/wine/0015 stops
++ * iphlpapi treating an adapter with no server list as a failure. Resolution
++ * itself never depended on this either way -- queries go to netd, which knows
++ * the servers whether or not we can name them. What the list buys is the callers
++ * that read the *configuration* rather than resolving a name: Chromium wants a
++ * server list before it will use its own async resolver, and says so once every
++ * ten seconds, forever, when it cannot get one. */
++static const char *dns_servers_env(void)
++{
++    return getenv( "VESSEL_DNS_SERVERS" );
++}
++
++/* Parsed into native sockaddr storage, not the Windows form, so that the family
++ * filter below is the same two-line comparison libresolv.c makes against
++ * _res.nsaddr_list. Sixteen is well past the four netd will report and keeps
++ * this off the heap in a function that runs on every DnsQueryConfig. */
++#define MAX_ANDROID_DNS_SERVERS 16
++
++struct android_dns_server
++{
++    unsigned short family;
++    union
++    {
++        struct in_addr  v4;
++        struct in6_addr v6;
++    } addr;
++};
++
++static unsigned int parse_dns_servers( struct android_dns_server *out, unsigned int max )
++{
++    const char *list = dns_servers_env();
++    unsigned int count = 0;
++
++    if (!list) return 0;
++
++    while (*list && count < max)
++    {
++        char text[INET6_ADDRSTRLEN];
++        unsigned int len = 0;
++
++        while (*list == ',' || *list == ' ') list++;
++        while (list[len] && list[len] != ',' && list[len] != ' ') len++;
++        if (!len) break;
++
++        if (len < sizeof(text))
++        {
++            memcpy( text, list, len );
++            text[len] = 0;
++
++            if (inet_pton( AF_INET, text, &out[count].addr.v4 ) == 1)
++            {
++                out[count].family = AF_INET;
++                count++;
++            }
++            else if (inet_pton( AF_INET6, text, &out[count].addr.v6 ) == 1)
++            {
++                out[count].family = AF_INET6;
++                count++;
++            }
++            else WARN( "ignoring unparseable DNS server %s\n", debugstr_a(text) );
++        }
++        else WARN( "ignoring over-long DNS server entry\n" );
++
++        list += len;
++    }
++    return count;
++}
++
++/* Lifted verbatim from libresolv.c so the two backends answer a family filter
++ * identically; a server the glibc build would have hidden must not appear here. */
++static inline int filter( unsigned short sin_family, USHORT family )
++{
++    if (sin_family != AF_INET && sin_family != AF_INET6) return TRUE;
++    if (sin_family == AF_INET6 && family == WS_AF_INET) return TRUE;
++    if (sin_family == AF_INET && family == WS_AF_INET6) return TRUE;
++
++    return FALSE;
++}
++
+ static NTSTATUS android_dns_get_serverlist( void *args )
+ {
+     const struct get_serverlist_params *params = args;
++    DNS_ADDR_ARRAY *addrs = params->addrs;
++    struct android_dns_server servers[MAX_ANDROID_DNS_SERVERS];
++    DWORD i, found, needed;
++    unsigned int total;
+ 
+-    TRACE( "family %u: Android does not expose its resolver's servers\n", params->family );
+-    return DNS_ERROR_NO_DNS_SERVERS;
++    total = parse_dns_servers( servers, MAX_ANDROID_DNS_SERVERS );
++    if (!total)
++    {
++        TRACE( "family %u: no servers in VESSEL_DNS_SERVERS\n", params->family );
++        return DNS_ERROR_NO_DNS_SERVERS;
++    }
++
++    /* The unfiltered size query libresolv.c answers first, and for the same
++     * reason: a caller asking how big the array must be has not named a family
++     * yet, so nothing may be excluded from the count it is given. */
++    if (!addrs && params->family != WS_AF_INET && params->family != WS_AF_INET6)
++    {
++        *params->len = FIELD_OFFSET(DNS_ADDR_ARRAY, AddrArray[total]);
++        return ERROR_SUCCESS;
++    }
++
++    for (i = 0, found = 0; i < total; i++)
++    {
++        if (filter( servers[i].family, params->family )) continue;
++        found++;
++    }
++    if (!found) return DNS_ERROR_NO_DNS_SERVERS;
++
++    needed = FIELD_OFFSET(DNS_ADDR_ARRAY, AddrArray[found]);
++    if (!addrs || *params->len < needed)
++    {
++        *params->len = needed;
++        return !addrs ? ERROR_SUCCESS : ERROR_MORE_DATA;
++    }
++
++    *params->len = needed;
++    memset( addrs, 0, needed );
++    addrs->AddrCount = addrs->MaxCount = found;
++
++    for (i = 0, found = 0; i < total; i++)
++    {
++        if (filter( servers[i].family, params->family )) continue;
++
++        if (servers[i].family == AF_INET6)
++        {
++            SOCKADDR_IN6 *sa = (SOCKADDR_IN6 *)addrs->AddrArray[found].MaxSa;
++            sa->sin6_family = WS_AF_INET6;
++            memcpy( &sa->sin6_addr, &servers[i].addr.v6, sizeof(sa->sin6_addr) );
++            addrs->AddrArray[found].Data.DnsAddrUserDword[0] = sizeof(*sa);
++        }
++        else
++        {
++            SOCKADDR_IN *sa = (SOCKADDR_IN *)addrs->AddrArray[found].MaxSa;
++            sa->sin_family = WS_AF_INET;
++            sa->sin_addr.WS_s_addr = servers[i].addr.v4.s_addr;
++            addrs->AddrArray[found].Data.DnsAddrUserDword[0] = sizeof(*sa);
++        }
++        found++;
++    }
++
++    TRACE( "family %u: %u server(s)\n", params->family, (unsigned int)found );
++    return ERROR_SUCCESS;
+ }
+ 
+ /* query.c calls this immediately before every query and RETURNS EARLY if it

@@ -1079,6 +1079,46 @@ class SessionEnvironmentTest {
     }
 
     @Test
+    fun `no resolvers omits VESSEL_DNS_SERVERS rather than setting it empty`() {
+        // The distinction the C parser depends on. An empty string is a list
+        // with one unparseable entry in it, and dlls/dnsapi/android.c would WARN
+        // about it once per DnsQueryConfig; an absent variable is the "none"
+        // that makes it return DNS_ERROR_NO_DNS_SERVERS, which every caller
+        // already handles. Default argument and explicit empty both count,
+        // because a caller on a device with no active network passes the latter.
+        assertFalse(sessionEnvironment(container(), fexManifest, paths).containsKey("VESSEL_DNS_SERVERS"))
+        assertFalse(
+            sessionEnvironment(container(), fexManifest, paths, dnsServers = emptyList())
+                .containsKey("VESSEL_DNS_SERVERS"),
+        )
+    }
+
+    @Test
+    fun `resolvers are handed down comma-separated, in the order the device gave them`() {
+        // Order is preserved because netd's first server is the one it prefers,
+        // and the guest should prefer the same one. Mixed families in one list
+        // is the ordinary case on a phone, not an edge case: android.c filters
+        // by family at the point of the query, not here.
+        val environment = sessionEnvironment(
+            container(),
+            fexManifest,
+            paths,
+            dnsServers = listOf("2405:200:1607::5", "8.8.8.8", "1.1.1.1"),
+        )
+        assertEquals("2405:200:1607::5,8.8.8.8,1.1.1.1", environment["VESSEL_DNS_SERVERS"])
+    }
+
+    @Test
+    fun `a manifest param cannot set VESSEL_DNS_SERVERS`() {
+        // Reserved for the same reason WINEDEBUG is: it is an observation of
+        // what the phone is resolving through, not a preference. A container
+        // naming its own would point the guest at servers the device is not
+        // using, and the resulting "resolves on the phone, not in the guest"
+        // reads as a network fault rather than as a setting.
+        assertTrue(RESERVED_SESSION_ENV.contains("VESSEL_DNS_SERVERS"))
+    }
+
+    @Test
     fun `diagnostics replace WINEDEBUG only by appending to it`() {
         val diagnosed = container().copy(diagnostics = wineRow("file", "EVERYTHING"))
         val environment = sessionEnvironment(diagnosed, fexManifest, paths)

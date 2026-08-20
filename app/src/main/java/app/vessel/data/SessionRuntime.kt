@@ -1,6 +1,7 @@
 package app.vessel.data
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.os.PowerManager
 import app.vessel.core.BOOTSTRAP_SESSION_ENV
 import app.vessel.core.ComponentType
@@ -909,6 +910,9 @@ class SessionRuntime @Inject constructor(
             // every 24 shown, at 84% GPU. See `sessionEnvironment`.
             fpsLimit = fpsLimit,
             hardware = hardware,
+            // Read here rather than in `sessionEnvironment` because it needs a
+            // `Context` and that function is pure by contract. See the parameter.
+            dnsServers = deviceDnsServers(appContext),
         )
 
         if (turnip == null) {
@@ -3543,6 +3547,44 @@ class SessionRuntime @Inject constructor(
         )
     }
 }
+
+/**
+ * The resolvers this phone is currently using, as address literals.
+ *
+ * **The Java half of a problem the guest cannot solve.** Android has no
+ * `/etc/resolv.conf` — absent, not empty — so Wine's resolver reports no
+ * servers, `DnsQueryConfig` fails, and anything that reads the DNS
+ * *configuration* rather than merely resolving a name gives up. Chromium is the
+ * one that says so out loud: `Failed to read DnsConfig`, on a ten-second retry,
+ * forever. `dlls/dnsapi/android.c` explains why native code cannot answer —
+ * netd owns the list, `net.dns1..4` went away in Android 8 — and names
+ * `ConnectivityManager`/`LinkProperties` as the only interface that can. This is
+ * that call.
+ *
+ * Two details the address strings need before C can parse them:
+ *
+ *  - **The scope suffix is stripped.** An IPv6 link-local arrives from
+ *    [java.net.InetAddress.getHostAddress] as `fe80::1%wlan0`, and `inet_pton`
+ *    rejects the `%wlan0`. Keeping it would silently drop exactly the servers a
+ *    phone on Wi-Fi is most likely to be handed.
+ *  - **Duplicates are removed**, because a device on Wi-Fi and cellular at once
+ *    reports the same resolver twice and the guest would then query it twice.
+ *
+ * Every failure returns an empty list rather than throwing: no permission, no
+ * active network, airplane mode. A session that cannot name its resolvers still
+ * resolves names — queries go to netd either way — so this must never be the
+ * reason a container fails to start.
+ */
+private fun deviceDnsServers(context: Context): List<String> = runCatching {
+    val manager = context.getSystemService(ConnectivityManager::class.java)
+        ?: return@runCatching emptyList()
+    val active = manager.activeNetwork ?: return@runCatching emptyList()
+    manager.getLinkProperties(active)?.dnsServers.orEmpty()
+        .mapNotNull { it.hostAddress }
+        .map { it.substringBefore('%') }
+        .filter { it.isNotBlank() }
+        .distinct()
+}.getOrDefault(emptyList())
 
 /** The fields of a Turnip package's `meta.json` this app acts on. */
 @Serializable

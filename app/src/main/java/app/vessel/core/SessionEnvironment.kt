@@ -151,6 +151,43 @@ const val WINEDLLOVERRIDES_ENV: String = "WINEDLLOVERRIDES"
  * The next instrument is capturing the PCM to see whether the buzz is noise,
  * repetition or clipping — three different bugs that sound alike.
  */
+/*
+ * **Asked a third time, for VS Code, and this time the thread is awake.
+ * 2026-08-20.**
+ *
+ * Both runs above eliminated ordering for a *sleeping* stall, and both said so
+ * on the same evidence: every thread asleep, no CPU burning anywhere. That is
+ * only half the shape a lost publication can take. The other half is a spin —
+ * a thread that polls a location the publisher already wrote and never sees the
+ * new value — and it looks nothing like the first: it burns a core flat out.
+ *
+ * VS Code is that half, measured rather than assumed. `CrRendererMain` sits at
+ * 103% of one core with `/proc/<pid>/syscall` reading `running` on every sample
+ * and `VmRSS` byte-identical at 312528 kB across twelve seconds: no syscalls, no
+ * allocation, no progress. Four threads where a healthy renderer has fifteen, so
+ * it never finished startup. Chromium's own log puts the stall precisely — the
+ * last thing it says is `FileURLLoader::Start: .../workbench/workbench.html`,
+ * then thirty seconds of silence and Electron's `detected unresponsive`. The GPU
+ * process is at exactly 0%: idle, waiting for work that never comes.
+ *
+ * So the two "no"s above do not cover this. On for one run to answer it, and
+ * back to `false` the moment it does — the "HUGE" vector-TSO cost the comment
+ * below describes has still never been paid for by a measurement.
+ *
+ * **Run, and it answered no. 2026-08-20.** All three closed and verified in the
+ * renderer's own `/proc/<pid>/environ` rather than assumed —
+ * `FEX_VECTORTSOENABLED=1`, `FEX_MEMCPYSETTSOENABLED=1`,
+ * `FEX_VOLATILEMETADATA=0` — and the spin did not move: 508 ticks over five
+ * seconds, 102% of one core, against 103% on the same measurement before the
+ * change. Not a shift, the same number.
+ *
+ * So ordering is eliminated for both shapes now, asleep and awake, and this is
+ * off again. What is left for VS Code is what the spin itself says: no syscalls,
+ * no allocation, one thread, stalled the instant `workbench.html` starts
+ * loading. That points at FEX's translation of whatever V8 runs first, not at
+ * the memory model, and the next instrument is a sample of where the JIT is
+ * spinning rather than another env-var run.
+ */
 const val STRICT_MEMORY_ORDERING: Boolean = false
 
 /**
@@ -674,6 +711,16 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // a 41px strip nothing paints and a client that overflows its own parent.
     "VESSEL_BORDERLESS",
     "VESSEL_MANAGED",
+    // Reserved because it is an observation, not a choice. Android's DNS servers
+    // live in netd, and `dlls/dnsapi/android.c` documents why native code cannot
+    // read them: `net.dns1..4` was removed in Android 8, and the only remaining
+    // source is `ConnectivityManager`/`LinkProperties` on the Java side. This is
+    // how that answer crosses into the guest, so its value is whatever the phone
+    // is actually resolving through right now. A container that could type its
+    // own would be naming servers the device is not using, and the failure — a
+    // name that resolves on the phone and not in the guest — would look like a
+    // network fault rather than a setting.
+    "VESSEL_DNS_SERVERS",
     // Not a driconf file and not a setting: it is a correctness/perf pairing
     // with FEX's store-release behaviour, and FEX would try to set it itself if
     // it could. See where it is assigned.
@@ -1428,10 +1475,38 @@ fun sessionEnvironment(
      * variables at all.
      */
     hardware: HardwareLimits? = null,
+    /**
+     * The resolvers this phone is currently using, already looked up.
+     *
+     * Passed in for the reason this whole function is pure: reading them means
+     * `ConnectivityManager`, and a `Context` here would make the exact-output
+     * test in `SessionEnvironmentTest` depend on whichever network the machine
+     * running it happened to be on. The caller has the `Context`; this only has
+     * to decide how the answer is spelled.
+     *
+     * Empty — no network, or a device that reports none — omits the variable
+     * rather than setting it blank, so `dlls/dnsapi/android.c` keeps returning
+     * `DNS_ERROR_NO_DNS_SERVERS` and callers see the same honest "none" they saw
+     * before this existed. An empty string would instead be a list with one
+     * unparseable entry in it.
+     */
+    dnsServers: List<String> = emptyList(),
 ): Map<String, String> {
     val environment = LinkedHashMap<String, String>()
 
     environment["WINEPREFIX"] = paths.prefix.absolutePath
+
+    // **How netd's answer reaches the guest.** Android has no `/etc/resolv.conf`
+    // — checked on device, it is not merely empty but absent — so Wine's
+    // resolver finds no servers and every `DnsQueryConfig(DnsConfigDnsServers*)`
+    // fails. `dlls/dnsapi/android.c` says why that is unfixable from C and names
+    // the one interface that can see them, which is on the Java side; this is
+    // that answer arriving. Comma-separated because the parser reading it is
+    // eleven lines of C and a separator that never appears in an address literal
+    // is worth more there than any structure would be.
+    if (dnsServers.isNotEmpty()) {
+        environment["VESSEL_DNS_SERVERS"] = dnsServers.joinToString(",")
+    }
 
     // **fsync, and `WINEESYNC` is gone because esync is not in this Wine.**
     //
