@@ -123,6 +123,19 @@ class ContainerRepository @Inject constructor(
         val layout = paths.of(id)
         DriveMap.drives(layout.prefix).forEach { DriveMap.unmap(layout.prefix, it.letter) }
         deleteTree(layout.base)
+
+        // **After the tree, never before it.** The container's `provisioned.json`
+        // is the reference that keeps its components alive, so pruning while it
+        // still exists frees nothing, and pruning *instead* of deleting it would
+        // be the dangerous order. Deleting the last container that referenced a
+        // Wine build is the main way a build becomes garbage, and it used to be
+        // the one case that leaked most: the container went, its gigabyte of
+        // components stayed, and nothing would ever look at them again.
+        //
+        // Swallowed on failure for the same reason the session path swallows it.
+        // The container is already gone; reporting a disk-reclaim failure as a
+        // delete failure would be a lie about what happened.
+        runCatching { componentStore.prune() }
     }
 
     /**

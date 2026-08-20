@@ -75,10 +75,17 @@ data class MigrationResult(
  * and reading only the new field would make every pre-upgrade container look
  * like it referenced nothing.
  *
- * [prune] is the only thing that deletes a component and **nothing calls it
- * automatically**. Deleting a container removes the container's directory and
- * leaves every component alone, so a mistake in the counting above cannot
- * cascade into deleting the Wine another container is running.
+ * [prune] is the only thing that deletes a component. It is called from two
+ * places, both chosen because they are the moments a version can *stop* being
+ * referenced: after [adoptLatest] moves a container forward, and after a
+ * container is deleted. It is never called speculatively, and it never takes
+ * a hint about what to remove -- it recounts references across every container
+ * directory on disk and removes only what nothing names.
+ *
+ * That is what keeps the original hazard closed. The risk was never "prune ran",
+ * it was "prune deleted the Wine a running container needs", and a running
+ * container protects itself by having written its reference down before it
+ * started. The counting above over-counts on purpose for the same reason.
  */
 @Singleton
 class ComponentStore @Inject constructor(
@@ -298,10 +305,18 @@ class ComponentStore @Inject constructor(
     /**
      * Delete every version no container references.
      *
-     * **Explicit on purpose.** Nothing calls this on container deletion, on
-     * install, or on a refresh. The failure mode of automatic pruning is
-     * deleting a Wine tree a running container needs, and no amount of disk
-     * saved is worth the shape of that bug.
+     * **Called on adoption and on container deletion, and nowhere else.**
+     * Those are the only two moments a version can stop being referenced, so
+     * they are the only two worth the walk.
+     *
+     * This used to be explicit-only, on the reasoning that automatic pruning
+     * risks deleting a Wine tree a running container needs. The reasoning was
+     * sound and the conclusion was too strong: nothing called it, so a device
+     * accumulated every build it had ever installed -- about a gigabyte per
+     * Wine revision, four revisions in one day. What actually prevents the
+     * hazard is the reference count being taken from disk across every
+     * container, which is unchanged; a container that is running has already
+     * written down what it uses.
      */
     suspend fun prune(): PruneResult = withContext(Dispatchers.IO) {
         migrate()

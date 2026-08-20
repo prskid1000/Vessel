@@ -716,6 +716,45 @@ class SessionRuntime @Inject constructor(
         // adoption both correct and only the ordering wrong.
         setup.awaitFinished()
         val adopted = components.adoptLatest(containerId)
+        // **Pruned here because this is the moment a version stops being
+        // referenced.** `adoptLatest` has just written this container's references
+        // to disk, so whatever it moved off is now unreferenced by the only
+        // file that decides that. Pruning before adoption would be reading
+        // references this session is about to change.
+        //
+        // [ComponentStore.prune] says nothing calls it automatically, and the
+        // reason is that deleting a Wine tree under a running container is not
+        // worth any amount of disk. That reason still holds, and it is exactly
+        // why this is a plain `prune` and nothing cleverer: it counts
+        // references across every container directory on disk, so a running
+        // container -- this one included -- protects its own components by
+        // having written them down. What it frees is only what nothing names.
+        //
+        // Not fatal on failure. A session that could not free disk is still a
+        // session; one that refused to start because it could not is not.
+        // Crash reports are the other unbounded thing in a container, and by far
+        // the largest single files on the device -- see [sweepGuestDebris].
+        runCatching { sweepGuestDebris(layout.prefix) }
+            .getOrNull()
+            ?.takeIf { it > 0L }
+            ?.let { freed ->
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.INFO,
+                    "swept stale crash reports, freed ${freed / (1024L * 1024L)} MB",
+                )
+            }
+        runCatching { components.prune() }
+            .getOrNull()
+            ?.takeIf { !it.isEmpty }
+            ?.let { pruned ->
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.INFO,
+                    "pruned ${pruned.removed.size} unreferenced component(s), freed " +
+                        "${pruned.freedBytes / (1024L * 1024L)} MB",
+                )
+            }
         // **Say it, every time, before anything else can be blamed for it.**
         //
         // What is left here after adoptLatest is Wine, which keeps the version

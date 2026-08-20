@@ -179,6 +179,26 @@ class ComponentSetup @Inject constructor(
                 if (started) return@withLock
                 started = true
                 install()
+                // **App start is the third moment a version can become garbage,
+                // and the only one a session never reaches.** `install()` has
+                // just put whatever the APK carried into the store, so anything
+                // it superseded is unreferenced from here on -- and a user who
+                // updates the APK twice without launching a container would
+                // otherwise keep both old builds forever.
+                //
+                // After `install()`, never before: pruning first would walk the
+                // store while the new versions were still arriving, which frees
+                // nothing and races the installer for the same directories.
+                //
+                // Swallowed, because setup reports whether components are ready
+                // and reclaiming disk is not part of that answer.
+                runCatching { store.prune() }
+                // And the archives themselves. `downloadMissing` deletes a
+                // `.wcp` the moment it installs, so what survives here is a
+                // failed install or a cancelled `.part` -- both kept on
+                // purpose so the next attempt is cheap, and both kept
+                // forever, because nothing ever swept this directory.
+                runCatching { sweepStaleDownloads(paths.downloadsRoot) }
             }
         }
     }
