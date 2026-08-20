@@ -1,0 +1,72 @@
+Subject: [PATCH] invalidationtracker: say how large an invalidation is
+
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -284,7 +284,8 @@
+ }
+ 
+ void InvalidationTracker::InvalidateAlignedInterval(uint64_t Address, uint64_t Size, bool Free) {
+-  if (!Address) {
++  const bool NullBase = !Address;
++  if (NullBase) {
+     // Match the Windows behaviour when passed a NULL base address.
+     Size = std::numeric_limits<uint64_t>::max();
+   }
+@@ -292,6 +293,57 @@
+   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto AlignedSize = std::max(Size, (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK);
+ 
++  // Vessel: how large is an invalidation, and how often is it the whole space.
++  //
++  // **The question this exists to answer.** An Electron renderer pins a core
++  // and never paints, and the stack that does it is this function: a guest free
++  // reaches `BTCpu64NotifyMemoryFree`, which calls here with `Free`, which takes
++  // `IntervalsLock` exclusively and broadcasts its condition variable on
++  // release. One session counted 507,904 of those broadcasts, every one of them
++  // futile because nothing holds a shared lock to wake.
++  //
++  // The broadcast is a symptom and cheap. What decides whether this is merely
++  // busy or actually unable to progress is the *size*: a targeted invalidation
++  // costs the blocks on a few pages, while one covering the address space throws
++  // away every translation FEX holds. Half a million of the second kind is a
++  // renderer that re-translates everything it just built, forever, which is
++  // exactly what a core burned and nothing drawn looks like.
++  //
++  // The null-base path above is the way to get the second kind: a free with no
++  // base sets `Size` to the whole 64-bit range, and `AlignedSize` carries that
++  // straight into `InvalidateIntervalInternal`. Whether Chromium actually takes
++  // it is the open question, and it is not one to answer by reading -- hence a
++  // counter rather than a theory.
++  //
++  // Bucketed by power of two and printed on powers of two within each bucket,
++  // the same shape as the RWX tally above and for the same reason: the
++  // interesting fact is which sizes repeat and how fast, not the total, and a
++  // pathological bucket costs a dozen lines instead of half a million.
++  {
++    static std::mutex SizeTallyLock;
++    static fextl::map<unsigned, uint64_t> SizeTally;
++    static uint64_t NullBaseSeen;
++
++    const unsigned Bucket = AlignedSize ? 63u - static_cast<unsigned>(__builtin_clzll(AlignedSize)) : 0u;
++
++    uint64_t Seen;
++    uint64_t Nulls = 0;
++    {
++      std::scoped_lock Lock(SizeTallyLock);
++      Seen = ++SizeTally[Bucket];
++      if (NullBase) {
++        Nulls = ++NullBaseSeen;
++      }
++    }
++
++    if ((Seen & (Seen - 1)) == 0) {
++      LogMan::Msg::IFmt("invalidate {} of ~2^{} bytes (base {:X} size {:X} free {})", Seen, Bucket, AlignedBase, AlignedSize, Free);
++    }
++    if (Nulls && (Nulls & (Nulls - 1)) == 0) {
++      LogMan::Msg::IFmt("invalidate {} with a null base -- the whole address space, every translation dropped", Nulls);
++    }
++  }
++
+   InvalidateIntervalInternal(AlignedBase, AlignedSize);
+ 
+   if (Free) {
