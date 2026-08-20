@@ -1566,16 +1566,24 @@ val LOGGABLES: List<Loggable> = listOf(
         addAt = WineChannelLevel.EVERYTHING,
         oneSessionFrom = WineChannelLevel.EVERYTHING,
         volumes = mapOf(
-            // Two facts and they point opposite ways, so both are stated. The
-            // documented cost is enormous; and relay is compiled out for
-            // arm64ec outright — `#if (…) && !defined(__arm64ec__)`,
-            // `dlls/ntdll/relay.c:37` — while every PE module here is ARM64X.
-            // So this may also print nothing whatsoever, and one session
-            // settles which.
+            // **It works, and the session that settled it is worth naming.**
+            // `dlls/ntdll/relay.c:37` compiles relay out under
+            // `!defined(__arm64ec__)`, and every PE module here is ARM64X, so
+            // this row was written expecting silence. One Electron session
+            // produced 431,962 `Call`/`Ret` lines: an ARM64X module keeps its
+            // thunks, and the guest-to-builtin calls are all named.
+            //
+            // The cost is the real caution now. That session reached 58 MB
+            // before the renderer had finished starting, so the head cap is
+            // what decides how much of a launch survives.
+            //
+            // Two things relay does *not* name, learned the same session:
+            // a call inside the guest, since only the boundary is thunked;
+            // and the caller of a builtin that another builtin called.
             WineChannelLevel.EVERYTHING to
-                "hundreds of megabytes in seconds if it works at all — relay is " +
-                    "compiled out for arm64ec, and whether an ARM64X module keeps " +
-                    "its thunks is unverified here",
+                "hundreds of megabytes in seconds — measured at 58 MB before one " +
+                    "Electron renderer finished starting, and it does work: ARM64X " +
+                    "modules keep their relay thunks",
         ),
     ),
     wineChannel(
@@ -2560,14 +2568,14 @@ fun costWarning(caution: String?, oneSession: Boolean, volume: String? = null): 
  */
 @Serializable
 data class SessionLogLimits(
-    val headBytes: Long = HEAD_LADDER.last(),
+    val headBytes: Long = DEFAULT_HEAD_BYTES,
     /**
      * The retained tail *in total*, named for what it holds rather than for the
      * field it sets: the writer keeps two segments and rotates between them, so
      * the retained tail sawtooths between half of this and all of it.
      */
-    val tailBytes: Long = TAIL_LADDER.last(),
-    val rateLimitLines: Int = RATE_LADDER.last(),
+    val tailBytes: Long = DEFAULT_TAIL_BYTES,
+    val rateLimitLines: Int = DEFAULT_RATE_LIMIT_LINES,
 ) {
     val tailSegmentBytes: Long get() = tailBytes / 2
     val worstCaseBytesPerSession: Long get() = headBytes + tailBytes
@@ -2580,13 +2588,25 @@ data class SessionLogLimits(
         private const val MB = 1024L * 1024L
 
         /** 5 MB is what shipped before this was a setting. */
-        val HEAD_LADDER: List<Long> = listOf(5 * MB, 8 * MB, 16 * MB, 32 * MB)
+        val HEAD_LADDER: List<Long> = listOf(5 * MB, 8 * MB, 16 * MB, 32 * MB, 64 * MB)
 
         /** 3 MB is the old two 1536 KB segments. */
-        val TAIL_LADDER: List<Long> = listOf(3 * MB, 6 * MB, 12 * MB, 16 * MB)
+        val TAIL_LADDER: List<Long> = listOf(3 * MB, 6 * MB, 12 * MB, 16 * MB, 32 * MB, 64 * MB)
 
         /** 2 000 is what shipped before this was a setting. */
-        val RATE_LADDER: List<Int> = listOf(2_000, 5_000, 10_000, 20_000)
+        val RATE_LADDER: List<Int> = listOf(2_000, 5_000, 10_000, 20_000, 50_000, 100_000)
+
+        /**
+         * What a container gets when it says nothing.
+         *
+         * Named rather than `LADDER.last()`, which is what these were: the top of
+         * each ladder was also the default, so adding a higher stop raised every
+         * container's worst case without anyone choosing it. The stops above these
+         * exist for a relay session, and a relay session is always a decision.
+         */
+        val DEFAULT_HEAD_BYTES: Long = 32 * MB
+        val DEFAULT_TAIL_BYTES: Long = 16 * MB
+        val DEFAULT_RATE_LIMIT_LINES: Int = 20_000
 
         /** What the writer ran with before any of this was adjustable. */
         val SHIPPED: SessionLogLimits = SessionLogLimits(

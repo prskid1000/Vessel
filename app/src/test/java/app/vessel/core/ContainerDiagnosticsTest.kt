@@ -540,12 +540,23 @@ class ContainerDiagnosticsTest {
     // — the log caps -----------------------------------------------------------
 
     @Test
-    fun `the caps default to the top of every ladder`() {
+    fun `the caps default to a named stop rather than the top of a ladder`() {
         val limits = SessionLogLimits()
-        assertEquals(SessionLogLimits.HEAD_LADDER.last(), limits.headBytes)
-        assertEquals(SessionLogLimits.TAIL_LADDER.last(), limits.tailBytes)
-        assertEquals(SessionLogLimits.RATE_LADDER.last(), limits.rateLimitLines)
+        assertEquals(SessionLogLimits.DEFAULT_HEAD_BYTES, limits.headBytes)
+        assertEquals(SessionLogLimits.DEFAULT_TAIL_BYTES, limits.tailBytes)
+        assertEquals(SessionLogLimits.DEFAULT_RATE_LIMIT_LINES, limits.rateLimitLines)
         assertEquals(limits.tailBytes / 2, limits.tailSegmentBytes)
+        // Every default is still a rung, or the picker could not show a
+        // container the value it already has.
+        assertTrue(limits.headBytes in SessionLogLimits.HEAD_LADDER)
+        assertTrue(limits.tailBytes in SessionLogLimits.TAIL_LADDER)
+        assertTrue(limits.rateLimitLines in SessionLogLimits.RATE_LADDER)
+        // And the stops a relay session needs sit *above* the default instead of
+        // becoming it. That is the whole reason the defaults are named: adding a
+        // rung used to raise every container's worst case with it.
+        assertTrue(SessionLogLimits.HEAD_LADDER.last() > limits.headBytes)
+        assertTrue(SessionLogLimits.TAIL_LADDER.last() > limits.tailBytes)
+        assertTrue(SessionLogLimits.RATE_LADDER.last() > limits.rateLimitLines)
         // The numbers the storage card shows, stated once here so a change to a
         // ladder cannot move them silently.
         assertEquals(48L * 1024 * 1024, limits.worstCaseBytesPerSession)
