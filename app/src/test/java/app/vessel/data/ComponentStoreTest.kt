@@ -21,7 +21,8 @@ import java.io.File
  * ones. Most of what is here is that question: two containers on one version,
  * one of them deleted, a `provisioned.json` written before the reference field
  * existed. Getting any of them wrong deletes a Wine tree somebody is running on,
- * which is why [ComponentStore.prune] is explicit and nothing calls it.
+ * which is why [ComponentStore.prune] answers it from disk, and why the newest
+ * build of every type is retained whether or not anything references it yet.
  */
 class ComponentStoreTest {
 
@@ -237,6 +238,47 @@ class ComponentStoreTest {
         assertNull(runBlocking { store.directoryFor("empty", ComponentType.WINE) })
     }
 
+    /**
+     * The regression that undid an install.
+     *
+     * `prune` runs at app start, straight after the bundle is unpacked -- and a
+     * version that has just been installed is referenced by nothing until a
+     * container adopts it at the *next* container start. Counting references
+     * alone, the newest build on the device is indistinguishable from the
+     * oldest, so the first pass deleted it and the device went on reporting the
+     * previous version. Seen with FEX: 260824 installed from the bundle,
+     * removed milliseconds later, and 260823 still in every log.
+     */
+    @Test
+    fun `the newest version survives prune even when nothing references it`() {
+        runBlocking { store.install(wine(1013), "wine-10.13-canoe") }
+        container("c1")
+        runBlocking { store.adoptLatest("c1") }
+
+        // A newer build arrives. Nothing can reference it until c1 next starts.
+        runBlocking { store.install(wine(1014), "wine-10.14-canoe") }
+
+        assertTrue(runBlocking { store.prune() }.isEmpty)
+        assertTrue(paths.components.version(ComponentType.WINE, 1014).isDirectory)
+        assertTrue(paths.components.version(ComponentType.WINE, 1013).isDirectory)
+    }
+
+    @Test
+    fun `a superseded version is taken once the container has moved off it`() {
+        runBlocking { store.install(wine(1013), "wine-10.13-canoe") }
+        container("c1")
+        runBlocking { store.adoptLatest("c1") }
+        runBlocking { store.install(wine(1014), "wine-10.14-canoe") }
+        // Adoption is what makes 1013 garbage; before it, 1013 is the reference.
+        runBlocking { store.adoptLatest("c1") }
+
+        val pruned = runBlocking { store.prune() }
+
+        assertEquals(listOf(ComponentVersion(ComponentType.WINE, 1013)), pruned.removed)
+        assertFalse(paths.components.version(ComponentType.WINE, 1013).isDirectory)
+        assertTrue(paths.components.version(ComponentType.WINE, 1014).isDirectory)
+    }
+
     @Test
     fun `an adopted version counts as a reference, so prune cannot take it`() {
         runBlocking { store.install(wine(), "wine-10.13-canoe") }
@@ -320,33 +362,38 @@ class ComponentStoreTest {
     // — prune -----------------------------------------------------------------
 
     @Test
-    fun `prune removes only the versions nothing references`() {
+    fun `prune removes what is neither referenced nor newest`() {
         runBlocking {
             store.install(wine(1013), "wine-10.13-canoe")
+            store.install(wine(1050, body = "wine-10.50"), "wine-10.50-canoe")
             store.install(wine(1100, body = "wine-11.0"), "wine-11.0-canoe")
             store.install(dxvk(), "dxvk-2.7.1-canoe")
         }
-        // One container pinned to the older Wine keeps it alive; nothing uses
-        // the newer one or the DXVK.
+        // A container pinned to the oldest Wine keeps it alive. 1100 is the
+        // newest, so it is the only build a container could adopt next and is
+        // kept for that. 1050 is neither, and it is the whole point of prune.
         container("c1", ComponentType.WINE to 1013)
 
         val result = runBlocking { store.prune() }
 
+        assertEquals(listOf(ComponentVersion(ComponentType.WINE, 1050)), result.removed)
+        assertTrue(result.freedBytes > 0)
+        // The DXVK is unreferenced and untouched: it is the newest of its type,
+        // which is what a container adopts the first time it starts.
         assertEquals(
             setOf(
+                ComponentVersion(ComponentType.WINE, 1013),
                 ComponentVersion(ComponentType.WINE, 1100),
                 ComponentVersion(ComponentType.DXVK, 20701),
             ),
-            result.removed.toSet(),
+            installed(),
         )
-        assertTrue(result.freedBytes > 0)
-        assertEquals(setOf(ComponentVersion(ComponentType.WINE, 1013)), installed())
         assertEquals(
             "wine-1013",
             File(paths.components.version(ComponentType.WINE, 1013), "bin/wine").readText(),
         )
-        assertFalse(paths.components.version(ComponentType.WINE, 1100).exists())
-        assertFalse(paths.components.record(ComponentType.WINE, 1100).exists())
+        assertFalse(paths.components.version(ComponentType.WINE, 1050).exists())
+        assertFalse(paths.components.record(ComponentType.WINE, 1050).exists())
     }
 
     @Test
@@ -362,10 +409,19 @@ class ComponentStoreTest {
 
     @Test
     fun `prune is idempotent`() {
-        runBlocking { store.install(wine(), "wine-10.13-canoe") }
-        assertEquals(1, runBlocking { store.prune() }.removed.size)
+        // Two versions, neither referenced. The older one goes on the first
+        // pass; the newer is the adoption candidate and stays, so a second pass
+        // has nothing left to find.
+        runBlocking {
+            store.install(wine(1013), "wine-10.13-canoe")
+            store.install(wine(1100, body = "wine-11.0"), "wine-11.0-canoe")
+        }
+        assertEquals(
+            listOf(ComponentVersion(ComponentType.WINE, 1013)),
+            runBlocking { store.prune() }.removed,
+        )
         assertTrue(runBlocking { store.prune() }.isEmpty)
-        assertEquals(emptySet<ComponentVersion>(), installed())
+        assertEquals(setOf(ComponentVersion(ComponentType.WINE, 1100)), installed())
     }
 
     // — migration -------------------------------------------------------------

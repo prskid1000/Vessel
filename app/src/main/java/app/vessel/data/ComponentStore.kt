@@ -303,11 +303,15 @@ class ComponentStore @Inject constructor(
     }
 
     /**
-     * Delete every version no container references.
+     * Delete every version that is neither referenced by a container nor the
+     * newest of its type.
      *
-     * **Called on adoption and on container deletion, and nowhere else.**
-     * Those are the only two moments a version can stop being referenced, so
-     * they are the only two worth the walk.
+     * **Called at app start, at container start and on container deletion.**
+     * Those are the three moments a version can stop being referenced, so they
+     * are the three worth the walk.
+     *
+     * The newest is retained regardless, and that is not a nicety -- see the
+     * comment on `newest` below for the install it silently undid.
      *
      * This used to be explicit-only, on the reasoning that automatic pruning
      * risks deleting a Wine tree a running container needs. The reasoning was
@@ -321,10 +325,27 @@ class ComponentStore @Inject constructor(
     suspend fun prune(): PruneResult = withContext(Dispatchers.IO) {
         migrate()
         val referenced = referencesBlocking().filterValues { it.isNotEmpty() }.keys
+        // **The newest of every type is never garbage, however unreferenced it
+        // looks.** A version that has just been installed is referenced by
+        // nothing until a container adopts it, and adoption happens at container
+        // start -- so between the install and the next launch, the newest build
+        // on the device looks exactly like the oldest.
+        //
+        // Observed, not reasoned about: FEX 260824 was installed from the
+        // bundle at app start, pruned milliseconds later by the call that runs
+        // after `install()`, and the device kept reporting 260823. The install
+        // was visible on screen and the result was gone before it finished.
+        //
+        // `adoptLatest` takes `versions(type).firstOrNull()`, so the newest is
+        // by definition the only version a container can move *to*. Deleting it
+        // does not free garbage, it undoes an install.
+        val newest = ComponentType.entries.mapNotNull { type ->
+            layout.versions(type).firstOrNull()?.let { ComponentVersion(type, it) }
+        }.toSet()
         val removed = mutableListOf<ComponentVersion>()
         var freed = 0L
         for (version in layout.installed()) {
-            if (version in referenced) continue
+            if (version in referenced || version in newest) continue
             val directory = layout.version(version.type, version.versionCode)
             val size = directory.walkTopDown().filter { it.isFile }.sumOf { it.length() }
             if (!deleteTree(directory)) continue

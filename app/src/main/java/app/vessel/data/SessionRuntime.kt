@@ -983,6 +983,22 @@ class SessionRuntime @Inject constructor(
 
         // The guest is told `C:\vessel\fexcache\`; this is what that resolves to.
         val cacheHost = fexCacheHost(sessionPaths, environment, fex)
+        // Every other digest under `caches/fex` belongs to a FEX build or a FEX
+        // setting this container no longer runs, and nothing else will ever
+        // reclaim it -- see [sweepStaleFexCaches]. Swept here rather than beside
+        // the component prune because only this line knows which digest is live,
+        // and recomputing the key somewhere else is a second chance to get it
+        // wrong.
+        runCatching { sweepStaleFexCaches(File(sessionPaths.caches, "fex"), cacheHost) }
+            .getOrNull()
+            ?.takeIf { it > 0L }
+            ?.let { freed ->
+                log.line(
+                    LogSource.VESSEL,
+                    LogLevel.INFO,
+                    "dropped stale FEX code caches, freed ${freed / (1024L * 1024L)} MB",
+                )
+            }
         linkFexCache(layout.prefix, cacheHost, fex?.compilers.orEmpty(), log)
 
         val resolved = LaunchPlan(
