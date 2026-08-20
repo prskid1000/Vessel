@@ -1,0 +1,367 @@
+diff --git a/dlls/dwrite/font.c b/dlls/dwrite/font.c
+--- a/dlls/dwrite/font.c
++++ b/dlls/dwrite/font.c
+@@ -3336,6 +3336,352 @@
+     return ~0u;
+ }
+ 
++/* Vessel: the families Windows programs ask for by name, and what answers here.
++ *
++ * WHY A TABLE IN dwrite AND NOT REGISTRY ENTRIES, which is the obvious fix and
++ * does not work. `loader/wine.inf.in` registers twenty TrueType faces -- arial.ttf,
++ * tahoma.ttf, times.ttf, cour.ttf, msgothic.ttc and the rest -- and on this device
++ * `factory_create_system_fontset` rejects twenty-one files at every startup with
++ * hr 0x88985003, DWRITE_E_FILENOTFOUND. Repointing those registry values at files
++ * that exist changes nothing, because DirectWrite takes the family name from the
++ * file's own `name` table and not from the key it was filed under:
++ * Roboto-Regular.ttf registered as "Tahoma (TrueType)" still joins the collection
++ * as Roboto. The registry decides which files are read; it cannot decide what they
++ * are called.
++ *
++ * WHY NOT FontSubstitutes OR Replacements, the other obvious fix: Skia consults
++ * neither. That is the finding that made patches/wine/0057 necessary after four
++ * GDI-side font fixes had changed nothing -- Chromium goes straight to the
++ * DirectWrite collection, so the alias belongs where the collection is searched.
++ *
++ * WHAT IS NOT IN HERE, and it is the half that matters most. Wine ships real
++ * tahoma.ttf, tahomabd.ttf, symbol.ttf, webdings.ttf, wingding.ttf and marlett.ttf
++ * in its own font directory, and DirectWrite cannot see them: `create_system_path_list`
++ * resolves a bare registry name against %WINDIR%/fonts alone, while win32u's
++ * `add_system_font_resource` (win32u/font.c:6500) tries the data directory too.
++ * Those six are fixed by linking the real files into the prefix --
++ * PrefixRegistry.WINE_LINKED_FONTS -- because Wine's Tahoma *is* Tahoma, and
++ * Symbol, Wingdings, Webdings and Marlett carry dingbats no Noto face substitutes.
++ * They appear below only as the row that fires if that link failed.
++ *
++ * WHAT THIS IS NOT. It is not a substitution table in the Windows sense and does
++ * not pretend the metrics match; a program that asks for Arial and is handed
++ * Roboto gets different advance widths. That is the trade, and it is the one 0056
++ * and 0057 already made: a face with the wrong metrics is a rendered UI, and the
++ * alternative measured on this device is no UI at all. It runs only when the
++ * requested family is genuinely absent, so on a machine holding the real fonts
++ * every row below is dead code.
++ *
++ * THE THIRD INSTANCE OF ONE PATTERN. 0056 fixed GDI SystemLink chains naming five
++ * absent faces; 0057 fixed the DirectWrite fallback table naming 59 absent Noto
++ * families; this fixes family lookup itself. Every layer of Wine's font stack
++ * hardcodes Microsoft font names, and each has to be told separately what exists.
++ *
++ * Targets are best-first and every one is tried, so this survives a device with
++ * some and not others: Android guarantees Roboto, while Noto coverage varies by
++ * vendor and OS version. If no target in a row is present the lookup fails exactly
++ * as it did before. */
++struct vessel_family_alias
++{
++    const WCHAR *requested;
++    const WCHAR *targets[4];
++};
++
++static const struct vessel_family_alias vessel_family_aliases[] =
++{
++    /* Sans. Tahoma and Segoe UI lead because between them they are the first font
++     * nearly every program here asks for -- though Wine ships a real Tahoma,
++     * linked in by PrefixRegistry.WINE_LINKED_FONTS, so that row only fires
++     * where the link failed. */
++    { L"Tahoma",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Tahoma Bold",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial",                      { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial Black",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial Narrow",               { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial Unicode MS",           { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Helvetica",                  { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Helvetica Neue",             { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Helv",                       { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe UI",                   { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe UI Semibold",          { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe UI Light",             { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe UI Black",             { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe UI Variable",          { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe WPC",                  { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Verdana",                    { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Calibri",                    { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Candara",                    { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Corbel",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Bahnschrift",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Trebuchet MS",               { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Microsoft Sans Serif",       { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"MS Sans Serif",              { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"MS Shell Dlg",               { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"MS Shell Dlg 2",             { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"System",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Franklin Gothic Medium",     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Gill Sans MT",               { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Century Gothic",             { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Lucida Sans",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Lucida Sans Unicode",        { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Lucida Grande",              { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Gadugi",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Ebrima",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Small Fonts",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Tms Rmn",                    { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++
++    /* Serif. */
++    { L"Times New Roman",            { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Times",                      { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Georgia",                    { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Garamond",                   { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Book Antiqua",               { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Bookman Old Style",          { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Palatino Linotype",          { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Palatino",                   { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Cambria",                    { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Constantia",                 { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Century",                    { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Century Schoolbook",         { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Rockwell",                   { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Sylfaen",                    { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Sitka Text",                 { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"MS Serif",                   { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Roman",                      { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++
++    /* Monospace. Cascadia Mono first because Vessel ships it deliberately --
++     * TOOLS_CASCADIA_VERSION in native/pins.env says why the console needed
++     * it -- and Unifont last as the one face here covering the whole BMP,
++     * which is what a terminal drawing box characters actually needs. */
++    { L"Courier New",                { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Courier",                    { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Consolas",                   { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Lucida Console",             { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Terminal",                   { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Fixedsys",                   { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Monaco",                     { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Menlo",                      { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Andale Mono",                { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"DejaVu Sans Mono",           { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Liberation Mono",            { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Modern",                     { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++
++    /* CJK. One collection answers all of these on Android --
++     * NotoSansCJK-Regular.ttc carries JP, KR, SC and TC -- and which name it
++     * reports varies by vendor build, so each row lists more than one.
++     *
++     * The Serif entries are not decoration. Measured on this device: the sans
++     * collection is linked into windows\Fonts but registered NOWHERE, while
++     * NotoSerifCJK-Regular.ttc has twenty registry entries -- and dwrite
++     * builds its font set from the registry alone (create_system_path_list),
++     * never by scanning the directory. So on this phone every sans row above
++     * missed and logged "no target present" until serif was appended. A serif
++     * CJK face is the wrong style for MS Gothic and it is the difference
++     * between Japanese text and tofu. */
++    { L"MS Gothic",                  { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++    { L"MS PGothic",                 { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++    { L"MS UI Gothic",               { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++    { L"Meiryo",                     { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++    { L"Meiryo UI",                  { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++    { L"Yu Gothic",                  { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++    { L"Yu Gothic UI",               { L"Noto Sans CJK JP", L"Noto Sans CJK SC", L"Noto Serif CJK JP", L"Noto Serif CJK SC" } },
++
++    /* CJK, Japanese serif. */
++    { L"MS Mincho",                  { L"Noto Serif CJK JP", L"Noto Sans CJK JP" } },
++    { L"MS PMincho",                 { L"Noto Serif CJK JP", L"Noto Sans CJK JP" } },
++    { L"Yu Mincho",                  { L"Noto Serif CJK JP", L"Noto Sans CJK JP" } },
++
++    /* CJK, simplified Chinese. */
++    { L"SimSun",                     { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"NSimSun",                    { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"SimHei",                     { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"Microsoft YaHei",            { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"Microsoft YaHei UI",         { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"DengXian",                   { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"FangSong",                   { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"KaiTi",                      { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"LiSu",                       { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++    { L"YouYuan",                    { L"Noto Sans CJK SC", L"Noto Sans CJK JP", L"Noto Serif CJK SC", L"Noto Serif CJK JP" } },
++
++    /* CJK, traditional Chinese. */
++    { L"MingLiU",                    { L"Noto Sans CJK TC", L"Noto Sans CJK SC", L"Noto Serif CJK TC", L"Noto Serif CJK SC" } },
++    { L"PMingLiU",                   { L"Noto Sans CJK TC", L"Noto Sans CJK SC", L"Noto Serif CJK TC", L"Noto Serif CJK SC" } },
++    { L"MingLiU_HKSCS",              { L"Noto Sans CJK TC", L"Noto Sans CJK SC", L"Noto Serif CJK TC", L"Noto Serif CJK SC" } },
++    { L"DFKai-SB",                   { L"Noto Sans CJK TC", L"Noto Sans CJK SC", L"Noto Serif CJK TC", L"Noto Serif CJK SC" } },
++    { L"Microsoft JhengHei",         { L"Noto Sans CJK TC", L"Noto Sans CJK SC", L"Noto Serif CJK TC", L"Noto Serif CJK SC" } },
++    { L"Microsoft JhengHei UI",      { L"Noto Sans CJK TC", L"Noto Sans CJK SC", L"Noto Serif CJK TC", L"Noto Serif CJK SC" } },
++
++    /* CJK, Korean. */
++    { L"Malgun Gothic",              { L"Noto Sans CJK KR", L"Noto Sans CJK JP", L"Noto Serif CJK KR", L"Noto Serif CJK JP" } },
++    { L"Gulim",                      { L"Noto Sans CJK KR", L"Noto Sans CJK JP", L"Noto Serif CJK KR", L"Noto Serif CJK JP" } },
++    { L"GulimChe",                   { L"Noto Sans CJK KR", L"Noto Sans CJK JP", L"Noto Serif CJK KR", L"Noto Serif CJK JP" } },
++    { L"Dotum",                      { L"Noto Sans CJK KR", L"Noto Sans CJK JP", L"Noto Serif CJK KR", L"Noto Serif CJK JP" } },
++    { L"DotumChe",                   { L"Noto Sans CJK KR", L"Noto Sans CJK JP", L"Noto Serif CJK KR", L"Noto Serif CJK JP" } },
++
++    /* CJK, Korean serif. */
++    { L"Batang",                     { L"Noto Serif CJK KR", L"Noto Sans CJK KR" } },
++    { L"BatangChe",                  { L"Noto Serif CJK KR", L"Noto Sans CJK KR" } },
++    { L"Gungsuh",                    { L"Noto Serif CJK KR", L"Noto Sans CJK KR" } },
++    { L"GungsuhChe",                 { L"Noto Serif CJK KR", L"Noto Sans CJK KR" } },
++
++    /* Indic and South Asian. Windows covers each script with one UI face and
++     * Android has a Noto for every one of them. */
++    { L"Nirmala UI",                 { L"Noto Sans Devanagari", L"Noto Serif Devanagari", L"Noto Sans" } },
++    { L"Mangal",                     { L"Noto Sans Devanagari", L"Noto Serif Devanagari", L"Noto Sans" } },
++    { L"Aparajita",                  { L"Noto Sans Devanagari", L"Noto Serif Devanagari", L"Noto Sans" } },
++    { L"Kokila",                     { L"Noto Sans Devanagari", L"Noto Serif Devanagari", L"Noto Sans" } },
++    { L"Utsaah",                     { L"Noto Sans Devanagari", L"Noto Serif Devanagari", L"Noto Sans" } },
++    { L"Sanskrit Text",              { L"Noto Sans Devanagari", L"Noto Serif Devanagari", L"Noto Sans" } },
++
++    { L"Latha",                      { L"Noto Sans Tamil", L"Noto Serif Tamil", L"Noto Sans" } },
++    { L"Vrinda",                     { L"Noto Sans Bengali", L"Noto Serif Bengali", L"Noto Sans" } },
++    { L"Raavi",                      { L"Noto Sans Gurmukhi", L"Noto Serif Gurmukhi", L"Noto Sans" } },
++    { L"Shruti",                     { L"Noto Sans Gujarati", L"Noto Serif Gujarati", L"Noto Sans" } },
++    { L"Tunga",                      { L"Noto Sans Kannada", L"Noto Serif Kannada", L"Noto Sans" } },
++    { L"Gautami",                    { L"Noto Sans Telugu", L"Noto Serif Telugu", L"Noto Sans" } },
++    { L"Kartika",                    { L"Noto Sans Malayalam", L"Noto Serif Malayalam", L"Noto Sans" } },
++    { L"Kalinga",                    { L"Noto Sans Oriya", L"Noto Serif Oriya", L"Noto Sans" } },
++    { L"Iskoola Pota",               { L"Noto Sans Sinhala", L"Noto Serif Sinhala", L"Noto Sans" } },
++    { L"Nyala",                      { L"Noto Sans Ethiopic", L"Noto Serif Ethiopic", L"Noto Sans" } },
++
++    /* Arabic. */
++    { L"Simplified Arabic",          { L"Noto Naskh Arabic", L"Noto Naskh Arabic UI", L"Noto Sans" } },
++    { L"Traditional Arabic",         { L"Noto Naskh Arabic", L"Noto Naskh Arabic UI", L"Noto Sans" } },
++    { L"Andalus",                    { L"Noto Naskh Arabic", L"Noto Naskh Arabic UI", L"Noto Sans" } },
++    { L"Arabic Typesetting",         { L"Noto Naskh Arabic", L"Noto Naskh Arabic UI", L"Noto Sans" } },
++    { L"Sakkal Majalla",             { L"Noto Naskh Arabic", L"Noto Naskh Arabic UI", L"Noto Sans" } },
++    { L"Urdu Typesetting",           { L"Noto Naskh Arabic", L"Noto Naskh Arabic UI", L"Noto Sans" } },
++
++    /* Hebrew. */
++    { L"David",                      { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"Miriam",                     { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"Narkisim",                   { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"Rod",                        { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"FrankRuehl",                 { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"Levenim MT",                 { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"Aharoni",                    { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++    { L"Gisha",                      { L"Noto Sans Hebrew", L"Noto Serif Hebrew", L"Noto Sans" } },
++
++    /* Thai. */
++    { L"Leelawadee",                 { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"Leelawadee UI",              { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"Angsana New",                { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"AngsanaUPC",                 { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"Cordia New",                 { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"CordiaUPC",                  { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"Browallia New",              { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"BrowalliaUPC",               { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++    { L"DilleniaUPC",                { L"Noto Sans Thai", L"Noto Serif Thai", L"Noto Sans" } },
++
++    /* One face per script for the rest of what Windows ships. */
++    { L"DokChampa",                  { L"Noto Sans Lao", L"Noto Serif Lao", L"Noto Sans" } },
++    { L"Lao UI",                     { L"Noto Sans Lao", L"Noto Serif Lao", L"Noto Sans" } },
++    { L"Khmer UI",                   { L"Noto Sans Khmer", L"Noto Serif Khmer", L"Noto Sans" } },
++    { L"DaunPenh",                   { L"Noto Sans Khmer", L"Noto Serif Khmer", L"Noto Sans" } },
++    { L"Myanmar Text",               { L"Noto Sans Myanmar", L"Noto Serif Myanmar", L"Noto Sans" } },
++    { L"Mongolian Baiti",            { L"Noto Sans Mongolian", L"Noto Sans" } },
++    { L"Microsoft Tai Le",           { L"Noto Sans Tai Le", L"Noto Sans" } },
++    { L"Microsoft New Tai Lue",      { L"Noto Sans New Tai Lue", L"Noto Sans" } },
++    { L"Microsoft PhagsPa",          { L"Noto Sans PhagsPa", L"Noto Sans" } },
++    { L"Microsoft Yi Baiti",         { L"Noto Sans Yi", L"Noto Sans" } },
++    { L"Javanese Text",              { L"Noto Sans Javanese", L"Noto Sans" } },
++    { L"Euphemia",                   { L"Noto Sans Canadian Aboriginal", L"Noto Sans" } },
++    { L"Plantagenet Cherokee",       { L"Noto Sans Cherokee", L"Noto Sans" } },
++    { L"Estrangelo Edessa",          { L"Noto Sans Syriac Estrangela", L"Noto Sans" } },
++    { L"MV Boli",                    { L"Noto Sans Thaana", L"Noto Sans" } },
++    { L"Microsoft Himalaya",         { L"Noto Serif Tibetan", L"Noto Sans" } },
++    { L"Segoe UI Historic",          { L"Noto Sans Symbols", L"Unifont", L"Unifont Upper" } },
++
++    /* Symbols and emoji, and the emoji rows are not what they look like they
++     * should be. NotoColorEmoji.ttf is on this device and is deliberately NOT
++     * first: it is CBDT/CBLC colour bitmaps and Wine rasterises outlines, so
++     * naming it would make the chain look like it handles colour emoji while
++     * drawing nothing. native/pins.env records that measurement. Unifont Upper
++     * is what actually backs emoji here -- monochrome, but it renders. Colour
++     * is listed last so a Wine that grows CBDT support picks it up without
++     * this table changing. */
++    { L"Segoe UI Symbol",            { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Segoe MDL2 Assets",          { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Segoe Fluent Icons",         { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Symbol",                     { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Wingdings",                  { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Wingdings 2",                { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Wingdings 3",                { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Webdings",                   { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Marlett",                    { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Bookshelf Symbol 7",         { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"MS Outlook",                 { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"MS Reference Specialty",     { L"Noto Sans Symbols", L"Noto Sans Symbols 2", L"Unifont", L"Unifont Upper" } },
++    { L"Segoe UI Emoji",             { L"Unifont Upper", L"Noto Sans Symbols", L"Noto Color Emoji" } },
++    { L"Segoe Color Emoji",          { L"Unifont Upper", L"Noto Sans Symbols", L"Noto Color Emoji" } },
++
++    /* Script and display faces. Nothing here is a real match; the point is a
++     * legible line rather than a missing family. */
++    { L"Comic Sans MS",              { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Impact",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Papyrus",                    { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Brush Script MT",            { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe Script",               { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Segoe Print",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Ink Free",                   { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Gabriola",                   { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Script",                     { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Chiller",                    { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Jokerman",                   { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Copperplate Gothic",         { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Baskerville Old Face",       { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++
++    /* The charset-suffixed aliases wine.inf writes into FontSubstitutes. GDI
++     * resolves these before lookup; Skia does not, so a request arrives here
++     * verbatim and would otherwise miss. */
++    { L"Arial CE",                   { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial CYR",                  { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial Greek",                { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial TUR",                  { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++    { L"Arial Baltic",               { L"Roboto", L"Noto Sans", L"Droid Sans", L"Source Sans Pro" } },
++
++    { L"Courier New CE",             { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Courier New CYR",            { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Courier New Greek",          { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Courier New TUR",            { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++    { L"Courier New Baltic",         { L"Cascadia Mono", L"Droid Sans Mono", L"Noto Sans Mono", L"Unifont" } },
++
++    { L"Times New Roman CE",         { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Times New Roman CYR",        { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Times New Roman Greek",      { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Times New Roman TUR",        { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++    { L"Times New Roman Baltic",     { L"Noto Serif", L"Droid Serif", L"Roboto" } },
++};
++
++static UINT32 vessel_collection_find_alias(struct dwrite_fontcollection *collection, const WCHAR *name)
++{
++    unsigned int i, j;
++
++    for (i = 0; i < ARRAY_SIZE(vessel_family_aliases); ++i)
++    {
++        if (wcsicmp(vessel_family_aliases[i].requested, name)) continue;
++
++        for (j = 0; j < ARRAY_SIZE(vessel_family_aliases[i].targets); ++j)
++        {
++            const WCHAR *target = vessel_family_aliases[i].targets[j];
++            UINT32 index;
++
++            if (!target) break;
++
++            if ((index = collection_find_family(collection, target)) != ~0u)
++            {
++                TRACE("aliased absent family %s to %s.\n", debugstr_w(name), debugstr_w(target));
++                return index;
++            }
++        }
++
++        WARN("no target present for absent family %s.\n", debugstr_w(name));
++        break;
++    }
++
++    return ~0u;
++}
++
+ static HRESULT WINAPI dwritefontcollection_FindFamilyName(IDWriteFontCollection3 *iface, const WCHAR *name,
+         UINT32 *index, BOOL *exists)
+ {
+@@ -3344,6 +3690,10 @@
+     TRACE("%p, %s, %p, %p.\n", iface, debugstr_w(name), index, exists);
+ 
+     *index = collection_find_family(collection, name);
++    /* Only after the real lookup has failed, so a device holding the genuine
++     * face always gets it and this table never shadows anything installed. */
++    if (*index == ~0u)
++        *index = vessel_collection_find_alias(collection, name);
+     *exists = *index != ~0u;
+     return S_OK;
+ }

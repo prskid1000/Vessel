@@ -1116,6 +1116,49 @@ object PrefixRegistry {
      * tier. See [FONT_LINK_CHAIN] for why CJK, the complex scripts and colour emoji
      * were measured on the device and deliberately left out.
      */
+    /**
+     * Wine's own fonts, which Wine ships and DirectWrite cannot find.
+     *
+     * **A directory mismatch inside Wine, not an Android gap.** `win32u` resolves
+     * a bare font name against two directories — `add_system_font_resource`
+     * (`win32u/font.c:6500`) tries `%WINDIR%/fonts` and then the data directory
+     * where Wine keeps its own faces. DirectWrite's `create_system_path_list`
+     * (`dwrite/main.c`) tries only the first:
+     *
+     *     GetWindowsDirectoryW(ptrW, MAX_PATH);
+     *     wcscat(ptrW, L"\\fonts\\");
+     *     wcscat(ptrW, value);
+     *
+     * So `loader/wine.inf.in` registers `"Tahoma (TrueType)"="tahoma.ttf"`, GDI
+     * finds it in `share/wine/fonts`, and DirectWrite reports
+     * `DWRITE_E_FILENOTFOUND` — one of twenty-one such lines at every startup,
+     * read off the device through the `dwrite` diagnostics channel.
+     *
+     * **These are the real faces, which is why they are linked rather than
+     * aliased.** `patches/wine/0063` maps families with no file anywhere onto
+     * whatever the device does have, and that trade costs correct metrics. These
+     * six need no trade: Wine's Tahoma *is* Tahoma, and Symbol, Webdings,
+     * Wingdings and Marlett carry dingbat glyphs that no Noto face substitutes —
+     * Marlett in particular is what draws window chrome. Fixing them here means
+     * the alias table never fires for them.
+     *
+     * Symlinked from the running Wine component, so nothing is copied and a Wine
+     * upgrade re-points them. Any that a future Wine stops shipping simply do not
+     * appear, exactly as an absent Android face does above.
+     *
+     * `wingding.ttf` is renamed on the way in: that is the name Wine ships, while
+     * the registry value written by `wine.inf` is `wingdings.ttf`, and the lookup
+     * that has to succeed is the registry's.
+     */
+    internal val WINE_LINKED_FONTS: Map<String, String> = mapOf(
+        "tahoma.ttf" to "tahoma.ttf",
+        "tahomabd.ttf" to "tahomabd.ttf",
+        "symbol.ttf" to "symbol.ttf",
+        "webdings.ttf" to "webdings.ttf",
+        "wingding.ttf" to "wingdings.ttf",
+        "marlett.ttf" to "marlett.ttf",
+    )
+
     internal val ANDROID_LINKED_FONTS: List<String> = listOf(
         "NotoSansSymbols-Regular-Subsetted.ttf",
         "NotoSansSymbols-Regular-Subsetted2.ttf",

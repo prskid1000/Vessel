@@ -1588,6 +1588,27 @@ val LOGGABLES: List<Loggable> = listOf(
         addAt = WineChannelLevel.EVERYTHING,
         oneSessionFrom = WineChannelLevel.EVERYTHING,
     ),
+    wineChannel(
+        channel = "dwrite",
+        secondary = "Every font a program asks for, and what DirectWrite answered.",
+        // **The channel that named #57, added after it was needed rather than
+        // before.** patches/wine/0057 was found by reading a trace of exactly
+        // this shape -- `FindFamilyName L"Tahoma"`, a collection scan,
+        // `MapCharacters`, then `FindFamilyName L"sans"` and round again -- and
+        // that trace had to be obtained by editing WINEDEBUG by hand, because
+        // no row here offered it. A blocker diagnosed through a channel the
+        // diagnostics panel cannot switch on is a blocker the next person
+        // cannot re-open.
+        //
+        // The shape matters more than the volume: a font lookup that repeats
+        // with the same arguments is a loop, and a loop over a font collection
+        // already in memory burns CPU without making a single syscall -- which
+        // is what a spinning renderer looks like from outside.
+        caution = "A line per font lookup, and a program that is looping will " +
+            "repeat the same one.",
+        addAt = WineChannelLevel.WARNINGS,
+        oneSessionFrom = WineChannelLevel.EVERYTHING,
+    ),
 
     // — VKD3D_CONFIG, the only instrument that can explain a lost device -------
     vkd3dConfigFlag(

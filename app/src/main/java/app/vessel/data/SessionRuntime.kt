@@ -1412,6 +1412,12 @@ class SessionRuntime @Inject constructor(
         runCatching { installTools(container, layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "tools: ${it.message}") }
 
+        // Beside `installTools` and not inside it, because `installTools` returns
+        // early when the Tools payload is absent and these fonts are Wine's, not
+        // the payload's — a container with no Git would otherwise lose Tahoma.
+        runCatching { linkWineFonts(container, layout, current.log) }
+            .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "wine fonts: ${it.message}") }
+
         runCatching { ensureScriptsDirectory(layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: ${it.message}") }
 
@@ -2708,6 +2714,89 @@ class SessionRuntime @Inject constructor(
         }
     }
 
+    /**
+     * Link Wine's own faces into `windows\Fonts`, where DirectWrite can see them.
+     *
+     * Wine ships Tahoma, Symbol, Webdings, Wingdings and Marlett and registers
+     * them by bare filename; `win32u` then resolves that name against two
+     * directories and DirectWrite against one, so GDI finds them and DirectWrite
+     * does not. See [PrefixRegistry.WINE_LINKED_FONTS] for the code on both sides
+     * and why this is a link rather than an entry in `patches/wine/0063`'s alias
+     * table.
+     *
+     * Same contract as [linkAndroidFonts], which this is modelled on: a real file
+     * already under the name is left alone, because it is either a font a guest
+     * installed or one a payload copied and neither is ours to replace.
+     */
+    private suspend fun linkWineFonts(
+        containerId: String,
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val wine = components.directoryFor(containerId, ComponentType.WINE) ?: return@withContext
+        val source = File(wine, WINE_FONTS_DIR)
+        if (!source.isDirectory) {
+            log.line(LogSource.VESSEL, LogLevel.WARN, "wine fonts: no ${source.path}")
+            return@withContext
+        }
+
+        val target = File(layout.prefix, FONTS_PREFIX_DIR)
+        if (!target.isDirectory && !target.mkdirs()) error("could not create ${target.path}")
+
+        val absent = mutableListOf<String>()
+        val linked = mutableListOf<String>()
+        for ((shipped, installed) in PrefixRegistry.WINE_LINKED_FONTS) {
+            val file = File(source, shipped)
+            if (!file.isFile) {
+                absent += shipped
+                continue
+            }
+            val link = File(target, installed).toPath()
+            val wanted = file.toPath()
+            runCatching {
+                if (Files.isSymbolicLink(link)) {
+                    // Re-pointed rather than kept: the link names a component
+                    // directory that carries a version code, so one left alone
+                    // would still resolve into the Wine build this container has
+                    // stopped running.
+                    if (Files.readSymbolicLink(link) == wanted) return@runCatching
+                    Files.delete(link)
+                } else if (Files.exists(link)) {
+                    log.line(
+                        LogSource.VESSEL,
+                        LogLevel.WARN,
+                        "wine fonts: $FONTS_PREFIX_DIR/$installed is a real file, not a link; left alone",
+                    )
+                    return@runCatching
+                }
+                Files.createSymbolicLink(link, wanted)
+                linked += installed
+            }.onFailure {
+                absent += "$installed (${it.message})"
+            }
+        }
+
+        if (linked.isNotEmpty()) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "wine fonts: linked ${linked.size} into $FONTS_PREFIX_DIR " +
+                    "(${linked.joinToString(", ")})",
+            )
+        }
+        // WARN, because every name here is one `wine.inf` has already registered:
+        // one missing is a `DWRITE_E_FILENOTFOUND` at every startup and a family
+        // that falls through to `patches/wine/0063`'s alias with the wrong metrics.
+        if (absent.isNotEmpty()) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "wine fonts: not in ${source.path}, so DirectWrite cannot see " +
+                    "these: ${absent.joinToString(", ")}",
+            )
+        }
+    }
+
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
     private fun installToolTree(
         source: File,
@@ -3520,6 +3609,14 @@ class SessionRuntime @Inject constructor(
 
         /** Wine's own font directory — see [FONTS_PAYLOAD_DIR]. */
         const val FONTS_PREFIX_DIR = "drive_c/windows/Fonts"
+
+        /**
+         * Wine's own font directory inside the component, relative to its root.
+         *
+         * The directory `win32u` falls back to and DirectWrite never looks in --
+         * see [PrefixRegistry.WINE_LINKED_FONTS].
+         */
+        const val WINE_FONTS_DIR = "share/wine/fonts"
 
         /**
          * Which Tools version the fonts were copied from.
