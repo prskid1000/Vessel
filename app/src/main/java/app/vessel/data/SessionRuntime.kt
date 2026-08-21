@@ -3678,9 +3678,19 @@ class SessionRuntime @Inject constructor(
          * above it. Set here rather than in a profile because Pale Moon is the
          * browser Vessel ships, and a preference a user has to find is not a
          * fix.
+         *
+         * **Both spellings, because the rename postdates the fork.** Firefox
+         * called this `browser.tabs.drawInTitlebar` until version 89 and
+         * `browser.tabs.inTitlebar` after it. Pale Moon forked long before that,
+         * so the new name was the wrong one to set and was measured doing
+         * nothing: the file was on disk, the session had picked it up, and the
+         * browser still drew a full title bar. An unknown pref costs a parsed
+         * line and is ignored, so setting both is cheaper than being certain
+         * which fork reads which.
          */
         const val PALEMOON_PREFS: String =
-            "pref(\"browser.tabs.inTitlebar\", 0);\n"
+            "pref(\"browser.tabs.drawInTitlebar\", 0);\n" +
+                "pref(\"browser.tabs.inTitlebar\", 0);\n"
         /** [app.vessel.core.PrefixRegistry.SCRIPTS_DIR] as a path under the prefix. */
         const val GUEST_SCRIPTS_DIR = "drive_c/Scripts"
 
