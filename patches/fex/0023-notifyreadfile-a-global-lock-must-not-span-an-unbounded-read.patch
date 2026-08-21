@@ -1,0 +1,74 @@
+Subject: [PATCH] arm64ec: do not hold the code invalidation mutex across an unbounded read
+
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -1009,6 +1009,57 @@
+   InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
+ }
+ 
++namespace {
++// winioctl.h is not included here and pulling it in for three constants is
++// not worth the header churn. These are the stable NT device type values.
++constexpr ULONG DeviceTypeCdRom = 0x00000002;
++constexpr ULONG DeviceTypeDisk = 0x00000007;
++constexpr ULONG DeviceTypeVirtualDisk = 0x00000024;
++
++/**
++ * Whether a read from this handle is guaranteed to finish.
++ *
++ * **This finishes what NotifyLockEnter started.** That helper exists because
++ * the "before" half of a notification pair must never block, and it makes
++ * ThreadCreationMutex a try_lock for exactly that reason. The line directly
++ * after it is still a hard lock on CodeInvalidationMutex -- and unlike the
++ * first, that one is deliberately held until the *after* half runs, which
++ * means it spans the whole read.
++ *
++ * Survivable for a disk file, which completes. Not survivable for a pipe,
++ * which blocks until somebody writes; if that somebody is waiting on the
++ * same mutex, directly or through any other thread, the wait is circular and
++ * permanent.
++ *
++ * Measured, not theorised: an Electron browser process deadlocked here every
++ * launch. patches/fex/0013 named it outright -- WritePriorityMutex
++ * 7EC00B0100, held by thread 01B0 inside this function, with CrBrowserMain
++ * waiting exclusive and another thread waiting shared. All three sat in
++ * futex_wait with zero context switches for the life of the process.
++ * Chromium runs its IPC over pipes, so its browser process reads from one
++ * constantly, and a browser that cannot pump messages never repaints again.
++ *
++ * Skipping the locked path costs speed and nothing else. BeginUntrackedWrite
++ * is an *optimisation*: it untraps the destination so the read can write
++ * without faulting. Left trapped, each write takes an RWX fault that
++ * HandleRWXAccessViolation already handles correctly. Slower, and it returns.
++ *
++ * Unknown counts as unbounded. A handle we cannot classify is one we cannot
++ * promise will return, and guessing wrong in that direction hangs a process
++ * rather than slowing one.
++ */
++bool ReadWillTerminate(HANDLE Handle) {
++  FILE_FS_DEVICE_INFORMATION Info {};
++  IO_STATUS_BLOCK IoStatus {};
++  if (!NT_SUCCESS(NtQueryVolumeInformationFile(Handle, &IoStatus, &Info, sizeof(Info), FileFsDeviceInformation))) {
++    return false;
++  }
++  // Disk and optical media return what they have. Pipes, sockets, consoles
++  // and mailslots wait for a writer that may never arrive.
++  return Info.DeviceType == DeviceTypeDisk || Info.DeviceType == DeviceTypeCdRom ||
++         Info.DeviceType == DeviceTypeVirtualDisk;
++}
++} // namespace
+ void BTCpu64NotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After, NTSTATUS Status) {
+   auto* ThreadState = GetCPUArea().ThreadState();
+   if (!InvalidationTracker || !ThreadState) {
+@@ -1017,6 +1068,11 @@
+ 
+   auto& InLockedRWXRead = GetFrontendThreadData(ThreadState)->InLockedRWXRead;
+   if (!After) {
++    // See ReadWillTerminate: the mutex below is held until the read returns,
++    // so a source that can block forever must not be allowed to take it.
++    if (!ReadWillTerminate(Handle)) {
++      return;
++    }
+     NotifyLockEnter(GetFrontendThreadData(ThreadState));
+     CTX->GetCodeInvalidationMutex().lock();
+     if (InvalidationTracker->BeginUntrackedWriteLocked(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size))) {
