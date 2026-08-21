@@ -355,6 +355,36 @@ fact.
   descends into the virtual desktop (`display/XServerDisplay.kt`), and the
   interpreter badge that says `cmd`/`msiexec`/`wscript`/`shortcut` instead of
   `unknown`. *(2026-08-08.)*
+- [ ] **The blank strip across the top of a Chromium window.** VS Code and
+  Electron both draw everything except a band at the very top of the window,
+  which is white when the surface is fresh and black after a resize
+  reallocates it. It survives every window size and position, and it is not
+  drawn by anything -- it is surface nobody writes to, which is why no caption
+  theory, Chromium switch or VS Code setting has ever moved it.
+
+  Measured, on Wine 100110062 / FEX 260826:
+
+  - parent `0x1009e`: window `(360,140)-(1560,940)`, client `(371,140)-(1549,929)`
+    -- insets left 11, right 11, bottom 11, **top 0**
+  - child `0x100b0`: window and client both `(0,0)-(1200,800)`
+  - DXVK swapchain: `1200x800`, correct for the child, which is what it is
+    sized from (`Win32WsiDriver::getWindowSize` uses `GetClientRect`)
+  - `show_window cmd=1` (`SW_SHOWNORMAL`) -- the window is *not* maximised
+
+  **The open question is why the band is at the top at all.** Every mechanism
+  proposed so far -- the child overflowing the parent client, DXVK sizing from
+  the wrong rect, Wine painting a caption over the client, placement putting
+  client above the desktop -- clips the sides and the bottom, because the top
+  inset is zero. None of them predicts a top band. The next step is to measure
+  *where the band is in client coordinates* rather than reason from what the
+  screen looks like, which is what four dead theories have in common.
+
+  Ruled out by test, not argument: occlusion, DirectComposition, GPU and
+  software compositing, in-process GPU, DPI scale, profile state, title bar
+  style, Electron version (28, 42 and 43 all render), window size, renderer
+  backgrounding, timer throttling, and `patches/wine/0064` (written, built,
+  measured, deleted -- see the WINE_REVISION 62 note). *(2026-08-21.)*
+
 - [ ] **A README that is true**, on whatever day it is next looked at.
 
 ---
