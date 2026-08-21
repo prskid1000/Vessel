@@ -291,6 +291,28 @@ private fun ContainerSheetContent(
                             // else in the body changes a value in place; this one
                             // opens another screen, and that belongs with the
                             // other header action.
+                            // **Beside Input for the same reason Input is here.**
+                            // Both open another view rather than change a value in
+                            // place, and the header is where this sheet keeps the
+                            // things that do that.
+                            //
+                            // It was down beside Diagnostics and that was wrong on
+                            // its own terms: a fourth button in that row squeezed
+                            // "Session logs" until its label was clipped. A row
+                            // that cannot fit what is already in it is not a row
+                            // with space for a destination.
+                            //
+                            // "Certs" rather than "Certificates" because the header
+                            // is the narrowest place in the sheet, and the sheet it
+                            // opens is titled in full.
+                            VButton(
+                                "Certs",
+                                {
+                                    onRefreshCertificates()
+                                    certsOpen = true
+                                },
+                                style = VButtonStyle.Ghost,
+                            )
                             VButton(
                                 "Input",
                                 { inputOpen = true },
@@ -426,18 +448,6 @@ private fun ContainerSheetContent(
                             { diagnosticsOpen = true },
                             style = VButtonStyle.Secondary,
                             icon = VIcons.Info,
-                        )
-                        // Beside Diagnostics for the reason given above it: both
-                        // are about how the next run behaves rather than about
-                        // what this container is, and trust is exactly that.
-                        VButton(
-                            "Certificates",
-                            {
-                                onRefreshCertificates()
-                                certsOpen = true
-                            },
-                            style = VButtonStyle.Secondary,
-                            icon = VIcons.FileCode,
                         )
                         VButton(
                             "Session logs",
