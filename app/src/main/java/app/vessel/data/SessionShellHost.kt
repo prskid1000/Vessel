@@ -104,7 +104,11 @@ class SessionShellHost @Inject constructor(
                 "If it is on removable storage, check that it is still connected."
         }
 
-        val command = commandFor(shortcut) ?: return "Vessel cannot start ${file.name}."
+        // Composed here rather than stored: `file` is the resolved host path, and
+        // recognising a Chromium build means looking at what sits beside it. See
+        // [chromiumSwitchesFor] for why the user should not have to know this.
+        val command = commandFor(shortcut, chromiumSwitchesFor(file, splitArguments(shortcut.args)))
+            ?: return "Vessel cannot start ${file.name}."
 
         val workingDirectory = shortcut.workingDir
             .takeIf { it.isNotBlank() }
@@ -229,9 +233,12 @@ private data class GuestCommand(val program: String, val arguments: List<String>
  * through, and returning null keeps the failure a refusal rather than a launch
  * of Wine's stub PowerShell, which would appear to work.
  */
-private fun commandFor(shortcut: AppShortcut): GuestCommand? {
+private fun commandFor(shortcut: AppShortcut, added: List<String> = emptyList()): GuestCommand? {
     val path = shortcut.executable
-    val extra = splitArguments(shortcut.args)
+    // The user's arguments first, then anything Vessel had to add. Order is
+    // not cosmetic for Chromium: the *first* occurrence of a switch wins, so
+    // appending can never override something the user set deliberately.
+    val extra = splitArguments(shortcut.args) + added
     return when (path.substringAfterLast('.', "").lowercase()) {
         // Handed to the loader by its Windows path. `.lnk` too: Wine resolves a
         // shortcut to its target itself, so there is nothing for us to read.
