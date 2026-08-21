@@ -456,6 +456,11 @@ fun InputEditor(
         ) {
             item(key = "map") {
                 TouchPreviewCard(state, actions, Modifier.padding(top = Vessel.metrics.s8))
+                OverlayVisibility(
+                    visible = state.touchVisible,
+                    onVisible = actions.onTouchVisible,
+                    modifier = Modifier.padding(top = Vessel.metrics.s8),
+                )
             }
             item(key = "selected") {
                 SelectedControl(
@@ -1312,19 +1317,37 @@ private fun SelectedControl(
         }
 
         val toggle = glassSwitch(profile, row, actions)
-        if (toggle != null) {
+        // A button only. A stick and a d-pad have no press to hold, so the
+        // switch would be a control that does nothing on two thirds of the pad.
+        val latchable = glass != null && glass.kind == TouchKind.BUTTON
+        if (toggle != null || latchable) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                VToggle(checked = glass != null, onCheckedChange = toggle)
-                Text(
-                    "On the glass",
-                    style = Vessel.type.body,
-                    color = Vessel.colors.textPrimary,
-                    modifier = Modifier.weight(1f),
-                )
+                if (toggle != null) {
+                    SwitchCell(
+                        label = "On the glass",
+                        checked = glass != null,
+                        onCheckedChange = toggle,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                if (latchable && glass != null) {
+                    SwitchCell(
+                        label = "Hold to latch",
+                        checked = glass.latching,
+                        onCheckedChange = { on ->
+                            actions.onProfile(
+                                profile.copy(
+                                    touch = profile.touch.with(glass.copy(latching = on)),
+                                ),
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
 
@@ -1599,8 +1622,12 @@ private fun TouchLayout.freeStick(): Stick? = Stick.entries.firstOrNull { !stick
 // — the settings -----------------------------------------------------------------
 
 /**
- * Whether the overlay is drawn, how solid, and everything about the pad in your
- * hands.
+ * How solid the overlay is, and everything about the pad in your hands.
+ *
+ * **Whether it is drawn at all is no longer here.** That switch sits under the
+ * diagram now, against the picture of the thing it turns off, where someone
+ * looking for it will look. What is left is what a settings group is for:
+ * numbers you tune once and forget.
  *
  * **The Play / Edit layout toggle used to be here, and it is gone.** Editing in
  * place meant editing *under this panel*: the panel covers the left of the screen,
@@ -1608,6 +1635,66 @@ private fun TouchLayout.freeStick(): Stick? = Stick.entries.firstOrNull { !stick
  * all. The full-screen arrange surface exists precisely to give the whole screen
  * to placing controls, and it is one tap away on the map above.
  */
+/**
+ * Whether the overlay is drawn, directly under the picture of it.
+ *
+ * **It was in Settings, and that was the wrong place.** The diagram above is
+ * the overlay; a switch that turns the overlay off belongs against the thing it
+ * turns off, not two sections below in a group that also holds stick deadzones
+ * and the pad table. Someone looking for "how do I hide this" looks at the
+ * picture of the thing they want to hide.
+ */
+/**
+ * One switch and its label, sized to share a row with another.
+ *
+ * Two of these side by side rather than two stacked rows: they are both one
+ * question about the selected control -- is it on the glass, does a long press
+ * hold it down -- and an equal half each says that, where a full-width row each
+ * would read as two unrelated settings that happen to be adjacent.
+ */
+@Composable
+private fun SwitchCell(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier,
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        VToggle(checked = checked, onCheckedChange = onCheckedChange)
+        Text(
+            label,
+            style = Vessel.type.body,
+            color = Vessel.colors.textPrimary,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun OverlayVisibility(
+    visible: Boolean,
+    onVisible: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        VToggle(checked = visible, onCheckedChange = onVisible)
+        Text(
+            "Show the overlay",
+            style = Vessel.type.body,
+            color = Vessel.colors.textPrimary,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
 @Composable
 private fun InputSettings(
     state: InputEditorState,
@@ -1622,19 +1709,6 @@ private fun InputSettings(
     Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s11)) {
         VDisclosureHeader("Settings", expanded = !collapsed, onToggle = onToggle)
         if (collapsed) return@Column
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s8),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            VToggle(checked = state.touchVisible, onCheckedChange = actions.onTouchVisible)
-            Text(
-                "Show the overlay",
-                style = Vessel.type.body,
-                color = Vessel.colors.textPrimary,
-                modifier = Modifier.weight(1f),
-            )
-        }
 
         // One slider for the whole overlay rather than one per control. The model
         // stores opacity per control — a stick a thumb rests on wants to be

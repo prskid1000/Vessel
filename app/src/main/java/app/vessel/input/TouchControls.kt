@@ -51,6 +51,24 @@ data class TouchControl(
     val label: String = "",
     val action: GamepadAction = GamepadAction.None,
     val role: StickRole = StickRole.Keys,
+    /**
+     * Whether a long press on this button latches it down.
+     *
+     * For the buttons a hand cannot hold and play at the same time. `L3` is
+     * pressed by the thumb that is steering with the stick it sits beside --
+     * sprint is the ordinary case, and hold-and-steer with one thumb on glass
+     * is not a thing a hand does. `L2` is the aim held for as long as a fight
+     * lasts, by the finger the phone is also resting on.
+     *
+     * Per control rather than a list of the four, because which buttons a game
+     * wants held is the game s business: a flight sim holds a trigger nobody
+     * else does. The built-in pad turns it on for L1, L2, L3 and R3 and leaves
+     * every other button alone, which is where the argument above lands, not a
+     * rule the model enforces.
+     *
+     * Meaningless for a stick or a d-pad, which have no press to hold.
+     */
+    val latching: Boolean = false,
     val up: GamepadAction = GamepadAction.None,
     val down: GamepadAction = GamepadAction.None,
     val left: GamepadAction = GamepadAction.None,
@@ -553,8 +571,8 @@ object TouchLayouts {
 
             // Along the top edge, which is where an index finger reaches on a
             // phone held in two hands.
-            padButton("btn-l1", GamepadControl.L1, 0.055f, 0.09f, 0.048f),
-            padButton("btn-l2", GamepadControl.L2, 0.140f, 0.09f, 0.048f),
+            padButton("btn-l1", GamepadControl.L1, 0.055f, 0.09f, 0.048f, latching = true),
+            padButton("btn-l2", GamepadControl.L2, 0.140f, 0.09f, 0.048f, latching = true),
             padButton("btn-r2", GamepadControl.R2, 0.860f, 0.09f, 0.048f),
             padButton("btn-r1", GamepadControl.R1, 0.945f, 0.09f, 0.048f),
 
@@ -565,8 +583,8 @@ object TouchLayouts {
             // press a stick it is steering with, so the stick clicks are their
             // own small buttons inboard of each stick rather than a press on the
             // stick itself.
-            padButton("btn-l3", GamepadControl.THUMB_L, 0.245f, 0.72f, 0.040f),
-            padButton("btn-r3", GamepadControl.THUMB_R, 0.755f, 0.72f, 0.040f),
+            padButton("btn-l3", GamepadControl.THUMB_L, 0.245f, 0.72f, 0.040f, latching = true),
+            padButton("btn-r3", GamepadControl.THUMB_R, 0.755f, 0.72f, 0.040f, latching = true),
         ),
     )
 
@@ -595,6 +613,7 @@ object TouchLayouts {
         cx: Float,
         cy: Float,
         size: Float,
+        latching: Boolean = false,
     ) = TouchControl(
         id = id,
         kind = TouchKind.BUTTON,
@@ -602,6 +621,7 @@ object TouchLayouts {
         cy = cy,
         size = size,
         pad = control,
+        latching = latching,
     )
 
     /**

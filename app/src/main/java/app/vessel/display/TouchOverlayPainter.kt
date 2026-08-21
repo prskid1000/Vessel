@@ -43,8 +43,13 @@ internal class TouchOverlayPainter(private val density: Float) {
     /**
      * Draw the whole overlay.
      *
-     * [held] is the set of control ids with a finger on them, which is the only
-     * feedback a glass button can give that a physical one gives for free.
+     * [held] is the set of control ids that are down, which is the only feedback
+     * a glass button can give that a physical one gives for free.
+     *
+     * Down, not "under a finger": a long press latches L1, L2, L3 and R3 so the
+     * hand can leave, and a latched button that stopped being drawn as pressed
+     * would be a key held with nothing on screen saying so. It stays accented
+     * until the next long press lets it go.
      */
     fun draw(
         canvas: Canvas,

@@ -139,6 +139,20 @@ data class StoredTouchControl(
      */
     val pad: String = "",
     val padStick: String = "",
+    /**
+     * Whether a long press latches this button down, or null for "never said".
+     *
+     * **Nullable so a profile written before the setting existed can still get
+     * it.** Every such profile decodes `false` for a plain `Boolean`, which is
+     * indistinguishable from a user who turned it off — so the feature would
+     * arrive switched off for everyone who already had a profile, which is every
+     * user, and look broken rather than absent.
+     *
+     * Null instead means the control has no opinion and takes the built-in one
+     * for the pad control it is. Writing always stores a real value, so a
+     * profile only answers null once.
+     */
+    val latching: Boolean? = null,
 ) {
     /** Null for a kind this build has never heard of â€” dropped, not guessed at. */
     fun toControl(): TouchControl? {
@@ -157,12 +171,28 @@ data class StoredTouchControl(
             down = down.toAction(),
             left = left.toAction(),
             right = right.toAction(),
+            // Null takes the built-in answer for this pad control, so L1, L2, L3
+            // and R3 latch in a profile written before the setting existed.
+            latching = latching
+                ?: (GamepadControl.entries.firstOrNull { it.name == pad } in DEFAULT_LATCHING),
             pad = GamepadControl.entries.firstOrNull { it.name == pad },
             padStick = Stick.entries.firstOrNull { it.name == padStick },
         ).sane()
     }
 
     companion object {
+        /**
+         * The controls the built-in pad latches, for a profile that predates the
+         * setting. The same four [app.vessel.input.TouchLayouts.Gamepad] sets:
+         * the ones a hand cannot hold and play at the same time.
+         */
+        private val DEFAULT_LATCHING = setOf(
+            GamepadControl.L1,
+            GamepadControl.L2,
+            GamepadControl.THUMB_L,
+            GamepadControl.THUMB_R,
+        )
+
         fun of(control: TouchControl): StoredTouchControl = with(control.sane()) {
             StoredTouchControl(
                 id = id,
@@ -178,6 +208,7 @@ data class StoredTouchControl(
                 down = StoredAction.of(down),
                 left = StoredAction.of(left),
                 right = StoredAction.of(right),
+                latching = latching,
                 pad = pad?.name.orEmpty(),
                 padStick = padStick?.name.orEmpty(),
             )

@@ -1970,7 +1970,7 @@ private class SessionSurfaceView(
             is OverlayTouch.Down -> {
                 val control = touch.control ?: return
                 pressedControls[touch.pointerId] = control.id
-                emit(overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h))
+                emit(overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h, now()))
                 invalidate()
             }
 
@@ -1979,7 +1979,7 @@ private class SessionSurfaceView(
 
             is OverlayTouch.Up -> {
                 pressedControls.remove(touch.pointerId)
-                emit(overlay.onUp(touch.pointerId))
+                emit(overlay.onUp(touch.pointerId, now()))
                 invalidate()
             }
         }
@@ -2080,7 +2080,10 @@ private class SessionSurfaceView(
             height = height.toFloat(),
             editing = touchEditing,
             selectedId = selectedTouchControl,
-            held = pressedControls.values.toSet(),
+            // Latched controls as well as the ones under a finger. A latch with
+            // nothing drawn is a button held down with no way to tell it is --
+            // which is the whole failure the feature would otherwise introduce.
+            held = pressedControls.values.toSet() + overlay.latchedIds,
         )
     }
 

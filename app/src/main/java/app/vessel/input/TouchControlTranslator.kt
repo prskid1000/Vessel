@@ -59,6 +59,22 @@ class TouchControlTranslator(
      */
     private val holding = mutableMapOf<GamepadAction, Int>()
 
+    /**
+     * Stick-click controls a long press has latched down, by control id.
+     *
+     * A thumb cannot press a stick it is steering with, which is why L3 and R3
+     * are separate buttons at all -- and it cannot *hold* one either, because
+     * that same thumb is on the stick. Sprint is the case that makes it plain:
+     * hold L3 and steer, on glass, with one thumb, is not a thing a hand does.
+     *
+     * So a long press latches the button down and the finger leaves; another
+     * long press lets it go. A short press stays exactly what it always was.
+     */
+    private val latched = mutableSetOf<String>()
+
+    /** When each tracked finger landed, for telling a long press from a tap. */
+    private val downAt = mutableMapOf<Int, Long>()
+
     private var stickX = 0f
     private var stickY = 0f
     private var lookX = 0f
@@ -113,13 +129,18 @@ class TouchControlTranslator(
         // different pad buttons. A finger on a control that is neither bound to
         // a pad control nor is one contributes nothing here, which is what keeps
         // a hand-built keyboard layout out of the guest's gamepad.
-        pressed = fingers.values
+        // Latched ids as well as fingers: a latched button is held as far as
+        // the guest is concerned, and the finger that latched it is long gone.
+        pressed = (fingers.values + latched)
             .mapNotNull { id ->
                 val control = layout.byId(id) ?: return@mapNotNull null
                 (control.action as? GamepadAction.Pad)?.control ?: control.pad
             }
             .toSet(),
     )
+
+    /** Controls a long press is holding down, so they can be drawn as held. */
+    val latchedIds: Set<String> get() = latched
 
     /** Whether any finger is on the overlay at all. */
     val busy: Boolean get() = fingers.isNotEmpty()
@@ -150,14 +171,21 @@ class TouchControlTranslator(
         y: Float,
         width: Float,
         height: Float,
+        atMs: Long = 0L,
     ): List<GuestInput> {
         // A second DOWN for a pointer already tracked is a dropped UP somewhere
         // upstream. Let go of what it was on rather than leaking the hold.
         val out = mutableListOf<GuestInput>()
-        if (fingers.containsKey(pointerId)) out += onUp(pointerId)
+        if (fingers.containsKey(pointerId)) out += onUp(pointerId, atMs)
         fingers[pointerId] = control.id
+        downAt[pointerId] = atMs
         out += when (control.kind) {
-            TouchKind.BUTTON -> press(control.action)
+            // A latched control is already down. Pressing it again would take a
+            // second reference on the key and the matching release would never
+            // come, so the finger that arrives to *un*latch it must not press.
+            TouchKind.BUTTON ->
+                if (control.id in latched) emptyList() else press(control.action)
+
             TouchKind.STICK, TouchKind.DPAD -> steer(control, x, y, width, height)
         }
         return out
@@ -170,14 +198,64 @@ class TouchControlTranslator(
         return steer(control, x, y, width, height)
     }
 
-    /** A tracked finger lifted. */
-    fun onUp(pointerId: Int): List<GuestInput> {
-        val control = layout.byId(fingers.remove(pointerId)) ?: return emptyList()
+    /**
+     * A tracked finger lifted.
+     *
+     * Where a long press on a latchable button is decided: held past
+     * [LATCH_HOLD_MS] it toggles, and anything shorter is the press it always
+     * was. A tap on a latched button is deliberately *not* a release -- the way
+     * out is the way in, and a game where the same button is tapped in play
+     * would otherwise drop the latch by accident.
+     */
+    fun onUp(pointerId: Int, atMs: Long = 0L): List<GuestInput> {
+        val control = layout.byId(fingers.remove(pointerId)) ?: run {
+            downAt.remove(pointerId)
+            return emptyList()
+        }
+        val heldFor = atMs - (downAt.remove(pointerId) ?: atMs)
         return when (control.kind) {
-            TouchKind.BUTTON -> release(control.action)
+            TouchKind.BUTTON -> when {
+                !latches(control) -> release(control.action)
+                heldFor < LATCH_HOLD_MS ->
+                    if (control.id in latched) emptyList() else release(control.action)
+
+                control.id in latched -> {
+                    latched -= control.id
+                    release(control.action)
+                }
+
+                else -> {
+                    latched += control.id
+                    emptyList()
+                }
+            }
+
             TouchKind.STICK, TouchKind.DPAD -> centre(control)
         }
     }
+
+    /**
+     * Whether a long press on this control latches it down.
+     *
+     * The four a hand cannot hold and play at the same time. `L3` and `R3` are
+     * pressed by a thumb that is steering with the stick they belong to -- sprint
+     * is the ordinary case, and hold-and-steer with one thumb on glass is not a
+     * thing a hand does. `L1` and `L2` are the aim and the alt-fire an index
+     * finger holds for as long as a fight lasts, and on a phone that finger is
+     * also what the device is resting on.
+     *
+     * The control carries the answer, so a layout decides rather than this file:
+     * which buttons a game wants held is the game s business, and a flight sim
+     * holds a trigger nobody else does. The built-in pad turns it on for L1, L2,
+     * L3 and R3 -- the ones a hand cannot hold and play at the same time -- and
+     * leaves every other button alone.
+     *
+     * `R1` and `R2` are left off there on purpose: on the right they are fire,
+     * and a weapon that keeps firing after the finger leaves is a different
+     * feature with a different failure mode. A user who wants it can turn it on.
+     */
+    private fun latches(control: TouchControl): Boolean =
+        control.kind == TouchKind.BUTTON && control.latching
 
     /**
      * Advance a look pad by however long has passed. See [GamepadTranslator.tick]
@@ -197,6 +275,12 @@ class TouchControlTranslator(
     fun reset(): List<GuestInput> {
         val buttons = holding.keys.toList()
         fingers.clear()
+        downAt.clear()
+        // Latches go with everything else. A latch is a key the guest is holding
+        // with no finger anywhere near it, so a session that stops or a layout
+        // that changes underneath one would leave it held with nothing left in
+        // the system able to let it go.
+        latched.clear()
         holding.clear()
         stickX = 0f
         stickY = 0f
@@ -278,6 +362,17 @@ class TouchControlTranslator(
         }
 
     private companion object {
+        /**
+         * How long a press has to last to latch, in milliseconds.
+         *
+         * Three seconds is long enough that no press made in play reaches it --
+         * a tapped button is tens of milliseconds and a deliberate hold in a
+         * fight is under one second -- and short enough to be worth waiting out
+         * on purpose. The same threshold releases it, so there is one gesture to
+         * learn rather than two.
+         */
+        const val LATCH_HOLD_MS = 3_000L
+
         /**
          * Which control drives each of the two stick slots.
          *
