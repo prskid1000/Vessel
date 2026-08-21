@@ -29,6 +29,25 @@ class GuestDebrisSweepTest {
         }
 
     @Test
+    fun `the default keeps exactly one report`() {
+        // The default is what a container actually sweeps with, and every other
+        // test here passes `keep` explicitly -- so without this the constant
+        // could be changed to anything and the suite would still pass. It went
+        // from two to one after a single Electron crash left a 117 MB dump on
+        // the device: Chromium writes the whole renderer heap, so the second
+        // copy is another tenth of a gigabyte held for a comparison nobody had
+        // asked for.
+        val prefix = prefix()
+        val cp = crashpad(prefix)
+        val older = dump(cp, "a.dmp", 300, 1_000L)
+        val newest = dump(cp, "b.dmp", 100, 2_000L)
+
+        assertEquals(1, KEEP_CRASH_REPORTS)
+        assertEquals(300L, sweepGuestDebris(prefix))
+        assertFalse(older.exists())
+        assertTrue(newest.exists())
+    }
+    @Test
     fun `keeps the newest reports and removes the rest`() {
         val prefix = prefix()
         val cp = crashpad(prefix)

@@ -6,11 +6,17 @@ import java.nio.file.Files
 /**
  * How many crash reports a container keeps, per application, per family.
  *
- * Two rather than zero: the newest dump is the one worth reading when something
- * has just gone wrong, and the one before it is what a comparison needs. Beyond
- * that they are only ever storage.
+ * One rather than zero: the newest dump is the one worth reading when something
+ * has just gone wrong. Beyond that they are only ever storage.
+ *
+ * **It was two, for the comparison a second dump allows, and one Chromium dump
+ * is why it is not.** Measured on device: a single Electron crash left a 117 MB
+ * `.dmp` -- Chromium dumps carry the whole renderer heap, so the second copy is
+ * not a rounding error on a phone, it is another tenth of a gigabyte held
+ * against a comparison nobody had asked for. A crash that needs two dumps can
+ * be reproduced; a device out of storage cannot run anything at all.
  */
-internal const val KEEP_CRASH_REPORTS: Int = 2
+internal const val KEEP_CRASH_REPORTS: Int = 1
 
 /**
  * Directories whose *entire purpose* is holding crash artifacts.
