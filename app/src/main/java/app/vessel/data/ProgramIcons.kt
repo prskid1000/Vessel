@@ -147,7 +147,9 @@ class ProgramIcons @Inject constructor(
             layout.resolveGuestPath(program)?.takeIf { it.isFile } ?: return null
         } else {
             val windows = File(layout.prefix, DRIVE_C_WINDOWS)
-            sequenceOf(File(windows, program), File(windows, "system32/$program"))
+            val programFiles = File(layout.prefix, DRIVE_C_PROGRAM_FILES)
+            (sequenceOf(File(windows, program), File(windows, "system32/$program")) +
+                installedProgram(programFiles, program))
                 .firstOrNull { it.isFile }
                 ?: return null
         }
@@ -165,6 +167,9 @@ class ProgramIcons @Inject constructor(
         /** Where Wine puts the programs it provides, under a prefix. */
         const val DRIVE_C_WINDOWS = "drive_c/windows"
 
+        /** Where Vessel puts the programs it bundles, under a prefix. */
+        const val DRIVE_C_PROGRAM_FILES = "drive_c/Program Files"
+
         /** Four megabytes — about sixty 128 px icons, far more than a device has. */
         const val CACHE_BYTES = 4 * 1024 * 1024
 
@@ -178,3 +183,29 @@ class ProgramIcons @Inject constructor(
         const val EMPTY_ENTRY_BYTES = 1024
     }
 }
+
+/**
+ * The bundled programs, which are not in `windows` and are asked for by bare
+ * name anyway.
+ *
+ * [ProgramIcons.iconForBuiltIn] says a profile with a real path resolves it
+ * instead, and that is true of the start menu, where the path is written down.
+ * The task bar has no path to offer: the name it matches on comes from
+ * `WM_CLASS`, which `patches/wine/0058` sets to the bare process name, so
+ * `palemoon.exe` arrives with nothing saying where it lives. Looked for in
+ * `windows`, not found, and the window drew a monogram -- the same failure Git
+ * had on the start menu, one screen over.
+ *
+ * One level down and no deeper. Every bundled program puts its executable at
+ * the top of its own directory (`Pale Moon\palemoon.exe`, `PowerShell\pwsh.exe`),
+ * and a full walk of Program Files is a lot of disk for a question asked once
+ * per window. A miss costs one listing of a folder holding a handful of
+ * entries, and the answer is cached with the icon.
+ *
+ * Top level rather than a method so it can be tested without an Android
+ * Bitmap, which is the only reason [ProgramIcons] has no tests of its own.
+ */
+internal fun installedProgram(programFiles: File, program: String): Sequence<File> =
+    programFiles.listFiles().orEmpty().asSequence()
+        .filter { it.isDirectory }
+        .map { File(it, program) }
