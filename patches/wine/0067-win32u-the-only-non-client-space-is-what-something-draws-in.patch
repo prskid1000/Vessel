@@ -1,0 +1,108 @@
+win32u: the only non-client space is what something actually draws in.
+
+0065 stops Wine reserving a caption or a resize border, and that is enough for
+a program that lets DefWindowProc answer WM_NCCALCSIZE. It is not enough for
+one that answers the message itself, which is what every browser here does.
+Chromium keeps WS_CAPTION so that resize and snap behave, then returns a client
+inset by its own idea of a resize border; measured on device with VS Code,
+window (349,140)-(1571,951) against client (360,140)-(1560,940) -- 11 pixels on
+left, right and bottom, and zero at the top where it took the caption area for
+its own title bar. Pale Moon does the same and shows the same ring.
+
+Nothing draws that border. Wine paints a frame from its own metrics, four pixels
+here, and the rest is never written by anybody, so it keeps whatever the surface
+held: white while fresh, black once a resize reallocates it. It is the caption
+band of 0065 one step smaller, and it is why that patch appeared to only half
+work.
+
+The inset is clamped to what is genuinely occupied rather than removed outright.
+A blanket client = window would be simpler and would be wrong: the menu bar and
+the non-client scroll bars are real, Wine does draw them there, and notepad and
+winefile would have them painted over their own client. Each side is allowed
+exactly the space its own feature needs -- SM_CYMENU at the top when the window
+has a menu, SM_CXVSCROLL on the scroll bar side, SM_CYHSCROLL at the bottom --
+and no more.
+
+Both sites that turn an application answer into a client rect are covered: the
+WM_NCCALCSIZE in calc_ncsize, and the one on the creation path, which sends the
+message with wparam FALSE and maps the result back to parent coordinates first.
+
+Top-level windows only. A child window has no frame to begin with, and its
+client rect is parent geometry the parent is entitled to choose.
+
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -3762,6 +3762,57 @@
+     }
+ }
+ 
++/* Vessel: the only non-client space is what something actually draws in.
++ *
++ * patches/wine/0065 stops Wine reserving a caption or a resize border, and that
++ * is enough for a program that lets DefWindowProc answer WM_NCCALCSIZE. It is
++ * not enough for one that answers the message itself, which is what every
++ * browser here does: Chromium keeps WS_CAPTION so resize and snap behave, then
++ * returns a client inset by its own idea of a resize border. Measured on device,
++ * VS Code: window (349,140)-(1571,951), client (360,140)-(1560,940) -- 11 pixels
++ * on left, right and bottom, and zero at the top, where it took the caption area
++ * for its own title bar.
++ *
++ * Nothing draws that border. Wine paints a frame from *its* metrics, four pixels
++ * here, and the remaining seven are never written by anybody, so they keep
++ * whatever the surface held -- white while fresh, black once a resize
++ * reallocates it. The same failure as the caption band, one step smaller, and
++ * Pale Moon shows it identically for the same reason.
++ *
++ * So the inset is clamped to what is genuinely occupied rather than removed
++ * outright. A blanket client = window would be simpler and would be wrong: the
++ * menu bar and the non-client scroll bars are real, Wine does draw them there,
++ * and notepad and winefile would have them painted over their own client. Each
++ * side is allowed exactly the space its own feature needs and no more.
++ *
++ * Top-level windows only. A child window has no frame to begin with, and its
++ * client rect is parent geometry the parent is entitled to choose. */
++static void vessel_clamp_client_to_window( HWND hwnd, const RECT *window, RECT *client )
++{
++    UINT style = get_window_long( hwnd, GWL_STYLE );
++    UINT ex_style = get_window_long( hwnd, GWL_EXSTYLE );
++    LONG menu = 0, vscroll = 0, hscroll = 0;
++
++    if (style & WS_CHILD) return;
++    if (IsRectEmpty( window )) return;
++
++    if (get_menu( hwnd )) menu = get_system_metrics( SM_CYMENU );
++    if (style & WS_VSCROLL) vscroll = get_system_metrics( SM_CXVSCROLL );
++    if (style & WS_HSCROLL) hscroll = get_system_metrics( SM_CYHSCROLL );
++
++    if (ex_style & WS_EX_LEFTSCROLLBAR)
++    {
++        if (client->left > window->left + vscroll) client->left = window->left + vscroll;
++        if (client->right < window->right) client->right = window->right;
++    }
++    else
++    {
++        if (client->left > window->left) client->left = window->left;
++        if (client->right < window->right - vscroll) client->right = window->right - vscroll;
++    }
++    if (client->top > window->top + menu) client->top = window->top + menu;
++    if (client->bottom < window->bottom - hscroll) client->bottom = window->bottom - hscroll;
++}
+ static UINT calc_ncsize( WINDOWPOS *winpos, const struct window_rects *old_rects,
+                          struct window_rects *new_rects, RECT *valid_rects,
+                          int parent_x, int parent_y )
+@@ -3800,6 +3851,7 @@
+         wvr_flags |= send_message( winpos->hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)&params );
+ 
+         new_rects->client = params.rgrc[0];
++        vessel_clamp_client_to_window( winpos->hwnd, &new_rects->window, &new_rects->client );
+ 
+         TRACE( "hwnd %p old win %s old client %s new win %s new client %s\n", winpos->hwnd,
+                wine_dbgstr_rect(&old_rects->window), wine_dbgstr_rect(&old_rects->client),
+@@ -6133,6 +6185,7 @@
+         map_window_points( parent, 0, (POINT *)&new_rects.client, 2, win_dpi );
+         send_message( hwnd, WM_NCCALCSIZE, FALSE, (LPARAM)&new_rects.client );
+         map_window_points( 0, parent, (POINT *)&new_rects.client, 2, win_dpi );
++        vessel_clamp_client_to_window( hwnd, &new_rects.window, &new_rects.client );
+ 
+         surface = get_window_surface( hwnd, SWP_NOACTIVATE, FALSE, &new_rects, &surface_rect );
+         apply_window_pos( hwnd, insert_after, SWP_NOACTIVATE, surface, &new_rects, NULL );

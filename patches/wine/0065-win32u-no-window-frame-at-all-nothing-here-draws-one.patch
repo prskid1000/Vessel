@@ -1,0 +1,177 @@
+win32u: no window frame at all, because nothing here draws one.
+
+Vessel runs every session inside `explorer /desktop=`, with its own shell
+owning the window list, the move and resize handles and the task bar. The
+window manager Wine defers to decorates nothing, so nothing should be reserved
+for it.
+
+Two changes, and both are needed:
+
+  * adjust_window_rect no longer insets the client by a caption or a resize
+    border, so the client is the window. That function is what every consumer
+    agrees through -- WM_NCCALCSIZE, the visible rect the X window is created
+    from, and the AdjustWindowRect an application calls to size itself.
+
+  * decorated_mode defaults to FALSE, so get_visible_rect stops shrinking the
+    X window by the frame the window manager claims through
+    X11DRV_GetWindowStyleMasks.
+
+What this removes, measured on device with VS Code. Win32 said the client was
+(360,140)-(1560,940) while the X window Vessel composites sat at (360,192),
+1200x748 -- moved down 52 and shortened by 52, one caption plus border. Nobody
+wrote those rows, so they kept whatever the surface held: white when freshly
+allocated, black once a resize reallocated it, with the same 52 clipped off the
+bottom. Removing the caption alone left a white ring in its place, for the same
+reason one step smaller: the client stopped 11 pixels short on each side, the X
+window now covered the whole window rect, and Chromium answers WM_NCPAINT
+without drawing because it believes that ring belongs to the window manager.
+
+Chromium was innocent throughout, and a DevTools capture is what proved it: VS
+Code painted its own title bar, dark, at rows 0..34 of its 1200x800 surface,
+into pixels the compositor then placed 52 rows low. That is why thirteen
+Chromium switches, every VS Code title-bar setting and two Wine paint theories
+all missed -- they were aimed at a renderer that was already correct.
+
+Menu bars and non-client scroll bars keep their space: those are subtracted by
+handle_nc_calc_size and by the `menu` argument, not here. That is what still
+separates this from the gamescope early return a few lines above, which returns
+before any of it is added and would cost an ordinary desktop program its scroll
+bars. WS_EX_CLIENTEDGE is also left alone -- it is the sunken edge on ordinary
+controls, which Wine itself paints, so it is not a source of unpainted pixels.
+
+This does not duplicate patches/wine/0010, and the difference is the whole
+reason the band survived a patch already written for it. 0010 clears
+WS_CAPTION|WS_THICKFRAME in win32u s style-correction block at
+NtUserCreateWindowEx, which is the only place that works for a program that
+never touches its style again -- but it is creation time only. Chromium sets
+WS_CAPTION back afterwards, deliberately, so that resize, snap and drag keep
+working; its style reads 0x6CC0000 by the time a window is shown. 0010 removes
+the style and can be undone; this removes the geometry and cannot.
+
+Windows still move and resize: the shell owns those handles, WS_CAPTION stays
+on the window, and hit testing, snapping and anything reading the style are
+unchanged. Chromium in particular keeps WS_CAPTION deliberately for that.
+
+HKCU\Software\Wine\X11 Driver\Decorated still overrides the second half, so a
+session that really does have a decorating window manager can say so without a
+rebuild.
+
+--- a/dlls/win32u/defwnd.c
++++ b/dlls/win32u/defwnd.c
+@@ -262,7 +262,6 @@
+ BOOL adjust_window_rect( RECT *rect, DWORD style, BOOL menu, DWORD ex_style, UINT dpi )
+ {
+     NONCLIENTMETRICSW ncm = {.cbSize = sizeof(ncm)};
+-    int adjust = 0;
+ 
+     if (user_driver->pHasWindowManager( "steamcompmgr" ))
+     {
+@@ -282,26 +281,59 @@
+ 
+     NtUserSystemParametersInfoForDpi( SPI_GETNONCLIENTMETRICS, 0, &ncm, 0, dpi );
+ 
+-    if ((ex_style & (WS_EX_STATICEDGE|WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE)
+-        adjust = 1; /* for the outer frame always present */
+-    else if ((ex_style & WS_EX_DLGMODALFRAME) || (style & (WS_THICKFRAME|WS_DLGFRAME)))
+-        adjust = 2; /* outer */
+-
+-    if (style & WS_THICKFRAME)
+-        adjust += ncm.iBorderWidth + ncm.iPaddedBorderWidth; /* The resize border */
+-
+-    if ((style & (WS_BORDER|WS_DLGFRAME)) || (ex_style & WS_EX_DLGMODALFRAME))
+-        adjust++; /* The other border */
+-
+-    InflateRect( rect, adjust, adjust );
+-
+-    if ((style & WS_CAPTION) == WS_CAPTION)
+-    {
+-        if (ex_style & WS_EX_TOOLWINDOW)
+-            rect->top -= ncm.iSmCaptionHeight + 1;
+-        else
+-            rect->top -= ncm.iCaptionHeight + 1;
+-    }
++    /* Vessel: no resize border either, for the reason the caption goes below.
++     *
++     * The border is a decoration too, and leaving it in left a white ring
++     * around every Chromium window once the caption went: the client stops
++     * 11 pixels short of the window on each side, decorated_mode = FALSE means
++     * the X window now covers the whole window rect rather than just the
++     * client, and Chromium answers WM_NCPAINT without drawing -- it believes
++     * that ring is the window manager s. So the ring belonged to nobody and
++     * kept the surface fill, exactly as the caption band did before it.
++     *
++     * With this the client is the window, so win32u::get_visible_rect takes its
++     * EqualRect( window, client ) early return and the X window matches the
++     * surface by construction rather than by both being adjusted the same way.
++     *
++     * Menu bars and non-client scroll bars are unaffected: those are subtracted
++     * by handle_nc_calc_size and by the `menu` argument below, not here, which
++     * is what still separates this from upstream s gamescope early return.
++     */
++
++    /* Vessel: no window gets a caption, because nothing in this stack draws one.
++     *
++     * Vessel runs every session inside `explorer /desktop=`, with its own shell
++     * owning the window list, the move and resize handles and the task bar. A
++     * Win32 caption on top of that is a second title bar for the same window,
++     * and the reason this is removed here rather than hidden later is that the
++     * caption is not only drawn, it is *reserved*: adjust_window_rect is what
++     * insets the client, so every consumer of it -- WM_NCCALCSIZE, the visible
++     * rect the X window is created from, and the AdjustWindowRect an
++     * application calls to size itself -- agrees there is no caption at all.
++     *
++     * **Leaving it in cost a blank band across the top of every Chromium
++     * window.** Measured on device: VS Code client (360,140)-(1560,940) while
++     * the X window sat at (360,192) 1200x748 -- moved down 52 and shortened by
++     * 52, one caption plus border. win32u::get_visible_rect shrinks the X
++     * window by whatever frame the window manager claims to draw
++     * (X11DRV_GetWindowStyleMasks -> MWM_DECOR_TITLE), and Vessel s shell draws
++     * none of it, so those 52 rows were never written by anybody: white while
++     * the surface was fresh, black once a resize reallocated it, with the same
++     * 52 rows clipped off the bottom. Chromium was innocent -- a DevTools
++     * capture showed it painting its own title bar, dark, at rows 0..34 of its
++     * 1200x800 surface, into pixels the compositor then placed 52 rows low.
++     *
++     * Only the caption goes. The border, menu bar and non-client scroll bars
++     * below still get their space, which is why this is a few lines here rather
++     * than the early return upstream takes for gamescope a few lines above --
++     * that one returns before the frame is added at all, and Vessel runs
++     * ordinary desktop programs that would lose their scroll bars with it.
++     *
++     * Windows still resize and move: the shell owns those handles, and
++     * WS_CAPTION stays on the window, so hit testing, snapping and anything
++     * that reads the style are unchanged. Chromium in particular keeps
++     * WS_CAPTION deliberately for exactly that reason.
++     */
+     if (menu) rect->top -= ncm.iMenuHeight + 1;
+ 
+     if (ex_style & WS_EX_CLIENTEDGE)
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -170,7 +170,25 @@
+ static BOOL emulate_modelist = TRUE;
+ static BOOL emulate_modeset = TRUE;
+ static UINT limit_resolutions = 0;
+-BOOL decorated_mode = TRUE;
++/* Vessel: FALSE, because the window manager here decorates nothing.
++ *
++ * This flag is what makes win32u::get_visible_rect shrink the X window by the
++ * frame the window manager claims it will draw. Vessel s shell owns the window
++ * list, the move and resize handles and the task bar, and draws no frame at
++ * all, so every pixel reserved that way belongs to nobody and is never
++ * written: white while the surface is fresh, black once a resize reallocates
++ * it. Measured on device as a 52 row band across the top of every Chromium
++ * window, with the same 52 rows clipped off the bottom.
++ *
++ * The pair to the caption removal in defwnd.c adjust_window_rect: that one
++ * stops a caption being reserved and drawn, this one stops the X window being
++ * inset for a frame nobody paints. Both are needed -- with only the first, the
++ * border is still reserved and the band merely gets thinner.
++ *
++ * Still a registry key: HKCU\Software\Wine\X11 Driver\Decorated overrides
++ * it, so a session that really does have a decorating window manager can say
++ * so without a rebuild. */
++BOOL decorated_mode = FALSE;
+ UINT64 thunk_lock_callback = 0;
+ 
+ #define VIRTUAL_HMONITOR ((HMONITOR)(UINT_PTR)(0x10000 + 1))
