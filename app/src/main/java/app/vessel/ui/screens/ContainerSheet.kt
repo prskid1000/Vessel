@@ -44,6 +44,7 @@ import app.vessel.ui.components.VComponentReadout
 import app.vessel.ui.components.VConfirmSheet
 import app.vessel.ui.components.VDropdownField
 import app.vessel.ui.components.VExpander
+import app.vessel.data.ContainerCertificate
 import app.vessel.ui.components.VIconAction
 import app.vessel.ui.components.VIcons
 import app.vessel.ui.components.VLabeledField
@@ -152,6 +153,9 @@ fun ContainerSheet(
                 ),
             )
         },
+        onRefreshCertificates = viewModel::refreshCertificates,
+        onAddCertificate = viewModel::addCertificate,
+        onRemoveCertificate = viewModel::removeCertificate,
     )
 
     if (arranging) {
@@ -181,6 +185,9 @@ private fun ContainerSheetContent(
     onDeleteLogs: () -> Unit,
     onCopyDiagnostics: (String) -> Unit,
     onGrantStorage: () -> Unit,
+    onRefreshCertificates: () -> Unit,
+    onAddCertificate: (String) -> Boolean,
+    onRemoveCertificate: (ContainerCertificate) -> Unit,
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -190,6 +197,7 @@ private fun ContainerSheetContent(
     // also fixes the header: while it is open the commit action is meaningless
     // there, so Save becomes a chevron that puts the form back.
     var diagnosticsOpen by remember { mutableStateOf(false) }
+    var certsOpen by remember { mutableStateOf(false) }
 
     /**
      * Input takes the sheet over for the same reason Diagnostics does: what is
@@ -203,6 +211,7 @@ private fun ContainerSheetContent(
     // VSheet's own handler, so it wins while it is enabled — the innermost
     // enabled callback is the one the dispatcher runs.
     BackHandler(enabled = diagnosticsOpen) { diagnosticsOpen = false }
+    BackHandler(enabled = certsOpen) { certsOpen = false }
     BackHandler(enabled = inputOpen) { inputOpen = false }
 
     val editorState = InputEditorState(
@@ -232,6 +241,18 @@ private fun ContainerSheetContent(
                 DiagnosticsHeader(
                     containerName = state.name.ifBlank { "Container" },
                     onCollapse = { diagnosticsOpen = false },
+                )
+            } else if (certsOpen) {
+                VSheetHeader(
+                    title = "Certificates",
+                    leading = {
+                        VIconAction(
+                            icon = VIcons.ArrowLeft,
+                            contentDescription = "Back to the container's settings",
+                            onClick = { certsOpen = false },
+                            style = VButtonStyle.Ghost,
+                        )
+                    },
                 )
             } else if (inputOpen) {
                 InputEditorHeader(
@@ -293,6 +314,14 @@ private fun ContainerSheetContent(
                 onChange = onDiagnostics,
                 onDeleteLogs = onDeleteLogs,
                 onCopyTo = onCopyDiagnostics,
+            )
+            return@VSheet
+        }
+        if (certsOpen) {
+            CertificatesPanel(
+                certificates = state.certificates,
+                onAdd = onAddCertificate,
+                onRemove = onRemoveCertificate,
             )
             return@VSheet
         }
@@ -397,6 +426,18 @@ private fun ContainerSheetContent(
                             { diagnosticsOpen = true },
                             style = VButtonStyle.Secondary,
                             icon = VIcons.Info,
+                        )
+                        // Beside Diagnostics for the reason given above it: both
+                        // are about how the next run behaves rather than about
+                        // what this container is, and trust is exactly that.
+                        VButton(
+                            "Certificates",
+                            {
+                                onRefreshCertificates()
+                                certsOpen = true
+                            },
+                            style = VButtonStyle.Secondary,
+                            icon = VIcons.FileCode,
                         )
                         VButton(
                             "Session logs",
@@ -705,6 +746,9 @@ private fun ContainerSheetPreview() {
             inputActions = InputEditorActions(),
             onDeleteLogs = {},
             onCopyDiagnostics = {},
+            onRefreshCertificates = {},
+            onAddCertificate = { false },
+            onRemoveCertificate = {},
             onGrantStorage = {},
         )
     }

@@ -177,6 +177,21 @@ data class ContainerLayout(
     val customRegistry: File get() = File(base, CUSTOM_REGISTRY)
 
     /**
+     * Certificate authorities this container trusts, one file each.
+     *
+     * Wine imports every file in the directory named by
+     * `WINE_ADDITIONAL_CERTS_DIR` into the root store at start-up, which is
+     * the store Chromium reads on Windows -- so a certificate dropped here is
+     * trusted by Electron applications, not merely by whatever happens to
+     * honour a `--cacert` flag.
+     *
+     * Per container because trust is: the store lives in the prefix, and two
+     * containers are two prefixes. A certificate for a service one container
+     * talks to is not a certificate the other should accept.
+     */
+    val certificates: File get() = File(base, CERTIFICATES_DIR)
+
+    /**
      * Where components used to be installed, before the shared store existed.
      *
      * Only [ComponentStore.migrate] should ever look at this. It is not part of
@@ -244,6 +259,9 @@ data class ContainerLayout(
 
         /** Device-specific registry additions, merged into the seed. */
         const val CUSTOM_REGISTRY = "custom.reg"
+
+        /** Extra certificate authorities, imported into the prefix root store. */
+        const val CERTIFICATES_DIR = "certs"
         const val LEGACY_COMPONENTS = "components"
     }
 }

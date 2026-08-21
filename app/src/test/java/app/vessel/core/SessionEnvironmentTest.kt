@@ -774,6 +774,11 @@ class SessionEnvironmentTest {
         assertEquals(
             mapOf(
                 "WINEPREFIX" to prefix.absolutePath,
+                // Certificate authorities the user added, imported into the root
+                // store at start-up. Always set and the directory need not exist:
+                // Wine opens it, fails, and carries on -- so a certificate added
+                // later is picked up by the next session with nothing to remember.
+                "WINE_ADDITIONAL_CERTS_DIR" to File(prefix.parentFile, "certs").absolutePath,
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr",
                 "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
                 "DISPLAY" to ":0",

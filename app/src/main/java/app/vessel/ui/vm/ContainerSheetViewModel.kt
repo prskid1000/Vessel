@@ -16,6 +16,9 @@ import app.vessel.core.params.ParamValue
 import app.vessel.core.params.ResolvedParam
 import app.vessel.core.params.resolve
 import app.vessel.data.AndroidDrives
+import app.vessel.data.ContainerCertificate
+import app.vessel.data.ContainerCertificates
+import app.vessel.data.ContainerPaths
 import app.vessel.data.ContainerRepository
 import app.vessel.data.ImportResult
 import app.vessel.data.InputProfileRepository
@@ -73,6 +76,14 @@ data class ContainerSheetUiState(
     /** One-shot: the sheet closes and this view model is done with. */
     val finished: Boolean = false,
     val diagnostics: DiagnosticsUiState = DiagnosticsUiState(),
+    /**
+     * Certificate authorities this container trusts on top of Wine's own.
+     *
+     * Read from the directory rather than held as a document: the directory is
+     * what Wine imports at start-up, so a list kept anywhere else would be a
+     * second copy able to disagree with the thing that actually decides.
+     */
+    val certificates: List<ContainerCertificate> = emptyList(),
     /**
      * Whether this app may map the phone's storage into the container as `D:`.
      *
@@ -206,6 +217,7 @@ class ContainerSheetViewModel @Inject constructor(
     private val sessionLogs: SessionLogStore,
     private val drives: AndroidDrives,
     private val inputProfiles: InputProfileRepository,
+    private val paths: ContainerPaths,
     private val json: Json,
 ) : ViewModel() {
 
@@ -721,5 +733,35 @@ class ContainerSheetViewModel @Inject constructor(
             componentId = resolution.resolved?.id,
             componentNote = resolution.note,
         )
+    }
+
+    /** Where this container keeps its extra certificate authorities. */
+    private fun certificatesDir(): java.io.File? =
+        _state.value.containerId.takeIf { it.isNotBlank() }?.let { paths.of(it).certificates }
+
+    /** Re-read the directory. Cheap, and the only thing that can be right. */
+    fun refreshCertificates() {
+        val dir = certificatesDir() ?: return
+        _state.update { it.copy(certificates = ContainerCertificates.list(dir)) }
+    }
+
+    /**
+     * Store a pasted certificate. False when it is not one.
+     *
+     * The caller shows the refusal: a paste that is truncated, or is a private
+     * key, or is simply the wrong clipboard, would otherwise be written and then
+     * fail inside the guest as a TLS error with nothing to read but the error.
+     */
+    fun addCertificate(text: String): Boolean {
+        val dir = certificatesDir() ?: return false
+        val added = ContainerCertificates.add(dir, text) ?: return false
+        refreshCertificates()
+        return added.file.isFile
+    }
+
+    /** Forget one. The next session does not import what is not there. */
+    fun removeCertificate(certificate: ContainerCertificate) {
+        ContainerCertificates.remove(certificate)
+        refreshCertificates()
     }
 }

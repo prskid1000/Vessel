@@ -1299,6 +1299,20 @@ data class SessionPaths(
      */
     val caches: File = File(prefix.parentFile ?: prefix, "caches"),
     /**
+     * `WINE_ADDITIONAL_CERTS_DIR` -- `files/containers/<id>/certs`.
+     *
+     * Certificate authorities the user added. Wine imports every file in the
+     * directory into the root store at start-up (`crypt32`, `load_root_certs`),
+     * which is the store Chromium consults on Windows -- so a self-signed gateway
+     * is trusted by an Electron application, not only by whatever honours a
+     * `--cacert` flag.
+     *
+     * Derived from the prefix like [caches], for the same reason: the container
+     * directory is the thing both belong to, and deriving it here keeps the one
+     * construction site from having to know.
+     */
+    val certificates: File = File(prefix.parentFile ?: prefix, "certs"),
+    /**
      * `TMPDIR` and `XDG_RUNTIME_DIR` — `files/containers/<id>/tmp`.
      *
      * Named here as well as in [SessionScratch] because one thing in this
@@ -1495,6 +1509,19 @@ fun sessionEnvironment(
     val environment = LinkedHashMap<String, String>()
 
     environment["WINEPREFIX"] = paths.prefix.absolutePath
+
+    // **Certificate authorities the user added, imported into the root store.**
+    //
+    // Wine reads every file in this directory at start-up and adds it to the
+    // root store -- `crypt32`, `load_root_certs` -- which is the store Chromium
+    // consults on Windows. That is what makes a self-signed gateway work for an
+    // Electron application: `NODE_EXTRA_CA_CERTS` reaches Node's TLS and misses
+    // Chromium's own network stack, which is the one that makes the request.
+    //
+    // Always set, and the directory need not exist: Wine opens it, fails, and
+    // carries on. Setting it unconditionally means a certificate added later is
+    // picked up by the next session with nothing else to remember.
+    environment["WINE_ADDITIONAL_CERTS_DIR"] = paths.certificates.absolutePath
 
     // **How netd's answer reaches the guest.** Android has no `/etc/resolv.conf`
     // — checked on device, it is not merely empty but absent — so Wine's
