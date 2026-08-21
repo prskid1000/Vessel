@@ -1,0 +1,105 @@
+win32u: a window has no buttons, because it has no frame to put them on.
+
+0065 and 0067 leave the client covering the whole window, so Wine draws no
+caption and no border. The minimise, maximise and close buttons still showing
+are drawn by the programs themselves inside their own client area -- VS Code in
+its DOM title bar, Pale Moon in its own -- so nothing Wine paints is involved,
+and nothing Wine paints can remove them.
+
+What they all consult is the window style. Electron NativeWindowViews
+IsMaximizable and IsMinimizable read WS_MAXIMIZEBOX and WS_MINIMIZEBOX off the
+HWND and the Gecko widget asks the same way, so the style is the one lever they
+share.
+
+Masked on the way out rather than cleared on the window. 0010 clears
+WS_CAPTION|WS_THICKFRAME at NtUserCreateWindowEx and Chromium sets them
+straight back -- 0x6CC0000 by the time a window is shown -- so a stored bit is
+not something this can rely on. A program that asks is told no every time,
+whatever it has stored.
+
+Only what a program reads: the four NtUserCallHwndParam_GetWindowLong entries.
+Wine own code calls get_window_long directly and still sees the real style, so
+hit testing, SetWindowPos and the non-client paths are unchanged. That
+separation matters, because these bits also decide how a window answers a
+maximise request and not only how it is drawn.
+
+Nothing is lost: the task bar carries minimise, close and force-close, and move
+and resize are handles the shell draws -- the same division 0010 records for the
+caption.
+
+Top-level windows only. A child window has no frame and no buttons, and
+WS_SYSMENU on one means something else entirely.
+
+Uncertain by construction and worth saying so: this removes the buttons only for
+programs that ask before drawing. One that draws them unconditionally will keep
+them, and would need its own setting instead.
+
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -1294,6 +1294,44 @@
+     return retval;
+ }
+ 
++/* Vessel: a window has no buttons, because it has no frame to put them on.
++ *
++ * 0065 and 0067 leave the client covering the whole window, so Wine draws no
++ * caption and no border. The minimise, maximise and close buttons that remain
++ * are drawn by the programs themselves, inside their own client area: VS Code
++ * puts them in its DOM title bar, Pale Moon in its own. Nothing Wine paints is
++ * involved, so nothing Wine paints can remove them.
++ *
++ * What both consult is the window style. Electron NativeWindowViews
++ * IsMaximizable and IsMinimizable read WS_MAXIMIZEBOX and WS_MINIMIZEBOX off
++ * the HWND, and the Gecko widget asks the same question the same way, so the
++ * style is the one lever every one of them shares.
++ *
++ * Masked on the way out rather than cleared on the window. patches/wine/0010
++ * clears WS_CAPTION|WS_THICKFRAME at NtUserCreateWindowEx and Chromium sets
++ * them straight back -- style 0x6CC0000 by the time a window is shown -- so a
++ * stored bit is not something this can rely on. A program that asks is told
++ * no, every time, whatever it has stored.
++ *
++ * Only what a program reads. Wine own code calls get_window_long directly and
++ * still sees the real style, so hit testing, SetWindowPos and the non-client
++ * paths are unchanged -- which matters, because these bits also decide how a
++ * window responds to a maximise request rather than only how it is drawn.
++ *
++ * Nothing is lost by it: the task bar carries minimise, close and force-close,
++ * and move and resize are handles the shell draws, which is the same division
++ * 0010 records for the caption.
++ *
++ * Top-level only. A child window has no frame and no buttons, and WS_SYSMENU on
++ * one means something else entirely. */
++#define VESSEL_UNDECORATED_STYLE (WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)
++
++static LONG_PTR vessel_mask_window_style( HWND hwnd, INT offset, LONG_PTR value )
++{
++    if (offset != GWL_STYLE) return value;
++    if (value & WS_CHILD) return value;
++    return value & ~(LONG_PTR)VESSEL_UNDECORATED_STYLE;
++}
+ /* see GetWindowLongW */
+ DWORD get_window_long( HWND hwnd, INT offset )
+ {
+@@ -6438,16 +6476,17 @@
+         return get_window_info( hwnd, (WINDOWINFO *)param );
+ 
+     case NtUserCallHwndParam_GetWindowLongA:
+-        return get_window_long_size( hwnd, param, sizeof(LONG), TRUE );
++        return vessel_mask_window_style( hwnd, param,
++                                         get_window_long_size( hwnd, param, sizeof(LONG), TRUE ));
+ 
+     case NtUserCallHwndParam_GetWindowLongW:
+-        return get_window_long( hwnd, param );
++        return vessel_mask_window_style( hwnd, param, get_window_long( hwnd, param ));
+ 
+     case NtUserCallHwndParam_GetWindowLongPtrA:
+-        return get_window_long_ptr( hwnd, param, TRUE );
++        return vessel_mask_window_style( hwnd, param, get_window_long_ptr( hwnd, param, TRUE ));
+ 
+     case NtUserCallHwndParam_GetWindowLongPtrW:
+-        return get_window_long_ptr( hwnd, param, FALSE );
++        return vessel_mask_window_style( hwnd, param, get_window_long_ptr( hwnd, param, FALSE ));
+ 
+     case NtUserCallHwndParam_GetWindowRect:
+     {

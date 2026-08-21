@@ -1,0 +1,72 @@
+win32u: a window that cannot be closed from a button it does not have.
+
+The pair to 0068, and it exists because that patch got two buttons out of
+three. Masking WS_MINIMIZEBOX and WS_MAXIMIZEBOX out of what a program reads
+removed minimise and maximise from VS Code and left close exactly where it was,
+because Electron does not ask the style whether it may close:
+NativeWindowViews::IsClosable calls GetSystemMenu and reads the MFS_DISABLED
+bit on SC_CLOSE.
+
+SC_CLOSE is greyed rather than the whole system menu removed. Returning no menu
+was tried first and is worse for no gain: both make IsClosable answer no, but
+no menu takes the Alt+Space window menu with it, and Move and Size on that menu
+are how a window is placed when there is no caption left to drag.
+
+Closing is untouched. WM_CLOSE and WM_SYSCOMMAND SC_CLOSE are handled by
+DefWindowProc, which never reads this state, and the task bar sends its close
+that way -- the division 0010 records for minimise and force-close. What a user
+loses is a greyed Close row on a menu they reach with Alt+Space, beside Move and
+Size rows that still work.
+
+Top-level windows only: WS_SYSMENU on a child means something else entirely.
+
+This does not reach a program that draws its buttons without asking. Pale Moon
+is one -- Gecko paints its own title bar unconditionally -- and is handled on
+the Vessel side instead, by a default preference shipped with the browser.
+
+--- a/dlls/win32u/menu.c
++++ b/dlls/win32u/menu.c
+@@ -1589,6 +1589,7 @@
+     HMENU retvalue = 0;
+ 
+     if (win == WND_DESKTOP || !win) return 0;
++
+     if (win == WND_OTHER_PROCESS)
+     {
+         if (is_window( hwnd )) FIXME( "not supported on other process window %p\n", hwnd );
+@@ -1602,8 +1603,35 @@
+     }
+ 
+     if (!win->hSysMenu && (win->dwStyle & WS_SYSMENU))
++    {
+         win->hSysMenu = get_sys_menu( hwnd, 0 );
+ 
++        /* Vessel: a window that cannot be closed from a button it does not have.
++         *
++         * The pair to the style mask in patches/wine/0068, and it exists because
++         * that patch got two buttons out of three. Electron does not ask the
++         * style whether it may close: NativeWindowViews::IsClosable calls
++         * GetSystemMenu and reads the MFS_DISABLED bit on SC_CLOSE, so masking
++         * WS_SYSMENU out of what a program reads left the close button exactly
++         * where it was while minimise and maximise disappeared.
++         *
++         * Greyed rather than the whole menu removed, which was tried first and
++         * is worse for no gain: both make IsClosable answer no, but returning no
++         * menu at all takes the Alt+Space window menu with it, and Move and Size
++         * on that menu are how a window is placed without a caption to drag.
++         *
++         * Closing is untouched. WM_CLOSE and WM_SYSCOMMAND SC_CLOSE are handled
++         * by DefWindowProc, which never reads this state, and the task bar sends
++         * its close that way -- the division 0010 records for minimise and
++         * force-close. What a user loses is the greyed Close row on a menu they
++         * reach with Alt+Space, next to the Move and Size rows that still work.
++         *
++         * Top-level only: a child window has no caption and no buttons, and
++         * WS_SYSMENU on one means something else entirely. */
++        if (win->hSysMenu && !(win->dwStyle & WS_CHILD))
++            NtUserEnableMenuItem( win->hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED );
++    }
++
+     if (win->hSysMenu)
+     {
+         struct menu *menu;

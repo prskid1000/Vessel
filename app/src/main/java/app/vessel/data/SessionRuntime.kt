@@ -2880,6 +2880,26 @@ class SessionRuntime @Inject constructor(
         // The stamp is the version code the tree was copied from. Absent means a
         // tree written before this existed, and that re-copies once — cheap, and
         // the alternative is trusting bytes whose provenance nobody recorded.
+        // Before the stamp check, so it reaches a tree that is already
+        // installed. These are settings about how Vessel runs the program, not
+        // part of the payload, and a device that copied the tree yesterday needs
+        // them as much as one copying it now.
+        tree.defaultPrefs?.let { (path, contents) ->
+            val file = File(target, path)
+            if (runCatching { file.readText() }.getOrNull() != contents) {
+                runCatching {
+                    file.parentFile?.mkdirs()
+                    file.writeText(contents)
+                }.onFailure {
+                    log.line(
+                        LogSource.VESSEL,
+                        LogLevel.WARN,
+                        "tools: could not write ${tree.prefixDir}/$path: ${it.message}",
+                    )
+                }
+            }
+        }
+
         val stamp = File(target, TOOLS_VERSION_STAMP)
         if (File(target, tree.sentinel).isFile &&
             runCatching { stamp.readText().trim() }.getOrNull() == version
@@ -2960,6 +2980,14 @@ class SessionRuntime @Inject constructor(
         val sentinel: String,
         /** Whether MSYS2 lives here and wants its first-run directories made. */
         val msys2: Boolean = false,
+        /**
+         * Default preferences to drop into the tree, or null for a program that
+         * has none. Written on every launch rather than only on a fresh copy,
+         * because a device that already installed the tree would otherwise never
+         * receive them -- and it is one small file, so the cost of being
+         * self-healing is nothing.
+         */
+        val defaultPrefs: Pair<String, String>? = null,
     )
 
     /** What one package's payload cost. */
@@ -3601,7 +3629,10 @@ class SessionRuntime @Inject constructor(
             // ARM64 one gets STATUS_INVALID_IMAGE_FORMAT and cannot. Firefox was
             // here first, was ARM64, and never drew a window -- native/pins.env
             // carries that measurement.
-            ToolsTree("PaleMoon", "drive_c/Program Files/Pale Moon", "palemoon.exe"),
+            ToolsTree(
+                "PaleMoon", "drive_c/Program Files/Pale Moon", "palemoon.exe",
+                defaultPrefs = PALEMOON_PREFS_FILE to PALEMOON_PREFS,
+            ),
         )
 
         /**
@@ -3622,6 +3653,34 @@ class SessionRuntime @Inject constructor(
             msys2 = true,
         )
 
+        /**
+         * Where Gecko reads default preferences from, inside its own install.
+         *
+         * Every `.js` in this directory is read at startup, before any profile,
+         * which is what makes it the right place for a setting that belongs to
+         * the way Vessel runs the browser rather than to one profile a user may
+         * delete.
+         */
+        const val PALEMOON_PREFS_FILE = "defaults/pref/vessel.js"
+
+        /**
+         * No title bar drawn by the browser, because nothing draws one here.
+         *
+         * `patches/wine/0065` leaves the client covering the whole window, so
+         * Wine paints no caption, and `0068`/`0069` take the minimise, maximise
+         * and close buttons off any program that asks before drawing them.
+         * Gecko does not ask: it paints its own title bar unconditionally when
+         * `browser.tabs.inTitlebar` is on, which is the default, so Pale Moon
+         * kept a full title bar and three buttons while VS Code lost its.
+         *
+         * Zero puts the tabs below a system title bar instead -- and there is no
+         * system title bar any more, so what is left is the browser and nothing
+         * above it. Set here rather than in a profile because Pale Moon is the
+         * browser Vessel ships, and a preference a user has to find is not a
+         * fix.
+         */
+        const val PALEMOON_PREFS: String =
+            "pref(\"browser.tabs.inTitlebar\", 0);\n"
         /** [app.vessel.core.PrefixRegistry.SCRIPTS_DIR] as a path under the prefix. */
         const val GUEST_SCRIPTS_DIR = "drive_c/Scripts"
 
