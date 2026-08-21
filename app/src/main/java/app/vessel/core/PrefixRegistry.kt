@@ -1820,9 +1820,36 @@ object PrefixRegistry {
      * The one every caller wants. [render] stays public for the tests, which
      * render one key at a time to assert on its text.
      */
-    fun renderSeed(letters: Collection<Char> = DEFAULT_DRIVES): String {
-        val body = render(seedFor(letters))
+    fun renderSeed(letters: Collection<Char> = DEFAULT_DRIVES, extra: String = ""): String {
+        val body = render(seedFor(letters)) + normaliseExtra(extra)
         return body + block(listOf(stampKey(stampFor(body))))
+    }
+
+    /**
+     * A container's own registry additions, folded into the seed body.
+     *
+     * **Before the stamp, and that is the whole reason this is a parameter
+     * rather than something appended afterwards.** The stamp fingerprints the
+     * body, and [app.vessel.data.SessionRuntime] skips `regedit` when the hive
+     * already carries the stamp the file names. Text added after the stamp
+     * would render, be written, be recorded -- and never be applied, which is
+     * exactly what happened to seeds 9, 10 and 11.
+     *
+     * What it is for: values that belong to one device rather than to the
+     * project. A gateway URL, an organisation id, an API key -- things that
+     * cannot be written here because this file is public, and that a user
+     * should not have to re-apply by hand after every prefix rebuild.
+     *
+     * Line endings are normalised because `.reg` is a CRLF format and a file
+     * written by any ordinary editor on the device will not be.
+     */
+    private fun normaliseExtra(extra: String): String {
+        val trimmed = extra.trim()
+        if (trimmed.isEmpty()) return ""
+        val body = trimmed.lineSequence()
+            .filterNot { it.trim().startsWith("Windows Registry Editor") }
+            .joinToString(CRLF) { it.trimEnd() }
+        return CRLF + body + CRLF
     }
 
     /** The drives a prefix has, as [renderSeed] wants them. */

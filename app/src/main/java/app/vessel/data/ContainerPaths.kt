@@ -162,6 +162,21 @@ data class ContainerLayout(
     val registrySeed: File get() = File(base, REGISTRY_SEED)
 
     /**
+     * Registry additions belonging to this device, merged into the seed.
+     *
+     * Never written by Vessel and never in the repository: it is where a
+     * gateway URL, an organisation id or an API key goes -- values that are
+     * specific to one install and, in the case of a key, must not be committed
+     * to a public tree. Written by hand, in ordinary `.reg` syntax, and picked
+     * up by [app.vessel.data.ContainerProvisioner] on the next provision.
+     *
+     * It survives what hand-editing the hive does not. `regedit` applies it
+     * inside the booted prefix, so wineserver owns the change and writes it
+     * back itself, and a prefix rebuild re-applies it rather than losing it.
+     */
+    val customRegistry: File get() = File(base, CUSTOM_REGISTRY)
+
+    /**
      * Where components used to be installed, before the shared store existed.
      *
      * Only [ComponentStore.migrate] should ever look at this. It is not part of
@@ -226,6 +241,9 @@ data class ContainerLayout(
         const val CACHES = "caches"
         const val PROVISION_STATE = "provisioned.json"
         const val REGISTRY_SEED = "prefix-seed.reg"
+
+        /** Device-specific registry additions, merged into the seed. */
+        const val CUSTOM_REGISTRY = "custom.reg"
         const val LEGACY_COMPONENTS = "components"
     }
 }

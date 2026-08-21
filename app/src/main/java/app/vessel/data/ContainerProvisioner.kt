@@ -256,7 +256,13 @@ class ContainerProvisioner @Inject constructor(
 
     /** The seed text this prefix should carry, drives and all. */
     private fun renderSeed(layout: ContainerLayout): String =
-        PrefixRegistry.renderSeed(PrefixRegistry.drivesOf(layout.prefix))
+        PrefixRegistry.renderSeed(
+            PrefixRegistry.drivesOf(layout.prefix),
+            // Read on every render, so adding or editing the file is enough:
+            // the text changes, the stamp changes with it, and `regedit` runs
+            // again. Absent is the normal case and reads as empty.
+            runCatching { layout.customRegistry.readText() }.getOrDefault(""),
+        )
 
     /** Forget everything, so the next [provision] redoes all of it. */
     suspend fun invalidate(containerId: String) = withContext(Dispatchers.IO) {
