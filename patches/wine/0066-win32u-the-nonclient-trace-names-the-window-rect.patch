@@ -1,0 +1,33 @@
+win32u: the nonclient trace names the window rect as well.
+
+The question this trace is now asked is which of the two rectangles is wrong.
+A ring of unpainted pixels around a window means the client is smaller than the
+window, and whether Wine reserved that or the program claimed it by answering
+WM_NCCALCSIZE itself is not answerable from the client rect alone -- which is
+exactly the ambiguity that made a measured 11 pixel inset unattributable after
+0065 removed every inset Wine applies.
+
+--- a/dlls/win32u/defwnd.c
++++ b/dlls/win32u/defwnd.c
+@@ -1820,8 +1820,19 @@
+      * line per non-client paint of a visible window and it names, in the units
+      * the bug is argued in, exactly which pixels the frame agrees not to
+      * touch. WINEDEBUG=+nonclient prints it. */
+-    TRACE_(nonclient)( "hwnd %p exclude client %s (screen)\n", hwnd,
+-                       wine_dbgstr_rect( &rectClient ) );
++    {
++        /* Vessel: the window rect beside the client rect, because the question
++         * this trace is now asked is which of the two is wrong. A ring of
++         * unpainted pixels means the client is smaller than the window, and
++         * whether Wine reserved that or the program claimed it in
++         * WM_NCCALCSIZE is not answerable from the client rect alone. */
++        RECT rectWindow;
++
++        get_window_rect_rel( hwnd, COORDS_SCREEN, &rectWindow, get_thread_dpi() );
++        TRACE_(nonclient)( "hwnd %p window %s client %s (screen)\n", hwnd,
++                           wine_dbgstr_rect( &rectWindow ),
++                           wine_dbgstr_rect( &rectClient ) );
++    }
+ 
+     if (clip > (HRGN)1)
+     {

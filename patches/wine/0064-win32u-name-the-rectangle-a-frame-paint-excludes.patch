@@ -1,0 +1,73 @@
+win32u: name the rectangle a frame paint excludes.
+
+One line per non-client paint of a visible window, giving the client rectangle
+nc_paint keeps its frame off. On a channel of its own -- WINEDEBUG=+nonclient --
+because the file default `win` traces every window message, which would bury a
+once-per-frame line and slow Wine enough to change the painting being observed.
+
+This is an instrument, not a fix, and it is what disproved the theory it was
+written for. A blank caption-height band sits across the top of every Chromium
+window under Vessel. The theory was that nc_paint excludes the client in the
+wrong coordinate space: it asks for COORDS_SCREEN and hands the region to a
+DCX_WINDOW device context, which looks like a space mismatch. Changing it to
+COORDS_WINDOW left the band exactly as it was, and reading the DC code shows
+the original was right -- the region is combined into the visible region while
+that is still in screen coordinates (dce.c, get_dc_ex) and only afterwards
+mapped to DC space (clipping.c, set_visible_region):
+
+    NtGdiOffsetRgn( hrgn, -vis_rect->left, -vis_rect->top );
+
+so COORDS_WINDOW was a regression that stopped the client being excluded at
+all. Measured on device, VS Code window 0x1009e: the excluded rectangle reads
+(371,140)-(1549,929) in screen space, which is correct, while the band is 34
+screen pixels of pure white -- about 29 guest pixels, one SM_CYCAPTION -- and
+sits inside the client area. It is not painted by this function.
+
+Kept because the next theory needs the same number, and because a trace that
+has already killed one explanation is worth more than the explanation was.
+
+diff --git a/dlls/win32u/defwnd.c b/dlls/win32u/defwnd.c
+index 9404a87664d..207e0d9679c 100644
+--- a/dlls/win32u/defwnd.c
++++ b/dlls/win32u/defwnd.c
+@@ -30,6 +30,12 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(win);
+ 
++/* Vessel: a channel of its own for the non-client paint trace below, so it can
++ * be read without +win. The default channel here traces every window message,
++ * which would bury a once-per-frame line and slow Wine enough to change the
++ * painting being observed. */
++WINE_DECLARE_DEBUG_CHANNEL(nonclient);
++
+ #define WINE_MOUSE_HANDLE       ((HANDLE)1)
+ #define WINE_KEYBOARD_HANDLE    ((HANDLE)2)
+ 
+@@ -1763,6 +1769,27 @@ static void nc_paint( HWND hwnd, HRGN clip )
+     get_client_rect_rel( hwnd, COORDS_SCREEN, &rectClient, get_thread_dpi() );
+     hrgn = NtGdiCreateRectRgn( rectClient.left, rectClient.top,
+                                rectClient.right, rectClient.bottom );
++    /* Vessel: name the rectangle the frame paint refuses to draw over.
++     *
++     * SCREEN is the right space and this trace is what proved it. The region
++     * is combined into the DC visible region while that is still in screen
++     * coordinates -- dce.c get_dc_ex -- and only then offset to DC space by
++     * clipping.c set_visible_region:
++     *
++     *     NtGdiOffsetRgn( hrgn, -vis_rect->left, -vis_rect->top );
++     *
++     * so a window-relative rectangle here lands at the wrong place on screen
++     * and stops excluding the client at all. That was tried, on the theory
++     * that it explained a blank caption-height band across the top of every
++     * Chromium window; the band was unchanged and the change was a regression.
++     * The band is inside the client and is not drawn by this function.
++     *
++     * Kept as an instrument rather than removed with the theory: it is one
++     * line per non-client paint of a visible window and it names, in the units
++     * the bug is argued in, exactly which pixels the frame agrees not to
++     * touch. WINEDEBUG=+nonclient prints it. */
++    TRACE_(nonclient)( "hwnd %p exclude client %s (screen)\n", hwnd,
++                       wine_dbgstr_rect( &rectClient ) );
+ 
+     if (clip > (HRGN)1)
+     {

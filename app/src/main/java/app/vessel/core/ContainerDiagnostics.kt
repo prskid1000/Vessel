@@ -1551,6 +1551,33 @@ val LOGGABLES: List<Loggable> = listOf(
         oneSessionFrom = WineChannelLevel.EVERYTHING,
     ),
     wineChannel(
+        channel = "nonclient",
+        secondary = "The rectangle a window frame paint refuses to draw over.",
+        // Vessel's own channel, not upstream Wine's -- patches/wine/0064, and
+        // separate from `win` for the reason `futexwho` is separate from `sync`:
+        // the default channel in defwnd.c traces every window message, which
+        // would bury a once-per-frame line and slow Wine enough to change the
+        // painting it is meant to observe.
+        //
+        // Prints the client rectangle nc_paint excludes from its window DC. The
+        // two disagreeing is the bug 0064 fixes: the region was built in screen
+        // coordinates and handed to a window-relative DC, so for any window away
+        // from the desktop origin the client was never excluded and the caption
+        // was painted over the application. Read it as a coordinate space check --
+        // for a window at (360,140) the honest answer starts near (11,0), and a
+        // rectangle reading (371,140) is the frame about to land on the client.
+        //
+        // Invisible for an ordinary window, whose client is already inset by the
+        // caption. It is Chromium that shows it: VS Code keeps WS_CAPTION so
+        // resize and drag behave, then claims a client reaching its own top edge.
+        //
+        // One line per non-client paint of a visible window, so it needs no
+        // one-session cap -- bounded by repaints rather than by workload. A
+        // session that floods it is reporting a frame repainting in a loop,
+        // which is worth seeing on its own.
+        addAt = WineChannelLevel.EVERYTHING,
+    ),
+    wineChannel(
         channel = "msg",
         secondary = "Every window message the program receives.",
         caution = "Includes mouse movement, so it fires whenever the screen is touched.",
