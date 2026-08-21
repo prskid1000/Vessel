@@ -34,7 +34,7 @@ the Vessel side instead, by a default preference shipped with the browser.
      if (win == WND_OTHER_PROCESS)
      {
          if (is_window( hwnd )) FIXME( "not supported on other process window %p\n", hwnd );
-@@ -1602,8 +1603,35 @@
+@@ -1602,8 +1603,44 @@
      }
  
      if (!win->hSysMenu && (win->dwStyle & WS_SYSMENU))
@@ -50,6 +50,14 @@ the Vessel side instead, by a default preference shipped with the browser.
 +         * WS_SYSMENU out of what a program reads left the close button exactly
 +         * where it was while minimise and maximise disappeared.
 +         *
++         * **MF_DISABLED as well as MF_GRAYED, and the difference is the whole
++         * patch.** MF_GRAYED is 0x1, MF_DISABLED is 0x2, and what Electron reads
++         * is `info.fState & MFS_DISABLED` -- MFS_DISABLED being MF_DISABLED. So
++         * greying alone set the bit that draws the item grey and left the bit that
++         * answers the question: the close button stayed exactly where it was while
++         * minimise and maximise disappeared. Measured on device before it was
++         * noticed.
++         *
 +         * Greyed rather than the whole menu removed, which was tried first and
 +         * is worse for no gain: both make IsClosable answer no, but returning no
 +         * menu at all takes the Alt+Space window menu with it, and Move and Size
@@ -64,7 +72,8 @@ the Vessel side instead, by a default preference shipped with the browser.
 +         * Top-level only: a child window has no caption and no buttons, and
 +         * WS_SYSMENU on one means something else entirely. */
 +        if (win->hSysMenu && !(win->dwStyle & WS_CHILD))
-+            NtUserEnableMenuItem( win->hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED );
++            NtUserEnableMenuItem( win->hSysMenu, SC_CLOSE,
++                                  MF_BYCOMMAND | MF_GRAYED | MF_DISABLED );
 +    }
 +
      if (win->hSysMenu)
