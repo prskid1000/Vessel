@@ -288,6 +288,10 @@ data class ContainerDiagnostics(
      * - `timing` — what each pass costs on the GPU.
      * - `field` — what the motion field contains: magnitude, how much of it came
      *   back as zero, how much the two directions disagree.
+     * - `layers` — what the compositor stacked: each window's size, position,
+     *   whether it moved, whether it is transparent, and whether the upscaler
+     *   touched it. Frame generation sees one flattened picture; this says what
+     *   went into it.
      * - `quality` — what the interpolation did with it: how much was trusted,
      *   how much fell back, how much came out darker than either source.
      * - `all` — every category.
@@ -371,6 +375,18 @@ data class KnownEnv(
  * Ordered by how likely one is to answer a question, not alphabetically: the
  * tiling pair first, because the driver's own profile opts Direct3D out of tiled
  * rendering and that is the largest unexamined thing in the stack.
+ *
+ * **Past the graphics experiments the ordering becomes by subsystem, and the
+ * entries stop being offered.** The unified table's name column is built from
+ * `ADDABLE_LOGGABLES`, which comes out of [LOGGABLES]; nothing declared only
+ * here appears in it. So the tail of this list is a set of *descriptions waiting
+ * for a name* — they arrive the moment somebody types the variable they read
+ * about, which is the failure this list exists to stop: a value field with no
+ * idea what it is for and no idea what it accepts. Every one of them was read
+ * out of the vendored source under `native/` before it was written down; where
+ * the accepted set is closed and small it is in [KnownEnv.values], and where it
+ * is not, [KnownEnv.placeholder] carries a real example rather than an invented
+ * one.
  */
 val KNOWN_ENV: List<KnownEnv> = listOf(
     // First, and it is not a graphics experiment: it is the one row that can
@@ -394,11 +410,11 @@ val KNOWN_ENV: List<KnownEnv> = listOf(
         secondary = "What the frame generation pipeline reports about itself, as a " +
             "comma-separated list. 'setup' prints the resolutions and block size once; " +
             "'pacing' the real against synthesised rate; 'timing' the cost of each pass; " +
-            "'field' what the motion vectors actually contain; 'quality' how much of " +
+            "'field' what the motion vectors actually contain; 'layers' what the compositor stacked to make the frame; 'quality' how much of " +
             "each frame was trusted and how much fell back. 'all' for everything. " +
             "Means nothing unless Frame generation is on.",
         placeholder = "pacing,quality",
-        values = listOf("all", "setup", "pacing", "timing", "field", "quality"),
+        values = listOf("all", "setup", "pacing", "timing", "field", "layers", "quality"),
     ),
     KnownEnv(
         name = "TU_AUTOTUNE_ALGO",
@@ -450,6 +466,247 @@ val KNOWN_ENV: List<KnownEnv> = listOf(
     // and GPU, so the memory type DXVK avoids costs nothing here),
     // `d3d11.relaxedBarriers = True`, `d3d11.relaxedGraphicsBarriers = True`.
     // None is proven.
+
+    // — the Direct3D 9 to 11 translator ---------------------------------------
+    KnownEnv(
+        name = "DXVK_HUD",
+        secondary = "Draws DXVK's own counters over the frame, as a comma-separated list: " +
+            "'fps', 'frametimes' for the graph, 'compiler' for shader compilation still " +
+            "running, 'gpuload', 'memory', 'drawcalls'. '1' means devinfo and fps, 'full' " +
+            "means everything. The Metrics tab already graphs most of these from the same " +
+            "counters — DXVK keeps them whether the HUD is on or not, and this project's " +
+            "own patch only reads them — so what the HUD adds is that the number sits " +
+            "inside the picture it describes, which is what ties a stutter to the compile " +
+            "that caused it.",
+        placeholder = "fps,compiler",
+        values = listOf(
+            "1",
+            "full",
+            "fps",
+            "frametimes",
+            "compiler",
+            "gpuload",
+            "memory",
+            "drawcalls",
+            "pipelines",
+            "submissions",
+        ),
+    ),
+    KnownEnv(
+        name = "DXVK_DEBUG",
+        secondary = "'hang' is the one worth reaching for: it names the command that was " +
+            "in flight when the device was lost, which is otherwise a window that stops " +
+            "updating and a log that says nothing. 'capture' adds DXVK's own debug names " +
+            "and markers, 'markers' forwards the ones the title provides, 'validation' " +
+            "asks for the Khronos validation layer.",
+        values = listOf("hang", "capture", "markers", "validation"),
+        caution = "One word only, matched exactly. Two of these joined by a comma match " +
+            "none of them and enable nothing, so a compound value is indistinguishable " +
+            "from a setting that did not apply. Whichever is picked, DXVK warns 'Debug " +
+            "Utils are enabled. May affect performance.' — and validation additionally " +
+            "wants a layer winevulkan does not expose, which DXVK reports rather than " +
+            "fails on.",
+    ),
+    KnownEnv(
+        name = "DXVK_SHADER_CACHE",
+        secondary = "'0' stops DXVK reading or writing its own shader cache. The reason to " +
+            "reach for it is a fault that only appears on the second launch: if it goes " +
+            "away with the cache out of the way the cache is the cause, and if it does not " +
+            "the cache has been eliminated in one run.",
+        values = listOf("0", "1"),
+        caution = "Any value but 0 leaves the cache on. With it off every pipeline is " +
+            "compiled again on each launch, so loading is slow and frame rate is not a " +
+            "measurement while it lasts.",
+    ),
+
+    // — the Direct3D 12 translator ---------------------------------------------
+    KnownEnv(
+        name = "VKD3D_SWAPCHAIN_PRESENT_MODE",
+        secondary = "Forces the Vulkan present mode of the Direct3D 12 swapchain over " +
+            "whatever the title asked for. FIFO waits for the display and cannot tear; " +
+            "IMMEDIATE hands the frame over as soon as it is finished and can; MAILBOX " +
+            "keeps the newest finished frame and discards the ones behind it. It is how " +
+            "to ask whether a judder is the title's pacing or the present path's, because " +
+            "it changes one and not the other.",
+        values = listOf("FIFO", "FIFO_RELAXED", "FIFO_LATEST_READY", "MAILBOX", "IMMEDIATE"),
+        caution = "Upper case and exact. A name vkd3d does not recognise, or one this " +
+            "surface does not support, is logged as ignored and the title's own choice " +
+            "stands — so a typo here looks exactly like a setting that had no effect. It " +
+            "is read again every time the swapchain is rebuilt rather than once at launch.",
+    ),
+    KnownEnv(
+        name = "VKD3D_DISABLE_EXTENSIONS",
+        secondary = "A comma-separated list of Vulkan extensions vkd3d must behave as " +
+            "though the driver does not have. This is the bisect for a suspected driver " +
+            "bug: take away the extension the failing path uses and see whether the " +
+            "fallback draws correctly.",
+        placeholder = "VK_KHR_present_wait",
+        caution = "Only sound for the optional ones. vkd3d still asks for an extension it " +
+            "treats as required — it logs that the required extension is not supported and " +
+            "requests it anyway — so hiding one of those ends in a device that cannot be " +
+            "created and a title that never draws a frame.",
+    ),
+
+    // — the graphics driver's Vulkan runtime -----------------------------------
+    KnownEnv(
+        name = "MESA_VK_ABORT_ON_DEVICE_LOSS",
+        secondary = "Ends the process at the moment the device is lost, with the driver's " +
+            "own report, rather than returning an error code the translator above may " +
+            "swallow. This is the row for a session that dies with a black window and " +
+            "nothing in the log saying why: the report names the queue that lost it and " +
+            "the timeline mode it was running.",
+        values = listOf("true", "false"),
+        caution = "It aborts rather than unwinds, so nothing the title or the translators " +
+            "would have written on the way down gets written. It is a thing to turn on to " +
+            "catch a loss, not a thing to run with.",
+    ),
+    KnownEnv(
+        name = "MESA_VK_WSI_PRESENT_MODE",
+        secondary = "The same override as the vkd3d one, a layer down: it applies to every " +
+            "Vulkan swapchain whichever translator created it, so it is the one to use " +
+            "when the title is Direct3D 11 or when the question is about the driver rather " +
+            "than the translator. 'fifo' waits for the display, 'immediate' does not, " +
+            "'mailbox' keeps only the newest finished frame.",
+        values = listOf("fifo", "relaxed", "mailbox", "immediate"),
+        caution = "Lower case, and these four spellings only — anything else prints " +
+            "'Invalid MESA_VK_WSI_PRESENT_MODE value!' and changes nothing. A mode the " +
+            "surface does not support is also ignored, with the title's own choice left " +
+            "standing.",
+    ),
+
+    // — the graphics driver's own workarounds ----------------------------------
+    //
+    // Lower case because these are driconf options rather than debug variables:
+    // Mesa looks each one up in the environment under its own name, and an
+    // environment value **overrides the driver's per-application profile**
+    // instead of merging with it. That is most of the reason they are worth
+    // having here — the profile is where the driver's opinion about a title
+    // lives, and this is the only way a container can disagree with it. They
+    // accept exactly `true` and `false`; anything else prints an "illegal
+    // environment value" line and is ignored, which is the same shape of silent
+    // no-op the two entries above them already warn about.
+    KnownEnv(
+        name = "tu_dont_care_as_load",
+        secondary = "Makes the driver load a render target the title said it did not care " +
+            "about. On a tiler that instruction decides whether a tile starts from what " +
+            "was in memory or from nothing, and Turnip carries this for titles that " +
+            "confuse the two — which then draw over undefined contents rather than over " +
+            "what was there.",
+        values = listOf("true", "false"),
+        caution = "It buys that correctness with bandwidth: every 'do not care' becomes a " +
+            "real read of the whole attachment, which is exactly the traffic the load op " +
+            "exists to avoid.",
+    ),
+    KnownEnv(
+        name = "tu_allow_oob_indirect_ubo_loads",
+        secondary = "Stops the driver turning indirectly indexed uniform buffer loads into " +
+            "constants, so a read past the end returns what the bound descriptor actually " +
+            "holds rather than what the shader declared. Turnip carries this for Direct3D " +
+            "11 titles that depend on exactly that, citing dxvk issue 3861, and what it " +
+            "addresses is wrong values on screen rather than a crash.",
+        values = listOf("true", "false"),
+        caution = "The lowering it disables is an optimisation the driver would otherwise " +
+            "apply to every indirectly indexed uniform buffer, so it is not free on a " +
+            "shader that was using it.",
+    ),
+    KnownEnv(
+        name = "tu_enable_softfloat32",
+        secondary = "Emulates 32-bit float denormals in software. Turnip's own note is " +
+            "that this is required for Direct3D 12 shader model 6.2 and is not encouraged " +
+            "for native Vulkan titles, so it is a vkd3d setting, and the suspicion it " +
+            "answers is arithmetic that is wrong only where the numbers are very small.",
+        values = listOf("true", "false"),
+        caution = "Software emulation of something the hardware otherwise does: the cost " +
+            "is paid by every shader that meets a denormal, on every draw.",
+    ),
+    KnownEnv(
+        name = "tu_emulate_alpha_to_coverage",
+        secondary = "Does alpha-to-coverage in the shader rather than in fixed function. " +
+            "Turnip's own description is that it 'provides improved visual quality for " +
+            "many games at the cost of some performance'; what it improves is the edge of " +
+            "alpha-tested geometry, which is foliage, fences and chain link.",
+        values = listOf("true", "false"),
+    ),
+    KnownEnv(
+        name = "tu_use_tex_coord_round_nearest_even_mode",
+        secondary = "Rounds texture coordinates the way Direct3D specifies rather than the " +
+            "way this hardware does by default. Half a texel is invisible almost " +
+            "everywhere and visible exactly where two tiles or two atlas entries meet, so " +
+            "it is worth a try on a seam that moves with the camera.",
+        values = listOf("true", "false"),
+    ),
+
+    // — the x86 translator ------------------------------------------------------
+    //
+    // **Two rules apply to all four, and each caution repeats them rather than
+    // stating them once, because a caution is only read where it appears.**
+    //
+    // FEX converts a configuration value with `strtoull`
+    // (`FEXCore/Source/Common/StringConv.h:11-18`), booleans included — so
+    // `true` converts to zero and asks for *off*. `patches/fex/0007` is where
+    // this project learned that, and its own note spells it out for
+    // `FEX_SILENTLOG`. Use `1` and `0`.
+    //
+    // And every `FEX_*` variable except the logging pair is digested into
+    // `fexCacheKey`; [FEX_CACHE_KEY_IGNORED] is the exception list, and its
+    // design is that the rule is "all of them" so that forgetting costs a
+    // rebuild rather than correctness. Changing one of these therefore sends the
+    // container to a different code cache directory. That is the property that
+    // makes them safe to expose at all — a setting and the blocks generated
+    // under it cannot come apart — and the price is one cold launch.
+    KnownEnv(
+        name = "FEX_SMCCHECKS",
+        secondary = "How the translator notices a guest that rewrites its own code. " +
+            "'mtrack' is the default and tracks it by page; 'full' revalidates a block " +
+            "before every run, which is what proves a stale translation is the fault; " +
+            "'none' takes the checking away altogether.",
+        values = listOf("mtrack", "full", "none"),
+        caution = "A word FEX does not recognise becomes 'none' rather than an error, so " +
+            "a typo here turns the checking off instead of being refused. 'full' is slow " +
+            "by construction — FEX's own description says so — and frame rate is not a " +
+            "measurement while it is on. Changing this changes the container's code cache " +
+            "key, so the launch after it compiles from cold.",
+    ),
+    KnownEnv(
+        name = "FEX_MULTIBLOCK",
+        secondary = "Whether the translator may compile on past the end of a block into " +
+            "what follows it. On by default because it produces better code; '0' is the " +
+            "bisect for a stutter that arrives with a new area rather than a low frame " +
+            "rate everywhere, because what multiblock costs is long compilations and not " +
+            "slow execution.",
+        values = listOf("1", "0"),
+        caution = "FEX converts this with strtoull, so 'true' is zero and asks for off — " +
+            "use 1 and 0. Changing it changes the container's code cache key, so the " +
+            "launch after it compiles from cold.",
+    ),
+    KnownEnv(
+        name = "FEX_X87REDUCEDPRECISION",
+        secondary = "Emulates the x87 stack at 64-bit rather than 80-bit precision, which " +
+            "is cheaper and less accurate. FEX's own description says it 'may result in " +
+            "rendering bugs', so it is worth trying where x87 is hot and worth turning " +
+            "back off the moment the picture changes.",
+        values = listOf("0", "1"),
+        caution = "FEX converts this with strtoull, so 'true' is zero and asks for off — " +
+            "use 1 and 0. Changing it changes the container's code cache key, so the " +
+            "launch after it compiles from cold.",
+    ),
+    KnownEnv(
+        name = "FEX_DISABLEDEP",
+        secondary = "Whether every readable guest page counts as executable, as a process " +
+            "with data execution prevention off would. Vessel's own FEX patch defaults it " +
+            "on, because FEX tracks page permissions in its own interval map and a page " +
+            "the guest never marked executable fails to decode at all — 'NoExec " +
+            "instruction in entry block' — which is how a program that builds code at " +
+            "runtime dies before the first frame. '0' gives the tracking back.",
+        values = listOf("1", "0"),
+        caution = "The cost of leaving it on is that a genuinely wild jump is translated " +
+            "instead of faulting, so what would have been a clean access violation becomes " +
+            "silent corruption; the cost of turning it off is that a title which needs it " +
+            "does not start at all. FEX converts this with strtoull, so 'true' is zero and " +
+            "asks for off. Changing it changes the container's code cache key, so the " +
+            "launch after it compiles from cold — which is also what keeps the setting and " +
+            "the blocks generated under it together.",
+    ),
 )
 
 /** The declaration for [name], or null when Vessel has nothing to say about it. */
@@ -933,6 +1190,15 @@ data class Loggable(
     val gate: String? = null,
     val levelIsMachine: Boolean = false,
     val volumes: Map<String, String> = emptyMap(),
+    /**
+     * Whether [levels] is a set of suggestions rather than the only answers.
+     *
+     * True for anything reached through the environment table, where a curated
+     * value list has to stay as open as an uncurated one -- otherwise describing
+     * a variable would make it *harder* to use than leaving it undescribed, which
+     * is the opposite of what curating it is for.
+     */
+    val isFreeText: Boolean = false,
 ) {
     /** Stable across renames of the display text; used by [gate] and by tests. */
     val id: String get() = name
@@ -1010,7 +1276,8 @@ data class Loggable(
      * about. A gate that refuses every value it was not written to know about
      * removes exactly that.
      */
-    fun isRealValue(level: String): Boolean = levels.isEmpty() || level in levels
+    fun isRealValue(level: String): Boolean =
+        levels.isEmpty() || level in levels || isFreeText
 
     /** Whether [level] is at or past the stop that makes this a one-launch row. */
     fun isOneSession(level: String): Boolean {
@@ -1917,7 +2184,32 @@ fun loggableIn(name: String, type: String): Loggable {
                 wineChannel(name, "A Wine debug channel this build has no description for.")
             }
         DiagnosticFamily.Shape.LIST -> unknownListMember(name, family)
-        DiagnosticFamily.Shape.SCALAR, DiagnosticFamily.Shape.RAW -> unknownVariable(name, family.wire)
+        // **[KNOWN_ENV] first, and its absence here is why the picker described
+        // everything it offered as undescribed.** That list carries a sentence
+        // and, for some, the values a variable accepts -- and the row model
+        // never asked it. Every name the environment column offered was then
+        // synthesised as an unknown one: generic caution, no description, no
+        // suggestions, which is precisely the opposite of the reason the entry
+        // was curated. The old single-purpose env row called `knownEnvFor`; the
+        // unified table that replaced it did not, and nothing failed loudly
+        // because an undescribed variable is a legitimate state.
+        DiagnosticFamily.Shape.SCALAR, DiagnosticFamily.Shape.RAW ->
+            knownEnvFor(name)?.let { declared ->
+                Loggable(
+                    name = name,
+                    emit = Emit.Variable(name, ""),
+                    // Suggestions rather than a ladder: these are values worth
+                    // offering, not the only ones accepted. `isRealValue` lets an
+                    // empty ladder through, and a curated one must stay just as
+                    // open or curating a variable would make it harder to use
+                    // than leaving it alone.
+                    levels = declared.values,
+                    baseline = "",
+                    secondary = declared.secondary,
+                    caution = declared.caution,
+                    isFreeText = true,
+                )
+            } ?: unknownVariable(name, family.wire)
     }
 }
 
@@ -1957,6 +2249,7 @@ private fun unknownVariable(variable: String, family: String) = Loggable(
     else "$family — a variable this build has no description for.",
     caution = "Vessel does not know this variable, so nothing here can say what it " +
         "costs or whether the value is one it accepts.",
+    isFreeText = true,
 )
 
 /**

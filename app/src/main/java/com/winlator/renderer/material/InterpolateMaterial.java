@@ -235,16 +235,28 @@ public class InterpolateMaterial extends ScreenMaterial {
                     "float outLuma = max(max(shown.r, shown.g), shown.b);",
                     "float newLuma = max(max(newer.r, newer.g), newer.b);",
                     "float oldLuma = max(max(older.r, older.g), older.b);",
+                    // **Measured against the real frame at this same position,
+                    // not against the warped reads.** The first version compared
+                    // the output with the two samples it was built from, which
+                    // cannot tell an artefact from a dark scene: in Metro it
+                    // reported 12-60% and was really just counting how dark the
+                    // game is. What matters is whether this pixel is darker than
+                    // what genuinely belongs at this spot, and the undisplaced
+                    // newer frame is the closest thing to that.
+                    "vec3 here = texture2D(screenTexture, vUV).rgb;",
+                    "float hereLuma = max(max(here.r, here.g), here.b);",
                     "gl_FragColor = vec4(",
                         // R: how much of the frame is trusted at all.
                         "confidence,",
-                        // G: manufactured black -- output dark while both of the
-                        // frames it was built from were lit. This is the number
-                        // that says whether the shader is inventing the dots.
-                        "step(outLuma, 0.03) * step(0.08, min(newLuma, oldLuma)),",
-                        // B: output dark while the sources were dark too. A wrong
-                        // vector pointing into shadow, faithfully reproduced.
-                        "step(outLuma, 0.03) * step(max(newLuma, oldLuma), 0.08),",
+                        // G: a dot. Black put where the real frame has something
+                        // clearly lit -- which no correct interpolation does,
+                        // whatever the vectors said.
+                        "step(outLuma, 0.03) * step(0.15, hereLuma),",
+                        // B: how far the frame departs from simply showing the
+                        // newer one. Real motion raises this legitimately, so it
+                        // is a scale rather than a fault -- but a jump in it
+                        // without a jump in speed is not legitimate.
+                        "clamp(length(shown - here) * 2.0, 0.0, 1.0),",
                         // A: how far things are moving, to tell a still scene from
                         // a moving one without asking.
                         "clamp(length(best) * 20.0, 0.0, 1.0));",

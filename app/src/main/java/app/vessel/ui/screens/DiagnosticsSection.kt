@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import app.vessel.core.ADDABLE_LOGGABLES
+import app.vessel.core.ENV_FAMILY
 import app.vessel.core.FAMILIES
 import app.vessel.core.ContainerDiagnostics
 import app.vessel.core.EnvSetting
@@ -256,9 +257,18 @@ private fun InventoryRow(
         // vkd3d row, where it would be composed into the wrong variable and
         // ignored in silence; offering one already present invites a second row
         // for a setting that can only have one value.
-        flagOptions = ADDABLE_LOGGABLES
-            .filter { it.family == row.type }
-            .map { it.name }
+        // **`KNOWN_ENV` for the environment family, and its absence was why that
+        // column offered nothing at all.** Every other family's names are
+        // declared `LOGGABLES`; the environment table's are not -- they are a
+        // separate curated list, because a plain variable has no level ladder and
+        // nothing to compose. The unified table replaced a composable that read
+        // `KNOWN_ENV` directly and did not carry that half over, so sixteen
+        // described variables were reachable only by typing their names exactly,
+        // which is the one thing the list exists to spare the reader.
+        flagOptions = (
+            if (row.type == ENV_FAMILY) KNOWN_ENV.map { it.name }
+            else ADDABLE_LOGGABLES.filter { it.family == row.type }.map { it.name }
+            )
             .filter { name -> name == row.name || diagnostics.normalised().rows.none { it.name == name } },
         onFlag = { propose(diagnostics.normalised().withRowNamed(row.index, it), row.index) },
         flagEditable = row.nameEditable,

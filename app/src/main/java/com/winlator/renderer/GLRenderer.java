@@ -61,6 +61,47 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     private final ArrayList<RenderableWindow> renderableWindows = new ArrayList<>();
     private boolean forceWindowsFullscreen;
     private boolean fullscreen = false;
+
+    /**
+     * VESSEL: composite at the size the guest drew, not the size it is shown at.
+     *
+     * <p>**Everything downstream of the composite was doing several times the
+     * work the content justifies, and the upscale is why.** The guest draws at
+     * `display.resolution`; the compositor stretches that to the panel by binding
+     * a letterboxed viewport, because {@link WindowMaterial} emits *guest*
+     * coordinates and the viewport is what scales them. Frame generation then
+     * captured the result -- a panel-sized image of an upscaled 1280x720 frame,
+     * with black bars either side -- and searched, matched and interpolated all
+     * of it. On this device that is 3.5 megapixels of work carrying 0.9
+     * megapixels of information, and roughly 40% of it is bars.
+     *
+     * <p>Worse than the cost: between every pair of rendered pixels sit ones the
+     * upscaler invented, and a block matcher has nothing to lock onto in those.
+     * The search was being asked to find motion in pixels that never moved
+     * because they were never drawn.
+     *
+     * <p>So the capture binds a guest-sized target and a guest-sized viewport, and
+     * the upscale moves to the end -- {@link #presentGuestFrame} -- where it runs
+     * once, on a finished frame, into the letterbox rectangle. Nothing else about
+     * the composite changes: the same transform, the same {@code viewSize}, the
+     * same materials. It is one viewport.
+     *
+     * <p>This is also the order FSR3 and DLSS use, and for the same reason: work
+     * at render resolution, upscale last.
+     */
+    private boolean capturingAtGuestScale = false;
+
+    /** VESSEL: see {@link #capturingAtGuestScale}. */
+    void beginGuestScaleCapture() {
+        capturingAtGuestScale = true;
+        viewportNeedsUpdate = true;
+    }
+
+    /** VESSEL: see {@link #capturingAtGuestScale}. */
+    void endGuestScaleCapture() {
+        capturingAtGuestScale = false;
+        viewportNeedsUpdate = true;
+    }
     private boolean toggleFullscreen = false;
     protected boolean viewportNeedsUpdate = true;
     private boolean cursorVisible = true;
@@ -69,6 +110,21 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     private int cursorForeColor = 0x000000;
     private boolean screenOffsetYRelativeToCursor = false;
     private float magnifierZoom = 1.0f;
+    /**
+     * VESSEL: what the guest actually rendered, as opposed to what it is shown at.
+     *
+     * <p>The guest draws at {@code display.resolution} and the compositor scales
+     * that to the panel, so a captured frame is an *upscaled* image: between every
+     * pair of rendered pixels sit interpolated ones carrying no independent
+     * detail. Frame generation searches that image for motion, and a block matcher
+     * has nothing to lock onto in an interpolated pixel -- it was matching at
+     * 2776x1264 on content with 1280x720 of real information in it, which is 3.8
+     * times the work for a weaker answer. See {@link FrameSynthesizer}.
+     */
+    int guestWidth() { return xServer.screenInfo.width; }
+
+    int guestHeight() { return xServer.screenInfo.height; }
+
     protected short surfaceWidth;
     protected short surfaceHeight;
     public final EffectComposer effectComposer = new EffectComposer(this);
@@ -329,7 +385,12 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
     protected void drawFrame() {
         if (viewportNeedsUpdate) {
-            if (fullscreen) {
+            // VESSEL: one to one with what the guest drew, when the frame is being
+            // captured for frame generation. See capturingAtGuestScale.
+            if (capturingAtGuestScale) {
+                GLES20.glViewport(0, 0, guestWidth(), guestHeight());
+            }
+            else if (fullscreen) {
                 GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
             }
             else GLES20.glViewport(viewTransformation.viewOffsetX, viewTransformation.viewOffsetY, viewTransformation.viewWidth, viewTransformation.viewHeight);
@@ -513,6 +574,125 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
      * nominally 1:1 configuration can land a hair over one and flip the material
      * back and forth between frames.
      */
+    /**
+     * VESSEL: put a guest-sized frame on the screen, upscaled once.
+     *
+     * <p>The other half of {@link #capturingAtGuestScale}. Takes a texture holding
+     * a frame at the guest's resolution -- real or synthesised, they are the same
+     * thing by this point -- and draws it into the letterboxed rectangle through
+     * the same materials a window goes through, so the upscaler that used to run
+     * per window now runs once per presented frame.
+     *
+     * <p>The quad is expressed in guest coordinates like everything else here,
+     * which is what makes this resolution-agnostic: {@code viewSize} is the guest
+     * screen and the viewport is the destination, so 1280x720 and 300x470 differ
+     * only in the numbers.
+     *
+     * <p>The screen is cleared first because the letterbox bars are outside the
+     * viewport and nothing else writes them.
+     *
+     * <p>**Callers holding a captured frame want {@code flipY} true, and getting
+     * it wrong turns the picture upside down.** Guest coordinates run downwards,
+     * so this material's vertex shader inverts Y on the way to clip space -- which
+     * is right when it draws a window straight to the screen, and happens *twice*
+     * when the same material draws a frame that was itself composited through it
+     * into a texture. The old path blitted with {@link ScreenMaterial}, whose
+     * shader does no inversion at all, so the question never arose. Flipping the
+     * sampled V undoes the second one.
+     */
+    void presentGuestFrame(int textureId, boolean flipY) {
+        final int guestW = guestWidth();
+        final int guestH = guestHeight();
+        if (guestW <= 0 || guestH <= 0) return;
+
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        GLES20.glViewport(viewTransformation.viewOffsetX, viewTransformation.viewOffsetY,
+                          viewTransformation.viewWidth, viewTransformation.viewHeight);
+        viewportNeedsUpdate = true;
+        GLES20.glDisable(GLES20.GL_BLEND);
+
+        XForm.set(tmpXForm1, 0, 0, guestW, guestH);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId);
+
+        // The same test the per-window path used, asked once about the whole
+        // frame: SGSR where the picture is genuinely being magnified, the
+        // bilinear blit where it is not.
+        final boolean magnifying = sgsrEnabled
+            && SGSRMaterial.isSupported()
+            && viewTransformation.aspect > 1.02f;
+
+        if (magnifying) {
+            bindWindowMaterial(sgsrMaterial);
+            sgsrMaterial.setUniformInt(sgsrMaterial.uniforms.texture, 0);
+            sgsrMaterial.setSourceSize(guestW, guestH);
+            sgsrMaterial.setUniformFloatArray(sgsrMaterial.uniforms.xform, tmpXForm1);
+            sgsrMaterial.setUniformBool(sgsrMaterial.uniforms.flipY, flipY);
+        }
+        else {
+            bindWindowMaterial(windowMaterial);
+            windowMaterial.setUniformInt(windowMaterial.uniforms.texture, 0);
+            windowMaterial.setUniformFloat(windowMaterial.uniforms.noAlpha, 1.0f);
+            windowMaterial.setUniformFloatArray(windowMaterial.uniforms.xform, tmpXForm1);
+            windowMaterial.setUniformBool(windowMaterial.uniforms.flipY, flipY);
+        }
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, quadVertices.count());
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        boundWindowMaterial = null;
+    }
+
+    /**
+     * VESSEL: what the compositor is actually stacking, layer by layer.
+     *
+     * <p>Frame generation sees one flattened picture and can say nothing about
+     * what went into it -- but nearly every artefact class depends on that. A
+     * transparent overlay is blended and cannot be tracked by a block matcher; a
+     * window smaller than the screen has edges that are not scene boundaries; a
+     * second layer moving over a first is two motions in one pixel, which a single
+     * vector per block cannot express at all. All of that is invisible downstream
+     * and known here.
+     *
+     * <p>Also says, per layer, whether the upscaler touched it. With the capture
+     * now at the guest's own resolution nothing should be magnified during a
+     * composite, and a layer reporting otherwise means the capture is not one to
+     * one after all.
+     */
+    String describeLayers() {
+        final StringBuilder out = new StringBuilder();
+        int index = 0;
+        try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
+            for (RenderableWindow window : renderableWindows) {
+                if (window.content.isOffscreenStorage()) continue;
+                final float destW = window.fullscreenTransformation != null
+                    ? window.fullscreenTransformation.width : window.content.width;
+                final float destH = window.fullscreenTransformation != null
+                    ? window.fullscreenTransformation.height : window.content.height;
+                if (index > 0) out.append("; ");
+                out.append('[').append(index).append("] ")
+                   .append(window.content.width).append('x').append(window.content.height)
+                   .append(" at ").append(window.rootX).append(',').append(window.rootY);
+                if (window.rootX != window.previousRootX || window.rootY != window.previousRootY) {
+                    out.append(" moved ")
+                       .append(window.rootX - window.previousRootX).append(',')
+                       .append(window.rootY - window.previousRootY);
+                }
+                if (window.transparent) out.append(" transparent");
+                if (window.fullscreenTransformation != null) {
+                    out.append(" stretched to ").append((int)destW).append('x').append((int)destH);
+                }
+                if (useSGSRFor(window.content, destW, destH, window.transparent)) {
+                    out.append(" UPSCALED");
+                }
+                index++;
+            }
+        }
+        if (index == 0) return "none";
+        return index + " layer" + (index == 1 ? "" : "s") + ": " + out;
+    }
+
     private boolean useSGSRFor(Drawable drawable, float destWidth, float destHeight, boolean transparent) {
         if (!sgsrEnabled) return false;
         if (transparent) return false;
@@ -521,7 +701,15 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
         float scaleX;
         float scaleY;
-        if (fullscreen) {
+        // VESSEL: a capture is one to one by construction, so nothing is being
+        // magnified and SGSR has nothing to do. Without this it would upscale
+        // into a target the same size as its source and then be upscaled again at
+        // present -- twice the cost for a worse picture than doing it once.
+        if (capturingAtGuestScale) {
+            scaleX = 1f;
+            scaleY = 1f;
+        }
+        else if (fullscreen) {
             scaleX = (float)surfaceWidth / xServer.screenInfo.width;
             scaleY = (float)surfaceHeight / xServer.screenInfo.height;
         }

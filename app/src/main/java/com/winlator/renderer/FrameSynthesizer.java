@@ -244,6 +244,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
     private Target vectors;
+    /**
+     * Where an interpolated frame is built, at the guest's resolution.
+     *
+     * <p>It needs a target of its own because the result is upscaled on the way to
+     * the screen and the two colour slots hold real frames. One more guest-sized
+     * RGBA8 buys interpolating 0.9 megapixels instead of 3.5.
+     */
+    private Target output;
     /** Diagnostics only; null unless a category that needs it was asked for. */
     private Target probe;
     private int blockX = 8, blockY = 8;
@@ -340,8 +348,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (announced || diagnostics.isEmpty()) return;
         announced = true;
         Log.i(TAG, "fg setup: asked for " + diagnostics
-            + ", " + multiple + "x, surface " + renderer.surfaceWidth
-            + "x" + renderer.surfaceHeight
+            + ", " + multiple + "x, guest " + renderer.guestWidth()
+            + "x" + renderer.guestHeight()
+            + " presented into " + renderer.viewTransformation.viewWidth
+            + "x" + renderer.viewTransformation.viewHeight
+            + " of " + renderer.surfaceWidth + "x" + renderer.surfaceHeight
             + ", motion estimation " + (motionEstimationSupported()
                 ? "available, block " + blockX + "x" + blockY
                 : "NOT AVAILABLE -- tier 1 will never run"));
@@ -377,6 +388,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     public boolean beginRealFrame() {
         if (!ensureTargets()) return false;
         captureTimer.begin();
+        // **One to one with what the guest drew.** See
+        // GLRenderer.capturingAtGuestScale: the compositor emits guest
+        // coordinates and the viewport is what upscales them, so binding a
+        // guest-sized viewport and a guest-sized target composites at native
+        // resolution and the upscale moves to present. Everything from here to
+        // the screen is then working on real pixels rather than on invented ones,
+        // at a quarter of the area.
+        renderer.beginGuestScaleCapture();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeColour().framebuffer);
         return true;
     }
@@ -385,6 +404,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     public void endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.endGuestScaleCapture();
         captureTimer.end();
 
         // **The invariant: every real frame is presented exactly once, in
@@ -554,8 +574,10 @@ public class FrameSynthesizer implements FramePacer.Target {
             return;
         }
         interpolateTimer.begin();
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, output.framebuffer);
         interpolate(phase);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.presentGuestFrame(output.texture, true);
         interpolateTimer.end();
 
         // Once a second, and only if something asked. Deliberately after the
@@ -568,8 +590,9 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private void presentLatest() {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        blit(blitMaterial, latestColour().texture,
-             renderer.surfaceWidth, renderer.surfaceHeight);
+        // Upscaled once, here, rather than before any of the work. See
+        // GLRenderer.presentGuestFrame.
+        renderer.presentGuestFrame(latestColour().texture, true);
         realPresented = true;
     }
 
@@ -587,7 +610,9 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     {@link #measure}.
      */
     private void interpolate(float phase, boolean measuring) {
-        GLES20.glViewport(0, 0, renderer.surfaceWidth, renderer.surfaceHeight);
+        // Guest resolution, like everything else now. The upscale happens once,
+        // when the finished frame is presented.
+        GLES20.glViewport(0, 0, colour[0].width, colour[0].height);
         renderer.viewportNeedsUpdate = true;
         GLES20.glDisable(GLES20.GL_BLEND);
 
@@ -660,7 +685,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private void measure(float phase) {
         if (probe == null) {
             probe = new Target();
-            probe.allocateAveraging(renderer.surfaceWidth, renderer.surfaceHeight);
+            probe.allocateAveraging(colour[0].width, colour[0].height);
         }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.framebuffer);
         interpolate(phase, true);
@@ -690,7 +715,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     should be attempted -- an unwritten field would warp by garbage.
      */
     private boolean estimateMotion() {
-        if (luma[0] == null || vectors == null) return false;
+        if (luma[0] == null || vectors == null || output == null) return false;
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
@@ -773,8 +798,13 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
-        final int width = renderer.surfaceWidth;
-        final int height = renderer.surfaceHeight;
+        // **The guest's own resolution, not the panel's.** Every pass downstream
+        // of the capture inherits this, which is the whole point: the picture
+        // carries this much information and no more, so anything larger is work
+        // spent on pixels the upscaler invented. See
+        // GLRenderer.capturingAtGuestScale.
+        final int width = renderer.guestWidth();
+        final int height = renderer.guestHeight();
         if (width <= 0 || height <= 0) return false;
         if (colour[0] != null && allocWidth == width && allocHeight == height
                 && allocGeneration == generation) {
@@ -790,6 +820,8 @@ public class FrameSynthesizer implements FramePacer.Target {
             colour[i] = new Target();
             colour[i].allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
         }
+        output = new Target();
+        output.allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
 
         if (motionEstimationSupported()) {
             final int[] value = new int[1];
@@ -799,7 +831,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             blockY = Math.max(1, value[0]);
 
             // The luma pair must be an exact multiple of the search block, so the
-            // largest such rectangle is used rather than the whole surface.
+            // largest such rectangle is used rather than the whole frame. The
+            // frame is already the guest's own resolution, so a block covers real
+            // rendered pixels rather than ones the upscaler invented.
             final int lumaW = (width / blockX) * blockX;
             final int lumaH = (height / blockY) * blockY;
             if (lumaW > 0 && lumaH > 0) {
@@ -831,10 +865,12 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
+            if (output != null) output.release();
             if (probe != null) probe.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
+        output = null;
         probe = null;
         announced = false;
     }
@@ -925,13 +961,19 @@ public class FrameSynthesizer implements FramePacer.Target {
                 measuredSpeed * 5f, estimateFailures));
         }
 
+        if (wants("layers")) {
+            // What went into the flattened frame everything downstream works on.
+            // See GLRenderer.describeLayers.
+            Log.i(TAG, "fg layers: " + renderer.describeLayers());
+        }
+
         if (wants("quality")) {
             // Read as: how much of the frame the interpolation stood behind, and
             // of what it did not, which way it failed.
             Log.i(TAG, String.format(
                 "fg quality: %.1f%% trusted, %.1f%% fell back,"
-                    + " %.2f%% black from lit sources (this shader invented it),"
-                    + " %.2f%% black from dark sources (vector pointed at shadow)",
+                    + " %.3f%% dots (black where the real frame is lit),"
+                    + " %.1f%% mean departure from the real frame",
                 measuredConfidence * 100f,
                 (1f - measuredConfidence) * 100f,
                 measuredDark * 100f, measuredShadow * 100f));
