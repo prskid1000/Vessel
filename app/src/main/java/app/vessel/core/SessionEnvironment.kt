@@ -1940,7 +1940,8 @@ fun sessionEnvironment(
     // container's own `hardware.vram` rather than to something near it. See
     // [HardwareLimits.dxvkMemoryConfig] for why the margin is taken off the
     // dedicated side.
-    val dxvkConfig = (hardware?.dxvkMemoryConfig ?: listOf(FIXED_DXVK_MAX_SHARED_MEMORY)).toMutableList()
+    val dxvkConfig = hardware?.dxvkMemoryConfig ?: listOf(FIXED_DXVK_MAX_SHARED_MEMORY)
+    environment["DXVK_CONFIG"] = dxvkConfig.joinToString(";")
 
     // **The D3D layer's own counters, permanently on, into a file this app
     // reads.**
@@ -2074,36 +2075,9 @@ fun sessionEnvironment(
     // the frames this exists to add.
     fpsLimit?.takeIf { it > 0 }?.let { limit ->
         val rendered = if (frameGeneration >= 2) maxOf(1, limit / frameGeneration) else limit
-        // **`DXVK_FRAME_RATE` does not exist in the DXVK this ships, and setting
-        // it has never capped anything.** The variable was removed upstream --
-        // vkd3d's own changelog records dropping its copy "to align with DXVK's
-        // removal" -- and the limiter is now a config option. So every D3D9, 10
-        // and 11 title has been rendering flat out while this code believed it
-        // was capped, which is precisely the 116-rendered-for-24-shown the note
-        // above measured and thought it had fixed. Confirmed by grep: zero
-        // occurrences of DXVK_FRAME_RATE anywhere in native/dxvk/src.
-        //
-        // `dxvk.maxFrameRate` rather than the per-API `dxgi.` and `d3d9.` names:
-        // both dxgi_options.cpp and d3d9_options.cpp read the `dxvk.` one first
-        // and fall back to their own, so one option covers every Direct3D
-        // version DXVK serves. DXVK_CONFIG is semicolon-separated `key = value`
-        // and is parsed on top of any dxvk.conf, so this does not displace a
-        // file a user has put beside their game.
-        //
-        // Appended to the memory options rather than assigned over them. The
-        // variable is one string and DXVK_CONFIG is the only way in, so writing
-        // it twice would silently drop whichever line ran first -- which would
-        // have taken the shared-memory fix with it.
-        dxvkConfig += "dxvk.maxFrameRate = $rendered"
-        // vkd3d kept its variable, and reads it in swapchain.c.
+        environment["DXVK_FRAME_RATE"] = rendered.toString()
         environment["VKD3D_FRAME_RATE"] = rendered.toString()
     }
-
-    // Written once, after every contributor has had its say, and outside the
-    // limit block: an uncapped container still needs the shared-memory options,
-    // and assigning inside the block would have dropped them for exactly the
-    // containers that set no frame rate.
-    environment["DXVK_CONFIG"] = dxvkConfig.joinToString(";")
 
     // **What the guest is told this phone has**, from the Hardware group. Each
     // of the three is written to the variable the other layers *derive from*

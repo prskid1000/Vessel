@@ -5,7 +5,6 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
-import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 import com.winlator.renderer.material.WarpMaterial;
 
@@ -177,16 +176,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final WarpMaterial warpMaterial = new WarpMaterial();
-    private final MedianMaterial medianMaterial = new MedianMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
     private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
     private final GpuTimer warpTimer = new GpuTimer("tier1 warp");
-    private final GpuTimer medianTimer = new GpuTimer("tier1 median");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
-    private Target colourA, colourB, lumaA, lumaB, vectors, vectorsBackward, vectorsFiltered;
+    private Target colourA, colourB, lumaA, lumaB, vectors;
     private boolean latestIsB = false;
     private int blockX = 8, blockY = 8;
 
@@ -259,7 +256,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     public void endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        discard(true);
         blit(blitMaterial, written.texture, renderer.surfaceWidth, renderer.surfaceHeight);
         captureTimer.end();
 
@@ -307,30 +303,16 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         // Tier 1. Only worth the passes when the driver does the matching.
         if (motionEstimationSupported() && estimateMotion()) {
-            // Falls through to the composite below if anything here declines, for
-            // the same reason: a pass that draws nothing presents a stale buffer.
             warpTimer.begin();
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            discard(true);
             warp(latestColour(), t);
             warpTimer.end();
             tier1Frames++;
             return;
         }
 
-        // **Neither tier applies, and this path must still draw.** GLSurfaceView
-        // swaps the buffer after onDrawFrame whether or not anything was rendered
-        // into it, so returning here does not skip a frame -- it presents an
-        // unwritten back buffer, which on a double-buffered surface holds the
-        // frame from two swaps ago. The display then alternates between the
-        // current picture and an old one, which reads as flicker and looks like a
-        // fault in the synthesis rather than in the decision not to synthesise.
-        //
-        // So the scene is composited as it is, at t = 0: one composite showing
-        // the same picture again, which is what "no new information" should look
-        // like.
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        renderer.drawSynthesizedFrame(0f);
+        // Neither applies: nothing moved that we can account for. Drawing a copy
+        // of the last frame would cost a composite and show nothing new.
         skipped++;
     }
 
@@ -341,55 +323,18 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     should be attempted -- an unwritten field would warp by garbage.
      */
     private boolean estimateMotion() {
-        if (lumaA == null || vectors == null || vectorsBackward == null
-                || vectorsFiltered == null) {
-            return false;
-        }
+        if (lumaA == null || vectors == null) return false;
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
         texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
-        // The same match the other way round, for the consistency test in
-        // MedianMaterial. Affordable because the matcher is fixed-function
-        // silicon measured at 0.001 ms, and it is the only way to ask a question
-        // the extension will not answer: was this match trustworthy.
-        texEstimateMotion(latestLuma().texture, previousLuma().texture, vectorsBackward.texture);
         final int error = GLES20.glGetError();
         estimateTimer.end();
         if (error != GLES20.GL_NO_ERROR) {
             Log.e(TAG, "glTexEstimateMotionQCOM failed 0x" + Integer.toHexString(error));
             return false;
         }
-
-        // The field the warp reads is the filtered one. See MedianMaterial: a
-        // block matcher gets flat and repeating regions wrong on its own, and
-        // warping along an unfiltered field tears holes in a correct picture.
-        medianTimer.begin();
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, vectorsFiltered.framebuffer);
-        discard(false);
-        GLES20.glViewport(0, 0, vectorsFiltered.width, vectorsFiltered.height);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-        medianMaterial.use();
-        renderer.quadVertices.bind(medianMaterial.programId);
-        medianMaterial.setUniformBool(medianMaterial.uniforms.flipY, false);
-        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
-                                      1f / vectors.width, 1f / vectors.height);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
-        medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectorsBackward.texture);
-        medianMaterial.setUniformInt(medianMaterial.medianUniforms.backwardTexture, 1);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glEnable(GLES20.GL_BLEND);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        renderer.invalidateBoundWindowMaterial();
-        medianTimer.end();
         return true;
     }
 
@@ -405,13 +350,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         // The field is in pixels between two real frames; dividing by the frame
         // size puts it in texture space, and t aims it.
         warpMaterial.setUniformVec2(warpMaterial.warpUniforms.motionScale,
-                                    t / Math.max(1, lumaA.width), t / Math.max(1, lumaA.height));
+                                    t / Math.max(1, allocWidth), t / Math.max(1, allocHeight));
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
         warpMaterial.setUniformInt(warpMaterial.uniforms.screenTexture, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectorsFiltered.texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
         warpMaterial.setUniformInt(warpMaterial.warpUniforms.motionTexture, 1);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
@@ -425,38 +370,9 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
-        discard(false);
         blit(material, source, destination.width, destination.height);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
-
-    /**
-     * VESSEL: tell the tiler we do not want what is already in this target.
-     *
-     * <p>**A bind is a load unless you say otherwise, and every pass here
-     * overwrites every pixel.** Adreno renders into on-chip tile memory and
-     * resolves out to main memory at the end of a pass; binding a target it
-     * cannot prove is fully written makes it *unresolve* -- copy the old contents
-     * back in from memory first -- so a full-screen blit that needs none of that
-     * data still pays for reading it. Qualcomm's own `avoid_gmem_loads` sample
-     * measures the cost of getting this wrong at 37% of frame time, 18.24 ms
-     * against 25.15 ms.
-     *
-     * <p>{@code glClear} says the same thing and the compositor's own
-     * {@code drawFrame} already does it, which is why the colour capture is not
-     * listed here. Invalidate is the cheaper statement where a clear would only
-     * be overwritten a moment later.
-     *
-     * <p>The default framebuffer names its attachment {@code GL_COLOR}, not
-     * {@code GL_COLOR_ATTACHMENT0} -- passing the wrong one is an
-     * {@code INVALID_ENUM} that silently leaves the load in place.
-     */
-    private void discard(boolean defaultFramebuffer) {
-        DISCARD[0] = defaultFramebuffer ? GLES30.GL_COLOR : GLES20.GL_COLOR_ATTACHMENT0;
-        GLES30.glInvalidateFramebuffer(GLES20.GL_FRAMEBUFFER, 1, DISCARD, 0);
-    }
-
-    private static final int[] DISCARD = new int[1];
 
     /**
      * Draw a texture over the whole of the current target.
@@ -532,10 +448,6 @@ public class FrameSynthesizer implements FramePacer.Target {
                 lumaB.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
                 vectors = new Target();
                 vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-                vectorsBackward = new Target();
-                vectorsBackward.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-                vectorsFiltered = new Target();
-                vectorsFiltered.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -558,10 +470,8 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (lumaA != null) lumaA.release();
             if (lumaB != null) lumaB.release();
             if (vectors != null) vectors.release();
-            if (vectorsBackward != null) vectorsBackward.release();
-            if (vectorsFiltered != null) vectorsFiltered.release();
         }
-        colourA = colourB = lumaA = lumaB = vectors = vectorsBackward = vectorsFiltered = null;
+        colourA = colourB = lumaA = lumaB = vectors = null;
     }
 
     /**
@@ -579,7 +489,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         lumaTimer.report(now);
         estimateTimer.report(now);
         warpTimer.report(now);
-        medianTimer.report(now);
         tier0Timer.report(now);
         if (now - reportedAt < 1000) return;
         reportedAt = now;
