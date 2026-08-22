@@ -354,6 +354,7 @@ public class FrameExtrapolator {
         // "never ran". One line at the first success separates the two, and it
         // is one line per context rather than per frame.
         presented++;
+        dumpOnce();
         if (!announced) {
             announced = true;
             android.util.Log.i("FrameExtrapolator",
@@ -365,6 +366,79 @@ public class FrameExtrapolator {
     }
 
     private boolean announced = false;
+
+    /**
+     * VESSEL: read the three textures back to disk, once, and look at them.
+     *
+     * <p>The extension is a black box -- one entry point, no parameters, no error
+     * and nothing to query -- and five fixes aimed at it were all wrong. What has
+     * never been done is to look at what it actually wrote, and the difference
+     * matters: an unrecoverable mess means building the prediction ourselves out
+     * of {@code GL_QCOM_motion_estimation}, while a recognisable picture in the
+     * wrong channel order is a swizzle.
+     *
+     * <p>The two sources are dumped alongside it as the control. If those are
+     * wrong the fault was never in the extension at all.
+     *
+     * <p>Raw RGBA rather than PNG: there is no encoder here worth linking for a
+     * diagnostic, and the reader on the other end can reshape bytes. Once per
+     * context, because each file is width * height * 4 bytes.
+     */
+    private void dumpOnce() {
+        if (dumped) return;
+        // Late, not on the first prediction. The first one happens while the
+        // desktop is still black -- a dump taken there shows two empty sources
+        // and says nothing about what the extension does with a real frame.
+        if (!DUMP_ENABLED || presented < DUMP_AFTER) return;
+        dumped = true;
+        try {
+            java.io.File dir = renderer.xServerView.getContext().getFilesDir();
+            write(new java.io.File(dir, "fx-previous.rgba"), previousTarget());
+            write(new java.io.File(dir, "fx-latest.rgba"), latestTarget());
+            write(new java.io.File(dir, "fx-predicted.rgba"), predicted);
+            android.util.Log.i("FrameExtrapolator",
+                "dumped " + allocWidth + "x" + allocHeight + " RGBA to " + dir);
+        } catch (Throwable e) {
+            android.util.Log.e("FrameExtrapolator", "dump failed", e);
+        }
+    }
+
+    private void write(java.io.File file, ColourTarget target) throws java.io.IOException {
+        final java.nio.ByteBuffer pixels =
+            java.nio.ByteBuffer.allocateDirect(allocWidth * allocHeight * 4)
+                .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer);
+        GLES20.glReadPixels(0, 0, allocWidth, allocHeight, GLES20.GL_RGBA,
+                            GLES20.GL_UNSIGNED_BYTE, pixels);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        pixels.rewind();
+        final byte[] bytes = new byte[pixels.remaining()];
+        pixels.get(bytes);
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) {
+            out.write(bytes);
+        }
+    }
+
+    private boolean dumped = false;
+
+    /**
+     * Off, and kept rather than deleted, because it is what settled the question.
+     *
+     * <p>Five fixes aimed at the call were all wrong, and this is what showed
+     * why: read the three textures back and look at them. The sources held a real
+     * scene -- 14,577 unique colours, mean (46,54,56) -- and the output was an
+     * 8-pixel ramp, {@code 16 48 80 112 143 175 207 239} repeating across every
+     * row, with a standard deviation of 2.3 and 5.2 in R and G across 8x8 blocks.
+     * A fixed pattern, not a frame, and nothing derived from the inputs at all.
+     *
+     * <p>Turn it on again to validate the motion vectors if the estimation path
+     * is ever built: the same instrument answers the same question there, and
+     * guessing at a black box is what it exists to stop.
+     */
+    private static final boolean DUMP_ENABLED = false;
+
+    /** Predictions to let pass before dumping, so the game is really drawing. */
+    private static final long DUMP_AFTER = 400;
 
     /**
      * Ask for one extra pass, half way to where the next real frame is expected.

@@ -844,8 +844,20 @@ The modifications, in the order they were made:
    renderer is not an idle one; a genuinely idle desktop damages nothing and
    never reaches the gate at all.
 
-   **WITHDRAWN. The extension writes garbage on this driver and four attempts to
-   fix it all failed.** The setting is gone from the manifest, so nothing can turn
+   **The extension is advertised and does not work on this driver, and that was
+   proved by reading its output back rather than by guessing.** The three
+   textures were dumped mid-gameplay: both sources held a real scene, 14,577
+   unique colours at mean (46,54,56), and the output was
+   {@code 16 48 80 112 143 175 207 239} repeating every eight pixels across every
+   row -- a fixed ramp, standard deviation 2.3 and 5.2 in R and G across 8x8
+   blocks, with no scene structure at any scale. Not a frame, and not derived
+   from the inputs.
+
+   So `glExtrapolateTex2DQCOM` on Adreno 829 driver `V@0842.36` accepts the call,
+   reports `GL_NO_ERROR`, and fills the destination with a pattern. Nothing on
+   the API side can fix that, which is why five attempts at it all failed:
+
+   **The five, kept because each was a real bug and none was the cause.** The setting is gone from the manifest, so nothing can turn
    it on; the code is kept because the findings below are worth more than the
    diff, and because the failure is in one call rather than in the surrounding
    machinery.
