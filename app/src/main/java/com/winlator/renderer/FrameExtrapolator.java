@@ -134,6 +134,13 @@ public class FrameExtrapolator {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
                                           GLES20.GL_TEXTURE_2D, texture, 0);
+            // Once, at allocation, so no target can ever present the contents of
+            // whatever last held this memory. The sample does not write its
+            // output texture per frame and neither does this any more -- but an
+            // allocation that is never cleared at all is how the speckle got on
+            // screen in the first place.
+            GLES20.glClearColor(0f, 0f, 0f, 1f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -298,44 +305,28 @@ public class FrameExtrapolator {
      */
     public void presentSynthesizedFrame(int index) {
         if (!ensureTargets() || realFrameCount < 2) return;
-        if (index < 1 || index >= multiplier) return;
-        // VESSEL: seed the target with the newest real frame before predicting
-        // into it.
+        if (index != 1) return;
+        // VESSEL: matched to Qualcomm's own AMFE sample, exactly.
         //
-        // **An unwritten target is not blank, it is noise.** RenderTarget
-        // allocates with glTexImage2D(..., null), so until something writes it
-        // the texture holds whatever that page of GPU memory last contained --
-        // which presents as dense colour speckle over the whole screen, twice
-        // observed on device. glGetError cannot save us from that: it reports a
-        // call the driver *rejected*, and an extension that quietly does nothing
-        // returns GL_NO_ERROR having written not a pixel.
+        // That sample is the only working reference for this call, and what it
+        // does is narrower than what was built here:
         //
-        // So the worst case is made harmless rather than merely detected. Seeded
-        // this way, a prediction that never happens shows the frame before it --
-        // a repeat, visible as a moment of judder and nothing worse -- and the
-        // counters still say a prediction was presented, which is what separates
-        // "the driver did nothing" from "nothing was scheduled".
+        //     m_glExtrapolateTex2DQCOM(colour[n % 2], colour[n % 2 ? 0 : 1],
+        //                              m_extrapolatedTexture, .5f);
         //
-        // One extra full-screen blit per predicted frame. That is a real cost and
-        // it buys the guarantee that this feature can never put garbage on the
-        // screen, which is worth more than the blit.
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, predicted.framebuffer);
-        blit(latestTarget().texture);
-
-        // **Unbind before predicting, and this is not tidiness.** `predicted` is
-        // the colour attachment of the framebuffer just bound to seed it, and the
-        // extension is about to write to that same texture by name. A texture
-        // that is simultaneously an attachment of the bound framebuffer and the
-        // destination of a write is a feedback loop -- undefined by the spec, and
-        // what undefined looks like on screen is noise. The same goes for the two
-        // sources, which are attachments of their own framebuffers; nothing of
-        // ours may be bound while the driver has all three.
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-
+        // One call per pair of traditionally rendered frames, always at 0.5, and
+        // the output texture is never written by the application between calls.
+        // This was doing three calls on the *same* pair at 4x, each into a target
+        // it had just blitted a seed frame into -- so every assumption the sample
+        // makes was being broken at once, and the result was speckle.
+        //
+        // Higher multiples are held back rather than deleted: they need the same
+        // pair to answer more than one scaleFactor, which nothing in the spec
+        // promises and nothing in the sample demonstrates. Prove one prediction
+        // first.
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
         extrapolateTex2D(previousTarget().texture, latestTarget().texture,
-                         predicted.texture, (float)index / (float)multiplier);
+                         predicted.texture, 0.5f);
 
         // VESSEL: the call either wrote the texture or it did not, and the
         // difference is not visible in the output -- an untouched target still
@@ -389,9 +380,12 @@ public class FrameExtrapolator {
         if (interval > IDLE_INTERVAL_MS) { report("idle, " + interval + " ms between frames"); return; }
 
         final long stamp = realFrameCount;
-        for (int i = 1; i < multiplier; i++) {
+        // One, not multiplier - 1. See presentSynthesizedFrame: the sample makes
+        // a single prediction per pair and the higher multiples are held back
+        // until that one is proven.
+        for (int i = 1; i < 2; i++) {
             final int index = i;
-            long delay = Math.max(MIN_DELAY_MS, (interval * i) / multiplier);
+            long delay = Math.max(MIN_DELAY_MS, interval / 2);
             renderer.xServerView.postDelayed(() -> {
                 if (realFrameCount != stamp) {
                     cancelled++;
@@ -401,7 +395,7 @@ public class FrameExtrapolator {
                 renderer.xServerView.requestRender();
             }, delay);
         }
-        scheduled += multiplier - 1;
+        scheduled += 1;
         report("scheduled, " + interval + " ms between frames");
     }
 
