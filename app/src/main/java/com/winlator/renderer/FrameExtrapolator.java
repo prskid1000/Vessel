@@ -260,6 +260,29 @@ public class FrameExtrapolator {
     public void presentSynthesizedFrame(int index) {
         if (!ensureTargets() || realFrameCount < 2) return;
         if (index < 1 || index >= multiplier) return;
+        // VESSEL: seed the target with the newest real frame before predicting
+        // into it.
+        //
+        // **An unwritten target is not blank, it is noise.** RenderTarget
+        // allocates with glTexImage2D(..., null), so until something writes it
+        // the texture holds whatever that page of GPU memory last contained --
+        // which presents as dense colour speckle over the whole screen, twice
+        // observed on device. glGetError cannot save us from that: it reports a
+        // call the driver *rejected*, and an extension that quietly does nothing
+        // returns GL_NO_ERROR having written not a pixel.
+        //
+        // So the worst case is made harmless rather than merely detected. Seeded
+        // this way, a prediction that never happens shows the frame before it --
+        // a repeat, visible as a moment of judder and nothing worse -- and the
+        // counters still say a prediction was presented, which is what separates
+        // "the driver did nothing" from "nothing was scheduled".
+        //
+        // One extra full-screen blit per predicted frame. That is a real cost and
+        // it buys the guarantee that this feature can never put garbage on the
+        // screen, which is worth more than the blit.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, predicted.getFramebuffer());
+        blit(latestTarget().getTextureId());
+
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
         extrapolateTex2D(previousTarget().getTextureId(), latestTarget().getTextureId(),
                          predicted.getTextureId(), (float)index / (float)multiplier);
