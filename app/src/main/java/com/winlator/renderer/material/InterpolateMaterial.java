@@ -57,6 +57,13 @@ public class InterpolateMaterial extends ScreenMaterial {
         return String.join("\n",
             "precision highp float;",
 
+            // Below this the two sources agree well enough to trust the blend
+            // completely; above the second, not at all. Between them the
+            // interpolated frame fades back to the newer one rather than
+            // switching, so a region crossing the threshold does not pop.
+            "#define AGREE_FULL 0.12",
+            "#define AGREE_NONE 0.40",
+
             // The newer of the two real frames, N.
             "uniform sampler2D screenTexture;",
             // The older one, N-1.
@@ -82,7 +89,34 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "vec3 newer = texture2D(screenTexture, fromNewer).rgb;",
                 "vec3 older = texture2D(previousTexture, fromOlder).rgb;",
 
-                "gl_FragColor = vec4(mix(older, newer, phase), 1.0);",
+                // **Where the two sources disagree, the correspondence is wrong,
+                // and the newer frame is the only thing known to be right.**
+                //
+                // If the field is correct these two fetches are the same point of
+                // the same object seen a moment apart, so they should very nearly
+                // match. Large disagreement means they are not the same point at
+                // all: the block matched something unrelated, or the region was
+                // occluded in one frame, or -- the loudest case -- the scene cut
+                // and the two frames have nothing to do with each other, which is
+                // when the matcher returns meaningless vectors for the whole
+                // picture and blending them smears it.
+                //
+                // This is per pixel rather than a scene-change detector over the
+                // whole frame, and deliberately so. A global detector needs the
+                // difference summed on the GPU and read back to the CPU every
+                // frame, which is a pipeline stall in the middle of the thing that
+                // exists to make frames smoother. Judging locally costs a
+                // subtraction, catches the same cut, and additionally catches the
+                // single wrong block a global test would average away.
+                //
+                // Falling back to the newer frame rather than to the blend: a
+                // repeated real frame is a moment of judder, and a blend of two
+                // unrelated images is a visible tear.
+                "float disagreement = length(newer - older);",
+                "float confidence = 1.0 - smoothstep(AGREE_FULL, AGREE_NONE, disagreement);",
+                "vec3 blended = mix(older, newer, phase);",
+
+                "gl_FragColor = vec4(mix(newer, blended, confidence), 1.0);",
             "}"
         );
     }
