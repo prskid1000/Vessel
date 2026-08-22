@@ -113,39 +113,6 @@ public class FrameSynthesizer implements FramePacer.Target {
      * differences perceptually uniform, which is the same reason FidelityFX
      * converts to L* before its own search.
      */
-    /**
-     * VESSEL: luma and chroma in one texel, for the candidate search only.
-     *
-     * <p>The block matcher's inputs must be {@code GL_R8}, so {@link LumaMaterial}
-     * stays exactly as it is. This is a second, wider copy that only the
-     * interpolation reads: brightness in R and an opponent-colour channel in G.
-     *
-     * <p>**Two channels rather than one costs nothing where it matters.** A
-     * search that scores on brightness alone cannot tell two objects of equal
-     * brightness apart, and the old code only discovered that afterwards, when the
-     * winning vector's colour reads disagreed -- at which point all it could do
-     * was decline. One RG fetch returns both channels, so every candidate is now
-     * judged on colour as well for the same number of texture reads.
-     *
-     * <p>{@code r - b} for the chroma: the cheapest channel that separates the
-     * confusions luma leaves, biased into 0..1 because the target is unsigned.
-     */
-    private static final class MatchMaterial extends ScreenMaterial {
-        @Override
-        protected String getFragmentShader() {
-            return String.join("\n",
-                "precision mediump float;",
-                "uniform sampler2D screenTexture;",
-                "varying vec2 vUV;",
-                "void main() {",
-                    "vec3 c = texture2D(screenTexture, vUV).rgb;",
-                    "gl_FragColor = vec4(dot(c, vec3(0.299, 0.587, 0.114)),",
-                                        "(c.r - c.b) * 0.5 + 0.5, 0.0, 1.0);",
-                "}"
-            );
-        }
-    }
-
     private static final class LumaMaterial extends ScreenMaterial {
         @Override
         protected String getFragmentShader() {
@@ -216,7 +183,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final FramePacer pacer;
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
-    private final MatchMaterial matchMaterial = new MatchMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -225,23 +191,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer interpolateTimer = new GpuTimer("tier1 interpolate");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
-    /**
-     * The fine field, double-buffered so last interval's survives.
-     *
-     * <p>Motion is coherent in time, which is why every video codec ranks the
-     * temporal predictor among its strongest. Keeping the previous field costs one
-     * more texture of {@code width/8 x height/8} and gives the search both a
-     * candidate and a prior -- and the prior is what stops an ambiguous region
-     * being re-decided differently every frame.
-     */
-    private final Target[] vectorsPair = new Target[2];
-
-    private Target latestVectors() { return vectorsPair[newest]; }
-
-    private Target previousVectors() { return vectorsPair[oldest()]; }
-
-    private Target coarseVectors;
-    private Target reverseVectors;
+    private Target vectors;
     private int blockX = 8, blockY = 8;
 
     private int allocWidth = 0;
@@ -359,15 +309,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (motionEstimationSupported()) {
             lumaTimer.begin();
             renderToTarget(lumaMaterial, written.texture, writeLuma());
-            // Halving with a plain bilinear blit is exactly a 2x2 box average --
-            // sampling at the destination's texel centres lands each fetch on the
-            // meeting point of four source texels -- so the second level costs one
-            // trivial pass and no filter kernel.
-            renderToTarget(blitMaterial, writeLuma().texture, writeLumaHalf());
-            // And the same pyramid carrying colour, which the matcher cannot take
-            // but the search can. See MatchMaterial.
-            renderToTarget(matchMaterial, written.texture, writeMatch());
-            renderToTarget(blitMaterial, writeMatch().texture, writeMatchHalf());
             lumaTimer.end();
         }
 
@@ -547,15 +488,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // The block grid, so a single block can be addressed rather than only the
         // filtered average of four. See InterpolateMaterial's third point.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.vectorSize,
-                                           vectorsPair[0].width, vectorsPair[0].height);
-        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.coarseScale,
-                                           1f / Math.max(1, lumaHalf[0].width),
-                                           1f / Math.max(1, lumaHalf[0].height));
-        // One pixel of what is about to be presented, for the sharpening taps
-        // that put back what bilinear resampling took out.
-        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.colourTexel,
-                                           1f / Math.max(1, renderer.surfaceWidth),
-                                           1f / Math.max(1, renderer.surfaceHeight));
+                                           vectors.width, vectors.height);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
@@ -565,47 +498,23 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.previousTexture, 1);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestVectors().texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.motionTexture, 2);
-        // The search runs on these rather than on the colour: two bytes a texel
-        // instead of four, and both channels in one fetch. See MatchMaterial.
+        // The search runs on these rather than on the colour: one byte a texel
+        // instead of four, for the same answer. See InterpolateMaterial.
         GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestMatch().texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
         interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.matchNewerTexture, 3);
+            interpolateMaterial.interpolateUniforms.lumaNewerTexture, 3);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE4);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousMatch().texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
         interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.matchOlderTexture, 4);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE5);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, coarseVectors.texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.coarseTexture, 5);
-        // The half-size pair: the second scale a match is judged at, and the local
-        // mean that makes the fine term blind to a lighting change.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE6);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestMatchHalf().texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.broadNewerTexture, 6);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE7);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousMatchHalf().texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.broadOlderTexture, 7);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE8);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, reverseVectors.texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.reverseTexture, 8);
-        // Last interval's field: both a candidate and the prior that keeps an
-        // ambiguous region resolving the same way twice running.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE9);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousVectors().texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.historyTexture, 9);
+            interpolateMaterial.interpolateUniforms.lumaOlderTexture, 4);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
 
-        for (int unit = 9; unit >= 0; unit--) {
+        for (int unit = 4; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -620,31 +529,12 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     should be attempted -- an unwritten field would warp by garbage.
      */
     private boolean estimateMotion() {
-        if (luma[0] == null || vectorsPair[0] == null || lumaHalf[0] == null
-                || coarseVectors == null || reverseVectors == null
-                || match[0] == null || matchHalf[0] == null) {
-            return false;
-        }
+        if (luma[0] == null || vectors == null) return false;
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        texEstimateMotion(previousLuma().texture, latestLuma().texture,
-                          latestVectors().texture);
-        // **And again, half the size.** The search window is fixed, so halving the
-        // resolution halves every displacement and doubles the motion the same
-        // silicon can follow. Free in practice: fixed-function, and the timer
-        // reads 0.001 ms for the pair.
-        texEstimateMotion(previousLumaHalf().texture, latestLumaHalf().texture,
-                          coarseVectors.texture);
-        // **And once more with the two frames swapped.** For a correspondence
-        // that really exists the two fields are negatives of each other, so where
-        // they are not, one frame does not hold the content at all -- which is
-        // the occlusion test, and the only thing that separates a region worth
-        // blending from one worth taking from a single frame. Free, like the
-        // others: all three calls together still measure 0.001 ms.
-        texEstimateMotion(latestLuma().texture, previousLuma().texture,
-                          reverseVectors.texture);
+        texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
         final int error = GLES20.glGetError();
         estimateTimer.end();
         if (error != GLES20.GL_NO_ERROR) {
@@ -718,29 +608,6 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private final Target[] colour = new Target[2];
     private final Target[] luma = new Target[2];
-    /** Half size, for the coarse search only. See {@link InterpolateMaterial}. */
-    private final Target[] lumaHalf = new Target[2];
-    /** Luma and chroma, which only the candidate search reads. */
-    private final Target[] match = new Target[2];
-    private final Target[] matchHalf = new Target[2];
-
-    private Target writeMatch() { return match[oldest()]; }
-
-    private Target writeMatchHalf() { return matchHalf[oldest()]; }
-
-    private Target latestMatch() { return match[newest]; }
-
-    private Target previousMatch() { return match[oldest()]; }
-
-    private Target latestMatchHalf() { return matchHalf[newest]; }
-
-    private Target previousMatchHalf() { return matchHalf[oldest()]; }
-
-    private Target writeLumaHalf() { return lumaHalf[oldest()]; }
-
-    private Target latestLumaHalf() { return lumaHalf[newest]; }
-
-    private Target previousLumaHalf() { return lumaHalf[oldest()]; }
 
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
@@ -778,38 +645,11 @@ public class FrameSynthesizer implements FramePacer.Target {
                     luma[i] = new Target();
                     luma[i].allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
                 }
-                for (int i = 0; i < 2; i++) {
-                    vectorsPair[i] = new Target();
-                    vectorsPair[i].allocate(lumaW / blockX, lumaH / blockY,
-                                            GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-                }
-
-                // The coarse level, block-rounded again at its own size: half of
-                // a multiple of the block need not be one.
-                final int halfW = Math.max(blockX, ((lumaW / 2) / blockX) * blockX);
-                final int halfH = Math.max(blockY, ((lumaH / 2) / blockY) * blockY);
-                for (int i = 0; i < 2; i++) {
-                    lumaHalf[i] = new Target();
-                    lumaHalf[i].allocate(halfW, halfH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                    match[i] = new Target();
-                    match[i].allocate(lumaW, lumaH, GLES30.GL_RG8, GLES20.GL_LINEAR);
-                    matchHalf[i] = new Target();
-                    matchHalf[i].allocate(halfW, halfH, GLES30.GL_RG8, GLES20.GL_LINEAR);
-                }
-                coarseVectors = new Target();
-                coarseVectors.allocate(halfW / blockX, halfH / blockY,
-                                       GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-
-                // The same grid as the forward field, matched the other way.
-                reverseVectors = new Target();
-                reverseVectors.allocate(lumaW / blockX, lumaH / blockY,
-                                        GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-
+                vectors = new Target();
+                vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
-                    + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY)
-                    + ", coarse " + (halfW / blockX) + "x" + (halfH / blockY)
-                    + ", match " + lumaW + "x" + lumaH);
+                    + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
             }
         }
 
@@ -827,19 +667,11 @@ public class FrameSynthesizer implements FramePacer.Target {
             for (int i = 0; i < 2; i++) {
                 if (colour[i] != null) colour[i].release();
                 if (luma[i] != null) luma[i].release();
-                if (lumaHalf[i] != null) lumaHalf[i].release();
-                if (match[i] != null) match[i].release();
-                if (matchHalf[i] != null) matchHalf[i].release();
-                if (vectorsPair[i] != null) vectorsPair[i].release();
             }
-            if (coarseVectors != null) coarseVectors.release();
-            if (reverseVectors != null) reverseVectors.release();
+            if (vectors != null) vectors.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
-        lumaHalf[0] = lumaHalf[1] = null;
-        match[0] = match[1] = matchHalf[0] = matchHalf[1] = null;
-        vectorsPair[0] = vectorsPair[1] = null;
-        coarseVectors = reverseVectors = null;
+        vectors = null;
     }
 
     /**
