@@ -5,6 +5,7 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 import com.winlator.renderer.material.SignTestMaterial;
 import com.winlator.renderer.material.WarpMaterial;
@@ -178,14 +179,16 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final WarpMaterial warpMaterial = new WarpMaterial();
     private final SignTestMaterial signTestMaterial = new SignTestMaterial();
+    private final MedianMaterial medianMaterial = new MedianMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
     private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
     private final GpuTimer warpTimer = new GpuTimer("tier1 warp");
+    private final GpuTimer medianTimer = new GpuTimer("tier1 median");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
-    private Target vectors;
+    private Target vectors, vectorsFiltered;
     private int blockX = 8, blockY = 8;
 
     private int allocWidth = 0;
@@ -261,6 +264,9 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     public boolean beginRealFrame() {
         if (!ensureTargets()) return false;
+        // The cursor is composited after the capture, so it never reaches the
+        // luma the estimator reads or the texture the warp gathers from.
+        renderer.setCursorDeferred(true);
         captureTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeColour().framebuffer);
         return true;
@@ -271,6 +277,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         blit(blitMaterial, written.texture, renderer.surfaceWidth, renderer.surfaceHeight);
+        renderer.setCursorDeferred(false);
+        renderer.drawCursorOverlay();
         captureTimer.end();
 
         // Luma for this frame, so the pair is ready without re-deriving the older
@@ -348,6 +356,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             warpTimer.begin();
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             warp(latestColour(), t);
+            renderer.drawCursorOverlay();
             warpTimer.end();
             tier1Frames++;
             return;
@@ -363,6 +372,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         blit(blitMaterial, latestColour().texture,
              renderer.surfaceWidth, renderer.surfaceHeight);
+        renderer.drawCursorOverlay();
         skipped++;
     }
 
@@ -373,7 +383,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     should be attempted -- an unwritten field would warp by garbage.
      */
     private boolean estimateMotion() {
-        if (luma[0] == null || vectors == null) return false;
+        if (luma[0] == null || vectors == null || vectorsFiltered == null) return false;
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
@@ -385,6 +395,27 @@ public class FrameSynthesizer implements FramePacer.Target {
             Log.e(TAG, "glTexEstimateMotionQCOM failed 0x" + Integer.toHexString(error));
             return false;
         }
+
+        // The field the warp reads is the filtered one. See MedianMaterial.
+        medianTimer.begin();
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, vectorsFiltered.framebuffer);
+        GLES20.glViewport(0, 0, vectorsFiltered.width, vectorsFiltered.height);
+        renderer.viewportNeedsUpdate = true;
+        GLES20.glDisable(GLES20.GL_BLEND);
+        medianMaterial.use();
+        renderer.quadVertices.bind(medianMaterial.programId);
+        medianMaterial.setUniformBool(medianMaterial.uniforms.flipY, false);
+        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
+                                      1f / vectors.width, 1f / vectors.height);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.invalidateBoundWindowMaterial();
+        medianTimer.end();
         return true;
     }
 
@@ -513,7 +544,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
         warpMaterial.setUniformInt(warpMaterial.uniforms.screenTexture, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectorsFiltered.texture);
         warpMaterial.setUniformInt(warpMaterial.warpUniforms.motionTexture, 1);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
@@ -628,6 +659,9 @@ public class FrameSynthesizer implements FramePacer.Target {
                 }
                 vectors = new Target();
                 vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
+                vectorsFiltered = new Target();
+                vectorsFiltered.allocate(lumaW / blockX, lumaH / blockY,
+                                         GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -650,9 +684,11 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
+            if (vectorsFiltered != null) vectorsFiltered.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
+        vectorsFiltered = null;
     }
 
     /**
@@ -670,6 +706,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         lumaTimer.report(now);
         estimateTimer.report(now);
         warpTimer.report(now);
+        medianTimer.report(now);
         tier0Timer.report(now);
         if (now - reportedAt < 1000) return;
         reportedAt = now;

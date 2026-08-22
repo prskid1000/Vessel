@@ -337,7 +337,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         XForm.makeTransform(tmpXForm2, -pointerX, -pointerY, magnifierZoom, magnifierZoom, 0);
 
         renderWindows();
-        if (cursorVisible) renderCursor();
+        // VESSEL: the cursor is drawn separately when a frame is being captured
+        // for synthesis. See setCursorDeferred.
+        if (cursorVisible && !cursorDeferred) renderCursor();
     }
 
     @Override
@@ -577,6 +579,35 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             }
         }
         return false;
+    }
+
+    /**
+     * VESSEL: keep the cursor out of the captured frame, and draw it after.
+     *
+     * <p>Two problems, one cause. The captured frame is what the motion
+     * estimator derives its luma from, and the cursor is a small, high-contrast
+     * object moving independently of everything behind it -- so the blocks it
+     * touches report its motion rather than the motion of the scene. It is also
+     * what the warp gathers from, so a predicted frame drags the cursor along a
+     * field describing the scene, smearing the one thing on screen the user is
+     * looking directly at.
+     *
+     * <p>Deferring it fixes both and costs nothing: the cursor is composited on
+     * top afterwards, at its real position, on real and synthesised frames
+     * alike. It is never warped and never predicted, which is correct -- the
+     * compositor knows exactly where the pointer is and has no reason to guess.
+     */
+    void setCursorDeferred(boolean deferred) {
+        this.cursorDeferred = deferred;
+    }
+
+    private boolean cursorDeferred = false;
+
+    /** Draw just the cursor, over whatever is already on the target. */
+    void drawCursorOverlay() {
+        if (!cursorVisible) return;
+        renderCursor();
+        invalidateBoundWindowMaterial();
     }
 
     /** Composite the whole scene aimed at {@code t} frames past the last real one. */
