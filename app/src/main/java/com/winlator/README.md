@@ -857,6 +857,28 @@ The modifications, in the order they were made:
    reports `GL_NO_ERROR`, and fills the destination with a pattern. Nothing on
    the API side can fix that, which is why five attempts at it all failed:
 
+   **The sibling extension does work, and that is the way forward.**
+   `MotionProbe` asks the same question of `GL_QCOM_motion_estimation`, with a
+   control the extrapolation work lacked: it reads a patch of both luma inputs
+   back first, because the spec says a zero vector means "no motion detected OR
+   masked" and an all-zero result from two identical frames is the extension
+   behaving perfectly. Measured on device during camera movement:
+
+       block 8x8, luma 2776x1264, vectors 347x158
+       luma inputs differ in 57013 of 65536 sampled pixels
+       vectors 54826: nonzero 44590, x [-113..90], y [-110..106], mean|v| 14.08
+
+   Real signed motion, correct block size queried from the driver, no error. An
+   earlier run of the same probe returned all zeros and would have been read as a
+   second stub -- it was a static scene, and the control is what makes the
+   difference legible. So one of the two extensions is a stub and the other is
+   not, on the same driver, which is exactly why every one of these has to be
+   measured rather than trusted.
+
+   The probe cost an ANR before it was cheap enough: two full 2776x1264 readbacks
+   and a three-million-iteration loop on the GL thread. A 256x256 patch answers
+   the same question.
+
    **The five, kept because each was a real bug and none was the cause.** The setting is gone from the manifest, so nothing can turn
    it on; the code is kept because the findings below are worth more than the
    diff, and because the failure is in one call rather than in the surrounding

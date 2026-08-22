@@ -355,6 +355,14 @@ public class FrameExtrapolator {
         // is one line per context rather than per frame.
         presented++;
         dumpOnce();
+        // Once per context, and late enough that the frames hold a real scene.
+        // See MotionProbe: the sibling extension is worth building on only if it
+        // actually estimates motion, and that is a question with a measurable
+        // answer rather than one to reason about.
+        if (presented >= DUMP_AFTER) {
+            MotionProbe.run(renderer, previousTarget().texture, latestTarget().texture,
+                            allocWidth, allocHeight);
+        }
         if (!announced) {
             announced = true;
             android.util.Log.i("FrameExtrapolator",
@@ -438,7 +446,7 @@ public class FrameExtrapolator {
     private static final boolean DUMP_ENABLED = false;
 
     /** Predictions to let pass before dumping, so the game is really drawing. */
-    private static final long DUMP_AFTER = 400;
+    private static final long DUMP_AFTER = 120;
 
     /**
      * Ask for one extra pass, half way to where the next real frame is expected.
