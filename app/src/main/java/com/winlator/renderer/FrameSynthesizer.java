@@ -1,195 +1,57 @@
 package com.winlator.renderer;
 
-import android.opengl.GLES20;
-import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
-import com.winlator.renderer.material.ScreenMaterial;
-import com.winlator.renderer.material.WarpMaterial;
-
 /**
- * VESSEL: frames the guest never drew, built from what the compositor knows.
+ * VESSEL: frames the guest never drew, and only the ones we can build exactly.
  *
  * <p>The temporal counterpart to {@link com.winlator.renderer.material.SGSRMaterial}:
  * that reconstructs across space, from a frame rendered below the panel's
- * resolution; this reconstructs across time, from frames arriving below its
- * refresh rate.
+ * resolution; this fills time between frames arriving below its refresh rate.
  *
- * <h2>Why this is not a call to the driver</h2>
+ * <h2>What is here, and what was removed</h2>
  *
- * <p>It was, and the driver lied. {@code GL_QCOM_frame_extrapolation} is
- * advertised on this device, accepts the call, returns {@code GL_NO_ERROR} and
- * writes an eight-pixel ramp -- {@code 16 48 80 112 143 175 207 239} repeating
- * across every row, standard deviation 2.3 in R across 8x8 blocks, no scene
- * structure at any scale. Proved by reading the destination back after five
- * fixes aimed at the call were all wrong. The spec declines to define output
- * quality and there is no conformance test, so a placeholder implementation is
- * undetectable except by looking, and nobody had looked: no public code anywhere
- * calls that entry point outside Qualcomm's own sample, whose only published
- * numbers are from a 2021 Adreno 660.
+ * <p><b>Window translation, and nothing else.</b> We are the compositor, so when
+ * a window moves we know the translation exactly. A synthesised frame
+ * re-composites the same window textures at carried-forward positions -- not an
+ * estimate of the motion, the motion itself, replayed a fraction of a frame on.
+ * There is no block matching, no warping and no filtering, so there is nothing
+ * to distort: every pixel comes from a real texture placed at a position the
+ * window really passed through. Nothing working from a screen capture can do
+ * this, which is every other frame-generation implementation on Android.
  *
- * <h2>The two tiers, cheapest first</h2>
+ * <p><b>An image-warping tier was built, measured, and taken out.</b> It used
+ * {@code GL_QCOM_motion_estimation} -- which, unlike its stubbed sibling
+ * {@code GL_QCOM_frame_extrapolation}, genuinely works, at 0.001 ms for a
+ * fixed-function block match -- followed by a 3x3 vector median, a
+ * forward-backward consistency test and a backward warp, all comfortably inside
+ * budget at about 1.4 ms. It still looked worse than showing the previous frame
+ * again, and no amount of filtering fixed it, because the filtering was never
+ * the problem.
  *
- * <p><b>Tier 0 -- window translation.</b> We are the compositor. When a window
- * moves we know the translation exactly, so a synthesised frame re-composites
- * the same window textures at carried-forward positions. Not an estimate: the
- * motion, replayed a fraction of a frame on. No block matching, no warping, no
- * inpainting, and therefore none of their artefacts. This is available to us and
- * to nobody else working from a screen capture, and for a Windows desktop --
- * dragged windows, sliding panels -- it is most of the motion there is.
+ * <p>The problem is the size of the guess. Frame generation divides the guest's
+ * frame cap by the multiple, so a 24 fps container at 4x renders six frames a
+ * second, and the last prediction of each interval is aimed 125 ms past anything
+ * real using vectors measured at up to a hundred pixels per pair. A block field
+ * carried that far stretches the picture, and detail that was never observed
+ * cannot be recovered by a median. Judged on the screen rather than on the
+ * timings -- which is the right way round, and was not how it got there.
  *
- * <p><b>Tier 1 -- hardware motion estimation and a backward warp.</b> When the
- * windows are still but their contents are not, the picture has to be examined.
- * {@code GL_QCOM_motion_estimation} is the sibling extension, and unlike the
- * other one it works: measured on this device at 44,590 non-zero vectors across
- * a moving scene, x in [-113, 90], y in [-110, 106]. It is a fixed-function
- * block matcher, so the expensive half of frame generation is free, and what is
- * left to write is a gather.
+ * <p>It is in the history if the aim ever gets small enough to be worth
+ * revisiting: a multiple of 2 against a frame rate limit high enough that the
+ * guest still renders 30 or more, so the prediction is 16 ms out and not 125.
  *
- * <p>Nothing else is attempted. A tier that cannot run yields, and a frame that
- * cannot be synthesised is simply not drawn -- which costs a little smoothness
- * and never costs correctness.
+ * <p><b>The honest scope of what remains:</b> a fullscreen game has one window
+ * that never moves, so this does nothing for it. It is for a desktop -- dragged
+ * windows, sliding panels -- where it is exact and free.
  */
 public class FrameSynthesizer implements FramePacer.Target {
     private static final String TAG = "FrameSynthesizer";
 
-    static {
-        System.loadLibrary("winlator");
-    }
-
-    private static native boolean resolveMotionEntryPoint();
-
-    private static native void texEstimateMotion(int ref, int target, int output);
-
-    private static final int MOTION_ESTIMATION_SEARCH_BLOCK_X_QCOM = 0x8C90;
-    private static final int MOTION_ESTIMATION_SEARCH_BLOCK_Y_QCOM = 0x8C91;
-    private static final String MOTION_EXTENSION = "GL_QCOM_motion_estimation";
-
-    /**
-     * Whether tier 1 is available, asked of the driver rather than assumed.
-     *
-     * <p>Cached against {@link GLRenderer#contextGeneration()} for the reason
-     * {@code SGSRMaterial.isSupported()} is: a new EGL context is a different
-     * driver state, and an answer from the old one describes something that is no
-     * longer being drawn to. Both halves are needed -- the string says the driver
-     * claims it, the resolve says {@code eglGetProcAddress} will hand over a
-     * function, and the extrapolation work is what proved those are different
-     * questions from "does it work".
-     */
-    public static boolean motionEstimationSupported() {
-        final int generation = GLRenderer.contextGeneration();
-        if (motionGeneration != generation) {
-            motionGeneration = generation;
-            motionSupported = false;
-            final String extensions = GLES20.glGetString(GLES20.GL_EXTENSIONS);
-            if (extensions != null) {
-                for (String name : extensions.split(" ")) {
-                    if (name.equals(MOTION_EXTENSION)) { motionSupported = true; break; }
-                }
-            }
-            if (motionSupported) motionSupported = resolveMotionEntryPoint();
-        }
-        return motionSupported;
-    }
-
-    private static int motionGeneration = -1;
-    private static boolean motionSupported = false;
-
-    /**
-     * Luma, because the extension requires it.
-     *
-     * <p>Reference and target must be {@code GL_R8}, and the spec says outright
-     * that estimation tracks brightness. Perceptual weights rather than a plain
-     * average: matching on what the eye calls brightness makes the block
-     * differences perceptually uniform, which is the same reason FidelityFX
-     * converts to L* before its own search.
-     */
-    private static final class LumaMaterial extends ScreenMaterial {
-        @Override
-        protected String getFragmentShader() {
-            return String.join("\n",
-                "precision mediump float;",
-                "uniform sampler2D screenTexture;",
-                "varying vec2 vUV;",
-                "void main() {",
-                    "vec3 c = texture2D(screenTexture, vUV).rgb;",
-                    "gl_FragColor = vec4(dot(c, vec3(0.299, 0.587, 0.114)), 0.0, 0.0, 1.0);",
-                "}"
-            );
-        }
-    }
-
-    /**
-     * A colour, luma or vector target with sized immutable storage.
-     *
-     * <p>Not {@link RenderTarget}: that allocates with {@code glTexImage2D} using
-     * {@link Texture#format} for both the internal and pixel format, defaulting to
-     * {@code GLES11Ext.GL_BGRA} -- right for a guest window upload and not a
-     * format any of this accepts. {@code glTexStorage2D} with a sized format is
-     * unambiguous, which matters for an extension that writes to a texture by
-     * name rather than through the pipeline.
-     */
-    private static final class Target {
-        int texture;
-        int framebuffer;
-        int width;
-        int height;
-
-        void allocate(int width, int height, int sizedFormat, int filter) {
-            this.width = width;
-            this.height = height;
-            final int[] names = new int[1];
-            GLES20.glGenTextures(1, names, 0);
-            texture = names[0];
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
-            GLES30.glTexStorage2D(GLES20.GL_TEXTURE_2D, 1, sizedFormat, width, height);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, filter);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, filter);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-
-            GLES20.glGenFramebuffers(1, names, 0);
-            framebuffer = names[0];
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
-            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
-                                          GLES20.GL_TEXTURE_2D, texture, 0);
-            // Cleared once at allocation. Nothing may ever present the contents of
-            // whatever last held this memory -- that is how the speckle got on
-            // screen while the extrapolation call was still trusted.
-            GLES20.glClearColor(0f, 0f, 0f, 1f);
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-
-        void release() {
-            if (framebuffer != 0) GLES20.glDeleteFramebuffers(1, new int[] {framebuffer}, 0);
-            if (texture != 0) GLES20.glDeleteTextures(1, new int[] {texture}, 0);
-            framebuffer = 0;
-            texture = 0;
-        }
-    }
-
     private final GLRenderer renderer;
     private final FramePacer pacer;
-    private final ScreenMaterial blitMaterial = new ScreenMaterial();
-    private final LumaMaterial lumaMaterial = new LumaMaterial();
-    private final WarpMaterial warpMaterial = new WarpMaterial();
-
-    private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
-    private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
-    private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
-    private final GpuTimer warpTimer = new GpuTimer("tier1 warp");
-    private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
-
-    private Target colourA, colourB, lumaA, lumaB, vectors;
-    private boolean latestIsB = false;
-    private int blockX = 8, blockY = 8;
-
-    private int allocWidth = 0;
-    private int allocHeight = 0;
-    private int allocGeneration = -1;
+    private final GpuTimer recompositeTimer = new GpuTimer("tier0 recomposite");
 
     private int multiple = 2;
     private volatile long realFrames = 0;
@@ -209,8 +71,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private static final long IDLE_NANOS = 250_000_000L;
 
-    private long tier0Frames = 0;
-    private long tier1Frames = 0;
+    private long synthesized = 0;
     private long skipped = 0;
     private long reportedAt = 0;
 
@@ -240,35 +101,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * Point the compositor at the offscreen colour target.
+     * Note that a real frame has been composited, and queue what follows it.
      *
-     * @return false when the targets could not be allocated, in which case the
-     *     caller composites to the screen exactly as it did before this existed.
+     * <p>No offscreen capture any more. The warping tier needed the finished
+     * frame as a texture; this one re-composites from the window textures the
+     * renderer already holds, so the extra full-screen copy -- measured at
+     * 0.8 ms, the most expensive pass in the whole pipeline -- went out with it.
      */
-    public boolean beginRealFrame() {
-        if (!ensureTargets()) return false;
-        captureTimer.begin();
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeColour().framebuffer);
-        return true;
-    }
-
-    /** Present the real frame, remember what it looked like, and queue the rest. */
     public void endRealFrame() {
-        final Target written = writeColour();
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        discard(true);
-        blit(blitMaterial, written.texture, renderer.surfaceWidth, renderer.surfaceHeight);
-        captureTimer.end();
-
-        // Luma for this frame, so the pair is ready without re-deriving the older
-        // one every time. Only when tier 1 can actually use it.
-        if (motionEstimationSupported()) {
-            lumaTimer.begin();
-            renderToTarget(lumaMaterial, written.texture, writeLuma());
-            lumaTimer.end();
-        }
-
-        latestIsB = !latestIsB;
         realFrames++;
         renderer.latchWindowPositions();
 
@@ -283,251 +123,36 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * Draw one synthesised frame, choosing the cheapest tier that applies.
-     *
-     * @param index which of the N-1 frames this is; t is index/N
+     * Re-composite the scene aimed {@code index/N} of the way to the next real
+     * frame.
      */
     public void presentSynthesized(int index) {
-        if (!ensureTargets() || realFrames < 2) return;
-        if (index < 1 || index >= multiple) return;
-        final float t = (float)index / (float)multiple;
+        if (realFrames < 2 || index < 1 || index >= multiple) return;
 
-        // Tier 0. Exact, and cheap enough that it is worth testing for first.
-        if (renderer.anyWindowMoved()) {
-            tier0Timer.begin();
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            renderer.drawSynthesizedFrame(t);
-            tier0Timer.end();
-            tier0Frames++;
+        // Nothing moved, so this frame would be a copy of the one before it --
+        // which costs a composite and shows the user nothing new.
+        if (!renderer.anyWindowMoved()) {
+            skipped++;
             return;
         }
 
-        // Tier 1. Only worth the passes when the driver does the matching.
-        if (motionEstimationSupported() && estimateMotion()) {
-            warpTimer.begin();
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            discard(true);
-            warp(latestColour(), t);
-            warpTimer.end();
-            tier1Frames++;
-            return;
-        }
-
-        // Neither applies: nothing moved that we can account for. Drawing a copy
-        // of the last frame would cost a composite and show nothing new.
-        skipped++;
+        recompositeTimer.begin();
+        renderer.drawSynthesizedFrame((float)index / (float)multiple);
+        recompositeTimer.end();
+        synthesized++;
     }
 
-    /**
-     * Run the hardware block matcher over the luma pair.
-     *
-     * @return false if the vectors could not be produced, in which case no warp
-     *     should be attempted -- an unwritten field would warp by garbage.
-     */
-    private boolean estimateMotion() {
-        if (lumaA == null || vectors == null) return false;
-        estimateTimer.begin();
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
-        final int error = GLES20.glGetError();
-        estimateTimer.end();
-        if (error != GLES20.GL_NO_ERROR) {
-            Log.e(TAG, "glTexEstimateMotionQCOM failed 0x" + Integer.toHexString(error));
-            return false;
-        }
-        return true;
-    }
-
-    /** Gather the latest frame along the field, aimed t of the way forward. */
-    private void warp(Target source, float t) {
-        GLES20.glViewport(0, 0, renderer.surfaceWidth, renderer.surfaceHeight);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        warpMaterial.use();
-        renderer.quadVertices.bind(warpMaterial.programId);
-        warpMaterial.setUniformBool(warpMaterial.uniforms.flipY, false);
-        // The field is in pixels between two real frames; dividing by the frame
-        // size puts it in texture space, and t aims it.
-        warpMaterial.setUniformVec2(warpMaterial.warpUniforms.motionScale,
-                                    t / Math.max(1, allocWidth), t / Math.max(1, allocHeight));
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
-        warpMaterial.setUniformInt(warpMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
-        warpMaterial.setUniformInt(warpMaterial.warpUniforms.motionTexture, 1);
-
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
-    }
-
-    private void renderToTarget(ScreenMaterial material, int source, Target destination) {
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
-        discard(false);
-        blit(material, source, destination.width, destination.height);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-    }
-
-    /**
-     * VESSEL: tell the tiler we do not want what is already in this target.
-     *
-     * <p>**A bind is a load unless you say otherwise, and every pass here
-     * overwrites every pixel.** Adreno renders into on-chip tile memory and
-     * resolves out to main memory at the end of a pass; binding a target it
-     * cannot prove is fully written makes it *unresolve* -- copy the old contents
-     * back in from memory first -- so a full-screen blit that needs none of that
-     * data still pays for reading it. Qualcomm's own `avoid_gmem_loads` sample
-     * measures the cost of getting this wrong at 37% of frame time, 18.24 ms
-     * against 25.15 ms.
-     *
-     * <p>{@code glClear} says the same thing and the compositor's own
-     * {@code drawFrame} already does it, which is why the colour capture is not
-     * listed here. Invalidate is the cheaper statement where a clear would only
-     * be overwritten a moment later.
-     *
-     * <p>The default framebuffer names its attachment {@code GL_COLOR}, not
-     * {@code GL_COLOR_ATTACHMENT0} -- passing the wrong one is an
-     * {@code INVALID_ENUM} that silently leaves the load in place.
-     */
-    private void discard(boolean defaultFramebuffer) {
-        DISCARD[0] = defaultFramebuffer ? GLES30.GL_COLOR : GLES20.GL_COLOR_ATTACHMENT0;
-        GLES30.glInvalidateFramebuffer(GLES20.GL_FRAMEBUFFER, 1, DISCARD, 0);
-    }
-
-    private static final int[] DISCARD = new int[1];
-
-    /**
-     * Draw a texture over the whole of the current target.
-     *
-     * <p>Blending off for the duration. The compositor enables
-     * SRC_ALPHA/ONE_MINUS_SRC_ALPHA once at context creation and leaves it on,
-     * which is right for stacking windows and wrong for a whole-surface copy: the
-     * letterbox is clear colour at alpha zero, so blended it would let the
-     * previous screen show through as a second, older image underneath.
-     */
-    private void blit(ScreenMaterial material, int texture, int width, int height) {
-        GLES20.glViewport(0, 0, width, height);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        material.use();
-        renderer.quadVertices.bind(material.programId);
-        material.setUniformBool(material.uniforms.flipY, false);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
-        material.setUniformInt(material.uniforms.screenTexture, 0);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-
-        GLES20.glEnable(GLES20.GL_BLEND);
-        // The blit bound a program behind bindWindowMaterial's back, and its
-        // one-glUseProgram-per-frame bookkeeping would otherwise let the next
-        // window pass draw with this shader.
-        renderer.invalidateBoundWindowMaterial();
-    }
-
-    private Target writeColour() { return latestIsB ? colourA : colourB; }
-    private Target latestColour() { return latestIsB ? colourB : colourA; }
-    private Target writeLuma() { return latestIsB ? lumaA : lumaB; }
-    private Target latestLuma() { return latestIsB ? lumaB : lumaA; }
-    private Target previousLuma() { return latestIsB ? lumaA : lumaB; }
-
-    private boolean ensureTargets() {
-        final int generation = GLRenderer.contextGeneration();
-        final int width = renderer.surfaceWidth;
-        final int height = renderer.surfaceHeight;
-        if (width <= 0 || height <= 0) return false;
-        if (colourA != null && allocWidth == width && allocHeight == height
-                && allocGeneration == generation) {
-            return true;
-        }
-
-        // Only delete when the names still mean something. A new generation means
-        // the objects went with the context that held them, and deleting those ids
-        // would destroy whatever now has them.
-        release(colourA != null && allocGeneration == generation);
-
-        colourA = new Target();
-        colourA.allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
-        colourB = new Target();
-        colourB.allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
-
-        if (motionEstimationSupported()) {
-            final int[] value = new int[1];
-            GLES20.glGetIntegerv(MOTION_ESTIMATION_SEARCH_BLOCK_X_QCOM, value, 0);
-            blockX = Math.max(1, value[0]);
-            GLES20.glGetIntegerv(MOTION_ESTIMATION_SEARCH_BLOCK_Y_QCOM, value, 0);
-            blockY = Math.max(1, value[0]);
-
-            // The luma pair must be an exact multiple of the search block, so the
-            // largest such rectangle is used rather than the whole surface.
-            final int lumaW = (width / blockX) * blockX;
-            final int lumaH = (height / blockY) * blockY;
-            if (lumaW > 0 && lumaH > 0) {
-                lumaA = new Target();
-                lumaA.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                lumaB = new Target();
-                lumaB.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                vectors = new Target();
-                vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-                Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
-                    + ", luma " + lumaW + "x" + lumaH
-                    + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
-            }
-        }
-
-        allocWidth = width;
-        allocHeight = height;
-        allocGeneration = generation;
-        latestIsB = false;
-        realFrames = 0;
-        lastRealFrameNanos = 0;
-        return true;
-    }
-
-    private void release(boolean deleteObjects) {
-        if (deleteObjects) {
-            if (colourA != null) colourA.release();
-            if (colourB != null) colourB.release();
-            if (lumaA != null) lumaA.release();
-            if (lumaB != null) lumaB.release();
-            if (vectors != null) vectors.release();
-        }
-        colourA = colourB = lumaA = lumaB = vectors = null;
-    }
-
-    /**
-     * Say once a second which tier is carrying the frames, and what it costs.
-     *
-     * <p>Both halves matter and neither is guessable. The counters say whether
-     * tier 0 is doing the work -- which it should be, for a desktop -- and the
-     * timers say whether the passes fit in the budget, which reasoning about the
-     * shader cannot answer because the cost is bandwidth and render-target
-     * switches rather than arithmetic.
-     */
+    /** Say once a second what is being drawn and what it costs. */
     private void report() {
         final long now = SystemClock.uptimeMillis();
-        captureTimer.report(now);
-        lumaTimer.report(now);
-        estimateTimer.report(now);
-        warpTimer.report(now);
-        tier0Timer.report(now);
+        recompositeTimer.report(now);
         if (now - reportedAt < 1000) return;
         reportedAt = now;
-        Log.i(TAG, "real " + realFrames + ", tier0 " + tier0Frames
-            + ", tier1 " + tier1Frames + ", skipped " + skipped
-            + ", " + multiple + "x");
-        tier0Frames = 0;
-        tier1Frames = 0;
+        if (synthesized > 0 || skipped > 0) {
+            Log.i(TAG, "real " + realFrames + ", synthesized " + synthesized
+                + ", skipped " + skipped + ", " + multiple + "x");
+        }
+        synthesized = 0;
         skipped = 0;
     }
 }

@@ -39,22 +39,7 @@
 typedef void (*PFN_glExtrapolateTex2DQCOM)(GLuint src1, GLuint src2, GLuint output,
                                            GLfloat scaleFactor);
 
-/*
- * GL_QCOM_motion_estimation, the sibling that hands back data we can look at.
- *
- * The reason to prefer it: `glExtrapolateTex2DQCOM` is a black box that turned
- * out to be a stub on this driver -- it accepts the call, reports no error, and
- * writes an eight-pixel ramp. This one produces a motion vector texture instead,
- * so whether the hardware is doing anything real is a question we can answer by
- * reading it, rather than by inferring from what the screen looks like.
- *
- * ref and target are R8 luma of the same size, a multiple of the search block;
- * output is RGBA16F sized ref/block, with the motion in pixels in R and G.
- */
-typedef void (*PFN_glTexEstimateMotionQCOM)(GLuint ref, GLuint target, GLuint output);
-
 static PFN_glExtrapolateTex2DQCOM extrapolate_tex_2d = NULL;
-static PFN_glTexEstimateMotionQCOM estimate_motion = NULL;
 
 /*
  * Resolve the entry point against the current context, and say whether it is
@@ -87,18 +72,4 @@ Java_com_winlator_renderer_FrameExtrapolator_extrapolateTex2D(JNIEnv *env, jclas
                                                               jfloat scaleFactor) {
     if (extrapolate_tex_2d == NULL) return;
     extrapolate_tex_2d((GLuint)src1, (GLuint)src2, (GLuint)output, (GLfloat)scaleFactor);
-}
-
-/* Resolve GL_QCOM_motion_estimation's entry point. See the typedef above. */
-JNIEXPORT jboolean JNICALL
-Java_com_winlator_renderer_FrameSynthesizer_resolveMotionEntryPoint(JNIEnv *env, jclass obj) {
-    estimate_motion = (PFN_glTexEstimateMotionQCOM)eglGetProcAddress("glTexEstimateMotionQCOM");
-    return estimate_motion != NULL ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT void JNICALL
-Java_com_winlator_renderer_FrameSynthesizer_texEstimateMotion(JNIEnv *env, jclass obj, jint ref,
-                                                         jint target, jint output) {
-    if (estimate_motion == NULL) return;
-    estimate_motion((GLuint)ref, (GLuint)target, (GLuint)output);
 }

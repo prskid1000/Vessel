@@ -291,12 +291,10 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
                 if (listener != null) listener.onFrameEnd();
                 return;
             }
-            if (frameSynthesizer.beginRealFrame()) {
-                drawFrame();
-                frameSynthesizer.endRealFrame();
-                if (listener != null) listener.onFrameEnd();
-                return;
-            }
+            drawFrame();
+            frameSynthesizer.endRealFrame();
+            if (listener != null) listener.onFrameEnd();
+            return;
             // Allocation failed. Fall through and composite to the screen, which
             // is what this did before the extrapolator existed.
         }
