@@ -256,6 +256,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     public void endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        discard(true);
         blit(blitMaterial, written.texture, renderer.surfaceWidth, renderer.surfaceHeight);
         captureTimer.end();
 
@@ -305,6 +306,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (motionEstimationSupported() && estimateMotion()) {
             warpTimer.begin();
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            discard(true);
             warp(latestColour(), t);
             warpTimer.end();
             tier1Frames++;
@@ -370,9 +372,38 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
+        discard(false);
         blit(material, source, destination.width, destination.height);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
+
+    /**
+     * VESSEL: tell the tiler we do not want what is already in this target.
+     *
+     * <p>**A bind is a load unless you say otherwise, and every pass here
+     * overwrites every pixel.** Adreno renders into on-chip tile memory and
+     * resolves out to main memory at the end of a pass; binding a target it
+     * cannot prove is fully written makes it *unresolve* -- copy the old contents
+     * back in from memory first -- so a full-screen blit that needs none of that
+     * data still pays for reading it. Qualcomm's own `avoid_gmem_loads` sample
+     * measures the cost of getting this wrong at 37% of frame time, 18.24 ms
+     * against 25.15 ms.
+     *
+     * <p>{@code glClear} says the same thing and the compositor's own
+     * {@code drawFrame} already does it, which is why the colour capture is not
+     * listed here. Invalidate is the cheaper statement where a clear would only
+     * be overwritten a moment later.
+     *
+     * <p>The default framebuffer names its attachment {@code GL_COLOR}, not
+     * {@code GL_COLOR_ATTACHMENT0} -- passing the wrong one is an
+     * {@code INVALID_ENUM} that silently leaves the load in place.
+     */
+    private void discard(boolean defaultFramebuffer) {
+        DISCARD[0] = defaultFramebuffer ? GLES30.GL_COLOR : GLES20.GL_COLOR_ATTACHMENT0;
+        GLES30.glInvalidateFramebuffer(GLES20.GL_FRAMEBUFFER, 1, DISCARD, 0);
+    }
+
+    private static final int[] DISCARD = new int[1];
 
     /**
      * Draw a texture over the whole of the current target.
