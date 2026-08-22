@@ -127,19 +127,30 @@ public class FrameSynthesizer implements FramePacer.Target {
      * frame.
      */
     public void presentSynthesized(int index) {
-        if (realFrames < 2 || index < 1 || index >= multiple) return;
-
-        // Nothing moved, so this frame would be a copy of the one before it --
-        // which costs a composite and shows the user nothing new.
-        if (!renderer.anyWindowMoved()) {
-            skipped++;
-            return;
+        // **Every path through here must draw, and the one that did not caused a
+        // flicker.** GLSurfaceView swaps the buffer after onDrawFrame whether or
+        // not anything was rendered into it, so returning early does not skip a
+        // frame -- it presents an unwritten back buffer, which on a
+        // double-buffered surface holds the frame from two swaps ago. The result
+        // is the display alternating between the current picture and an old one,
+        // which reads as flicker and looks like a fault in the synthesis rather
+        // than in the decision not to synthesise.
+        //
+        // So a frame that cannot be predicted is composited as it is, at t = 0.
+        // That costs one composite and shows the same picture again, which is
+        // exactly what "no new information" should look like.
+        float t = 0f;
+        boolean predicted = false;
+        if (realFrames >= 2 && index >= 1 && index < multiple && renderer.anyWindowMoved()) {
+            t = (float)index / (float)multiple;
+            predicted = true;
         }
 
         recompositeTimer.begin();
-        renderer.drawSynthesizedFrame((float)index / (float)multiple);
+        renderer.drawSynthesizedFrame(t);
         recompositeTimer.end();
-        synthesized++;
+
+        if (predicted) synthesized++; else skipped++;
     }
 
     /** Say once a second what is being drawn and what it costs. */
