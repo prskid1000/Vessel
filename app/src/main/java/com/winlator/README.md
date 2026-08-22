@@ -962,6 +962,7 @@ fails the build.
 | `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
 | `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22, 31 |
 | `app/src/main/java/com/winlator/renderer/FrameExtrapolator.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/MotionProbe.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
