@@ -957,6 +957,8 @@ class SessionRuntime @Inject constructor(
             frameGeneration = parseFrameGeneration(
                 text(profile, manifest, DisplayParams.FRAME_GENERATION),
             ),
+            frameGenerationDivides = text(profile, manifest, DisplayParams.FRAME_GENERATION_MODE)
+                != DisplayParams.FRAME_GENERATION_MODE_SMOOTHNESS,
             hardware = hardware,
             // Read here rather than in `sessionEnvironment` because it needs a
             // `Context` and that function is pure by contract. See the parameter.

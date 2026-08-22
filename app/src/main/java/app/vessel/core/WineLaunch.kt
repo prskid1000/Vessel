@@ -399,6 +399,31 @@ object DisplayParams {
 
     /** [FRAME_GENERATION]'s "do not", beside the multiples 2, 3 and 4. */
     const val FRAME_GENERATION_OFF: String = "off"
+
+    /**
+     * What [FPS_LIMIT] counts when [FRAME_GENERATION] is on.
+     *
+     * The multiple has to come from somewhere, and there are only two places it
+     * can: the guest renders a fraction of the limit and the compositor fills
+     * back up to it, or the guest renders the limit and the compositor presents a
+     * multiple of it. They are different features wearing the same setting.
+     *
+     * **The first saves power; the second is the one that looks good, and the
+     * reason is the distance between the two real frames.** Every interpolation
+     * error grows with it — the block matcher's search range, the area uncovered
+     * during the interval, and the assumption that anything moved in a straight
+     * line while it passed. Dividing a 24 fps limit by 2 leaves the guest drawing
+     * every 83 ms, and interpolating across 83 ms of a moving scene is a much
+     * harder question than the same code answers easily across 17 ms. It also
+     * costs latency, which is a fixed fraction of that same interval.
+     */
+    const val FRAME_GENERATION_MODE: String = "display.frameGenerationMode"
+
+    /** [FRAME_GENERATION_MODE]: the limit is what the screen shows. */
+    const val FRAME_GENERATION_MODE_EFFICIENCY: String = "efficiency"
+
+    /** [FRAME_GENERATION_MODE]: the limit is what the guest draws. */
+    const val FRAME_GENERATION_MODE_SMOOTHNESS: String = "smoothness"
 }
 
 /**

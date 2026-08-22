@@ -172,7 +172,7 @@
         {
           "key": "display.frameGeneration",
           "title": "Multiple",
-          "help": "Shows frames the guest never drew, predicted by the GPU from the last two it did, through GL_QCOM_frame_extrapolation. Frame rate limit becomes what the screen shows: the game is capped at that divided by this multiple, so 120 fps at 2x renders 60 and presents 120 — a game left to render flat out has no GPU left over to predict with. EXPERIMENTAL: on this device the driver accepts the call and reports no error, but the predicted frames come back as colour speckle, so turning this on shows dots and flicker. Everything behaves normally with it Off.",
+          "help": "Shows frames the guest never drew, built between the last two it did rather than guessed past them: the GPU’s block matcher measures where everything moved, and each synthesised frame reads both real frames along that motion. Costs one frame of latency, because a frame cannot be shown until the frames belonging before it have been. Sharpest at 2x. EXPERIMENTAL.",
           "type": "enum",
           "options": [
             "off",
@@ -185,11 +185,27 @@
           "default": "off",
           "optionLabels": {
             "off": "Off",
-            "2": "2x  (game renders half)",
-            "3": "3x  (game renders a third)",
-            "4": "4x  (game renders a quarter)",
-            "6": "6x  (game renders a sixth)",
-            "8": "8x  (game renders an eighth)"
+            "2": "2x",
+            "3": "3x",
+            "4": "4x",
+            "6": "6x",
+            "8": "8x"
+          },
+          "section": "Frame generation"
+        },
+        {
+          "key": "display.frameGenerationMode",
+          "title": "What the frame rate limit counts",
+          "help": "Efficiency caps the game at the limit divided by the multiple and fills the rest in, so the screen still shows the limit and the game does a fraction of the work. Smoothness lets the game render at the full limit and presents the multiple of it. Smoothness looks considerably better — the two real frames are that many times closer together, which is what every part of the interpolation depends on — and it also cuts the added latency by the same factor. It costs GPU, because the game really does render every frame of the limit.",
+          "type": "enum",
+          "options": [
+            "efficiency",
+            "smoothness"
+          ],
+          "default": "efficiency",
+          "optionLabels": {
+            "efficiency": "Frames shown  (game renders limit ÷ multiple)",
+            "smoothness": "Frames drawn  (game renders the limit)"
           },
           "section": "Frame generation"
         }

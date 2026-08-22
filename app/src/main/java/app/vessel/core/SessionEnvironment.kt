@@ -1488,6 +1488,17 @@ fun sessionEnvironment(
      */
     frameGeneration: Int = 0,
     /**
+     * Whether [frameGeneration] divides [fpsLimit] or multiplies it.
+     *
+     * True is `display.frameGenerationMode` at its default, `efficiency`: the
+     * limit counts presented frames and the guest is capped at its fraction.
+     * False is `smoothness`: the limit counts the guest's own frames and the
+     * compositor presents the multiple. See [DisplayParams.FRAME_GENERATION_MODE]
+     * for why the second is the one that looks better and the first is the one
+     * that saves power.
+     */
+    frameGenerationDivides: Boolean = true,
+    /**
      * What the guest is told this phone has, already resolved.
      *
      * Passed in for the same reason [fpsLimit] is: the session needs these
@@ -2073,7 +2084,9 @@ fun sessionEnvironment(
     // rates have to be the ones described here or the pacer suppresses exactly
     // the frames this exists to add.
     fpsLimit?.takeIf { it > 0 }?.let { limit ->
-        val rendered = if (frameGeneration >= 2) maxOf(1, limit / frameGeneration) else limit
+        val rendered =
+            if (frameGeneration >= 2 && frameGenerationDivides) maxOf(1, limit / frameGeneration)
+            else limit
         // **`DXVK_FRAME_RATE` does not exist in the DXVK this ships, and setting
         // it has never capped anything.** The variable was removed upstream --
         // vkd3d's own changelog records dropping its copy "to align with DXVK's

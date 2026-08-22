@@ -128,10 +128,11 @@ class SessionEnvironmentTest {
         display: String = DEFAULT_DISPLAY,
         fpsLimit: Int? = null,
         frameGeneration: Int = 0,
+        frameGenerationDivides: Boolean = true,
         hardware: HardwareLimits? = null,
     ) = sessionEnvironment(
         container(params), manifest, paths, driver, fexPackage, display, fpsLimit,
-        frameGeneration, hardware,
+        frameGeneration, frameGenerationDivides, hardware,
     )
 
     // — the logging contract --------------------------------------------------
@@ -625,6 +626,30 @@ class SessionEnvironmentTest {
             environment["DXVK_CONFIG"].orEmpty().contains("dxvk.maxFrameRate = 60"),
         )
         assertEquals("60", environment["VKD3D_FRAME_RATE"])
+    }
+
+    @Test
+    fun `smoothness mode leaves the guest at the full limit`() {
+        // The multiple has to come from somewhere. Efficiency takes it out of
+        // what the guest draws; smoothness takes it out of the GPU. See
+        // DisplayParams.FRAME_GENERATION_MODE for why the second looks better:
+        // the two real frames the compositor interpolates between are that many
+        // times closer together.
+        val environment = env(
+            fpsLimit = 120,
+            frameGeneration = 2,
+            frameGenerationDivides = false,
+        )
+        assertTrue(environment["DXVK_CONFIG"]!!.contains("dxvk.maxFrameRate = 120"))
+        assertEquals("120", environment["VKD3D_FRAME_RATE"])
+    }
+
+    @Test
+    fun `the mode does nothing at all with frame generation off`() {
+        val divided = env(fpsLimit = 60, frameGenerationDivides = true)
+        val whole = env(fpsLimit = 60, frameGenerationDivides = false)
+        assertEquals(divided["DXVK_CONFIG"], whole["DXVK_CONFIG"])
+        assertEquals("60", whole["VKD3D_FRAME_RATE"])
     }
 
     @Test
