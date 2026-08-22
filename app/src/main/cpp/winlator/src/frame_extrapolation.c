@@ -91,13 +91,13 @@ Java_com_winlator_renderer_FrameExtrapolator_extrapolateTex2D(JNIEnv *env, jclas
 
 /* Resolve GL_QCOM_motion_estimation's entry point. See the typedef above. */
 JNIEXPORT jboolean JNICALL
-Java_com_winlator_renderer_MotionProbe_resolveEntryPoint(JNIEnv *env, jclass obj) {
+Java_com_winlator_renderer_FrameSynthesizer_resolveMotionEntryPoint(JNIEnv *env, jclass obj) {
     estimate_motion = (PFN_glTexEstimateMotionQCOM)eglGetProcAddress("glTexEstimateMotionQCOM");
     return estimate_motion != NULL ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_winlator_renderer_MotionProbe_texEstimateMotion(JNIEnv *env, jclass obj, jint ref,
+Java_com_winlator_renderer_FrameSynthesizer_texEstimateMotion(JNIEnv *env, jclass obj, jint ref,
                                                          jint target, jint output) {
     if (estimate_motion == NULL) return;
     estimate_motion((GLuint)ref, (GLuint)target, (GLuint)output);

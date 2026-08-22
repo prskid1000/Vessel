@@ -223,16 +223,16 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
      * are the size of the surface and a container that will never use them
      * should not be paying for them.
      */
-    private FrameExtrapolator frameExtrapolator;
+    private FrameSynthesizer frameSynthesizer;
 
     /** Presented frames per real frame. Below 2 means off. */
     private int frameGenerationMultiplier = 0;
 
-    /** VESSEL: see {@link FrameExtrapolator}. Below 2 switches it off. */
+    /** VESSEL: see {@link FrameSynthesizer}. Below 2 switches it off. */
     public void setFrameGenerationMultiplier(int multiplier) {
         this.frameGenerationMultiplier = multiplier;
-        if (frameExtrapolator != null && multiplier >= 2) {
-            frameExtrapolator.setMultiplier(multiplier);
+        if (frameSynthesizer != null && multiplier >= 2) {
+            frameSynthesizer.setMultiple(multiplier);
         }
         xServerView.requestRender();
     }
@@ -249,10 +249,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     private boolean extrapolating() {
         if (frameGenerationMultiplier < 2) return false;
         if (effectComposer.hasEffects()) return false;
-        if (!FrameExtrapolator.isSupported()) return false;
-        if (frameExtrapolator == null) {
-            frameExtrapolator = new FrameExtrapolator(this);
-            frameExtrapolator.setMultiplier(frameGenerationMultiplier);
+        if (frameSynthesizer == null) {
+            frameSynthesizer = new FrameSynthesizer(this);
+            frameSynthesizer.setMultiple(frameGenerationMultiplier);
         }
         return true;
     }
@@ -286,15 +285,15 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         }
 
         if (extrapolating()) {
-            final int synthesized = frameExtrapolator.consumeSynthesizedFrame();
+            final int synthesized = frameSynthesizer.consumePending();
             if (synthesized > 0) {
-                frameExtrapolator.presentSynthesizedFrame(synthesized);
+                frameSynthesizer.presentSynthesized(synthesized);
                 if (listener != null) listener.onFrameEnd();
                 return;
             }
-            if (frameExtrapolator.beginRealFrame()) {
+            if (frameSynthesizer.beginRealFrame()) {
                 drawFrame();
-                frameExtrapolator.endRealFrame();
+                frameSynthesizer.endRealFrame();
                 if (listener != null) listener.onFrameEnd();
                 return;
             }
@@ -543,6 +542,53 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     /** VESSEL: which of the two window materials is bound, within one pass. */
     private ShaderMaterial boundWindowMaterial;
 
+    /**
+     * VESSEL: how far past the last real composite this frame is aimed.
+     *
+     * <p>Zero for a real frame, so the ordinary path is untouched. A fraction for
+     * a synthesised one -- 0.5 puts it halfway to where the next real frame is
+     * expected. See {@link RenderableWindow#previousRootX} for why this is exact
+     * rather than estimated.
+     */
+    private float synthesisT = 0f;
+
+    /**
+     * Remember where every window is, so the next synthesised frame can carry it
+     * forward. Called once per real composite, after it has been drawn.
+     */
+    void latchWindowPositions() {
+        for (RenderableWindow window : renderableWindows) {
+            window.previousRootX = window.rootX;
+            window.previousRootY = window.rootY;
+        }
+    }
+
+    /**
+     * Whether any window moved between the last two real composites.
+     *
+     * <p>The gate for this tier. Nothing moved means a synthesised frame would be
+     * a byte-for-byte copy of the one before it, which is worse than not drawing:
+     * it costs a composite and shows the user nothing new.
+     */
+    boolean anyWindowMoved() {
+        for (RenderableWindow window : renderableWindows) {
+            if (window.rootX != window.previousRootX || window.rootY != window.previousRootY) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Composite the whole scene aimed at {@code t} frames past the last real one. */
+    void drawSynthesizedFrame(float t) {
+        synthesisT = t;
+        try {
+            drawFrame();
+        } finally {
+            synthesisT = 0f;
+        }
+    }
+
     private void renderWindows() {
         // VESSEL: the material is chosen per window now, so the pass opens with
         // nothing bound rather than with the bilinear one bound unconditionally.
@@ -551,7 +597,15 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
             for (RenderableWindow window : renderableWindows) {
                 if (!window.content.isOffscreenStorage()) {
-                    renderWindowDrawable(window.content, window.rootX, window.rootY, window.transparent, window.fullscreenTransformation);
+                    // VESSEL: carried forward on a synthesised frame. See
+                    // RenderableWindow.previousRootX -- at synthesisT == 0 this is
+                    // exactly the position the window has, so the real path is
+                    // unchanged and costs one multiply it will optimise away.
+                    final int x = window.rootX
+                        + Math.round((window.rootX - window.previousRootX) * synthesisT);
+                    final int y = window.rootY
+                        + Math.round((window.rootY - window.previousRootY) * synthesisT);
+                    renderWindowDrawable(window.content, x, y, window.transparent, window.fullscreenTransformation);
                 }
             }
         }
