@@ -1,0 +1,174 @@
+ntdll: give ARM64EC translation a thread stack it can survive on.
+
+In ARM64EC translation under FEX, exception dispatches push ARM64EC_NT_XCONTEXT
+frames (3.3 KB each), and guest x64 code executes on the CHPE v2 emulator stack.
+The default CHPE stack was hardcoded to only 256 KB (0x40000), which overflows
+instantly during Electron / V8 JIT recursive execution and CreateWindowEx.
+Raising chpev2_stack_size and the virtual_alloc_thread_stack floor to 8 MB
+provides ample headroom.
+
+This patch used to carry a second, unrelated change: it clamped any pure
+MEM_RESERVE larger than 8 GB down to 8 GB and reported success, so that V8's
+1.47 TB pointer-compression cage would not fail outright on a 39-bit-VA kernel.
+That half is removed, because it did not do what it claimed.
+
+V8 does not merely commit inside the cage it asked for -- it *validates* the
+reservation it was given, rejects one of the wrong size, releases it, and asks
+again at a smaller size. It has a fallback ladder, and it walks it: measured on
+device, 1.5 TB, then 516 GB, 260 GB, 132 GB, 68 GB, 64 GB, 36 GB, 16 GB, three
+attempts a rung.
+
+Reporting success for a request that was not honoured breaks that ladder. V8
+can never descend past a rung it believes it cleared, so it loops: 36,043
+clamped reservations in one session, 59,601 attempts at a single size, and an
+Electron renderer pinned at 100% of a core that never paints a window. Each
+rejected 8 GB release also made FEX invalidate 8 GB of translations --
+524,288 times -- which is the JIT thrash that made this look like an emulator
+bug for a day.
+
+Failing honestly is what the ladder needs, and the address space was never the
+obstacle: every rung from 48 GB down fits in the 512 GB a 39-bit kernel gives.
+The clamp was not protecting V8 from a small address space. It was preventing
+V8 from finding the size that fits in it.
+
+It also carries the reservation ceiling that used to live here as an
+unconditional 8 GB clamp. That clamp was deleted at revision 61 because it
+reported success for a reservation it had not honoured, which stops V8 descending
+its fallback ladder; it comes back as WINE_MAX_RESERVATION_GB, defaulting to off,
+so V8 keeps the honest failure it needs while a container running an allocator
+that treats a large reservation as pass-or-die can opt back into the old lie. The
+long form is on the function itself.
+
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 9ee9239947f..76dbf7f71f5 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1247,7 +1247,11 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
+     if (is_arm64ec())
+     {
+         CHPE_V2_CPU_AREA_INFO *cpu_area;
+-        const SIZE_T chpev2_stack_size = 0x40000;
++        /* Vessel: Expand CHPE v2 emulator stack from 256 KB to at least 8 MB
++         * (or image MaximumStackSize). Guest x64 code under FEX runs on this
++         * emulator stack, and 256 KB overflows immediately during deep recursion,
++         * V8 compilation, and SEH dispatching. */
++        const SIZE_T chpev2_stack_size = max( (SIZE_T)8 * 1024 * 1024, max( reserve_size, commit_size ) );
+ 
+         /* emulator stack */
+         if ((status = virtual_alloc_thread_stack( &stack, limit_4g, 0, chpev2_stack_size, chpev2_stack_size, FALSE )))
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index b18593e0f19..eb4468e23e9 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4791,7 +4791,10 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+     if (!commit_size) commit_size = main_image_info.CommittedStackSize;
+ 
+     size = max( reserve_size, commit_size );
+-    if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
++    /* Vessel: ARM64EC translation frames and V8/Electron recursive workloads require
++     * a generous stack (at least 8 MB). Default 256KB-1MB stacks overflow quickly under
++     * ARM64EC_NT_XCONTEXT exception dispatching. */
++    if (size < 8 * 1024 * 1024) size = 8 * 1024 * 1024;
+     size = ROUND_SIZE( 0, size, granularity_mask );
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5816,10 +5816,75 @@ static SIZE_T commit_granularity_mask(void)
+                 WARN( "commit granularity is %u KB, not the page size; commits will be rounded up\n", kb );
+         }
+     }
+     return mask;
+ }
+ 
++/* Vessel: a ceiling on a pure reservation, chosen per container.
++ *
++ * **This was an unconditional 8 GB clamp and it had to go, because it lied.** A
++ * pure MEM_RESERVE larger than 8 GB was silently cut to 8 GB and reported as
++ * success. V8 does not merely commit inside its pointer-compression cage: it
++ * validates the reservation it was handed, rejects one of the wrong size,
++ * releases it and asks again smaller, walking a ladder from 1.5 TB down. A
++ * success it never got is a rung it can never descend past, so the ladder stops
++ * dead -- one Electron session took 36,043 clamped reservations and 59,601
++ * attempts at a single size, forever. That is why the clamp was deleted
++ * outright at revision 61, and why nothing here restores it by default.
++ *
++ * What the deletion cost, which revision 61 predicted and did not measure. Not
++ * every caller walks a ladder. An allocator that reserves a large range once
++ * and treats failure as fatal -- Unreal's Binned3 asks for up to 512 GB and
++ * aborts if it cannot have it -- was being carried by the lie, and a 39-bit-VA
++ * kernel hands out 512 GB of user address space in total, so the honest answer
++ * to that request is no.
++ *
++ * **Those two callers want opposite answers to the same question, and the
++ * request does not distinguish them.** V8 needs the failure in order to
++ * descend; Binned3 needs the success in order to start. Both arrive as a pure
++ * MEM_RESERVE with no base and a size that does not fit. No threshold, no
++ * protection flag and no alignment separates them, which is the whole reason
++ * this is a setting and not a heuristic -- a heuristic here would be the 8 GB
++ * clamp again, wearing a larger number.
++ *
++ * So it defaults to off, and off is byte-for-byte the behaviour of revision 61.
++ * V8, Chromium, Electron and VS Code are unaffected by this patch existing:
++ * they get the honest STATUS_NO_MEMORY that lets the ladder find the rung that
++ * fits, which is what made them work in the first place. A container running a
++ * title that dies on a large reservation sets WINE_MAX_RESERVATION_GB to a size
++ * that does fit, and pays the old price knowingly -- the guest is told it owns
++ * address space it does not, and a program that reads back what it reserved
++ * finds a different number than it asked for.
++ *
++ * Deliberately the same shape as WINE_COMMIT_GRANULARITY_KB above: a property
++ * of the machine a program expects, which this kernel does not have, named as a
++ * per-container choice rather than decided once for everybody.
++ */
++static SIZE_T max_reservation_size(void)
++{
++    static SIZE_T limit = ~(SIZE_T)0;
++
++    if (limit == ~(SIZE_T)0)
++    {
++        const char *e = getenv( "WINE_MAX_RESERVATION_GB" );
++        unsigned int gb = e ? atoi( e ) : 0;   /* off unless a container asks */
++
++        /* Above 256 GB there is nothing left on a 39-bit kernel for the clamp
++         * to land in, so a value that large is a typo rather than a request. */
++        if (!gb || gb > 256) limit = 0;
++        else
++        {
++            limit = (SIZE_T)gb << 30;
++            /* WARN rather than ERR, once per process, for the reason
++             * commit_granularity_mask gives directly above: this is a statement
++             * of configuration and not a failure, and a session has many
++             * processes. Enable warn+virtual to confirm the setting took. */
++            WARN( "pure reservations above %u GB will be clamped to it\n", gb );
++        }
++    }
++    return limit;
++}
++
+ 
+ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
+                                          ULONG_PTR limit_low, ULONG_PTR limit_high,
+                                          ULONG_PTR align, ULONG attributes )
+@@ -5887,6 +5949,20 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+         if ((type & MEM_COMMIT) && commit_granularity_mask() != page_mask)
+             size = ROUND_SIZE( base, size, commit_granularity_mask() );
+ 
++        /* Vessel: a reservation this kernel cannot honour, clamped only if the
++         * container asked for that. See max_reservation_size -- the default is
++         * off, which is the honest STATUS_NO_MEMORY that lets V8 walk its
++         * fallback ladder down to a size that fits. Pure reservations only: one
++         * that commits is asking for memory rather than for address space, and
++         * shortening it would hand back a buffer smaller than the caller sized
++         * its writes for. */
++        if ((type & MEM_RESERVE) && !(type & MEM_COMMIT) && !base
++            && max_reservation_size() && size > max_reservation_size())
++        {
++            WARN( "oversized reservation of 0x%lx bytes clamped to 0x%lx\n", size, max_reservation_size() );
++            size = max_reservation_size();
++        }
++
+         if (!(status = get_vprot_flags( protect, &vprot, FALSE )))
+         {
+             if (type & MEM_COMMIT) vprot |= VPROT_COMMITTED;
