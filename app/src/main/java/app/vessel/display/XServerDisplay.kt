@@ -2775,6 +2775,16 @@ private class PacedXServerView(
     private fun renderNow() = super.requestRender()
 
     /**
+     * Straight through, with the limiter skipped and its clock left alone.
+     *
+     * The caller is the frame synthesiser, whose frames are already placed
+     * against vsync — see [XServerView.requestRenderUnpaced]. [lastFrameNanos] is
+     * deliberately not touched: it budgets the *guest's* frames, and letting a
+     * synthesised one consume that budget would suppress the next real composite.
+     */
+    override fun requestRenderUnpaced() = renderNow()
+
+    /**
      * Widen the hint session to a guest process, when one is known.
      *
      * Called from whatever notices the desktop window and its `_NET_WM_PID` —

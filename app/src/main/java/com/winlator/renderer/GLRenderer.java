@@ -285,7 +285,7 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         }
 
         if (extrapolating()) {
-            final int synthesized = frameSynthesizer.consumePending();
+            final long synthesized = frameSynthesizer.consumePending();
             if (synthesized > 0) {
                 frameSynthesizer.presentSynthesized(synthesized);
                 if (listener != null) listener.onFrameEnd();
@@ -545,12 +545,18 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     /**
      * VESSEL: how far past the last real composite this frame is aimed.
      *
-     * <p>Zero for a real frame, so the ordinary path is untouched. A fraction for
-     * a synthesised one -- 0.5 puts it halfway to where the next real frame is
-     * expected. See {@link RenderableWindow#previousRootX} for why this is exact
-     * rather than estimated.
+     * <p>**One for a real frame, and it used to be zero.** The tier reads as an
+     * interpolation now, matching the pipeline around it: phase 0 is the previous
+     * composite and phase 1 is this one, so a real frame is phase 1 and lands
+     * exactly where the window is. The old form added {@code (root - previous)*t}
+     * on top of the *current* position, which carried the window past frame N
+     * rather than between N-1 and N -- an extrapolation left over from the design
+     * before this one. Windows ran ahead and snapped back on every real frame.
+     *
+     * <p>See {@link RenderableWindow#previousRootX} for why this is exact rather
+     * than estimated.
      */
-    private float synthesisT = 0f;
+    private float synthesisT = 1f;
 
     /**
      * Remember where every window is, so the next synthesised frame can carry it
@@ -585,7 +591,7 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         try {
             drawFrame();
         } finally {
-            synthesisT = 0f;
+            synthesisT = 1f;
         }
     }
 
@@ -597,13 +603,14 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
             for (RenderableWindow window : renderableWindows) {
                 if (!window.content.isOffscreenStorage()) {
-                    // VESSEL: carried forward on a synthesised frame. See
-                    // RenderableWindow.previousRootX -- at synthesisT == 0 this is
-                    // exactly the position the window has, so the real path is
-                    // unchanged and costs one multiply it will optimise away.
-                    final int x = window.rootX
+                    // VESSEL: placed between the last two composites on a
+                    // synthesised frame. See RenderableWindow.previousRootX -- at
+                    // synthesisT == 1 this is exactly the position the window has,
+                    // so the real path is unchanged and costs one multiply it will
+                    // optimise away.
+                    final int x = window.previousRootX
                         + Math.round((window.rootX - window.previousRootX) * synthesisT);
-                    final int y = window.rootY
+                    final int y = window.previousRootY
                         + Math.round((window.rootY - window.previousRootY) * synthesisT);
                     renderWindowDrawable(window.content, x, y, window.transparent, window.fullscreenTransformation);
                 }

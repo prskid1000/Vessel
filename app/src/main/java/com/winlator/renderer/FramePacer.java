@@ -23,11 +23,19 @@ import android.view.Choreographer;
  *
  * <h2>Aiming</h2>
  *
- * <p>The target is the midpoint between the last real frame and the next one
- * expected -- or, for a multiple of N, the i-th of N-1 evenly spaced points. A
+ * <p>The target is the i-th of N evenly spaced points across the interval. A
  * vsync is accepted as that point when it is the closest one to it, which is the
  * best any display can do: a frame shown at a refresh boundary is shown, and a
  * frame aimed between two of them is shown at whichever comes first anyway.
+ *
+ * <p><b>Evenly, and it used to be nine tenths of evenly.</b> The bias existed to
+ * win a race against the next real frame, back when a callback that fired late
+ * showed a moment that had already been drawn. It cost more than it bought: K
+ * phases compressed into {@code 0.9(K-1)/K} of an interval, then a hold for the
+ * remainder -- motion running fast and then stopping, every interval. The
+ * synthesiser now reads the moment to show from the vsync timestamp this hands
+ * it, so a late callback shows a later moment instead of a wrong one, and the
+ * aim can be what it should always have been.
  *
  * <p>The pacer never asks for a frame it has already missed. If the real frame
  * for this interval has already been superseded, the synthesised one is dropped
@@ -36,8 +44,13 @@ import android.view.Choreographer;
  */
 class FramePacer {
     interface Target {
-        /** Called on the UI thread when a synthesised frame is due. */
-        void onSynthesisDue(int index);
+        /**
+         * Called on the UI thread when a synthesised frame is due.
+         *
+         * @param vsyncNanos the timestamp of the display frame being composed,
+         *     which is what decides the moment to show. See the class comment.
+         */
+        void onSynthesisDue(long vsyncNanos);
 
         /** Frames composited for real, for the staleness check. */
         long realFrameCount();
@@ -75,16 +88,9 @@ class FramePacer {
         if (multiple < 2 || intervalNanos <= 0) return;
         final long stamp = target.realFrameCount();
         for (int i = 1; i < multiple; i++) {
-            final int index = i;
-            // **Aimed slightly early, on purpose.** A prediction is only worth
-            // showing before the frame it predicts arrives, and the interval is an
-            // estimate -- so aiming exactly at i/N means half the time the real
-            // frame wins the race and the prediction is discarded. Landing a
-            // little before the ideal point costs a fraction of a frame of
-            // evenness and converts a coin flip into a frame that is actually
-            // shown.
-            final long dueNanos = System.nanoTime()
-                + (intervalNanos * i * EARLY_NUMERATOR) / (multiple * EARLY_DENOMINATOR);
+            // Evenly spaced across the interval. See the class comment for why
+            // there is no longer a bias here.
+            final long dueNanos = System.nanoTime() + (intervalNanos * i) / multiple;
             main.post(() -> {
                 final Choreographer choreographer = Choreographer.getInstance();
                 choreographer.postFrameCallback(new Choreographer.FrameCallback() {
@@ -101,7 +107,7 @@ class FramePacer {
                             choreographer.postFrameCallback(this);
                             return;
                         }
-                        target.onSynthesisDue(index);
+                        target.onSynthesisDue(frameTimeNanos);
                     }
                 });
             });
@@ -117,8 +123,4 @@ class FramePacer {
      * rate moves that decision by well under one refresh.
      */
     private static final long HALF_VSYNC_NANOS = 4_000_000L;
-
-    /** Nine tenths of the ideal point. See where the due time is computed. */
-    private static final long EARLY_NUMERATOR = 9;
-    private static final long EARLY_DENOMINATOR = 10;
 }

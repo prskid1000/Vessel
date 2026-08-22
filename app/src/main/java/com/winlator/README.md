@@ -826,16 +826,30 @@ The modifications, in the order they were made:
    multiples, since the last prediction at 4x aims three times as far as the
    first on exactly the same two frames.
 
-   **The guest is capped at `display.fpsLimit / N`, and that division is the
-   feature.** `SessionEnvironment` writes the divided number to `DXVK_FRAME_RATE`
-   and `VKD3D_FRAME_RATE`, so the limit means what the *screen* shows and the
-   game renders its fraction of it: 120 fps at 2x renders 60 and presents 120.
-   Both the other arrangements fail. A guest left uncapped spends the whole GPU
-   on real frames and leaves nothing to predict with; a guest capped at the full
-   number asks the compositor to present N times that, past what the panel can
-   show. It also keeps `PacedXServerView` out of the way, which drops a
-   `requestRender` arriving sooner than the limit allows — and a predicted frame
-   arrives between two real ones by construction.
+   **What `display.fpsLimit` counts is now a container setting, because the two
+   readings are different features.** `display.frameGenerationMode` at its
+   default, `efficiency`, caps the guest at `fpsLimit / N` through
+   `dxvk.maxFrameRate` and `VKD3D_FRAME_RATE`: the limit means what the *screen*
+   shows and the game renders its fraction of it, which is where the power saving
+   comes from. `smoothness` leaves the guest at the whole limit and lets the
+   compositor present the multiple.
+
+   Smoothness is the one that looks right, and the reason is the distance between
+   the two real frames. Every part of the interpolation degrades with it — the
+   block matcher's search range, the area uncovered during the interval, and the
+   assumption that anything moved in a straight line while it passed. Dividing a
+   24 fps limit by 2 leaves the guest drawing every 83 ms, and interpolating
+   across 83 ms of a moving scene is a far harder question than the same code
+   answers easily across 17 ms. The added latency is a fixed fraction of that
+   same interval, so it falls by the same factor.
+
+   **`PacedXServerView` no longer sees the synthesised frames at all.** It drops
+   or re-posts through a `Handler` any `requestRender` arriving sooner than the
+   limit allows, which is right for the guest's damage and wrong for a frame
+   `FramePacer` has just aimed at a vsync — re-posting it through a delay queue
+   is exactly the scheduling the pacer exists to avoid. They go through
+   `XServerView.requestRenderUnpaced` instead. The rate is unaffected, because
+   the source rate already is.
 
    **The idle gate was 40 ms and that switched the feature off entirely.** 40 ms
    is 25 fps, and a container capped at 24 fps composites every 41.7 ms, so every
@@ -969,10 +983,9 @@ fails the build.
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/InterpolateMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
-| `app/src/main/java/com/winlator/renderer/material/WarpMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/SignTestMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
+| `app/src/main/java/com/winlator/widget/XServerView.java` | 31 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
 | `app/src/main/java/com/winlator/xserver/ClientOpcodes.java` | 30 |

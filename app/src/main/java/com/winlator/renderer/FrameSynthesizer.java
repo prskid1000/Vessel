@@ -7,8 +7,6 @@ import android.util.Log;
 
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
-import com.winlator.renderer.material.SignTestMaterial;
-import com.winlator.renderer.material.WarpMaterial;
 
 /**
  * VESSEL: frames the guest never drew, built from what the compositor knows.
@@ -31,23 +29,31 @@ import com.winlator.renderer.material.WarpMaterial;
  * calls that entry point outside Qualcomm's own sample, whose only published
  * numbers are from a 2021 Adreno 660.
  *
- * <h2>The two tiers, cheapest first</h2>
+ * <h2>The two tiers, best first</h2>
  *
- * <p><b>Tier 0 -- window translation.</b> We are the compositor. When a window
- * moves we know the translation exactly, so a synthesised frame re-composites
- * the same window textures at carried-forward positions. Not an estimate: the
- * motion, replayed a fraction of a frame on. No block matching, no warping, no
- * inpainting, and therefore none of their artefacts. This is available to us and
- * to nobody else working from a screen capture, and for a Windows desktop --
- * dragged windows, sliding panels -- it is most of the motion there is.
- *
- * <p><b>Tier 1 -- hardware motion estimation and a backward warp.</b> When the
- * windows are still but their contents are not, the picture has to be examined.
+ * <p><b>Tier 1 -- hardware motion estimation and a bilateral interpolation.</b>
  * {@code GL_QCOM_motion_estimation} is the sibling extension, and unlike the
  * other one it works: measured on this device at 44,590 non-zero vectors across
  * a moving scene, x in [-113, 90], y in [-110, 106]. It is a fixed-function
  * block matcher, so the expensive half of frame generation is free, and what is
- * left to write is a gather.
+ * left to write is a search over what it produced. See {@link
+ * com.winlator.renderer.material.InterpolateMaterial} for that, which is where
+ * the picture quality actually lives.
+ *
+ * <p><b>Tier 0 -- window translation.</b> We are the compositor. When a window
+ * moves we know the translation exactly, so a synthesised frame re-composites
+ * the same window textures at interpolated positions. Not an estimate: the
+ * motion, replayed part of the way. No block matching, no warping, no
+ * inpainting, and therefore none of their artefacts.
+ *
+ * <p><b>It is the fallback, and it used to be the preference.</b> Being exact is
+ * not the same as being sufficient. The block matcher measures apparent motion
+ * whatever causes it, so tier 1's field already contains a window translation --
+ * while a window that moves *and* whose contents move is a case tier 0 cannot
+ * express at all, because it replays the translation with the contents frozen at
+ * frame N. Tier 1 covers the union, so tier 0 now runs only where there is no
+ * field to be had: a device without the extension, or the first frame after a
+ * resolution change.
  *
  * <p>Nothing else is attempted. A tier that cannot run yields, and a frame that
  * cannot be synthesised is simply not drawn -- which costs a little smoothness
@@ -177,14 +183,12 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final FramePacer pacer;
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
-    private final WarpMaterial warpMaterial = new WarpMaterial();
-    private final SignTestMaterial signTestMaterial = new SignTestMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
     private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
-    private final GpuTimer warpTimer = new GpuTimer("tier1 warp");
+    private final GpuTimer interpolateTimer = new GpuTimer("tier1 interpolate");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
     private Target vectors;
@@ -210,8 +214,15 @@ public class FrameSynthesizer implements FramePacer.Target {
      * and a double buys nothing at that scale.
      */
     private static final long SMOOTHING = 4;
-    private final java.util.concurrent.atomic.AtomicInteger pending =
-        new java.util.concurrent.atomic.AtomicInteger(0);
+    /**
+     * The vsync a synthesised frame is due at, or zero for none.
+     *
+     * <p>A timestamp rather than an index, because the phase to show is decided
+     * from when the frame actually reaches the display and not from which of the
+     * N-1 slots it was scheduled as. See {@link #presentSynthesized}.
+     */
+    private final java.util.concurrent.atomic.AtomicLong pending =
+        new java.util.concurrent.atomic.AtomicLong(0);
 
     /**
      * Above this gap between real frames the picture is not really moving.
@@ -245,13 +256,18 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     @Override
-    public void onSynthesisDue(int index) {
-        pending.set(index);
-        renderer.xServerView.requestRender();
+    public void onSynthesisDue(long vsyncNanos) {
+        pending.set(vsyncNanos);
+        // **Unpaced on purpose, and pacing it twice was a whole class of
+        // judder.** PacedXServerView.requestRender throttles to the container's
+        // frame limit and re-posts anything early through Handler.postDelayed --
+        // the exact mechanism {@link FramePacer} exists to avoid, applied to the
+        // frames it had just finished aiming at a vsync. These are paced already.
+        renderer.xServerView.requestRenderUnpaced();
     }
 
     /** Consume a pending request, so one schedule yields exactly one frame. */
-    public int consumePending() {
+    public long consumePending() {
         return pending.getAndSet(0);
     }
 
@@ -306,13 +322,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         // prediction between now and the next real frame shares this pair, so
         // every prediction shares these vectors.
         motionValid = realFrames >= 2 && motionEstimationSupported() && estimateMotion();
-        if (motionValid) runSignTestOnce();
 
         // The interval now presents phase 1/K here, then 2/K .. K/K through
         // the pacer -- and K/K is frame N itself, arriving at the end of the
         // interval it belongs to. That delay is the whole latency cost of
         // interpolation and is what buys an answerable question.
         realPresented = false;
+        lastPhase = 0f;
         if (motionValid && multiple >= 2) {
             presentPhase(1f / multiple);
         } else {
@@ -354,32 +370,76 @@ public class FrameSynthesizer implements FramePacer.Target {
      *
      * @param index which of the N-1 frames this is; t is index/N
      */
-    public void presentSynthesized(int index) {
-        if (!ensureTargets() || realFrames < 2) return;
-        if (index < 1 || index >= multiple) return;
+    public void presentSynthesized(long vsyncNanos) {
+        if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return;
 
-        // Tier 0 stays exact and stays first: a window translation the compositor
-        // already knows beats anything derived from the picture.
-        if (renderer.anyWindowMoved()) {
-            tier0Timer.begin();
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            renderer.drawSynthesizedFrame((float)index / (float)multiple);
-            tier0Timer.end();
-            tier0Frames++;
+        final float phase = phaseFor(vsyncNanos);
+
+        // **Tier 1 first, where it used to be second.** The block matcher
+        // measures apparent motion whatever causes it, so its field already
+        // contains a window translation -- and a window that moves while its
+        // contents move is a case tier 0 cannot express at all, because it
+        // replays the translation with the contents frozen at frame N. Tier 1
+        // covers the union of the two, which is why the cheaper tier is now the
+        // fallback for when there is no field rather than the preferred answer.
+        if (motionValid) {
+            presentPhase(phase);
+            tier1Frames++;
             return;
         }
 
-        // Phase 1/K went out when the frame was composited, so this slot is
-        // index + 1 -- and the last of them is phase 1.0, the real frame.
-        if (motionValid) {
-            presentPhase((float)(index + 1) / (float)multiple);
-            tier1Frames++;
+        // No field: re-composite at carried positions, which is exact for a
+        // translation and is all that is available without one.
+        if (renderer.anyWindowMoved()) {
+            tier0Timer.begin();
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            renderer.drawSynthesizedFrame(phase);
+            tier0Timer.end();
+            tier0Frames++;
+            if (phase >= 1f) realPresented = true;
             return;
         }
 
         presentLatest();
         skipped++;
     }
+
+    /**
+     * VESSEL: which moment to show, taken from the clock rather than from a slot.
+     *
+     * <p>**Content time has to run at the same rate as wall time, or the picture
+     * judders however many frames are drawn.** The old code presented phase
+     * {@code (i+1)/K} for slot {@code i} while the pacer aimed slot {@code i}
+     * nine tenths of the way to {@code i/K}, so K phases were squeezed into
+     * {@code 0.9(K-1)/K} of an interval and the display then held the last one
+     * for the rest of it. At 2x that is motion running eleven per cent fast
+     * followed by a dead stop lasting more than half an interval, every interval
+     * -- judder manufactured by the pacing, which would read as a fault in the
+     * synthesis.
+     *
+     * <p>Deriving the phase from the vsync timestamp makes the two clocks the
+     * same clock. A callback that fires late shows a later moment, which is
+     * correct; one that fires early shows an earlier one. The schedule now only
+     * has to wake the renderer near the right time rather than hit it.
+     *
+     * <p>Never backwards: a phase behind one already shown would rewind the
+     * picture, and repeating the last is a duplicate frame rather than a
+     * reversal. Never nothing, either -- {@code GLSurfaceView} swaps whether or
+     * not anything was drawn, so a frame that declines to draw presents an
+     * unwritten buffer, which is the flicker.
+     */
+    private float phaseFor(long vsyncNanos) {
+        if (smoothedInterval <= 0 || lastRealFrameNanos == 0) return 1f;
+        final float elapsed = (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
+        float phase = 1f / multiple + elapsed;
+        if (phase < lastPhase) phase = lastPhase;
+        if (phase > 1f) phase = 1f;
+        lastPhase = phase;
+        return phase;
+    }
+
+    /** The most recent phase presented, so the picture cannot run backwards. */
+    private float lastPhase = 0f;
 
     /**
      * Show the frame at {@code phase} between the two real frames.
@@ -394,10 +454,10 @@ public class FrameSynthesizer implements FramePacer.Target {
             presentLatest();
             return;
         }
-        warpTimer.begin();
+        interpolateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         interpolate(phase);
-        warpTimer.end();
+        interpolateTimer.end();
     }
 
     private void presentLatest() {
@@ -425,6 +485,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
                                            1f / Math.max(1, luma[0].width),
                                            1f / Math.max(1, luma[0].height));
+        // The block grid, so a single block can be addressed rather than only the
+        // filtered average of four. See InterpolateMaterial's third point.
+        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.vectorSize,
+                                           vectors.width, vectors.height);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
@@ -437,10 +501,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.motionTexture, 2);
+        // The search runs on these rather than on the colour: one byte a texel
+        // instead of four, for the same answer. See InterpolateMaterial.
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
+        interpolateMaterial.setUniformInt(
+            interpolateMaterial.interpolateUniforms.lumaNewerTexture, 3);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE4);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
+        interpolateMaterial.setUniformInt(
+            interpolateMaterial.interpolateUniforms.lumaOlderTexture, 4);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
 
-        for (int unit = 2; unit >= 0; unit--) {
+        for (int unit = 4; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -468,143 +542,6 @@ public class FrameSynthesizer implements FramePacer.Target {
             return false;
         }
         return true;
-    }
-
-    /**
-     * VESSEL: settle which way the motion field points, once, by measuring.
-     *
-     * <p>See {@link SignTestMaterial}. Both real frames are in hand, so the field
-     * can be tested against what it claims to describe rather than argued about:
-     * reconstruct the newer frame from the older under each sign and keep the one
-     * with the lower error. The wrong sign displaces every block by twice its
-     * true motion, so the two numbers are not close.
-     *
-     * <p>Deferred until the picture is actually moving. Two identical frames
-     * reconstruct perfectly under either sign and the test would report a tie,
-     * which is how a static menu screen would have taught us the wrong answer.
-     */
-    private void runSignTestOnce() {
-        if (signTested || luma[0] == null) return;
-
-        final float scaleX = 1f / Math.max(1, luma[0].width);
-        final float scaleY = 1f / Math.max(1, luma[0].height);
-        // **The control, and without it the comparison is uninterpretable.** A
-        // direction of zero compensates for nothing, so this is simply how much
-        // the two frames differ. If neither hypothesis beats it by a wide margin
-        // the field is doing no work -- either it is all zeros or the scene was
-        // static -- and the winner between them is noise. The first run of this
-        // test reported -motion ahead by 5.6% with both errors at 0.0025, which
-        // is exactly that failure and would have been read as a verdict.
-        final float baseline = signTestError(0f, scaleX, scaleY);
-        final float minus = signTestError(-1f, scaleX, scaleY);
-        final float plus = signTestError(1f, scaleX, scaleY);
-
-        final float best = Math.min(minus, plus);
-        // The right sign should explain a real share of the difference between
-        // the frames. A fifth is a low bar and still far outside noise.
-        if (baseline <= 1e-4f || best > baseline * 0.8f) return;
-
-        signTested = true;
-        final boolean backward = plus < minus;
-        Log.i(TAG, String.format(
-            "sign test: uncompensated %.5f, with -motion %.5f, with +motion %.5f"
-                + " -> vectors point %s; the warp should use %s",
-            baseline, minus, plus,
-            backward ? "BACKWARD (target to reference)" : "FORWARD (reference to target)",
-            backward ? "uv + motion*t" : "uv - motion*t"));
-    }
-
-    private boolean signTested = false;
-    private Target signTarget;
-
-    /**
-     * Mean absolute reconstruction error for one hypothesis.
-     *
-     * <p>Rendered into a small target and averaged on the CPU: the answer is a
-     * single number, and a 96x54 readback is 20 KB rather than the 14 MB a
-     * full-resolution one would cost on the GL thread -- which is how an earlier
-     * diagnostic here caused an ANR.
-     */
-    private float signTestError(float direction, float scaleX, float scaleY) {
-        if (signTarget == null) {
-            signTarget = new Target();
-            signTarget.allocate(SIGN_TEST_W, SIGN_TEST_H, GLES30.GL_RGBA8, GLES20.GL_NEAREST);
-        }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, signTarget.framebuffer);
-        GLES20.glViewport(0, 0, SIGN_TEST_W, SIGN_TEST_H);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        signTestMaterial.use();
-        renderer.quadVertices.bind(signTestMaterial.programId);
-        signTestMaterial.setUniformBool(signTestMaterial.uniforms.flipY, false);
-        signTestMaterial.setUniformVec2(signTestMaterial.signUniforms.motionScale, scaleX, scaleY);
-        signTestMaterial.setUniformFloat(signTestMaterial.signUniforms.direction, direction);
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
-        signTestMaterial.setUniformInt(signTestMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, colour[oldest()].texture);
-        signTestMaterial.setUniformInt(signTestMaterial.signUniforms.previousTexture, 1);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
-        signTestMaterial.setUniformInt(signTestMaterial.signUniforms.motionTexture, 2);
-
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-
-        final java.nio.ByteBuffer pixels = java.nio.ByteBuffer
-            .allocateDirect(SIGN_TEST_W * SIGN_TEST_H * 4)
-            .order(java.nio.ByteOrder.nativeOrder());
-        GLES20.glReadPixels(0, 0, SIGN_TEST_W, SIGN_TEST_H, GLES20.GL_RGBA,
-                            GLES20.GL_UNSIGNED_BYTE, pixels);
-
-        for (int unit = 2; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        renderer.invalidateBoundWindowMaterial();
-
-        long total = 0;
-        for (int i = 0; i < SIGN_TEST_W * SIGN_TEST_H; i++) {
-            total += pixels.get(i * 4) & 0xff;
-        }
-        return total / (255f * SIGN_TEST_W * SIGN_TEST_H);
-    }
-
-    private static final int SIGN_TEST_W = 96;
-    private static final int SIGN_TEST_H = 54;
-
-    /** Gather the latest frame along the field, aimed t of the way forward. */
-    private void warp(Target source, float t) {
-        GLES20.glViewport(0, 0, renderer.surfaceWidth, renderer.surfaceHeight);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        warpMaterial.use();
-        renderer.quadVertices.bind(warpMaterial.programId);
-        warpMaterial.setUniformBool(warpMaterial.uniforms.flipY, false);
-        // The field is in pixels between two real frames; dividing by the frame
-        // size puts it in texture space, and t aims it.
-        warpMaterial.setUniformVec2(warpMaterial.warpUniforms.motionScale,
-                                    t / Math.max(1, luma[0].width), t / Math.max(1, luma[0].height));
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
-        warpMaterial.setUniformInt(warpMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
-        warpMaterial.setUniformInt(warpMaterial.warpUniforms.motionTexture, 1);
-
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
     }
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
@@ -751,7 +688,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         captureTimer.report(now);
         lumaTimer.report(now);
         estimateTimer.report(now);
-        warpTimer.report(now);
+        interpolateTimer.report(now);
         tier0Timer.report(now);
         if (now - reportedAt < 1000) return;
         reportedAt = now;
