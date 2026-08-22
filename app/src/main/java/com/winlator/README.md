@@ -967,7 +967,9 @@ fails the build.
 | `app/src/main/java/com/winlator/renderer/RenderableWindow.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/material/MedianMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
+| `app/src/main/java/com/winlator/renderer/material/WarpMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
