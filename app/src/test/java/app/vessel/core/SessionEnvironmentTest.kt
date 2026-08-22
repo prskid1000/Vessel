@@ -598,9 +598,44 @@ class SessionEnvironmentTest {
         // composited rate was 24.0 and DXVK's own was 116.5, at 84% GPU and ~760
         // draw calls a frame. Four frames in five were rendered at full cost and
         // discarded, because the cap reached the blit and not the renderer.
+        //
+        // **It reaches DXVK through DXVK_CONFIG and not through DXVK_FRAME_RATE,
+        // because that variable no longer exists.** It was removed upstream --
+        // vkd3d's changelog records dropping its own copy "to align with DXVK's
+        // removal" -- so the assertion this test used to make passed while the
+        // renderer stayed uncapped for every D3D9, 10 and 11 title. `dxvk.` and
+        // not `dxgi.`/`d3d9.`: both option readers consult the `dxvk.` name first.
         val environment = env(fpsLimit = 24)
-        assertEquals("24", environment["DXVK_FRAME_RATE"])
+        assertTrue(
+            "DXVK is capped through its config, not the removed variable",
+            environment["DXVK_CONFIG"].orEmpty().contains("dxvk.maxFrameRate = 24"),
+        )
         assertEquals("24", environment["VKD3D_FRAME_RATE"])
+    }
+
+    @Test
+    fun `frame generation divides what the renderer is asked for`() {
+        // The limit is what the *screen* shows; with predicted frames only one
+        // presented frame in N was rendered, so the renderer's own cap has to be
+        // that fraction. Getting this wrong costs the feature in both directions:
+        // uncapped, there is no GPU left over to synthesise with, and capped at
+        // the full number the compositor is asked to present past the panel.
+        val environment = env(fpsLimit = 120, frameGeneration = 2)
+        assertTrue(
+            environment["DXVK_CONFIG"].orEmpty().contains("dxvk.maxFrameRate = 60"),
+        )
+        assertEquals("60", environment["VKD3D_FRAME_RATE"])
+    }
+
+    @Test
+    fun `the renderer cap never displaces the memory options it shares a variable with`() {
+        // DXVK_CONFIG is one string and the only way into DXVK's config, so a
+        // second assignment would silently drop whichever ran first -- and the
+        // one that runs first is the shared-memory fix.
+        val environment = env(fpsLimit = 24)
+        val config = environment["DXVK_CONFIG"].orEmpty()
+        assertTrue("frame cap present", config.contains("dxvk.maxFrameRate"))
+        assertTrue("memory options survive", config.contains("maxSharedMemory"))
     }
 
     @Test
@@ -635,10 +670,15 @@ class SessionEnvironmentTest {
             ),
         )
         val environment = env(manifest = sneaky, fpsLimit = 30)
-        assertEquals("30", environment["DXVK_FRAME_RATE"])
+        assertTrue(environment["DXVK_CONFIG"].orEmpty().contains("dxvk.maxFrameRate = 30"))
         assertEquals("30", environment["VKD3D_FRAME_RATE"])
+        // DXVK_FRAME_RATE stays reserved even though nothing reads it any more:
+        // a container declaring it would be setting a variable that does nothing,
+        // and the honest failure is for the manifest stage to drop it rather than
+        // for a user to believe they had capped something.
         assertTrue("DXVK_FRAME_RATE" in RESERVED_SESSION_ENV)
         assertTrue("VKD3D_FRAME_RATE" in RESERVED_SESSION_ENV)
+        assertTrue("DXVK_CONFIG" in RESERVED_SESSION_ENV)
     }
 
     @Test
