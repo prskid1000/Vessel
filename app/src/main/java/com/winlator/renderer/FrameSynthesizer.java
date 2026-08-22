@@ -5,7 +5,6 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
-import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 import com.winlator.renderer.material.SignTestMaterial;
@@ -181,7 +180,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final WarpMaterial warpMaterial = new WarpMaterial();
     private final SignTestMaterial signTestMaterial = new SignTestMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
-    private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
@@ -278,7 +276,9 @@ public class FrameSynthesizer implements FramePacer.Target {
     public void endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        blit(blitMaterial, written.texture, renderer.surfaceWidth, renderer.surfaceHeight);
         renderer.setCursorDeferred(false);
+        renderer.drawCursorOverlay();
         captureTimer.end();
 
         // Luma for this frame, so the pair is ready without re-deriving the older
@@ -300,23 +300,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         // every prediction shares these vectors.
         motionValid = realFrames >= 2 && motionEstimationSupported() && estimateMotion();
         if (motionValid) runSignTestOnce();
-
-        // **The real frame is not shown here, and that is the whole of the
-        // latency cost.** Interpolation needs both endpoints, so N cannot be
-        // presented until the frames belonging between N-1 and N have been.
-        // The interval therefore presents phase 1/K, 2/K ... and finally
-        // K/K, which is N itself, arriving up to one interval late.
-        //
-        // Extrapolation showed N immediately and invented what came after it,
-        // which costs nothing and cannot be made accurate: the information
-        // for a region about to be uncovered is in neither input. Here it is
-        // in N, which is why this can be nearly right and that could not.
-        if (motionValid) {
-            presentPhase(1f / multiple);
-        } else {
-            // Nothing to interpolate with, so show the frame we just made.
-            presentLatest();
-        }
 
         final long now = System.nanoTime();
         final long interval = lastRealFrameNanos == 0 ? 0 : now - lastRealFrameNanos;
@@ -354,95 +337,43 @@ public class FrameSynthesizer implements FramePacer.Target {
     public void presentSynthesized(int index) {
         if (!ensureTargets() || realFrames < 2) return;
         if (index < 1 || index >= multiple) return;
+        final float t = (float)index / (float)multiple;
 
-        // Tier 0 stays exact and stays first: a window translation the compositor
-        // knows beats anything derived from the picture.
+        // Tier 0. Exact, and cheap enough that it is worth testing for first.
         if (renderer.anyWindowMoved()) {
             tier0Timer.begin();
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            renderer.drawSynthesizedFrame((float)index / (float)multiple);
-            renderer.drawCursorOverlay();
+            renderer.drawSynthesizedFrame(t);
             tier0Timer.end();
             tier0Frames++;
             return;
         }
 
-        // The interval presents phases 1/K through K/K. The first went out when
-        // the frame was composited, so this one is index + 1 -- and the last of
-        // them is phase 1.0, which is the real frame arriving at the end of the
-        // interval it belongs to.
+        // Tier 1. The field was estimated once in endRealFrame, from the pair
+        // this whole interval shares -- re-running it here produced the identical
+        // vectors N-1 times per real frame for nothing.
         if (motionValid) {
-            presentPhase((float)(index + 1) / (float)multiple);
+            warpTimer.begin();
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            warp(latestColour(), t);
+            renderer.drawCursorOverlay();
+            warpTimer.end();
             tier1Frames++;
             return;
         }
 
-        presentLatest();
-        skipped++;
-    }
-
-    /**
-     * Show the frame at {@code phase} between the two real frames.
-     *
-     * <p>Phase 1.0 is the newer real frame exactly, so it is blitted rather than
-     * interpolated -- the shader would reproduce it, and a copy is cheaper and
-     * exact.
-     */
-    private void presentPhase(float phase) {
-        if (phase >= 1f) {
-            presentLatest();
-            return;
-        }
-        warpTimer.begin();
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        interpolate(phase);
-        renderer.drawCursorOverlay();
-        warpTimer.end();
-    }
-
-    private void presentLatest() {
+        // **Neither tier applies, and this path must still draw.** GLSurfaceView
+        // swaps the buffer after onDrawFrame whether or not anything was rendered
+        // into it, so returning here does not skip a frame -- it presents an
+        // unwritten back buffer, which on a double-buffered surface holds the
+        // frame from two swaps ago. The display then alternates between the
+        // current picture and an old one, which reads as flicker and looks like a
+        // fault in the synthesis rather than in the decision not to synthesise.
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         blit(blitMaterial, latestColour().texture,
              renderer.surfaceWidth, renderer.surfaceHeight);
         renderer.drawCursorOverlay();
-    }
-
-    /** Blend the two real frames along the field, at {@code phase} between them. */
-    private void interpolate(float phase) {
-        GLES20.glViewport(0, 0, renderer.surfaceWidth, renderer.surfaceHeight);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        interpolateMaterial.use();
-        renderer.quadVertices.bind(interpolateMaterial.programId);
-        interpolateMaterial.setUniformBool(interpolateMaterial.uniforms.flipY, false);
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
-        // The vectors are in luma pixels; the luma is the block-rounded frame, so
-        // dividing by its size is what puts them in texture space.
-        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
-                                           1f / Math.max(1, luma[0].width),
-                                           1f / Math.max(1, luma[0].height));
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
-        interpolateMaterial.setUniformInt(interpolateMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, colour[oldest()].texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.previousTexture, 1);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectorsFiltered.texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.motionTexture, 2);
-
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-
-        for (int unit = 2; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
+        skipped++;
     }
 
     /**
