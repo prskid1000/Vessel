@@ -52,6 +52,17 @@ package app.vessel.core
 const val TRACE_SPEC_ENV: String = "VESSEL_TRACE"
 
 /**
+ * The environment row that switches on the frame generation pipeline's own
+ * reporting. See [ContainerDiagnostics.frameGenerationLog].
+ *
+ * Beside [TRACE_SPEC_ENV] because it is the same kind of thing: a row in the
+ * environment table that Vessel reads itself rather than merely forwarding to
+ * the guest. Nothing inside the container knows the compositor is inventing
+ * frames, so nothing inside it could answer a question about them.
+ */
+const val FG_LOG_ENV: String = "FG_LOG"
+
+/**
  * The one ladder, in the one order, for every topic.
  *
  * Five stops rather than each tool's own three-to-six, and the mapping is

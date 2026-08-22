@@ -649,7 +649,10 @@ class SessionRuntime @Inject constructor(
 
         try {
             prepare(containerId, profile, manifest, fpsLimit, log) ?: return
-            runDesktop(log, geometry, fpsLimit, upscaler, frameGeneration)
+            runDesktop(
+                log, geometry, fpsLimit, upscaler, frameGeneration,
+                profile.diagnostics.frameGenerationLog(),
+            )
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
             // every step of it suspends, so it needs a context that is not
@@ -1067,6 +1070,7 @@ class SessionRuntime @Inject constructor(
         fpsLimit: Int?,
         upscaler: UpscalerRequest,
         frameGeneration: Int,
+        frameGenerationLog: Set<String>,
     ) {
         val current = plan ?: return
         _state.update { it.copy(phase = SessionPhase.STARTING) }
@@ -1078,6 +1082,7 @@ class SessionRuntime @Inject constructor(
             socketRoot = current.layout.base,
             upscaler = upscaler,
             frameGeneration = frameGeneration,
+            frameGenerationLog = frameGenerationLog,
         )
         // What the server answers with, not what was asked for. `DISPLAY` and
         // `WINE_SYSVSHM_SOCKET` name sockets that either got bound or did not,

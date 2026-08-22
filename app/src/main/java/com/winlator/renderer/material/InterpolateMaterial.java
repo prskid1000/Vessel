@@ -104,6 +104,8 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform motionScale = new Uniform("motionScale");
         public final Uniform vectorSize = new Uniform("vectorSize");
         public final Uniform phase = new Uniform("phase");
+        /** VESSEL: 1 makes this pass report on itself instead of drawing. */
+        public final Uniform diagnostic = new Uniform("diagnostic");
     }
 
     @Override
@@ -140,6 +142,14 @@ public class InterpolateMaterial extends ScreenMaterial {
             "uniform vec2 vectorSize;",
             // Where between the two frames this one sits: 0 is N-1, 1 is N.
             "uniform float phase;",
+
+            // VESSEL: when 1, write four measurements instead of a picture.
+            //
+            // **Because a description of what a screen looks like is a lossy
+            // channel, and it has been read wrong repeatedly.** Averaged over the
+            // frame by the mip chain and read back as four bytes, these say what
+            // the shader actually computed rather than what its output resembles.
+            "uniform float diagnostic;",
 
             "varying vec2 vUV;",
 
@@ -217,7 +227,31 @@ public class InterpolateMaterial extends ScreenMaterial {
                     "? texture2D(previousTexture, vUV).rgb",
                     ": texture2D(screenTexture, vUV).rgb;",
 
-                "gl_FragColor = vec4(mix(nearest, blended, confidence), 1.0);",
+                "vec3 shown = mix(nearest, blended, confidence);",
+
+                "if (diagnostic > 0.5) {",
+                    // How bright the three things are, so "we produced black from
+                    // lit sources" can be counted rather than described.
+                    "float outLuma = max(max(shown.r, shown.g), shown.b);",
+                    "float newLuma = max(max(newer.r, newer.g), newer.b);",
+                    "float oldLuma = max(max(older.r, older.g), older.b);",
+                    "gl_FragColor = vec4(",
+                        // R: how much of the frame is trusted at all.
+                        "confidence,",
+                        // G: manufactured black -- output dark while both of the
+                        // frames it was built from were lit. This is the number
+                        // that says whether the shader is inventing the dots.
+                        "step(outLuma, 0.03) * step(0.08, min(newLuma, oldLuma)),",
+                        // B: output dark while the sources were dark too. A wrong
+                        // vector pointing into shadow, faithfully reproduced.
+                        "step(outLuma, 0.03) * step(max(newLuma, oldLuma), 0.08),",
+                        // A: how far things are moving, to tell a still scene from
+                        // a moving one without asking.
+                        "clamp(length(best) * 20.0, 0.0, 1.0));",
+                    "return;",
+                "}",
+
+                "gl_FragColor = vec4(shown, 1.0);",
             "}"
         );
     }

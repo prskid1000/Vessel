@@ -498,6 +498,7 @@ class XServerDisplay @Inject constructor(
                 // so the extrapolator's targets are allocated once at the right
                 // size rather than allocated, used and thrown away.
                 started.view.renderer.setFrameGenerationMultiplier(request.frameGeneration)
+                started.view.renderer.setFrameGenerationLog(request.frameGenerationLog)
                 startSampling(started.view.renderer, request.fpsLimit, request.geometry.width, request.geometry.height)
                 DisplayOutcome.Started(started.environment)
             } catch (t: Throwable) {

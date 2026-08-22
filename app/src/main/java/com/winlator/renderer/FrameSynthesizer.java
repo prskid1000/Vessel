@@ -171,7 +171,59 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
 
+        /**
+         * VESSEL: diagnostics only. A full mip chain, and a second framebuffer
+         * bound to the 1x1 top of it.
+         *
+         * <p>**Averaging on the GPU is what makes measuring the whole frame
+         * affordable.** Reading a full-resolution frame back is 14 MB and stalls
+         * the render thread -- a diagnostic that did exactly that caused an ANR
+         * earlier in this project. {@code glGenerateMipmap} reduces the frame to
+         * a single texel, and reading one texel costs four bytes and no stall, so
+         * a per-frame statistic over every pixel becomes something that can be
+         * left switched on.
+         */
+        int topFramebuffer;
+        int levels = 1;
+
+        void allocateAveraging(int width, int height) {
+            this.width = width;
+            this.height = height;
+            int count = 1;
+            for (int size = Math.max(width, height); size > 1; size >>= 1) count++;
+            this.levels = count;
+
+            final int[] names = new int[1];
+            GLES20.glGenTextures(1, names, 0);
+            texture = names[0];
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+            GLES30.glTexStorage2D(GLES20.GL_TEXTURE_2D, count, GLES30.GL_RGBA8, width, height);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                                   GLES20.GL_LINEAR_MIPMAP_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+
+            GLES20.glGenFramebuffers(1, names, 0);
+            framebuffer = names[0];
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                                          GLES20.GL_TEXTURE_2D, texture, 0);
+
+            GLES20.glGenFramebuffers(1, names, 0);
+            topFramebuffer = names[0];
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, topFramebuffer);
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                                          GLES20.GL_TEXTURE_2D, texture, count - 1);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+
         void release() {
+            if (topFramebuffer != 0) {
+                GLES20.glDeleteFramebuffers(1, new int[] {topFramebuffer}, 0);
+                topFramebuffer = 0;
+            }
             if (framebuffer != 0) GLES20.glDeleteFramebuffers(1, new int[] {framebuffer}, 0);
             if (texture != 0) GLES20.glDeleteTextures(1, new int[] {texture}, 0);
             framebuffer = 0;
@@ -192,7 +244,34 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
     private Target vectors;
+    /** Diagnostics only; null unless a category that needs it was asked for. */
+    private Target probe;
     private int blockX = 8, blockY = 8;
+
+    /**
+     * VESSEL: which categories the container's {@code FG_LOG} row asked for.
+     *
+     * <p>Empty is the normal case, and then none of this costs anything: the
+     * measurement pass is never allocated, never drawn, and never read.
+     */
+    private java.util.Set<String> diagnostics = java.util.Collections.emptySet();
+
+    public void setDiagnostics(java.util.Set<String> categories) {
+        this.diagnostics = categories == null
+            ? java.util.Collections.emptySet() : categories;
+        this.announced = false;
+    }
+
+    private boolean wants(String category) {
+        return diagnostics.contains(category) || diagnostics.contains("all");
+    }
+
+    /** Whether the one-time setup line has been printed for this allocation. */
+    private boolean announced = false;
+
+    /** Frame-wide measurements, most recently read back. See {@link #measure}. */
+    private float measuredConfidence, measuredDark, measuredShadow, measuredSpeed;
+    private long measuredAt = 0;
 
     private int allocWidth = 0;
     private int allocHeight = 0;
@@ -239,6 +318,8 @@ public class FrameSynthesizer implements FramePacer.Target {
     private long tier0Frames = 0;
     private long tier1Frames = 0;
     private long skipped = 0;
+    /** Times the matcher refused, which is invisible in the picture. */
+    private long estimateFailures = 0;
     private long reportedAt = 0;
 
     public FrameSynthesizer(GLRenderer renderer) {
@@ -248,6 +329,22 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     public void setMultiple(int multiple) {
         this.multiple = Math.max(2, Math.min(8, multiple));
+    }
+
+    /**
+     * The one-time line: what was asked for, and what the device can actually do
+     * about it. Printed on the first composite after the targets exist, because
+     * that is the first moment both halves of the answer are known.
+     */
+    private void announce() {
+        if (announced || diagnostics.isEmpty()) return;
+        announced = true;
+        Log.i(TAG, "fg setup: asked for " + diagnostics
+            + ", " + multiple + "x, surface " + renderer.surfaceWidth
+            + "x" + renderer.surfaceHeight
+            + ", motion estimation " + (motionEstimationSupported()
+                ? "available, block " + blockX + "x" + blockY
+                : "NOT AVAILABLE -- tier 1 will never run"));
     }
 
     @Override
@@ -327,6 +424,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         // the pacer -- and K/K is frame N itself, arriving at the end of the
         // interval it belongs to. That delay is the whole latency cost of
         // interpolation and is what buys an answerable question.
+        if (wants("setup")) announce();
+
         realPresented = false;
         lastPhase = 0f;
         if (motionValid && multiple >= 2) {
@@ -458,6 +557,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         interpolate(phase);
         interpolateTimer.end();
+
+        // Once a second, and only if something asked. Deliberately after the
+        // frame the user sees, so a measurement can never delay one.
+        if ((wants("quality") || wants("field"))
+                && SystemClock.uptimeMillis() - measuredAt >= 1000) {
+            measure(phase);
+        }
     }
 
     private void presentLatest() {
@@ -472,6 +578,15 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     /** Blend the two real frames along the field, at {@code phase} between them. */
     private void interpolate(float phase) {
+        interpolate(phase, false);
+    }
+
+    /**
+     * @param measuring when true, writes four per-pixel measurements instead of a
+     *     picture, into {@link #probe} rather than to the screen. See
+     *     {@link #measure}.
+     */
+    private void interpolate(float phase, boolean measuring) {
         GLES20.glViewport(0, 0, renderer.surfaceWidth, renderer.surfaceHeight);
         renderer.viewportNeedsUpdate = true;
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -480,6 +595,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         renderer.quadVertices.bind(interpolateMaterial.programId);
         interpolateMaterial.setUniformBool(interpolateMaterial.uniforms.flipY, false);
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
+        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.diagnostic,
+                                            measuring ? 1f : 0f);
         // The vectors are in luma pixels, and the luma is the block-rounded frame,
         // so dividing by its size is what puts them in texture space.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
@@ -523,6 +640,50 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
+     * VESSEL: ask the interpolation what it just did, over the whole frame.
+     *
+     * <p>Runs the same shader a second time in its reporting mode, which writes
+     * four measurements per pixel instead of a colour, then lets the GPU average
+     * the frame down to one texel and reads that back. Four bytes, no stall.
+     *
+     * <p>**Why measure rather than describe.** Every fault this feature has had
+     * was diagnosed by looking at the screen and reasoning backwards, and a black
+     * speck, a shimmer and a frozen patch are indistinguishable in a sentence
+     * while having nothing in common in the code. These four numbers separate
+     * them: a frame that is mostly falling back reads differently from one that is
+     * confidently wrong, and both read differently from one whose vectors are
+     * simply zero.
+     *
+     * <p>Once a second, and only when asked for. The extra pass costs about what
+     * one interpolated frame costs, once per second.
+     */
+    private void measure(float phase) {
+        if (probe == null) {
+            probe = new Target();
+            probe.allocateAveraging(renderer.surfaceWidth, renderer.surfaceHeight);
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.framebuffer);
+        interpolate(phase, true);
+
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, probe.texture);
+        GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+
+        final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.topFramebuffer);
+        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+
+        measuredConfidence = (pixel.get(0) & 0xff) / 255f;
+        measuredDark = (pixel.get(1) & 0xff) / 255f;
+        measuredShadow = (pixel.get(2) & 0xff) / 255f;
+        measuredSpeed = (pixel.get(3) & 0xff) / 255f;
+        measuredAt = SystemClock.uptimeMillis();
+        renderer.viewportNeedsUpdate = true;
+    }
+
+    /**
      * Run the hardware block matcher over the luma pair.
      *
      * @return false if the vectors could not be produced, in which case no warp
@@ -538,6 +699,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         final int error = GLES20.glGetError();
         estimateTimer.end();
         if (error != GLES20.GL_NO_ERROR) {
+            estimateFailures++;
             Log.e(TAG, "glTexEstimateMotionQCOM failed 0x" + Integer.toHexString(error));
             return false;
         }
@@ -669,9 +831,12 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
+            if (probe != null) probe.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
+        probe = null;
+        announced = false;
     }
 
     /**
@@ -683,20 +848,100 @@ public class FrameSynthesizer implements FramePacer.Target {
      * shader cannot answer because the cost is bandwidth and render-target
      * switches rather than arithmetic.
      */
+    /**
+     * VESSEL: say what the pipeline is doing, in the categories that were asked
+     * for and no others.
+     *
+     * <p>**Every line here exists because its absence cost a day.** Frame
+     * generation fails visually, intermittently, and in ways that a description
+     * of the screen cannot separate -- a black speck, a shimmer and a frozen
+     * patch are one sentence and three different bugs. Each category answers a
+     * question that was previously answered by guessing:
+     *
+     * <ul>
+     * <li>{@code setup} -- is the tier even running, and at what sizes. The
+     *     feature has silently done nothing before now, and this says so.
+     * <li>{@code pacing} -- how many frames are real, how many are invented, how
+     *     many were dropped. A stutter is either here or it is not.
+     * <li>{@code timing} -- what each pass costs. Reasoning about a shader cannot
+     *     answer this: the cost is bandwidth and target switches, not arithmetic.
+     *     It also catches thermal throttling, which scales every pass at once and
+     *     is otherwise indistinguishable from a change having made things slower.
+     * <li>{@code field} -- what the vectors contain. A field that is mostly zero
+     *     and a field that is wrong look identical on screen and are opposite
+     *     problems.
+     * <li>{@code quality} -- what was done with them: how much of the frame was
+     *     trusted, how much fell back, and how much came out black from sources
+     *     that were not. That last number is the one that separates "this shader
+     *     invented a dot" from "this shader faithfully drew a dark pixel the
+     *     vector pointed at", which took nine attempts to establish by eye.
+     * </ul>
+     */
     private void report() {
         final long now = SystemClock.uptimeMillis();
-        captureTimer.report(now);
-        lumaTimer.report(now);
-        estimateTimer.report(now);
-        interpolateTimer.report(now);
-        tier0Timer.report(now);
+        if (wants("timing")) {
+            captureTimer.report(now);
+            lumaTimer.report(now);
+            estimateTimer.report(now);
+            interpolateTimer.report(now);
+            tier0Timer.report(now);
+        }
         if (now - reportedAt < 1000) return;
+        final long elapsed = reportedAt == 0 ? 1000 : Math.max(1, now - reportedAt);
         reportedAt = now;
+
+        final long realThisSecond = realFrames - reportedRealFrames;
+        reportedRealFrames = realFrames;
+
+        // The one line that is always printed, because a container with frame
+        // generation on and nothing to say about it is itself the answer.
         Log.i(TAG, "real " + realFrames + ", tier0 " + tier0Frames
             + ", tier1 " + tier1Frames + ", skipped " + skipped
             + ", " + multiple + "x");
+
+        if (wants("pacing")) {
+            final float perSecond = realThisSecond * 1000f / elapsed;
+            Log.i(TAG, String.format(
+                "fg pacing: %.1f real/s, %.1f synthesised/s, %.1f presented/s,"
+                    + " %d skipped, interval %.1f ms (%.1f fps), %dx, %s",
+                perSecond, tier1Frames * 1000f / elapsed,
+                (perSecond + tier1Frames * 1000f / elapsed),
+                skipped,
+                smoothedInterval / 1e6f,
+                smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
+                multiple,
+                motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
+        }
+
+        if (wants("field")) {
+            Log.i(TAG, String.format(
+                "fg field: block %dx%d, grid %dx%d, luma %dx%d, mean speed %.1f%% of"
+                    + " screen width, matcher refusals %d",
+                blockX, blockY,
+                vectors != null ? vectors.width : 0,
+                vectors != null ? vectors.height : 0,
+                luma[0] != null ? luma[0].width : 0,
+                luma[0] != null ? luma[0].height : 0,
+                measuredSpeed * 5f, estimateFailures));
+        }
+
+        if (wants("quality")) {
+            // Read as: how much of the frame the interpolation stood behind, and
+            // of what it did not, which way it failed.
+            Log.i(TAG, String.format(
+                "fg quality: %.1f%% trusted, %.1f%% fell back,"
+                    + " %.2f%% black from lit sources (this shader invented it),"
+                    + " %.2f%% black from dark sources (vector pointed at shadow)",
+                measuredConfidence * 100f,
+                (1f - measuredConfidence) * 100f,
+                measuredDark * 100f, measuredShadow * 100f));
+        }
+
         tier0Frames = 0;
         tier1Frames = 0;
         skipped = 0;
+        estimateFailures = 0;
     }
+
+    private long reportedRealFrames = 0;
 }

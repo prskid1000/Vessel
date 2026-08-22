@@ -72,7 +72,11 @@ import androidx.compose.material3.Text
  * offers what is known and accepts what is not is the only shape that serves
  * both, and it is what lets the environment table stop being a separate widget.
  *
- * @param typeOptions the declared families. Free text is still accepted: a name
+ * @param typeOptions the declared families, and the only values this column
+ *   takes. Unlike the flag and value columns it is a closed set: a type names
+ *   which composer writes the row, and an unrecognised one falls back to a plain
+ *   variable rather than selecting anything. See the field itself.
+ * @param flagOptions what the name column offers. Free text is still accepted: a name
  *   that matches none composes as a plain variable, which is the same escape
  *   hatch the environment table always was.
  * @param levelOptions the ladder in that subsystem's own vocabulary and order,
@@ -185,11 +189,22 @@ fun VDiagnosticEntry(
         AnimatedVisibility(open) {
             Column(Modifier.fillMaxWidth()) {
                 Field("Type") {
-                    VComboField(
-                        value = type,
+                    // **Closed, where the other two columns are not, and the
+                    // asymmetry is the point.** A name is whatever the tool calls
+                    // it and a value is whatever the tool accepts, so both take
+                    // typed text -- that is the reason this table exists. A type
+                    // is neither: it names which of Vessel's own composers writes
+                    // the row, and a word that matches none of them does not
+                    // select a fifth behaviour, it silently falls back to writing
+                    // a plain variable. Offering free text there invites a typo
+                    // that reads as a choice and behaves as a default.
+                    VDropdownField(
                         options = typeOptions,
-                        onValueChange = onType,
+                        labelFor = { it },
+                        selected = type.takeIf { it.isNotBlank() },
+                        onSelect = onType,
                         placeholder = "subsystem",
+                        valueIsMachine = true,
                         enabled = typeEditable,
                     )
                 }

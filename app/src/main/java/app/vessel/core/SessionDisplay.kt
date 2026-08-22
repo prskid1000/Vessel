@@ -54,6 +54,16 @@ data class DisplayRequest(
      * nothing else here to expose.
      */
     val frameGeneration: Int = 0,
+
+    /**
+     * Which parts of the frame generation pipeline should report on themselves,
+     * from the `FG_LOG` row of the container's environment table.
+     *
+     * Carried here rather than read by the renderer because the renderer has no
+     * container to read: it is handed a surface and a set of numbers, and this is
+     * one of the numbers. See `ContainerDiagnostics.frameGenerationLog`.
+     */
+    val frameGenerationLog: Set<String> = emptySet(),
 )
 
 /**

@@ -228,6 +228,23 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     /** Presented frames per real frame. Below 2 means off. */
     private int frameGenerationMultiplier = 0;
 
+    /**
+     * VESSEL: which parts of frame generation should report on themselves.
+     *
+     * <p>From the container's {@code FG_LOG} environment row. Empty is the normal
+     * case and costs nothing -- every diagnostic is gated on membership, and the
+     * measurement passes that feed the expensive categories are not run at all
+     * unless something asked for them.
+     */
+    private java.util.Set<String> frameGenerationLog = java.util.Collections.emptySet();
+
+    /** VESSEL: see {@link #frameGenerationLog}. */
+    public void setFrameGenerationLog(java.util.Set<String> categories) {
+        this.frameGenerationLog = categories == null
+            ? java.util.Collections.emptySet() : categories;
+        if (frameSynthesizer != null) frameSynthesizer.setDiagnostics(this.frameGenerationLog);
+    }
+
     /** VESSEL: see {@link FrameSynthesizer}. Below 2 switches it off. */
     public void setFrameGenerationMultiplier(int multiplier) {
         this.frameGenerationMultiplier = multiplier;
@@ -252,6 +269,7 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         if (frameSynthesizer == null) {
             frameSynthesizer = new FrameSynthesizer(this);
             frameSynthesizer.setMultiple(frameGenerationMultiplier);
+            frameSynthesizer.setDiagnostics(frameGenerationLog);
         }
         return true;
     }

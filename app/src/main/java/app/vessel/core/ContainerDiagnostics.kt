@@ -269,6 +269,42 @@ data class ContainerDiagnostics(
      * *and* passed through to the guest — see [TRACE_SPEC_ENV] for the two things
      * it means that no environment variable can express.
      */
+    /**
+     * `FG_LOG`, parsed — the frame generation pipeline's own reporting switch.
+     *
+     * **Why this exists at all.** Frame generation is the one feature in Vessel
+     * whose failures are visual, intermittent, and invisible to every log the app
+     * already writes. Diagnosing it has meant describing what a screen looked
+     * like and reasoning backwards, which is a lossy channel: a black speck, a
+     * shimmer and a frozen patch all look alike in a sentence and have nothing in
+     * common in the code. A day was spent on that once. This is so it is not
+     * spent again.
+     *
+     * Comma-separated categories, because the interesting question is rarely all
+     * of them at once and the loud ones would bury the quiet ones:
+     *
+     * - `setup` — resolutions, block size, what the driver admitted to, once.
+     * - `pacing` — real against synthesised, phases, skips, the interval.
+     * - `timing` — what each pass costs on the GPU.
+     * - `field` — what the motion field contains: magnitude, how much of it came
+     *   back as zero, how much the two directions disagree.
+     * - `quality` — what the interpolation did with it: how much was trusted,
+     *   how much fell back, how much came out darker than either source.
+     * - `all` — every category.
+     *
+     * Unknown names are kept rather than dropped. A category added later should
+     * work on a container configured today, and a typo is visible in the log line
+     * that lists what was asked for.
+     */
+    fun frameGenerationLog(): Set<String> =
+        normalised().rows.lastOrNull { it.name.trim() == FG_LOG_ENV }
+            ?.level
+            ?.split(',')
+            ?.map { it.trim().lowercase() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            .orEmpty()
+
     fun traceSpec(): TraceSpec =
         normalised().rows.lastOrNull { it.name.trim() == TRACE_SPEC_ENV }
             ?.let { parseTraceSpec(it.level) }
@@ -348,6 +384,21 @@ val KNOWN_ENV: List<KnownEnv> = listOf(
         caution = "Check the volume before you launch: the loud stops fill this " +
             "container's whole log budget in under a minute, and the log says which " +
             "source filled it.",
+    ),
+    // Second, for the same reason the first is first: it answers a question
+    // rather than testing a hypothesis. Frame generation is the one part of the
+    // renderer whose faults are visual and intermittent, and this is the only way
+    // to see what it computed rather than what it looked like.
+    KnownEnv(
+        name = FG_LOG_ENV,
+        secondary = "What the frame generation pipeline reports about itself, as a " +
+            "comma-separated list. 'setup' prints the resolutions and block size once; " +
+            "'pacing' the real against synthesised rate; 'timing' the cost of each pass; " +
+            "'field' what the motion vectors actually contain; 'quality' how much of " +
+            "each frame was trusted and how much fell back. 'all' for everything. " +
+            "Means nothing unless Frame generation is on.",
+        placeholder = "pacing,quality",
+        values = listOf("all", "setup", "pacing", "timing", "field", "quality"),
     ),
     KnownEnv(
         name = "TU_AUTOTUNE_ALGO",
@@ -940,7 +991,26 @@ data class Loggable(
     fun volume(level: String): String? = volumes[level]
 
     /** Whether [level] is a stop this thing actually has. */
-    fun isRealValue(level: String): Boolean = level in levels
+    /**
+     * Whether [level] is a value this thing can actually be set to.
+     *
+     * **An empty ladder means every value, and reading it as "no value" made the
+     * whole environment table read-only.** A declared knob carries the stops it
+     * accepts, so membership is the right test for it. A variable nobody declared
+     * carries no stops at all -- that is what [unknownVariable] is -- and the
+     * point of the environment table is that such a variable takes whatever the
+     * user types. Testing membership against an empty list answers false for
+     * every string, so [isAllowed] was false, so `levelEditable` was false, so the
+     * value box was disabled on every free-text row in the table. Not only for a
+     * name Vessel has never heard of: `TU_AUTOTUNE_ALGO` and every other entry in
+     * [KNOWN_ENV] is offered by name without being a declared [Loggable], so each
+     * of them had a dead value field too.
+     *
+     * The table exists to reach a variable this build was not written to know
+     * about. A gate that refuses every value it was not written to know about
+     * removes exactly that.
+     */
+    fun isRealValue(level: String): Boolean = levels.isEmpty() || level in levels
 
     /** Whether [level] is at or past the stop that makes this a one-launch row. */
     fun isOneSession(level: String): Boolean {
