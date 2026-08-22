@@ -127,9 +127,11 @@ class SessionEnvironmentTest {
         fexPackage: FexPackage? = fex,
         display: String = DEFAULT_DISPLAY,
         fpsLimit: Int? = null,
+        frameGeneration: Int = 0,
         hardware: HardwareLimits? = null,
     ) = sessionEnvironment(
-        container(params), manifest, paths, driver, fexPackage, display, fpsLimit, hardware,
+        container(params), manifest, paths, driver, fexPackage, display, fpsLimit,
+        frameGeneration, hardware,
     )
 
     // — the logging contract --------------------------------------------------

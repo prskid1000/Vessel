@@ -1480,6 +1480,14 @@ fun sessionEnvironment(
      */
     fpsLimit: Int? = null,
     /**
+     * `display.frameGeneration`, already parsed. Below 2 means off.
+     *
+     * Here because it divides [fpsLimit] rather than because the guest is told
+     * about it — nothing inside the container knows or should know that the
+     * compositor is inventing frames. See the D3D limiter block below.
+     */
+    frameGeneration: Int = 0,
+    /**
      * What the guest is told this phone has, already resolved.
      *
      * Passed in for the same reason [fpsLimit] is: the session needs these
@@ -2045,9 +2053,30 @@ fun sessionEnvironment(
     // objection that used to argue against setting these at all, and it costs
     // nothing to keep as the backstop for everything the D3D variables cannot
     // reach.
+    //
+    // **Divided by the frame-generation multiple, and that division is the whole
+    // feature.** `display.fpsLimit` is what the *screen* shows; with predicted
+    // frames turned on, only one presented frame in N was rendered by the guest,
+    // so the guest's own cap has to be that fraction. A container asking for 120
+    // fps at 2x renders 60 and is shown 120.
+    //
+    // Getting this wrong costs the feature entirely, in both directions. Leave
+    // the guest uncapped and it spends the whole GPU on real frames, so there is
+    // no headroom left to synthesise with and nothing is gained — which is the
+    // objection that frame generation only pays when the renderer is held below
+    // the target. Cap the guest at the full number instead and the compositor is
+    // asked to present N times that, past what the panel can show, and the extra
+    // frames are discarded by the display.
+    //
+    // It also keeps the compositor's own pacer out of the way. `PacedXServerView`
+    // drops a `requestRender` that arrives sooner than the limit allows, and a
+    // predicted frame arrives between two real ones by construction — so the two
+    // rates have to be the ones described here or the pacer suppresses exactly
+    // the frames this exists to add.
     fpsLimit?.takeIf { it > 0 }?.let { limit ->
-        environment["DXVK_FRAME_RATE"] = limit.toString()
-        environment["VKD3D_FRAME_RATE"] = limit.toString()
+        val rendered = if (frameGeneration >= 2) maxOf(1, limit / frameGeneration) else limit
+        environment["DXVK_FRAME_RATE"] = rendered.toString()
+        environment["VKD3D_FRAME_RATE"] = rendered.toString()
     }
 
     // **What the guest is told this phone has**, from the Hardware group. Each

@@ -37,6 +37,23 @@ data class DisplayRequest(
     val socketRoot: File,
     /** How the guest's picture is stretched when [geometry] is below the screen. */
     val upscaler: UpscalerRequest = UpscalerRequest(),
+    /**
+     * Presented frames per frame the guest actually drew. Below 2 is off.
+     *
+     * The temporal counterpart to [upscaler], and off by default for a different
+     * reason than that one: SGSR reconstructs from a frame that exists and is
+     * wrong only in detail, while this predicts a frame that does not exist and
+     * can be wrong about what is in it. The driver is asked whether it can do it
+     * at all — `GL_QCOM_frame_extrapolation` is a vendor extension — so setting
+     * this on a device without it changes nothing rather than failing.
+     *
+     * A count rather than a flag because the extension aims at a time rather than
+     * at a fixed midpoint: N-1 predictions at `i/N` fill the gap between two real
+     * frames evenly. The whole tunable surface of the extension is that one
+     * number — it defines no other entry point, token or state — so there is
+     * nothing else here to expose.
+     */
+    val frameGeneration: Int = 0,
 )
 
 /**

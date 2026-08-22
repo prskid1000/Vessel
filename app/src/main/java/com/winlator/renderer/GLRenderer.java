@@ -216,8 +216,63 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         this.frameListener = listener;
     }
 
+    /**
+     * VESSEL: predicted frames, off unless a container asks for them.
+     *
+     * <p>Null until switched on, because the three render targets it allocates
+     * are the size of the surface and a container that will never use them
+     * should not be paying for them.
+     */
+    private FrameExtrapolator frameExtrapolator;
+
+    /** Presented frames per real frame. Below 2 means off. */
+    private int frameGenerationMultiplier = 0;
+
+    /** VESSEL: see {@link FrameExtrapolator}. Below 2 switches it off. */
+    public void setFrameGenerationMultiplier(int multiplier) {
+        this.frameGenerationMultiplier = multiplier;
+        if (frameExtrapolator != null && multiplier >= 2) {
+            frameExtrapolator.setMultiplier(multiplier);
+        }
+        xServerView.requestRender();
+    }
+
+    /**
+     * VESSEL: whether this frame goes through the extrapolator at all.
+     *
+     * <p>Effects are the one exclusion, and it is a structural one rather than a
+     * policy: {@link EffectComposer#render()} binds framebuffer 0 for its last
+     * pass, so it writes the finished picture straight to the screen and there
+     * is nothing left for the extrapolator to capture. A container with an
+     * effect keeps the path it had.
+     */
+    private boolean extrapolating() {
+        if (frameGenerationMultiplier < 2) return false;
+        if (effectComposer.hasEffects()) return false;
+        if (!FrameExtrapolator.isSupported()) return false;
+        if (frameExtrapolator == null) {
+            frameExtrapolator = new FrameExtrapolator(this);
+            frameExtrapolator.setMultiplier(frameGenerationMultiplier);
+        }
+        return true;
+    }
+
+    /**
+     * VESSEL: forget which window material is bound.
+     *
+     * <p>{@link #bindWindowMaterial} keeps one {@code glUseProgram} per frame by
+     * remembering what it last bound. Anything else that binds a program behind
+     * its back -- the extrapolator's blit does -- has to say so, or the next
+     * window pass skips a bind it needed and draws with the wrong shader.
+     */
+    void invalidateBoundWindowMaterial() {
+        boundWindowMaterial = null;
+    }
+
     @Override
     public void onDrawFrame(GL10 gl) {
+        // VESSEL: a predicted frame counts. This is documented as what the user
+        // is actually shown, and a synthesised frame is shown.
         compositedFrames++;
         // VESSEL: read once. The field is volatile and the teardown path clears
         // it, so a local is what keeps begin and end paired on the same object.
@@ -228,6 +283,23 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             fullscreen = !fullscreen;
             toggleFullscreen = false;
             viewportNeedsUpdate = true;
+        }
+
+        if (extrapolating()) {
+            final int synthesized = frameExtrapolator.consumeSynthesizedFrame();
+            if (synthesized > 0) {
+                frameExtrapolator.presentSynthesizedFrame(synthesized);
+                if (listener != null) listener.onFrameEnd();
+                return;
+            }
+            if (frameExtrapolator.beginRealFrame()) {
+                drawFrame();
+                frameExtrapolator.endRealFrame();
+                if (listener != null) listener.onFrameEnd();
+                return;
+            }
+            // Allocation failed. Fall through and composite to the screen, which
+            // is what this did before the extrapolator existed.
         }
 
         if (effectComposer.hasEffects()) {

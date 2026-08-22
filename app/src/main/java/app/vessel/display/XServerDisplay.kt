@@ -494,6 +494,10 @@ class XServerDisplay @Inject constructor(
                         request.upscaler.maxDelta,
                     ),
                 )
+                // Same reasoning as setUpscaler above: before the first frame,
+                // so the extrapolator's targets are allocated once at the right
+                // size rather than allocated, used and thrown away.
+                started.view.renderer.setFrameGenerationMultiplier(request.frameGeneration)
                 startSampling(started.view.renderer, request.fpsLimit, request.geometry.width, request.geometry.height)
                 DisplayOutcome.Started(started.environment)
             } catch (t: Throwable) {

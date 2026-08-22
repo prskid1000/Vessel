@@ -27,6 +27,7 @@ include_directories(include)
 add_library(winlator SHARED
             src/copy_pool.c
             src/drawable.c
+            src/frame_extrapolation.c
             src/gpu_image.c
             src/sysvshared_memory.c
             src/xconnector_epoll.c

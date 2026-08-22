@@ -587,6 +587,9 @@ class SessionRuntime @Inject constructor(
         val geometry = parseGeometry(text(profile, manifest, DisplayParams.RESOLUTION), native)
         val fpsLimit = parseFpsLimit(text(profile, manifest, DisplayParams.FPS_LIMIT))
         val upscaler = upscalerOf(profile, manifest)
+        val frameGeneration = parseFrameGeneration(
+            text(profile, manifest, DisplayParams.FRAME_GENERATION),
+        )
 
         _state.value = SessionState(
             containerId = containerId,
@@ -646,7 +649,7 @@ class SessionRuntime @Inject constructor(
 
         try {
             prepare(containerId, profile, manifest, fpsLimit, log) ?: return
-            runDesktop(log, geometry, fpsLimit, upscaler)
+            runDesktop(log, geometry, fpsLimit, upscaler, frameGeneration)
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
             // every step of it suspends, so it needs a context that is not
@@ -948,6 +951,12 @@ class SessionRuntime @Inject constructor(
             // compositor was already throwing away — measured at 116 rendered for
             // every 24 shown, at 84% GPU. See `sessionEnvironment`.
             fpsLimit = fpsLimit,
+            // Resolved here rather than threaded down beside `fpsLimit`: it is
+            // read from the same profile and manifest this function already
+            // holds, and the environment is the only consumer on this path.
+            frameGeneration = parseFrameGeneration(
+                text(profile, manifest, DisplayParams.FRAME_GENERATION),
+            ),
             hardware = hardware,
             // Read here rather than in `sessionEnvironment` because it needs a
             // `Context` and that function is pure by contract. See the parameter.
@@ -1055,6 +1064,7 @@ class SessionRuntime @Inject constructor(
         geometry: DisplayGeometry,
         fpsLimit: Int?,
         upscaler: UpscalerRequest,
+        frameGeneration: Int,
     ) {
         val current = plan ?: return
         _state.update { it.copy(phase = SessionPhase.STARTING) }
@@ -1065,6 +1075,7 @@ class SessionRuntime @Inject constructor(
             fpsLimit = fpsLimit,
             socketRoot = current.layout.base,
             upscaler = upscaler,
+            frameGeneration = frameGeneration,
         )
         // What the server answers with, not what was asked for. `DISPLAY` and
         // `WINE_SYSVSHM_SOCKET` name sockets that either got bound or did not,
@@ -3213,6 +3224,20 @@ class SessionRuntime @Inject constructor(
      * sharpening constant would be a much worse answer than one that starts at
      * 2.0 and says so in the log line above.
      */
+    /**
+     * The container's frame-generation multiple, as a count of presented frames.
+     *
+     * `off` and anything unparseable both mean 0, which the compositor reads as
+     * "do not". A container file edited by hand is the only way to reach the
+     * second case — the manifest collects this as an enum — and a session that
+     * refused to start over it would be a much worse answer than one that starts
+     * without predicted frames.
+     */
+    private fun parseFrameGeneration(value: String?): Int {
+        if (value == null || value == DisplayParams.FRAME_GENERATION_OFF) return 0
+        return value.trim().toIntOrNull()?.takeIf { it >= 2 } ?: 0
+    }
+
     private fun upscalerOf(profile: ContainerProfile, manifest: ParamManifest?): UpscalerRequest {
         val fallback = UpscalerRequest()
         val choice = text(profile, manifest, DisplayParams.UPSCALER)

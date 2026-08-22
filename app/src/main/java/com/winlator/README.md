@@ -782,6 +782,78 @@ The modifications, in the order they were made:
    practice, and whether the self-write suppression matches how many callbacks
    `setPrimaryClip` really produces.
 
+31. **`FrameExtrapolator`, `frame_extrapolation.c`, and the renderer hook they
+   need — frames the guest never drew.** The temporal counterpart to
+   modification 22: SGSR reconstructs across space, from a frame rendered below
+   the panel's resolution, and this reconstructs across time, from two frames
+   rendered below its refresh rate. Both sit in the compositor and both ask the
+   driver before they act.
+
+   `GL_QCOM_frame_extrapolation` is a registered Khronos extension implemented by
+   the vendor GLES driver, so `glExtrapolateTex2DQCOM(src1, src2, output,
+   scaleFactor)` predicts a third frame from two real ones and nothing here
+   implements the prediction. It has no Java binding — `android.opengl.GLES2x`
+   stops at the core API — so `frame_extrapolation.c` resolves it through
+   `eglGetProcAddress` and exposes two statics, and it is the only new file in
+   `cpp/winlator` since `xshmfence.c`.
+
+   **Extrapolation and not interpolation, which is the reason for choosing it.**
+   Interpolating between two real frames means holding the newer one back until
+   the frame after it exists, at a cost of one full frame of latency. Predicting
+   forward costs none; the price is accuracy instead, and a prediction is most
+   wrong where something occluded is being revealed. The next real frame replaces
+   it outright, so the error is bounded to one frame.
+
+   `GLRenderer.onDrawFrame` gains three things: `extrapolating()`, which gates on
+   the container's setting, the absence of effects and
+   `FrameExtrapolator.isSupported()`; a branch that composites into an offscreen
+   target instead of the screen; and `invalidateBoundWindowMaterial()`, because
+   the extrapolator's blit binds a program behind `bindWindowMaterial`'s back and
+   modification 22's one-`glUseProgram`-per-frame bookkeeping would otherwise let
+   the next window pass draw with the blit shader.
+
+   Effects are excluded structurally rather than by policy: `EffectComposer`
+   binds framebuffer 0 for its last pass, so the finished picture goes straight
+   to the screen and there is nothing left to capture. Targets are RGBA8 rather
+   than `Texture`'s `GL_BGRA` default, which the extension rejects outright.
+
+   **The multiple is the whole tunable surface.** `scaleFactor` aims at a time
+   rather than at a fixed midpoint — 1.0 is a full time-delta past `src2`, and
+   negative values aim before it — so N-1 predictions at `i/N` fill the gap
+   between two real frames evenly, and 2x, 3x and 4x are that one number. The
+   extension defines no other entry point, no new tokens and no new state, so
+   there is nothing else to expose; accuracy is what pays for the larger
+   multiples, since the last prediction at 4x aims three times as far as the
+   first on exactly the same two frames.
+
+   **The guest is capped at `display.fpsLimit / N`, and that division is the
+   feature.** `SessionEnvironment` writes the divided number to `DXVK_FRAME_RATE`
+   and `VKD3D_FRAME_RATE`, so the limit means what the *screen* shows and the
+   game renders its fraction of it: 120 fps at 2x renders 60 and presents 120.
+   Both the other arrangements fail. A guest left uncapped spends the whole GPU
+   on real frames and leaves nothing to predict with; a guest capped at the full
+   number asks the compositor to present N times that, past what the panel can
+   show. It also keeps `PacedXServerView` out of the way, which drops a
+   `requestRender` arriving sooner than the limit allows — and a predicted frame
+   arrives between two real ones by construction.
+
+   **The idle gate was 40 ms and that switched the feature off entirely.** 40 ms
+   is 25 fps, and a container capped at 24 fps composites every 41.7 ms, so every
+   frame fell the wrong side of it and not one prediction was ever scheduled —
+   for exactly the containers frame generation exists for. 250 ms now. A slow
+   renderer is not an idle one; a genuinely idle desktop damages nothing and
+   never reaches the gate at all.
+
+   **Off by default, and no prediction has yet been seen on the device.** The
+   extension is present on this one — Adreno 829, GLES 3.2, driver `V@0842.36`,
+   reporting `GL_QCOM_frame_extrapolation` and `GL_QCOM_motion_estimation` — and
+   the visible corruption an early build produced (dense colour noise, which was
+   the uninitialised output target blended over the previous frame) is gone with
+   blending disabled for the blit. But the counters in `report()` exist because
+   two guesses about why nothing was happening were both wrong: the first was the
+   idle gate, the second was that the container's setting had been reset to off.
+   Nothing here is confirmed working until that log line prints.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -797,7 +869,8 @@ fails the build.
 | `app/src/main/java/com/winlator/core/ImageUtils.java` | 11 |
 | `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
 | `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
-| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22 |
+| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22, 31 |
+| `app/src/main/java/com/winlator/renderer/FrameExtrapolator.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
@@ -832,6 +905,7 @@ fails the build.
 | `app/src/main/cpp/winlator/include/copy_pool.h` | 28 |
 | `app/src/main/cpp/winlator/src/copy_pool.c` | 28 |
 | `app/src/main/cpp/winlator/src/drawable.c` | 28 |
+| `app/src/main/cpp/winlator/src/frame_extrapolation.c` | 31 |
 | `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 | `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |

@@ -381,6 +381,24 @@ object DisplayParams {
     /** [UPSCALER]'s two options. */
     const val UPSCALER_SGSR: String = "sgsr"
     const val UPSCALER_BILINEAR: String = "bilinear"
+
+    /**
+     * Frames the compositor predicts rather than the guest drawing them.
+     *
+     * The temporal sibling of [UPSCALER], and unlike that group this one does
+     * *not* depend on [RESOLUTION] — a container rendering at the panel's own
+     * size still benefits, because what is short here is frames per second and
+     * not pixels per frame.
+     *
+     * It needs `GL_QCOM_frame_extrapolation`, which is a vendor extension the
+     * driver either has or does not. `FrameExtrapolator.isSupported()` asks
+     * before anything is allocated, so a container that sets this on a device
+     * without it gets the ordinary composite rather than an error.
+     */
+    const val FRAME_GENERATION: String = "display.frameGeneration"
+
+    /** [FRAME_GENERATION]'s "do not", beside the multiples 2, 3 and 4. */
+    const val FRAME_GENERATION_OFF: String = "off"
 }
 
 /**
