@@ -283,6 +283,17 @@ public class FrameExtrapolator {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, predicted.getFramebuffer());
         blit(latestTarget().getTextureId());
 
+        // **Unbind before predicting, and this is not tidiness.** `predicted` is
+        // the colour attachment of the framebuffer just bound to seed it, and the
+        // extension is about to write to that same texture by name. A texture
+        // that is simultaneously an attachment of the bound framebuffer and the
+        // destination of a write is a feedback loop -- undefined by the spec, and
+        // what undefined looks like on screen is noise. The same goes for the two
+        // sources, which are attachments of their own framebuffers; nothing of
+        // ours may be bound while the driver has all three.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
         extrapolateTex2D(previousTarget().getTextureId(), latestTarget().getTextureId(),
                          predicted.getTextureId(), (float)index / (float)multiplier);
@@ -320,7 +331,6 @@ public class FrameExtrapolator {
                     + ", " + multiplier + "x");
         }
 
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         blit(predicted.getTextureId());
     }
 

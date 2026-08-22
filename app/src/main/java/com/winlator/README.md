@@ -844,7 +844,24 @@ The modifications, in the order they were made:
    renderer is not an idle one; a genuinely idle desktop damages nothing and
    never reaches the gate at all.
 
-   **Off by default, and no prediction has yet been seen on the device.** The
+   **Confirmed working, and the noise had two causes.** Measured on device with
+   Metro 2033 Redux at 4x: `scheduled 1674, cancelled 521, presented 587`, no GL
+   error, and a title screen that renders sharp. The dense colour speckle two
+   earlier builds put on screen was, first, an output target still holding
+   uninitialised GPU memory -- fixed by seeding it with the newest real frame --
+   and second, and the one that actually mattered, a feedback loop: the target
+   was still the colour attachment of the bound framebuffer while the extension
+   wrote to it by name, which the spec leaves undefined. Unbinding before the
+   call is what fixed it.
+
+   **The multiple divides an already-low cap, and 24 fps at 4x means the game
+   renders six.** The same measurement shows intervals alternating 41 ms and
+   124 ms, the latter being the guest doing as it was told. The multiple wants a
+   Frame rate limit high enough to survive the division -- 120 at 2x renders 60
+   -- and a container left at 24 gets a prediction aimed a sixth of a second past
+   anything real. Worth saying in the UI rather than leaving to arithmetic.
+
+   **Off by default.** The
    extension is present on this one — Adreno 829, GLES 3.2, driver `V@0842.36`,
    reporting `GL_QCOM_frame_extrapolation` and `GL_QCOM_motion_estimation` — and
    the visible corruption an early build produced (dense colour noise, which was
