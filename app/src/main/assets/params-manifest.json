@@ -168,30 +168,6 @@
           "max": 64,
           "default": 23,
           "section": "Scaling"
-        },
-        {
-          "key": "display.frameGeneration",
-          "title": "Multiple",
-          "help": "Shows frames the guest never drew, predicted by the GPU from the last two it did. Needs a driver with GL_QCOM_frame_extrapolation and does nothing without one. It predicts forward rather than interpolating, so it costs no input lag — the price is that a prediction can be wrong, most visibly where something hidden is being revealed. Frame rate limit becomes what the screen shows: the game is capped at that divided by this multiple, so 120 fps at 2x renders 60 and presents 120. That division is the point — a game left to render flat out has no GPU left over to predict with. Larger multiples predict further ahead from the same two frames, so 4x guesses worse than 2x.",
-          "type": "enum",
-          "options": [
-            "off",
-            "2",
-            "3",
-            "4",
-            "6",
-            "8"
-          ],
-          "default": "off",
-          "optionLabels": {
-            "off": "Off",
-            "2": "2x  (game renders half)",
-            "3": "3x  (game renders a third)",
-            "4": "4x  (game renders a quarter)",
-            "6": "6x  (game renders a sixth)",
-            "8": "8x  (game renders an eighth)"
-          },
-          "section": "Frame generation"
         }
       ]
     },

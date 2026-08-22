@@ -1,6 +1,7 @@
 package com.winlator.renderer;
 
 import android.opengl.GLES20;
+import android.opengl.GLES30;
 import android.os.SystemClock;
 
 import com.winlator.renderer.material.ScreenMaterial;
@@ -93,26 +94,64 @@ public class FrameExtrapolator {
     private static final String EXTENSION = "GL_QCOM_frame_extrapolation";
 
     /**
-     * VESSEL: RGBA8, because the extension will not take BGRA.
+     * VESSEL: a colour target the extension will actually accept.
      *
-     * <p>{@link Texture#format} defaults to {@code GLES11Ext.GL_BGRA}, which is
-     * right for a window drawable uploaded from the guest and wrong here: the
-     * extension's supported formats are RGBA8, RGB8, R8 and the float variants,
-     * and a BGRA source is an {@code INVALID_OPERATION} rather than a wrong
-     * colour. {@code GL_RGBA} with {@code GL_UNSIGNED_BYTE} is RGBA8.
+     * <p>Not {@link RenderTarget}, and the difference is the format. That class
+     * allocates with {@code glTexImage2D} using {@link Texture#format} as both
+     * the internal format and the pixel format, which defaults to
+     * {@code GLES11Ext.GL_BGRA} -- right for a window drawable uploaded from the
+     * guest, and not one of the formats this extension lists. Setting it to
+     * {@code GL_RGBA} gets closer but is still an *unsized* internal format: the
+     * spec asks for RGBA8 specifically, and a driver that checks for a sized
+     * format does not get one.
+     *
+     * <p>So the storage is immutable and sized: {@code glTexStorage2D} with
+     * {@code GL_RGBA8}, one level. That is unambiguous about what the texture is,
+     * which matters for an entry point that writes to a texture by name rather
+     * than through the pipeline and cannot renegotiate the format on the way.
      */
-    private static final class Rgba8Target extends RenderTarget {
-        Rgba8Target() {
-            format = GLES20.GL_RGBA;
+    private static final class ColourTarget {
+        int texture;
+        int framebuffer;
+
+        void allocate(int width, int height) {
+            final int[] names = new int[1];
+            GLES20.glGenTextures(1, names, 0);
+            texture = names[0];
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+            GLES30.glTexStorage2D(GLES20.GL_TEXTURE_2D, 1, GLES30.GL_RGBA8, width, height);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S,
+                                   GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T,
+                                   GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                                   GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                                   GLES20.GL_LINEAR);
+
+            GLES20.glGenFramebuffers(1, names, 0);
+            framebuffer = names[0];
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                                          GLES20.GL_TEXTURE_2D, texture, 0);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+
+        void release() {
+            if (framebuffer != 0) GLES20.glDeleteFramebuffers(1, new int[] {framebuffer}, 0);
+            if (texture != 0) GLES20.glDeleteTextures(1, new int[] {texture}, 0);
+            framebuffer = 0;
+            texture = 0;
         }
     }
 
     private final GLRenderer renderer;
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
 
-    private RenderTarget frameA;
-    private RenderTarget frameB;
-    private RenderTarget predicted;
+    private ColourTarget frameA;
+    private ColourTarget frameB;
+    private ColourTarget predicted;
     private boolean latestIsB = false;
 
     private int allocWidth = 0;
@@ -229,15 +268,15 @@ public class FrameExtrapolator {
      */
     public boolean beginRealFrame() {
         if (!ensureTargets()) return false;
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeTarget().getFramebuffer());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeTarget().framebuffer);
         return true;
     }
 
     /** Show the frame that was just composited, and arrange for one that was not. */
     public void endRealFrame() {
-        RenderTarget written = writeTarget();
+        ColourTarget written = writeTarget();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        blit(written.getTextureId());
+        blit(written.texture);
 
         latestIsB = !latestIsB;
         realFrameCount++;
@@ -280,8 +319,8 @@ public class FrameExtrapolator {
         // One extra full-screen blit per predicted frame. That is a real cost and
         // it buys the guarantee that this feature can never put garbage on the
         // screen, which is worth more than the blit.
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, predicted.getFramebuffer());
-        blit(latestTarget().getTextureId());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, predicted.framebuffer);
+        blit(latestTarget().texture);
 
         // **Unbind before predicting, and this is not tidiness.** `predicted` is
         // the colour attachment of the framebuffer just bound to seed it, and the
@@ -295,8 +334,8 @@ public class FrameExtrapolator {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
 
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        extrapolateTex2D(previousTarget().getTextureId(), latestTarget().getTextureId(),
-                         predicted.getTextureId(), (float)index / (float)multiplier);
+        extrapolateTex2D(previousTarget().texture, latestTarget().texture,
+                         predicted.texture, (float)index / (float)multiplier);
 
         // VESSEL: the call either wrote the texture or it did not, and the
         // difference is not visible in the output -- an untouched target still
@@ -308,9 +347,9 @@ public class FrameExtrapolator {
         if (error != GLES20.GL_NO_ERROR) {
             android.util.Log.e("FrameExtrapolator",
                 "glExtrapolateTex2DQCOM failed with 0x" + Integer.toHexString(error)
-                    + " (src1=" + previousTarget().getTextureId()
-                    + " src2=" + latestTarget().getTextureId()
-                    + " out=" + predicted.getTextureId()
+                    + " (src1=" + previousTarget().texture
+                    + " src2=" + latestTarget().texture
+                    + " out=" + predicted.texture
                     + " scale=" + ((float)index / (float)multiplier)
                     + " " + allocWidth + "x" + allocHeight + ") -- frame generation off");
             failed = true;
@@ -331,7 +370,7 @@ public class FrameExtrapolator {
                     + ", " + multiplier + "x");
         }
 
-        blit(predicted.getTextureId());
+        blit(predicted.texture);
     }
 
     private boolean announced = false;
@@ -391,15 +430,15 @@ public class FrameExtrapolator {
     private long presented = 0;
 
     /** The older of the pair, which is the one the next real frame overwrites. */
-    private RenderTarget writeTarget() {
+    private ColourTarget writeTarget() {
         return latestIsB ? frameA : frameB;
     }
 
-    private RenderTarget latestTarget() {
+    private ColourTarget latestTarget() {
         return latestIsB ? frameB : frameA;
     }
 
-    private RenderTarget previousTarget() {
+    private ColourTarget previousTarget() {
         return latestIsB ? frameA : frameB;
     }
 
@@ -442,23 +481,17 @@ public class FrameExtrapolator {
         return true;
     }
 
-    private static RenderTarget allocate(int width, int height) {
-        RenderTarget target = new Rgba8Target();
-        target.allocateFramebuffer(width, height);
+    private static ColourTarget allocate(int width, int height) {
+        ColourTarget target = new ColourTarget();
+        target.allocate(width, height);
         return target;
     }
 
     private void release(boolean deleteObjects) {
         if (deleteObjects) {
-            int[] framebuffers = new int[3];
-            int[] textures = new int[3];
-            RenderTarget[] targets = {frameA, frameB, predicted};
-            for (int i = 0; i < targets.length; i++) {
-                framebuffers[i] = targets[i] != null ? targets[i].getFramebuffer() : 0;
-                textures[i] = targets[i] != null ? targets[i].getTextureId() : 0;
-            }
-            GLES20.glDeleteFramebuffers(framebuffers.length, framebuffers, 0);
-            GLES20.glDeleteTextures(textures.length, textures, 0);
+            if (frameA != null) frameA.release();
+            if (frameB != null) frameB.release();
+            if (predicted != null) predicted.release();
         }
         frameA = null;
         frameB = null;

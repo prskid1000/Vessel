@@ -844,7 +844,47 @@ The modifications, in the order they were made:
    renderer is not an idle one; a genuinely idle desktop damages nothing and
    never reaches the gate at all.
 
-   **Confirmed working, and the noise had two causes.** Measured on device with
+   **WITHDRAWN. The extension writes garbage on this driver and four attempts to
+   fix it all failed.** The setting is gone from the manifest, so nothing can turn
+   it on; the code is kept because the findings below are worth more than the
+   diff, and because the failure is in one call rather than in the surrounding
+   machinery.
+
+   What was tried, in order, each built and run on device, each still showing
+   dense colour speckle on the predicted frames -- reported as "dot + flicker",
+   which is exactly right, since at 4x three frames in four are predicted:
+
+   1. **Blending disabled for the blit.** The compositor leaves
+      SRC_ALPHA/ONE_MINUS_SRC_ALPHA on from context creation, so a prediction
+      carrying alpha blended with the previous screen. Real bug, not this one.
+   2. **The output target seeded** with the newest real frame before predicting,
+      so an untouched target could not present uninitialised memory. Real bug --
+      `glTexImage2D(..., null)` leaves whatever that page held -- and not this one.
+   3. **The framebuffer unbound** before the call. The target was still the colour
+      attachment of the bound FBO while the driver wrote to it by name, which is a
+      feedback loop and undefined. Real bug, and not this one either.
+   4. **Immutable sized storage**, `glTexStorage2D` with `GL_RGBA8` instead of
+      `glTexImage2D` with unsized `GL_RGBA`, since the spec names RGBA8 and a
+      driver checking for a sized format would not have got one. Still not it.
+
+   `glGetError` returns `GL_NO_ERROR` throughout, and the counters prove the call
+   runs: `scheduled 31617, cancelled 10334, presented 10788` in one session. So
+   the driver accepts the call, writes *something*, and what it writes is not a
+   frame -- 423 distinct colours across a 400x300 sample with two dominant, which
+   is a repeating pattern rather than a picture.
+
+   The spec is the problem as much as the driver: it defines one entry point, no
+   tokens, no state, and says outright that "extrapolation quality is not
+   defined". There is nothing to query, nothing to configure, and no way to ask
+   whether the output is valid. Anything further needs a working reference to
+   compare against -- Qualcomm's own sample, or a device where this is known good
+   -- rather than a fifth guess.
+
+   Everything up to the call is sound and stays: the offscreen capture, the
+   history pair, the pacing, the guest-cap division, and the counters that
+   separate "the driver did nothing" from "nothing was scheduled".
+
+   **What was true before it was withdrawn.** Measured on device with
    Metro 2033 Redux at 4x: `scheduled 1674, cancelled 521, presented 587`, no GL
    error, and a title screen that renders sharp. The dense colour speckle two
    earlier builds put on screen was, first, an output target still holding
