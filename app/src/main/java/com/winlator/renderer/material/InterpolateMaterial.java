@@ -78,14 +78,25 @@ package com.winlator.renderer.material;
  * It is also the one displacement that resamples nothing, so a static region comes
  * out bit-exact rather than bilinearly approximated.
  *
- * <p><b>7. The previous interval's field is a candidate, and a prior.</b> Motion is
- * coherent in time -- what moved this way a frame ago is probably still moving this
- * way -- which is why the temporal predictor is among the strongest in every video
- * codec. It is offered as a candidate, and additionally every candidate is charged
- * for how far it departs from it. That second part is the one that matters for
- * shimmer: with a dozen hypotheses per pixel, near-ties in ambiguous regions were
- * being decided by noise and re-decided differently every frame. A prior makes the
- * same region resolve the same way twice running.
+ * <p><b>7. The previous interval's field is a candidate, and a bounded prior.</b>
+ * Motion is coherent in time -- what moved this way a frame ago is probably still
+ * moving this way -- which is why the temporal predictor is among the strongest in
+ * every video codec. It is offered as a candidate, and additionally every candidate
+ * is charged a little for departing from it, which is what keeps a near-tie in an
+ * ambiguous region from being re-decided differently every frame.
+ *
+ * <p>**The charge is capped, and the first version of it froze moving objects.**
+ * Unbounded, the term is proportional to how far a candidate sits from last
+ * interval's motion -- so for an object moving a twentieth of the screen it grew
+ * larger than the penalty that ranks whole candidate classes, and the search
+ * stopped being a search. Worse, it pulls hardest toward zero exactly where the
+ * previous field *is* zero, which is the matcher's way of saying it failed. A
+ * genuinely moving object over a failed prior was being assigned no motion at all
+ * and frozen in place, which is stutter manufactured out of a stabiliser.
+ *
+ * <p>A prior is meant to break ties, not to steer. The cap is a third of the
+ * neighbour penalty, so it can decide between candidates the image cannot separate
+ * and can never override one the image can.
  *
  * <h2>How a match is judged</h2>
  *
@@ -139,12 +150,35 @@ package com.winlator.renderer.material;
  * notices; on the edge of a light shaft against a dark wall it darkens the seam
  * into a visible band.
  *
- * <p><b>15. A warped frame is sharpened back to parity with a real one.</b> A real
- * frame reaches the screen as a pixel-exact blit; a warped one is bilinearly
- * resampled and therefore softer. At 2x those alternate, which is a sharpness
- * oscillation at half the presented rate and reads as shimmer on exactly the moving
- * content this feature exists to smooth. The correction is scaled by how far the
- * sample actually moved, so a static pixel -- already exact -- is left alone.
+ * <p><b>15. A warped frame is sharpened back to parity with a real one, the way
+ * AMD does it.</b> A real frame reaches the screen as a pixel-exact blit; a warped
+ * one is bilinearly resampled and therefore softer. At 2x those alternate, which
+ * is a sharpness oscillation at half the presented rate, on exactly the moving
+ * content this feature exists to smooth.
+ *
+ * <p>**Two attempts at this put black and white dots across every detailed
+ * surface, and the reason was the method, not the strength.** An unsharp mask adds
+ * an amplified difference to a finished pixel, and nothing about that is bounded:
+ * on high-contrast texture it overshoots past black and past white, and the final
+ * clamp turns the overshoot into hard dots. Reducing the gain made them fainter;
+ * capping the magnitude did not help either, because a dark pixel has almost no
+ * room to be darkened at all and a fixed cap still clips it.
+ *
+ * <p>FidelityFX CAS -- Timothy Lottes' contrast-adaptive sharpening -- does not do
+ * that. Two things about it matter here. It is a *normalised weighted average of
+ * real neighbourhood samples*, {@code (b*w + d*w + f*w + h*w + e) / (1 + 4w)} with
+ * {@code w} negative, so the result is bounded by the values actually present
+ * around the pixel and cannot overshoot by construction. And its strength is
+ * literally headroom: {@code amp = saturate(min(mn, 1 - mx) / mx)}, where
+ * {@code mn} is the neighbourhood's distance to black and {@code 1 - mx} its
+ * distance to white, so a neighbourhood already near either limit sharpens itself
+ * by nothing. That is the black-dot case, switched off at the source rather than
+ * clamped after the fact.
+ *
+ * <p>Two details of the integration follow from AMD's own notes. CAS wants linear
+ * input, which this shader now has anyway for the blending. And the strength is
+ * scaled by how far the sample actually moved, because a static pixel landed on a
+ * texel centre, was never resampled, and has no lost detail to restore.
  *
  * <p><b>What remains out of reach, honestly.</b> A volumetric light shaft, a
  * reflection or a particle moves differently from the geometry behind it, so one
@@ -189,9 +223,11 @@ public class InterpolateMaterial extends ScreenMaterial {
             // wins only where the fine level failed rather than by a shade.
             "#define COARSE_PENALTY 0.03",
             // What a candidate is charged per unit of departure from the motion
-            // this pixel had last interval. See point 7 -- the prior that keeps an
-            // ambiguous region resolving the same way twice running.
+            // this pixel had last interval, and the most that charge may ever
+            // amount to. See point 7: uncapped, this stops being a tie-break and
+            // starts being a bias toward standing still.
             "#define TEMPORAL_WEIGHT 0.25",
+            "#define TEMPORAL_CAP 0.006",
 
             // How much a chroma disagreement counts. Below the luma terms, because
             // chroma is the coarser signal and subsampled in most content anyway;
@@ -220,8 +256,12 @@ public class InterpolateMaterial extends ScreenMaterial {
             // holding nothing. The taper exists only so the edge is not a line.
             "#define EDGE_FADE 0.01",
 
-            // How much of the detail lost to bilinear resampling is put back.
-            "#define SHARPEN 0.35",
+            // The negative lobe of the CAS kernel at full strength. Negative
+            // because that is what sharpens; small because this is restoring
+            // detail resampling lost, not adding contrast that was never there.
+            // AMD's own range runs to -1/5 for maximum sharpness; this is nearer
+            // their minimum. See point 15.
+            "#define CAS_PEAK -0.125",
 
             // The two real frames, in colour.
             "uniform sampler2D screenTexture;",
@@ -284,7 +324,8 @@ public class InterpolateMaterial extends ScreenMaterial {
             // What a candidate is worth: how well it explains the picture, what it
             // costs to prefer it, and how far it strays from last interval.
             "float rank(vec2 b, float penalty) {",
-                "return cost(b) + penalty + TEMPORAL_WEIGHT * length(b - gPrior);",
+                "return cost(b) + penalty",
+                     "+ min(TEMPORAL_WEIGHT * length(b - gPrior), TEMPORAL_CAP);",
             "}",
 
             "vec2 fieldAt(vec2 uv, float direction) {",
@@ -420,22 +461,51 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // Seen by one: whichever still holds the content. Usually the
                 // newer, since that is what a disocclusion reveals -- but at an
                 // edge the camera is moving away from it is the older.
-                "vec3 oneSided = insideNewer >= insideOlder ? newerLin : olderLin;",
-                "vec3 blended = mix(oneSided, mix(olderLin, newerLin, phase), bilateral);",
-                "vec3 result = sqrt(mix(nearest * nearest, blended, confidence));",
-
-                // --- sharpness parity with a real frame -------------------------
+                // --- sharpness parity with a real frame, and the blend ---------
                 //
                 // Scaled by how far the sample actually moved, in pixels: a static
                 // pixel landed on a texel centre and is already exact, so it is
                 // left alone. See point 15.
                 "float moved = clamp(length(best) / max(colourTexel.x, 1e-6), 0.0, 1.0);",
-                "vec3 blur = 0.25 * (",
-                    "texture2D(screenTexture, clamp(fromNewer + vec2(colourTexel.x, 0.0), 0.0, 1.0)).rgb",
-                  "+ texture2D(screenTexture, clamp(fromNewer - vec2(colourTexel.x, 0.0), 0.0, 1.0)).rgb",
-                  "+ texture2D(screenTexture, clamp(fromNewer + vec2(0.0, colourTexel.y), 0.0, 1.0)).rgb",
-                  "+ texture2D(screenTexture, clamp(fromNewer - vec2(0.0, colourTexel.y), 0.0, 1.0)).rgb);",
-                "result += (SHARPEN * moved * confidence) * (newer - blur);",
+                "vec3 tb = texture2D(screenTexture, clamp(fromNewer - vec2(0.0, colourTexel.y), 0.0, 1.0)).rgb;",
+                "vec3 td = texture2D(screenTexture, clamp(fromNewer - vec2(colourTexel.x, 0.0), 0.0, 1.0)).rgb;",
+                "vec3 tf = texture2D(screenTexture, clamp(fromNewer + vec2(colourTexel.x, 0.0), 0.0, 1.0)).rgb;",
+                "vec3 th = texture2D(screenTexture, clamp(fromNewer + vec2(0.0, colourTexel.y), 0.0, 1.0)).rgb;",
+                // Linear, like everything else here and like CAS asks for.
+                "tb *= tb; td *= td; tf *= tf; th *= th;",
+
+                // Headroom toward both limits, which is what makes this adaptive:
+                // a neighbourhood already near black or near white sharpens by
+                // nothing, and that is the case that produced the dots.
+                "vec3 mn = min(min(min(tb, td), min(tf, th)), newerLin);",
+                "vec3 mx = max(max(max(tb, td), max(tf, th)), newerLin);",
+                "vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-4), 0.0, 1.0));",
+
+                // A normalised weighted average of samples that really exist, so
+                // it is bounded by them and cannot overshoot. See point 15.
+                "vec3 w = amp * (CAS_PEAK * moved * confidence);",
+                "vec3 sharpLin = (tb + td + tf + th) * w + newerLin;",
+                "sharpLin /= (1.0 + 4.0 * w);",
+                // **Saturated, because AMD saturates and the reason is not
+                // cosmetic.** A normalised weighted average is bounded by its
+                // inputs only when the weights are positive. Here w is negative,
+                // so the numerator is (sum of neighbours)*w + centre, and a dark
+                // pixel surrounded by bright ones drives it below zero -- which is
+                // precisely the pixel a black dot appears on. Negative light then
+                // reaches the sqrt below and comes back NaN, and a NaN resolves to
+                // black or white depending on the hardware. CAS ends on ASatF1 for
+                // exactly this; leaving it off is what kept the dots alive across
+                // two different sharpeners.
+                "sharpLin = clamp(sharpLin, 0.0, 1.0);",
+
+                // The sharpened newer frame replaces the plain one in the blend,
+                // so the correction is carried in proportion to how much of this
+                // pixel came from N in the first place.
+                "vec3 oneSided = insideNewer >= insideOlder ? sharpLin : olderLin;",
+                "vec3 blended = mix(oneSided, mix(olderLin, sharpLin, phase), bilateral);",
+                // max() before the root for the same reason: nothing downstream
+                // of a NaN can be trusted, and one instruction makes it impossible.
+                "vec3 result = sqrt(max(mix(nearest * nearest, blended, confidence), 0.0));",
 
                 "gl_FragColor = vec4(clamp(result, 0.0, 1.0), 1.0);",
             "}"
