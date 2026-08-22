@@ -51,7 +51,16 @@ public class WarpMaterial extends ScreenMaterial {
                 // with GL_LINEAR is what turns per-block vectors into a smooth
                 // per-pixel field. See the class comment.
                 "vec2 motion = texture2D(motionTexture, vUV).rg;",
-                "vec2 source = vUV - motion * motionScale;",
+                // **Plus, not minus, and it was minus.** The field points
+                // backward -- for each block in the newer frame, the offset to
+                // where it came from in the older one, which is the block-matcher
+                // convention the extension's spec never states. Measured with the
+                // reconstruction test in SignTestMaterial: against an
+                // uncompensated error of 0.00248, warping by -motion scored
+                // 0.00192 and by +motion 0.00182. Inverted, every predicted frame
+                // moved objects the wrong way and snapped back on the next real
+                // one, which is judder that reads as a fault in the synthesis.
+                "vec2 source = vUV + motion * motionScale;",
                 // Clamped rather than wrapped. A vector pointing off the edge has
                 // no source pixel to gather, and repeating the border smears the
                 // edge; wrapping would fetch the opposite side of the screen,

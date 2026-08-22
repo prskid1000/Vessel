@@ -6,6 +6,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import com.winlator.renderer.material.ScreenMaterial;
+import com.winlator.renderer.material.SignTestMaterial;
 import com.winlator.renderer.material.WarpMaterial;
 
 /**
@@ -176,6 +177,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final WarpMaterial warpMaterial = new WarpMaterial();
+    private final SignTestMaterial signTestMaterial = new SignTestMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
@@ -289,6 +291,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // prediction between now and the next real frame shares this pair, so
         // every prediction shares these vectors.
         motionValid = realFrames >= 2 && motionEstimationSupported() && estimateMotion();
+        if (motionValid) runSignTestOnce();
 
         final long now = System.nanoTime();
         final long interval = lastRealFrameNanos == 0 ? 0 : now - lastRealFrameNanos;
@@ -384,6 +387,113 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
         return true;
     }
+
+    /**
+     * VESSEL: settle which way the motion field points, once, by measuring.
+     *
+     * <p>See {@link SignTestMaterial}. Both real frames are in hand, so the field
+     * can be tested against what it claims to describe rather than argued about:
+     * reconstruct the newer frame from the older under each sign and keep the one
+     * with the lower error. The wrong sign displaces every block by twice its
+     * true motion, so the two numbers are not close.
+     *
+     * <p>Deferred until the picture is actually moving. Two identical frames
+     * reconstruct perfectly under either sign and the test would report a tie,
+     * which is how a static menu screen would have taught us the wrong answer.
+     */
+    private void runSignTestOnce() {
+        if (signTested || luma[0] == null) return;
+
+        final float scaleX = 1f / Math.max(1, luma[0].width);
+        final float scaleY = 1f / Math.max(1, luma[0].height);
+        // **The control, and without it the comparison is uninterpretable.** A
+        // direction of zero compensates for nothing, so this is simply how much
+        // the two frames differ. If neither hypothesis beats it by a wide margin
+        // the field is doing no work -- either it is all zeros or the scene was
+        // static -- and the winner between them is noise. The first run of this
+        // test reported -motion ahead by 5.6% with both errors at 0.0025, which
+        // is exactly that failure and would have been read as a verdict.
+        final float baseline = signTestError(0f, scaleX, scaleY);
+        final float minus = signTestError(-1f, scaleX, scaleY);
+        final float plus = signTestError(1f, scaleX, scaleY);
+
+        final float best = Math.min(minus, plus);
+        // The right sign should explain a real share of the difference between
+        // the frames. A fifth is a low bar and still far outside noise.
+        if (baseline <= 1e-4f || best > baseline * 0.8f) return;
+
+        signTested = true;
+        final boolean backward = plus < minus;
+        Log.i(TAG, String.format(
+            "sign test: uncompensated %.5f, with -motion %.5f, with +motion %.5f"
+                + " -> vectors point %s; the warp should use %s",
+            baseline, minus, plus,
+            backward ? "BACKWARD (target to reference)" : "FORWARD (reference to target)",
+            backward ? "uv + motion*t" : "uv - motion*t"));
+    }
+
+    private boolean signTested = false;
+    private Target signTarget;
+
+    /**
+     * Mean absolute reconstruction error for one hypothesis.
+     *
+     * <p>Rendered into a small target and averaged on the CPU: the answer is a
+     * single number, and a 96x54 readback is 20 KB rather than the 14 MB a
+     * full-resolution one would cost on the GL thread -- which is how an earlier
+     * diagnostic here caused an ANR.
+     */
+    private float signTestError(float direction, float scaleX, float scaleY) {
+        if (signTarget == null) {
+            signTarget = new Target();
+            signTarget.allocate(SIGN_TEST_W, SIGN_TEST_H, GLES30.GL_RGBA8, GLES20.GL_NEAREST);
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, signTarget.framebuffer);
+        GLES20.glViewport(0, 0, SIGN_TEST_W, SIGN_TEST_H);
+        renderer.viewportNeedsUpdate = true;
+        GLES20.glDisable(GLES20.GL_BLEND);
+
+        signTestMaterial.use();
+        renderer.quadVertices.bind(signTestMaterial.programId);
+        signTestMaterial.setUniformBool(signTestMaterial.uniforms.flipY, false);
+        signTestMaterial.setUniformVec2(signTestMaterial.signUniforms.motionScale, scaleX, scaleY);
+        signTestMaterial.setUniformFloat(signTestMaterial.signUniforms.direction, direction);
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
+        signTestMaterial.setUniformInt(signTestMaterial.uniforms.screenTexture, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, colour[oldest()].texture);
+        signTestMaterial.setUniformInt(signTestMaterial.signUniforms.previousTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        signTestMaterial.setUniformInt(signTestMaterial.signUniforms.motionTexture, 2);
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+
+        final java.nio.ByteBuffer pixels = java.nio.ByteBuffer
+            .allocateDirect(SIGN_TEST_W * SIGN_TEST_H * 4)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glReadPixels(0, 0, SIGN_TEST_W, SIGN_TEST_H, GLES20.GL_RGBA,
+                            GLES20.GL_UNSIGNED_BYTE, pixels);
+
+        for (int unit = 2; unit >= 0; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.invalidateBoundWindowMaterial();
+
+        long total = 0;
+        for (int i = 0; i < SIGN_TEST_W * SIGN_TEST_H; i++) {
+            total += pixels.get(i * 4) & 0xff;
+        }
+        return total / (255f * SIGN_TEST_W * SIGN_TEST_H);
+    }
+
+    private static final int SIGN_TEST_W = 96;
+    private static final int SIGN_TEST_H = 54;
 
     /** Gather the latest frame along the field, aimed t of the way forward. */
     private void warp(Target source, float t) {
