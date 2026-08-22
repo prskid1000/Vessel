@@ -183,8 +183,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer warpTimer = new GpuTimer("tier1 warp");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
-    private Target colourA, colourB, lumaA, lumaB, vectors;
-    private boolean latestIsB = false;
+    private Target vectors;
     private int blockX = 8, blockY = 8;
 
     private int allocWidth = 0;
@@ -192,8 +191,21 @@ public class FrameSynthesizer implements FramePacer.Target {
     private int allocGeneration = -1;
 
     private int multiple = 2;
+    /** Whether the field estimated at the last real frame is usable. */
+    private boolean motionValid = false;
     private volatile long realFrames = 0;
     private long lastRealFrameNanos = 0;
+    private long smoothedInterval = 0;
+
+    /**
+     * Weight of the running mean of the real-frame interval.
+     *
+     * <p>Four, which is short enough to follow a genuine change in frame
+     * rate within a few frames and long enough that one late frame does not
+     * move the aim. Integer arithmetic throughout -- these are nanoseconds
+     * and a double buys nothing at that scale.
+     */
+    private static final long SMOOTHING = 4;
     private final java.util.concurrent.atomic.AtomicInteger pending =
         new java.util.concurrent.atomic.AtomicInteger(0);
 
@@ -267,16 +279,41 @@ public class FrameSynthesizer implements FramePacer.Target {
             lumaTimer.end();
         }
 
-        latestIsB = !latestIsB;
+        // The slot just written is now the newest. Everything above read
+        // the old arrangement; everything below reads the new one.
+        newest = oldest();
         realFrames++;
         renderer.latchWindowPositions();
+
+        // Estimated once here, for the whole interval that follows. Every
+        // prediction between now and the next real frame shares this pair, so
+        // every prediction shares these vectors.
+        motionValid = realFrames >= 2 && motionEstimationSupported() && estimateMotion();
 
         final long now = System.nanoTime();
         final long interval = lastRealFrameNanos == 0 ? 0 : now - lastRealFrameNanos;
         lastRealFrameNanos = now;
 
-        if (realFrames >= 2 && interval > 0 && interval <= IDLE_NANOS) {
-            pacer.schedule(interval, multiple);
+        // **Aimed with a smoothed interval, because the last one is noise.**
+        // Measured at 2x: one prediction per real frame was scheduled and only
+        // one in three survived -- the rest were cancelled because the next real
+        // frame arrived before the prediction's vsync. The compositor draws on
+        // guest damage, which is bursty, so consecutive gaps differ by a factor
+        // of two or three and an aim computed from a single gap is wrong most of
+        // the time. A running mean is what the gap actually is.
+        //
+        // It is not a cancellation bug. Presenting a prediction of a moment that
+        // has already been drawn for real is worse than presenting nothing, so
+        // the check is right; what was wrong was aiming so badly that it kept
+        // firing.
+        if (interval > 0 && interval <= IDLE_NANOS) {
+            smoothedInterval = smoothedInterval == 0
+                ? interval
+                : (smoothedInterval * (SMOOTHING - 1) + interval) / SMOOTHING;
+        }
+
+        if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= IDLE_NANOS) {
+            pacer.schedule(smoothedInterval, multiple);
         }
         report();
     }
@@ -301,8 +338,10 @@ public class FrameSynthesizer implements FramePacer.Target {
             return;
         }
 
-        // Tier 1. Only worth the passes when the driver does the matching.
-        if (motionEstimationSupported() && estimateMotion()) {
+        // Tier 1. The field was estimated once in endRealFrame, from the pair
+        // this whole interval shares -- re-running it here produced the identical
+        // vectors N-1 times per real frame for nothing.
+        if (motionValid) {
             warpTimer.begin();
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             warp(latestColour(), t);
@@ -311,8 +350,16 @@ public class FrameSynthesizer implements FramePacer.Target {
             return;
         }
 
-        // Neither applies: nothing moved that we can account for. Drawing a copy
-        // of the last frame would cost a composite and show nothing new.
+        // **Neither tier applies, and this path must still draw.** GLSurfaceView
+        // swaps the buffer after onDrawFrame whether or not anything was rendered
+        // into it, so returning here does not skip a frame -- it presents an
+        // unwritten back buffer, which on a double-buffered surface holds the
+        // frame from two swaps ago. The display then alternates between the
+        // current picture and an old one, which reads as flicker and looks like a
+        // fault in the synthesis rather than in the decision not to synthesise.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        blit(blitMaterial, latestColour().texture,
+             renderer.surfaceWidth, renderer.surfaceHeight);
         skipped++;
     }
 
@@ -323,7 +370,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     should be attempted -- an unwritten field would warp by garbage.
      */
     private boolean estimateMotion() {
-        if (lumaA == null || vectors == null) return false;
+        if (luma[0] == null || vectors == null) return false;
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
@@ -350,7 +397,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // The field is in pixels between two real frames; dividing by the frame
         // size puts it in texture space, and t aims it.
         warpMaterial.setUniformVec2(warpMaterial.warpUniforms.motionScale,
-                                    t / Math.max(1, allocWidth), t / Math.max(1, allocHeight));
+                                    t / Math.max(1, luma[0].width), t / Math.max(1, luma[0].height));
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
@@ -404,18 +451,41 @@ public class FrameSynthesizer implements FramePacer.Target {
         renderer.invalidateBoundWindowMaterial();
     }
 
-    private Target writeColour() { return latestIsB ? colourA : colourB; }
-    private Target latestColour() { return latestIsB ? colourB : colourA; }
-    private Target writeLuma() { return latestIsB ? lumaA : lumaB; }
-    private Target latestLuma() { return latestIsB ? lumaB : lumaA; }
-    private Target previousLuma() { return latestIsB ? lumaA : lumaB; }
+    /**
+     * VESSEL: the history, addressed by which slot is newest rather than by a
+     * boolean two accessors can agree on by accident.
+     *
+     * <p>These used to be five one-line ternaries, and two of them --
+     * {@code writeLuma()} and {@code previousLuma()} -- had *identical bodies*.
+     * They returned different buffers only because one was called before the
+     * newest slot flipped and the other after, so the code was correct entirely
+     * by statement order and would have broken the first time a line moved. An
+     * index makes the question "which slot" separate from the question "when".
+     */
+    private int newest = 1;
+
+    private int oldest() { return 1 - newest; }
+
+    /** The slot the next real frame is composited into: the older of the two. */
+    private Target writeColour() { return colour[oldest()]; }
+
+    private Target latestColour() { return colour[newest]; }
+
+    private Target writeLuma() { return luma[oldest()]; }
+
+    private Target latestLuma() { return luma[newest]; }
+
+    private Target previousLuma() { return luma[oldest()]; }
+
+    private final Target[] colour = new Target[2];
+    private final Target[] luma = new Target[2];
 
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
         final int width = renderer.surfaceWidth;
         final int height = renderer.surfaceHeight;
         if (width <= 0 || height <= 0) return false;
-        if (colourA != null && allocWidth == width && allocHeight == height
+        if (colour[0] != null && allocWidth == width && allocHeight == height
                 && allocGeneration == generation) {
             return true;
         }
@@ -423,12 +493,12 @@ public class FrameSynthesizer implements FramePacer.Target {
         // Only delete when the names still mean something. A new generation means
         // the objects went with the context that held them, and deleting those ids
         // would destroy whatever now has them.
-        release(colourA != null && allocGeneration == generation);
+        release(colour[0] != null && allocGeneration == generation);
 
-        colourA = new Target();
-        colourA.allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
-        colourB = new Target();
-        colourB.allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
+        for (int i = 0; i < 2; i++) {
+            colour[i] = new Target();
+            colour[i].allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
+        }
 
         if (motionEstimationSupported()) {
             final int[] value = new int[1];
@@ -442,10 +512,10 @@ public class FrameSynthesizer implements FramePacer.Target {
             final int lumaW = (width / blockX) * blockX;
             final int lumaH = (height / blockY) * blockY;
             if (lumaW > 0 && lumaH > 0) {
-                lumaA = new Target();
-                lumaA.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                lumaB = new Target();
-                lumaB.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
+                for (int i = 0; i < 2; i++) {
+                    luma[i] = new Target();
+                    luma[i].allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
+                }
                 vectors = new Target();
                 vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
@@ -457,7 +527,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         allocWidth = width;
         allocHeight = height;
         allocGeneration = generation;
-        latestIsB = false;
+        newest = 1;
         realFrames = 0;
         lastRealFrameNanos = 0;
         return true;
@@ -465,13 +535,14 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private void release(boolean deleteObjects) {
         if (deleteObjects) {
-            if (colourA != null) colourA.release();
-            if (colourB != null) colourB.release();
-            if (lumaA != null) lumaA.release();
-            if (lumaB != null) lumaB.release();
+            for (int i = 0; i < 2; i++) {
+                if (colour[i] != null) colour[i].release();
+                if (luma[i] != null) luma[i].release();
+            }
             if (vectors != null) vectors.release();
         }
-        colourA = colourB = lumaA = lumaB = vectors = null;
+        colour[0] = colour[1] = luma[0] = luma[1] = null;
+        vectors = null;
     }
 
     /**

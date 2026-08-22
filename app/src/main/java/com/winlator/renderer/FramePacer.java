@@ -76,7 +76,15 @@ class FramePacer {
         final long stamp = target.realFrameCount();
         for (int i = 1; i < multiple; i++) {
             final int index = i;
-            final long dueNanos = System.nanoTime() + (intervalNanos * i) / multiple;
+            // **Aimed slightly early, on purpose.** A prediction is only worth
+            // showing before the frame it predicts arrives, and the interval is an
+            // estimate -- so aiming exactly at i/N means half the time the real
+            // frame wins the race and the prediction is discarded. Landing a
+            // little before the ideal point costs a fraction of a frame of
+            // evenness and converts a coin flip into a frame that is actually
+            // shown.
+            final long dueNanos = System.nanoTime()
+                + (intervalNanos * i * EARLY_NUMERATOR) / (multiple * EARLY_DENOMINATOR);
             main.post(() -> {
                 final Choreographer choreographer = Choreographer.getInstance();
                 choreographer.postFrameCallback(new Choreographer.FrameCallback() {
@@ -109,4 +117,8 @@ class FramePacer {
      * rate moves that decision by well under one refresh.
      */
     private static final long HALF_VSYNC_NANOS = 4_000_000L;
+
+    /** Nine tenths of the ideal point. See where the due time is computed. */
+    private static final long EARLY_NUMERATOR = 9;
+    private static final long EARLY_DENOMINATOR = 10;
 }
