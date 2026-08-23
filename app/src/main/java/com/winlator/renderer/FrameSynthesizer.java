@@ -690,6 +690,12 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.framebuffer);
         interpolate(phase, true);
 
+        // **Unbound first, and this was undefined behaviour.** Generating
+        // mipmaps for a texture still attached to the bound framebuffer is not
+        // something the spec defines, and a driver is free to stall or to
+        // misbehave. It did the latter here for long enough to trip the input
+        // dispatch timeout.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, probe.texture);
         GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
@@ -705,6 +711,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         measuredShadow = (pixel.get(2) & 0xff) / 255f;
         measuredSpeed = (pixel.get(3) & 0xff) / 255f;
         measuredAt = SystemClock.uptimeMillis();
+
         renderer.viewportNeedsUpdate = true;
     }
 
@@ -951,14 +958,14 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         if (wants("field")) {
             Log.i(TAG, String.format(
-                "fg field: block %dx%d, grid %dx%d, luma %dx%d, mean speed %.1f%% of"
-                    + " screen width, matcher refusals %d",
+                "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
+                    + " %.2f%% of the frame badly explained, matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
-                measuredSpeed * 5f, estimateFailures));
+                measuredSpeed * 100f, estimateFailures));
         }
 
         if (wants("layers")) {
@@ -972,11 +979,13 @@ public class FrameSynthesizer implements FramePacer.Target {
             // of what it did not, which way it failed.
             Log.i(TAG, String.format(
                 "fg quality: %.1f%% trusted, %.1f%% fell back,"
-                    + " %.3f%% dots (black where the real frame is lit),"
-                    + " %.1f%% mean departure from the real frame",
+                    + " %.4f%% dark patches, %.2f%% where the search is blind to"
+                    + " a 16px error the picture would show",
                 measuredConfidence * 100f,
                 (1f - measuredConfidence) * 100f,
                 measuredDark * 100f, measuredShadow * 100f));
+
+
         }
 
         tier0Frames = 0;
