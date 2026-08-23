@@ -323,6 +323,8 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float signVotes = 0f;
     /** When the sign was last probed, so a still scene retries rather than sticks. */
     private long signProbedAt = 0;
+    /** A decisive vote awaiting a second, agreeing one. See {@link #probeFieldSign}. */
+    private float pendingSign = 0f;
 
     /**
      * Vote on the field's sign, and latch the answer once it is decisive.
@@ -392,16 +394,89 @@ public class FrameSynthesizer implements FramePacer.Target {
         // latch a coin toss.
         if (signVotes < 0.05f) return;
 
+        // **Two decisive probes that agree, not one.**
+        //
+        // The underlying cost margin between the two hypotheses was measured at
+        // five per cent -- 0.00192 against 0.00182 -- so a single frame voting
+        // 65% one way is comfortably inside what chance produces. This latches
+        // for the life of the context and there is no path that ever revisits
+        // it, so a wrong latch inverts the field for the whole session, and an
+        // inverted field displaces every pixel by twice its motion the wrong
+        // way. That is the failure mode this same value already caused once,
+        // when it was decided per pixel.
+        //
+        // Eighty per cent, and the same answer from two probes at least a second
+        // apart -- which is two different moments of the scene. An undecided
+        // probe clears the pending answer rather than leaving it to pair up with
+        // a vote from some unrelated moment.
         final float share = positive / signVotes;
-        if (share > 0.65f) fieldSign = 1f;
-        else if (share < 0.35f) fieldSign = -1f;
-        else return;
+        final float vote = share > 0.8f ? 1f : (share < 0.2f ? -1f : 0f);
+        if (vote == 0f) { pendingSign = 0f; return; }
+        if (pendingSign != vote) { pendingSign = vote; return; }
+        fieldSign = vote;
 
         Log.i(TAG, String.format(
             "fg sign: field points %s (%.0f%% of moving pixels agree, %.0f%% of the"
                 + " frame moving) -- latched",
             fieldSign > 0 ? "forward" : "backward", share * 100f, signVotes * 100f));
     }
+
+    /**
+     * VESSEL: how long one display refresh lasts, from the display itself.
+     *
+     * <p>Two separate things needed this and neither had it. The pacer was
+     * deciding whether a vsync was the nearest one to its target using half of a
+     * 120 Hz refresh, hardcoded -- on a panel running at 60 that is 4 ms where it
+     * should be 8.3, so a slot due at 25 ms with a vsync available at 18 ms
+     * waited and fired at 34.6 instead: 9.6 ms late rather than 7 ms early. And
+     * nothing knew how many frames an interval could physically hold, which is
+     * what {@link #effectiveMultiple} exists to answer.
+     *
+     * <p>Asked of the {@code Display} rather than inferred from timestamps. The
+     * panel knows, it is exact, and a sampled estimate would have to distinguish
+     * consecutive vsyncs from ones two apart without any way to tell.
+     */
+    @Override
+    public long vsyncPeriodNanos() {
+        final android.view.Display display = renderer.xServerView.getDisplay();
+        final float hz = display != null ? display.getRefreshRate() : 0f;
+        return hz > 1f ? (long)(1_000_000_000L / hz) : 0L;
+    }
+
+    /**
+     * How many frames this interval can actually carry, which is not always the
+     * multiple that was asked for.
+     *
+     * <p><b>An interval cannot hold more frames than it holds refreshes.</b> At
+     * 8x with a 90 fps limit in smoothness the request is 720 presented frames a
+     * second into a panel whose fastest mode is 165 -- three quarters of them
+     * have nowhere to go, and every one costs a full interpolation pass to be
+     * discarded. The clamp is the arithmetic that says so.
+     *
+     * <p>Runtime rather than a filtered list of settings, because the guest's
+     * interval is what decides it and the guest's interval moves. A 30 fps limit
+     * in smoothness nominally leaves 33 ms between real frames; when the guest
+     * actually delivers every 45 ms the number of refreshes in that gap changes
+     * with it, and so does the answer.
+     */
+    private int effectiveMultiple() {
+        if (multiple < 2) return 1;
+        final long period = vsyncPeriodNanos();
+        if (period <= 0 || smoothedInterval <= 0) return multiple;
+        final int refreshes = (int)(smoothedInterval / period);
+        return Math.min(multiple, Math.max(1, refreshes));
+    }
+
+    /**
+     * The multiple actually in force for the interval now running.
+     *
+     * <p>Settled once per real frame and then used for every phase decision in
+     * that interval -- the {@code 1/K} the composite presents, the offset in
+     * {@link #phaseFor}, and the slots the pacer schedules. Recomputing it
+     * per-present would let the three disagree inside one interval, which puts
+     * the phases somewhere no frame belongs.
+     */
+    private int activeMultiple = 2;
 
     /** Whether the field estimated at the last real frame is usable. */
     private boolean motionValid = false;
@@ -463,6 +538,27 @@ public class FrameSynthesizer implements FramePacer.Target {
     private static final long IDLE_NANOS = 250_000_000L;
 
     /**
+     * How far a synthesised frame may sit from a real one before it is invention.
+     *
+     * <p><b>A flat quarter-second gate switched 8x off entirely.</b> The gate
+     * asks "is the picture still moving", and 250 ms answers it correctly at 2x
+     * and not at all above that: efficiency mode caps the guest at
+     * {@code limit / multiple}, so 30 fps at 8x leaves the guest drawing every
+     * 333 ms and every interval fell the wrong side of the line. Not one
+     * prediction was ever scheduled, at the setting that asks for the most.
+     *
+     * <p>The quantity that actually matters is the distance from a synthesised
+     * frame to the nearest real one, and that is the interval divided by the
+     * multiple. Gating on it is the same 250 ms at 2x -- so nothing changes where
+     * the old number was right -- and scales where it was not.
+     */
+    private static final long SYNTH_MAX_GAP_NANOS = 125_000_000L;
+
+    private long idleGate() {
+        return SYNTH_MAX_GAP_NANOS * Math.max(2, multiple);
+    }
+
+    /**
      * VESSEL: the spacing of frames as they actually reach the screen.
      *
      * <p><b>Every other number here describes what was drawn; this is the only
@@ -480,6 +576,20 @@ public class FrameSynthesizer implements FramePacer.Target {
      * rather than derived from the guest's interval: an estimate of the input
      * cannot describe the output.
      */
+    /**
+     * VESSEL: the same cadence, from the display instead of from this thread.
+     *
+     * <p>{@link #notePresented} below records when a draw was *issued*. This
+     * records when the compositor says the frame was *shown*. They are separated
+     * by a queue nothing here controls, and every pacing conclusion in this file
+     * has so far come from the first of them. See {@link FrameTimestamps}.
+     *
+     * <p>Both are kept rather than one replacing the other: the difference
+     * between them is the queue depth, which is itself worth seeing, and the
+     * platform is entitled to decline the real one on some display paths.
+     */
+    private final FrameTimestamps timestamps = new FrameTimestamps();
+
     private long lastPresentNanos = 0;
     private long presentGapMin = Long.MAX_VALUE;
     private long presentGapMax = 0;
@@ -487,6 +597,9 @@ public class FrameSynthesizer implements FramePacer.Target {
     private long presentGaps = 0;
 
     private void notePresented() {
+        // Before the swap, which is the only moment the frame about to be
+        // produced has an id. See FrameTimestamps.onDraw.
+        if (wants("pacing")) timestamps.onDraw();
         final long now = System.nanoTime();
         if (lastPresentNanos != 0) {
             final long gap = now - lastPresentNanos;
@@ -624,16 +737,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         // interpolation and is what buys an answerable question.
         if (wants("setup")) announce();
 
-        realPresented = false;
-        lastPhase = 0f;
-        if (motionValid && multiple >= 2) {
-            presentPhase(1f / multiple);
-        } else {
-            // Nothing to interpolate with, so the real frame is the only
-            // thing worth showing and there is no reason to hold it back.
-            presentLatest();
-        }
-
+        // **The interval is measured before anything is presented, because the
+        // present depends on it.** It used to be taken afterwards, so the
+        // {@code 1/K} frame drawn here was placed using an estimate one frame
+        // stale while the pacer's slots used the fresh one -- two halves of the
+        // same interval laid out against different numbers.
         final long now = System.nanoTime();
         final long interval = lastRealFrameNanos == 0 ? 0 : now - lastRealFrameNanos;
         lastRealFrameNanos = now;
@@ -659,15 +767,31 @@ public class FrameSynthesizer implements FramePacer.Target {
         // has already been drawn for real is worse than presenting nothing, so
         // the check is right; what was wrong was aiming so badly that it kept
         // firing.
-        if (interval > 0 && interval <= IDLE_NANOS) {
+        if (interval > 0 && interval <= idleGate()) {
             recent[recentAt] = interval;
             recentAt = (recentAt + 1) % recent.length;
             if (recentHeld < recent.length) recentHeld++;
             smoothedInterval = medianInterval();
         }
 
-        if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= IDLE_NANOS) {
-            pacer.schedule(smoothedInterval, multiple);
+        // Settled once, here, and used by all three of the phase decisions that
+        // follow. See effectiveMultiple.
+        activeMultiple = effectiveMultiple();
+
+        realPresented = false;
+        lastPhase = 0f;
+        if (motionValid && activeMultiple >= 2) {
+            presentPhase(1f / activeMultiple);
+            lastPhase = 1f / activeMultiple;
+        } else {
+            // Nothing to interpolate with, or no refresh to show it in, so the
+            // real frame is the only thing worth showing and there is no reason
+            // to hold it back.
+            presentLatest();
+        }
+
+        if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
+            pacer.schedule(smoothedInterval, activeMultiple);
         }
         report();
     }
@@ -691,7 +815,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         // fallback for when there is no field rather than the preferred answer.
         if (motionValid) {
             presentPhase(phase);
-            tier1Frames++;
+            // **Phase 1 is the real frame**, presented through presentLatest by
+            // presentPhase. Counting it here inflated the synthesised rate by
+            // exactly the real rate -- and at 2x the pacer's single slot always
+            // lands on phase 1, so every "synthesised" frame this counted was a
+            // real one. It is the number the whole feature was being judged by.
+            if (phase < 1f) tier1Frames++;
+            lastPhase = phase;
             return;
         }
 
@@ -702,12 +832,24 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             renderer.drawSynthesizedFrame(phase);
             tier0Timer.end();
+            // Without this the cadence measurement never sees a tier 0 frame, so
+            // on any device lacking the motion extension it reports the gaps
+            // between *real* frames and calls them the present cadence -- twice
+            // the true figure, with the "shortest gap" check blind. The
+            // diagnostic silently described a pipeline that was not running.
+            notePresented();
             tier0Frames++;
+            lastPhase = phase;
             if (phase >= 1f) realPresented = true;
             return;
         }
 
-        presentLatest();
+        // **Nothing to show, so show nothing.** This used to re-present the
+        // identical real frame: a second draw of a picture already on screen,
+        // which costs an upscale, adds a sample to the cadence statistics that
+        // did not correspond to any new content, and counted as a present. The
+        // frame is already there; the honest response to having nothing to add
+        // is to add nothing.
         skipped++;
     }
 
@@ -761,10 +903,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float phaseFor(long vsyncNanos) {
         if (smoothedInterval <= 0 || lastRealFrameNanos == 0) return 1f;
         final float elapsed = (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
-        float phase = 1f / multiple + elapsed;
+        float phase = 1f / activeMultiple + elapsed;
         if (phase < lastPhase) phase = lastPhase;
         if (phase > 1f) phase = 1f;
-        lastPhase = phase;
+        // **Not assigned here.** This is asked for a phase before anything has
+        // decided to present one, and the paths below can decline -- at which
+        // point the monotonic guard had already been advanced past a moment that
+        // was never shown, so the next genuine frame was clamped forward to it.
+        // The callers that actually present set it.
         return phase;
     }
 
@@ -1111,6 +1257,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         output = null;
         signProbe = null;
         fieldSign = 0f;
+        pendingSign = 0f;
         signVotes = 0f;
         probe = null;
         announced = false;
@@ -1176,6 +1323,17 @@ public class FrameSynthesizer implements FramePacer.Target {
             + ", tier1 " + tier1Frames + ", skipped " + skipped
             + ", " + multiple + "x");
 
+        if (wants("pacing") && timestamps.hasData()) {
+            // **The only line here that describes the display rather than this
+            // thread.** Where it disagrees with `fg cadence` below, this one is
+            // right and that one is measuring the queue.
+            Log.i(TAG, timestamps.describe(vsyncPeriodNanos()));
+        } else if (wants("pacing") && timestamps.unavailable()) {
+            Log.i(TAG, "fg presented: the display cannot report present times on"
+                + " this surface; every cadence figure below is a draw schedule,"
+                + " not a scanout");
+        }
+
         if (wants("pacing") && presentGaps > 0) {
             // Even spacing is what smooth motion is, not the count. A mean of
             // 33 ms with a spread from 0.2 to 56 is two frames inside one
@@ -1194,13 +1352,14 @@ public class FrameSynthesizer implements FramePacer.Target {
             final float perSecond = realThisSecond * 1000f / elapsed;
             Log.i(TAG, String.format(
                 "fg pacing: %.1f real/s, %.1f synthesised/s, %.1f presented/s,"
-                    + " %d skipped, interval %.1f ms (%.1f fps), %dx, %s",
+                    + " %d skipped, interval %.1f ms (%.1f fps),"
+                    + " %dx asked / %dx fitted into a %.2f ms refresh, %s",
                 perSecond, tier1Frames * 1000f / elapsed,
                 (perSecond + tier1Frames * 1000f / elapsed),
                 skipped,
                 smoothedInterval / 1e6f,
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
-                multiple,
+                multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
         }
 

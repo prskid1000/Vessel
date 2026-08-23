@@ -54,6 +54,9 @@ class FramePacer {
 
         /** Frames composited for real, for the staleness check. */
         long realFrameCount();
+
+        /** One display refresh, from the panel. See {@link #halfRefresh}. */
+        long vsyncPeriodNanos();
     }
 
     /**
@@ -103,7 +106,7 @@ class FramePacer {
                         // Not there yet: ride the next vsync rather than firing
                         // early. The display cannot show it sooner in any case,
                         // and waiting costs nothing -- the callback re-posts.
-                        if (frameTimeNanos + HALF_VSYNC_NANOS < dueNanos) {
+                        if (frameTimeNanos + halfRefresh() < dueNanos) {
                             choreographer.postFrameCallback(this);
                             return;
                         }
@@ -115,12 +118,22 @@ class FramePacer {
     }
 
     /**
-     * Half a 120 Hz refresh. A vsync within this of the target is the closest one
-     * to it, so waiting for the next would land further away than firing now.
+     * Half a refresh of the panel actually in front of the user.
      *
-     * <p>A fixed number rather than one read from the display: the pacer only has
-     * to pick the nearer of two pulses, and being wrong about the panel's exact
-     * rate moves that decision by well under one refresh.
+     * <p>A vsync within this of the target is the closest one to it, so waiting
+     * for the next would land further away than firing now.
+     *
+     * <p><b>This was four milliseconds, hardcoded, and the comment defending it
+     * was wrong.</b> It reasoned that the pacer only has to pick the nearer of
+     * two pulses so the exact rate cannot matter much. It does: four milliseconds
+     * is half of 120 Hz, and on a 60 Hz panel half a refresh is 8.3, so every
+     * target falling in the 4.3 ms band between them was handed to the *later*
+     * pulse. A slot due at 25 ms with a vsync available at 18 ms should fire 7 ms
+     * early; instead it waited and fired at 34.6 ms, 9.6 ms late. At 2x, where
+     * there is one synthesised frame per interval, that is the whole placement.
      */
-    private static final long HALF_VSYNC_NANOS = 4_000_000L;
+    private long halfRefresh() {
+        final long period = target.vsyncPeriodNanos();
+        return period > 0 ? period / 2 : 8_333_333L;
+    }
 }
