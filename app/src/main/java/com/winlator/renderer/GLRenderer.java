@@ -698,8 +698,18 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     String describeLayers() {
         final StringBuilder out = new StringBuilder();
         int index = 0;
+        int hidden = 0;
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
+            // **Report what is drawn, not what exists.** This counted every
+            // window while renderWindows skipped the covered ones, so the line
+            // read "3 layers" for a frame that composited one -- a diagnostic
+            // describing the wrong thing, which is how the wasted fill went
+            // unnoticed in the first place.
+            final int firstVisible = Math.max(0, topmostOpaqueCover());
+            int position = -1;
             for (RenderableWindow window : renderableWindows) {
+                position++;
+                if (position < firstVisible) { hidden++; continue; }
                 if (window.content.isOffscreenStorage()) continue;
                 final float destW = window.fullscreenTransformation != null
                     ? window.fullscreenTransformation.width : window.content.width;
@@ -725,7 +735,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             }
         }
         if (index == 0) return "none";
-        return index + " layer" + (index == 1 ? "" : "s") + ": " + out;
+        return index + " layer" + (index == 1 ? "" : "s")
+            + (hidden > 0 ? " (" + hidden + " culled as fully covered)" : "")
+            + ": " + out;
     }
 
     private boolean useSGSRFor(Drawable drawable, float destWidth, float destHeight, boolean transparent) {
@@ -836,13 +848,69 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         }
     }
 
+    /**
+     * VESSEL: the topmost window that covers everything, or -1 if none does.
+     *
+     * <p><b>Metro composites three full-screen opaque layers and two of them are
+     * never seen.</b> Wine's virtual desktop, the game's own window and the
+     * presentation surface all arrive as 1280x720 at 0,0, stacked; only the last
+     * is visible, and the compositor was drawing all three every frame. That is
+     * two whole screens of fill thrown away, on the same GPU the guest is
+     * competing with for the frame rate that everything else here depends on.
+     *
+     * <p>Culling what an opaque window completely hides is what a compositor is
+     * supposed to do, and it cannot change a pixel of the result: the covered
+     * windows contribute nothing to begin with. Transparent windows are never
+     * treated as covering, and a window that does not span the whole screen is
+     * not treated as covering either, so anything the guest actually composites
+     * -- a menu, an overlay, a smaller child window -- is unaffected.
+     *
+     * <p>Only full-screen coverage is considered rather than general
+     * rectangle-against-rectangle occlusion. That is deliberate: this exists to
+     * remove a specific and very large waste, and a general solution would need
+     * to reason about partial overlap and stacking order for a case no guest here
+     * produces.
+     */
+    private int topmostOpaqueCover() {
+        final int screenWidth = xServer.screenInfo.width;
+        final int screenHeight = xServer.screenInfo.height;
+        int cover = -1;
+        for (int i = 0; i < renderableWindows.size(); i++) {
+            final RenderableWindow window = renderableWindows.get(i);
+            if (window.content.isOffscreenStorage() || window.transparent) continue;
+            final float width = window.fullscreenTransformation != null
+                ? window.fullscreenTransformation.width : window.content.width;
+            final float height = window.fullscreenTransformation != null
+                ? window.fullscreenTransformation.height : window.content.height;
+            final float x = window.fullscreenTransformation != null
+                ? window.fullscreenTransformation.x : window.rootX;
+            final float y = window.fullscreenTransformation != null
+                ? window.fullscreenTransformation.y : window.rootY;
+            if (x <= 0 && y <= 0
+                    && x + width >= screenWidth && y + height >= screenHeight) {
+                cover = i;
+            }
+        }
+        return cover;
+    }
+
+    /** How many windows the last composite skipped, for the layers diagnostic. */
+    int culledWindows = 0;
+
     private void renderWindows() {
         // VESSEL: the material is chosen per window now, so the pass opens with
         // nothing bound rather than with the bilinear one bound unconditionally.
         boundWindowMaterial = null;
 
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
+            // Everything under an opaque window that covers the screen is
+            // invisible. See topmostOpaqueCover.
+            final int firstVisible = Math.max(0, topmostOpaqueCover());
+            culledWindows = firstVisible;
+            int index = -1;
             for (RenderableWindow window : renderableWindows) {
+                index++;
+                if (index < firstVisible) continue;
                 if (!window.content.isOffscreenStorage()) {
                     // VESSEL: placed between the last two composites on a
                     // synthesised frame. See RenderableWindow.previousRootX -- at
