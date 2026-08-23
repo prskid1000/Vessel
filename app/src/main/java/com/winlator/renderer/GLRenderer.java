@@ -3,10 +3,6 @@ package com.winlator.renderer;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.opengl.EGL14;
-import android.opengl.EGLDisplay;
-import android.opengl.EGLExt;
-import android.opengl.EGLSurface;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 
@@ -348,37 +344,6 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
     @Override
     public void onDrawFrame(GL10 gl) {
-        composite(gl);
-        stampPresentation();
-    }
-
-    /**
-     * VESSEL: tell SurfaceFlinger when this frame is meant to be seen.
-     *
-     * <p>Without it the frame is displayed at whatever vsync happens to follow
-     * the swap, so an evenly synthesised stream still reaches the panel unevenly
-     * -- three vsyncs for one frame and five for the next -- and that is judder
-     * the interpolation cannot be blamed for. Android's frame pacing
-     * documentation is direct about it: a presentation timestamp is what tells
-     * SurfaceFlinger when to present, and without one a pipeline either stuffs
-     * its queue or re-shows the last frame.
-     *
-     * <p>Called after the composite and before {@code GLSurfaceView} swaps, which
-     * is the window in which the timestamp applies to the frame just drawn. A
-     * zero from the synthesiser means it has no measured cadence yet, and then
-     * nothing is stamped and the old behaviour stands.
-     */
-    private void stampPresentation() {
-        if (!extrapolating()) return;
-        final long when = frameSynthesizer.presentationTimeNanos();
-        if (when <= 0) return;
-        final EGLDisplay display = EGL14.eglGetCurrentDisplay();
-        final EGLSurface surface = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW);
-        if (display == null || surface == null) return;
-        EGLExt.eglPresentationTimeANDROID(display, surface, when);
-    }
-
-    private void composite(GL10 gl) {
         // VESSEL: a predicted frame counts. This is documented as what the user
         // is actually shown, and a synthesised frame is shown.
         compositedFrames++;
@@ -701,10 +666,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         int hidden = 0;
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
             // **Report what is drawn, not what exists.** This counted every
-            // window while renderWindows skipped the covered ones, so the line
-            // read "3 layers" for a frame that composited one -- a diagnostic
-            // describing the wrong thing, which is how the wasted fill went
-            // unnoticed in the first place.
+            // window while renderWindows skipped the covered ones, and a
+            // diagnostic describing something other than what happens is how the
+            // wasted fill went unnoticed in the first place.
             final int firstVisible = Math.max(0, topmostOpaqueCover());
             int position = -1;
             for (RenderableWindow window : renderableWindows) {
@@ -849,27 +813,24 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     }
 
     /**
-     * VESSEL: the topmost window that covers everything, or -1 if none does.
+     * VESSEL: the topmost opaque window that covers the whole screen, or -1.
      *
      * <p><b>Metro composites three full-screen opaque layers and two of them are
      * never seen.</b> Wine's virtual desktop, the game's own window and the
      * presentation surface all arrive as 1280x720 at 0,0, stacked; only the last
-     * is visible, and the compositor was drawing all three every frame. That is
-     * two whole screens of fill thrown away, on the same GPU the guest is
-     * competing with for the frame rate that everything else here depends on.
+     * is visible, and this drew all three every frame. That is two whole screens
+     * of fill thrown away, on the same GPU the guest is competing with for the
+     * frame rate everything else here depends on.
      *
-     * <p>Culling what an opaque window completely hides is what a compositor is
-     * supposed to do, and it cannot change a pixel of the result: the covered
-     * windows contribute nothing to begin with. Transparent windows are never
-     * treated as covering, and a window that does not span the whole screen is
-     * not treated as covering either, so anything the guest actually composites
-     * -- a menu, an overlay, a smaller child window -- is unaffected.
+     * <p>Culling what an opaque full-screen window completely hides cannot change
+     * a pixel, because the covered windows contribute nothing to begin with.
+     * Transparent windows never count as covering and neither does one that does
+     * not span the screen, so menus, overlays and child windows are untouched.
      *
-     * <p>Only full-screen coverage is considered rather than general
-     * rectangle-against-rectangle occlusion. That is deliberate: this exists to
-     * remove a specific and very large waste, and a general solution would need
-     * to reason about partial overlap and stacking order for a case no guest here
-     * produces.
+     * <p>Only full-screen coverage is considered rather than general rectangle
+     * occlusion: this exists to remove one specific large waste, and a general
+     * solution would have to reason about partial overlap and stacking order for
+     * a case no guest here produces.
      */
     private int topmostOpaqueCover() {
         final int screenWidth = xServer.screenInfo.width;
@@ -894,23 +855,19 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         return cover;
     }
 
-    /** How many windows the last composite skipped, for the layers diagnostic. */
-    int culledWindows = 0;
-
     private void renderWindows() {
         // VESSEL: the material is chosen per window now, so the pass opens with
         // nothing bound rather than with the bilinear one bound unconditionally.
         boundWindowMaterial = null;
 
         try (XLock lock = xServer.lock(XServer.Lockable.DRAWABLE_MANAGER)) {
-            // Everything under an opaque window that covers the screen is
-            // invisible. See topmostOpaqueCover.
+            // Everything under an opaque window covering the screen is invisible.
+            // See topmostOpaqueCover.
             final int firstVisible = Math.max(0, topmostOpaqueCover());
-            culledWindows = firstVisible;
-            int index = -1;
+            int position = -1;
             for (RenderableWindow window : renderableWindows) {
-                index++;
-                if (index < firstVisible) continue;
+                position++;
+                if (position < firstVisible) continue;
                 if (!window.content.isOffscreenStorage()) {
                     // VESSEL: placed between the last two composites on a
                     // synthesised frame. See RenderableWindow.previousRootX -- at

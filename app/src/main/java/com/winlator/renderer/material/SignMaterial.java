@@ -50,19 +50,12 @@ package com.winlator.renderer.material;
  * the same answer, there is no per-pixel branch left to flip, and the
  * interpolation loses four luma fetches per pixel into the bargain.
  *
- * <p>Each texel scores how strongly it prefers one sign over the other, per
- * axis, and the caller averages those and latches once the evidence is decisive
- * and enough of the frame is actually moving -- a still scene has no opinion,
- * since both signs then fetch the same content.
- *
- * <p><b>Per axis, because the two can disagree.</b> GL texture space runs y
- * upward and image-space block matchers conventionally run y downward, so a
- * field arriving with x correct and y negated is the ordinary outcome of two
- * sensible conventions meeting rather than an exotic failure. A single scalar
- * cannot express that: it has to choose between horizontal and vertical, and the
- * axis it does not choose is displaced backwards. Under a mostly horizontal
- * camera pan the result is light regional distortion, which is quiet enough to
- * survive a long time.
+ * <p>Each texel here votes: it reads the field, scores both signs against the
+ * luma pair, and writes whether the positive sign won. Averaging the votes over
+ * the frame gives the fraction preferring positive, and the caller latches the
+ * answer only when the vote is decisive and enough of the frame is actually
+ * moving -- a still scene has no opinion, since both signs then fetch the same
+ * content.
  */
 public class SignMaterial extends ScreenMaterial {
     public final SignUniforms signUniforms = new SignUniforms();
@@ -97,50 +90,20 @@ public class SignMaterial extends ScreenMaterial {
             "void main() {",
                 "vec2 v = texture2D(screenTexture, vUV).rg * motionScale;",
 
-                // **Costs are summed and then compared, not compared and then
-                // averaged.** This is the third version of this vote and the
-                // first that can decide anything.
-                //
-                // Counting binary votes failed because most pixels are near-ties
-                // and a hair's preference counted as much as a certainty.
-                // Normalising each pixel's preference before averaging failed the
-                // same way for a subtler reason: it gives every pixel equal say,
-                // so the overwhelming majority that genuinely cannot tell the two
-                // signs apart -- at 64 pixels of displacement through a
-                // repetitive corridor, that is most of them -- drown out the few
-                // that can. Measured, it read 0.514 and 0.485 with 15% of the
-                // probe moving: a dead tie, and both axes ran on unverified
-                // defaults for a whole session because of it.
-                //
-                // Summing the raw costs first fixes exactly that. A pixel that
-                // cannot tell the signs apart contributes the same amount to both
-                // sums and cancels out of their difference, costing nothing; a
-                // pixel that can contributes its full margin. The frame's two
-                // totals then differ by the accumulated evidence of only the
-                // pixels that had any.
-                //
-                // Per axis, because the two can disagree: GL texture space runs y
-                // upward and image-space block matchers conventionally run y
-                // downward, so x correct and y negated is the ordinary outcome of
-                // two sensible conventions meeting.
-                "float keepX = cost(vec2( v.x, v.y));",
-                "float flipX = cost(vec2(-v.x, v.y));",
-                "float flipY = cost(vec2( v.x, -v.y));",
-
-                // Scaled so an 8-bit channel holds a useful range of luma
-                // differences rather than saturating on the first strong edge.
-                "float movingX = step(0.004, abs(v.x));",
-                "float movingY = step(0.004, abs(v.y));",
+                // Only pixels that are actually moving get a vote. Below about
+                // five luma pixels the two signs fetch nearly the same content,
+                // the comparison is noise, and counting it would drag any answer
+                // towards a tie. This is why the caller also needs to know how
+                // much of the frame voted at all.
+                "float moving = step(0.004, length(v));",
 
                 "gl_FragColor = vec4(",
-                    // R,G: the cost of keeping the sign, and of flipping x.
-                    "movingX * clamp(keepX * 4.0, 0.0, 1.0),",
-                    "movingX * clamp(flipX * 4.0, 0.0, 1.0),",
-                    // B: the cost of flipping y, against the same R.
-                    "movingY * clamp(flipY * 4.0, 0.0, 1.0),",
-                    // A: how much of the probe had an opinion, so the caller can
-                    // tell a tie from an empty frame.
-                    "max(movingX, movingY));",
+                    // R: votes for the positive sign.
+                    "moving * step(cost(v), cost(-v)),",
+                    // G: votes cast, so the caller can form a fraction rather
+                    // than a share of the whole frame.
+                    "moving,",
+                    "0.0, 1.0);",
             "}"
         );
     }
