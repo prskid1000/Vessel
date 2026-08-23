@@ -359,8 +359,17 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         }
 
         if (extrapolating()) {
+            // **Read and cleared together, and the real frame wins the draw.**
+            //
+            // See guestDamaged. The pending timestamp is consumed either way:
+            // a prediction the guest has already overtaken must not be allowed
+            // to fire on some later draw, where it would show a moment older
+            // than what is already on screen.
+            final boolean haveReal = guestDamaged;
+            guestDamaged = false;
             final long synthesized = frameSynthesizer.consumePending();
-            if (synthesized > 0) {
+
+            if (!haveReal && synthesized > 0) {
                 frameSynthesizer.presentSynthesized(synthesized);
                 if (listener != null) listener.onFrameEnd();
                 return;
@@ -419,31 +428,61 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         if (cursorVisible) renderCursor();
     }
 
+    /**
+     * VESSEL: the guest has drawn something this draw has not composited yet.
+     *
+     * <p><b>Without this the two schedulers cannot be told apart, and the wrong
+     * one wins.</b> The view is {@code RENDERMODE_WHEN_DIRTY}, so a composite
+     * happens because someone called {@code requestRender()} -- and two
+     * independent things do: the guest, whenever it damages a window, and the
+     * pacer, when a synthesised frame is due. {@code GLSurfaceView} coalesces
+     * every request between two draws into one draw, so when both land in the
+     * same refresh only one composite happens, and {@link #onDrawFrame} decided
+     * which by looking at the pending timestamp -- which the pacer had set.
+     *
+     * <p>So the synthesised frame won, every time the two coincided. That frame
+     * is an interpolation of the previous two real frames, presented while newer
+     * real content was already sitting in the X server's buffers waiting. The
+     * comment on FramePacer states the rule this breaks: showing a prediction of
+     * a moment that has since been drawn for real is strictly worse than showing
+     * nothing.
+     *
+     * <p>{@code volatile} because the damage callbacks run on the X server's
+     * thread and the draw runs on the GL thread.
+     */
+    private volatile boolean guestDamaged = false;
+
     @Override
     public void onMapWindow(Window window) {
+        guestDamaged = true;
         xServerView.queueEvent(this::updateScene);
         xServerView.requestRender();
     }
 
     @Override
     public void onUnmapWindow(Window window) {
+        guestDamaged = true;
         xServerView.queueEvent(this::updateScene);
         xServerView.requestRender();
     }
 
     @Override
     public void onChangeWindowZOrder(Window window) {
+        guestDamaged = true;
         xServerView.queueEvent(this::updateScene);
         xServerView.requestRender();
     }
 
     @Override
     public void onUpdateWindowContent(Window window) {
+        // The one that matters: a game rendering calls this every frame.
+        guestDamaged = true;
         xServerView.requestRender();
     }
 
     @Override
     public void onUpdateWindowGeometry(final Window window, boolean resized) {
+        guestDamaged = true;
         if (resized) {
             xServerView.queueEvent(this::updateScene);
         }
