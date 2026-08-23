@@ -7,6 +7,7 @@ import android.util.Log;
 
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
+import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 
 /**
@@ -237,6 +238,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
+    private final SignMaterial signMaterial = new SignMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -264,6 +266,15 @@ public class FrameSynthesizer implements FramePacer.Target {
     private Target output;
     /** Diagnostics only; null unless a category that needs it was asked for. */
     private Target probe;
+    /**
+     * Where {@link SignMaterial} counts its votes. Small on purpose.
+     *
+     * <p>The question is one bit about the whole field, so it does not need
+     * resolution -- it needs enough samples that a handful of ambiguous pixels
+     * cannot swing it. 64x36 is 2,304 votes, and the whole thing including the
+     * mip reduction is far below the frame it protects.
+     */
+    private Target signProbe;
     private int blockX = 8, blockY = 8;
 
     /**
@@ -296,6 +307,99 @@ public class FrameSynthesizer implements FramePacer.Target {
     private int allocGeneration = -1;
 
     private int multiple = 2;
+    /**
+     * Which way the field points: +1, -1, or 0 while it is still unknown.
+     *
+     * <p>Latched, because it is a property of what the driver means by its own
+     * output rather than of any frame, and it cannot change while the context
+     * lives. See {@link SignMaterial} for why deciding this per pixel -- which is
+     * what this replaces -- shredded every synthesised frame.
+     */
+    private float fieldSign = 0f;
+    /** Share of the last probe that was moving enough to have an opinion. */
+    private float signVotes = 0f;
+    /** When the sign was last probed, so a still scene retries rather than sticks. */
+    private long signProbedAt = 0;
+
+    /**
+     * Vote on the field's sign, and latch the answer once it is decisive.
+     *
+     * <p>Runs at most once a second and stops entirely once latched, so the
+     * steady-state cost is nothing. It has to be a readback -- the sign has to
+     * reach a uniform, and the CPU is what sets uniforms -- and one a second is
+     * the rate the diagnostics already run at safely. Deciding it on the GPU per
+     * pixel is precisely the thing that was wrong.
+     */
+    private void probeFieldSign() {
+        if (fieldSign != 0f) return;
+        final long now = SystemClock.uptimeMillis();
+        if (signProbedAt != 0 && now - signProbedAt < 1000) return;
+        signProbedAt = now;
+
+        if (signProbe == null) {
+            signProbe = new Target();
+            signProbe.allocateAveraging(64, 36);
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, signProbe.framebuffer);
+        GLES20.glViewport(0, 0, signProbe.width, signProbe.height);
+        renderer.viewportNeedsUpdate = true;
+        GLES20.glDisable(GLES20.GL_BLEND);
+
+        signMaterial.use();
+        renderer.quadVertices.bind(signMaterial.programId);
+        signMaterial.setUniformBool(signMaterial.uniforms.flipY, false);
+        signMaterial.setUniformVec2(signMaterial.signUniforms.motionScale,
+                                    1f / Math.max(1, luma[0].width),
+                                    1f / Math.max(1, luma[0].height));
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered.texture);
+        signMaterial.setUniformInt(signMaterial.uniforms.screenTexture, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
+        signMaterial.setUniformInt(signMaterial.signUniforms.lumaNewerTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
+        signMaterial.setUniformInt(signMaterial.signUniforms.lumaOlderTexture, 2);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+        for (int unit = 2; unit >= 0; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        GLES20.glEnable(GLES20.GL_BLEND);
+        renderer.invalidateBoundWindowMaterial();
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, signProbe.texture);
+        GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+
+        final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, signProbe.topFramebuffer);
+        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.viewportNeedsUpdate = true;
+
+        final float positive = (pixel.get(0) & 0xff) / 255f;
+        signVotes = (pixel.get(1) & 0xff) / 255f;
+
+        // A still frame has no opinion: both signs fetch the same content, so the
+        // vote is a tie whatever the truth is. Wait for real motion rather than
+        // latch a coin toss.
+        if (signVotes < 0.05f) return;
+
+        final float share = positive / signVotes;
+        if (share > 0.65f) fieldSign = 1f;
+        else if (share < 0.35f) fieldSign = -1f;
+        else return;
+
+        Log.i(TAG, String.format(
+            "fg sign: field points %s (%.0f%% of moving pixels agree, %.0f%% of the"
+                + " frame moving) -- latched",
+            fieldSign > 0 ? "forward" : "backward", share * 100f, signVotes * 100f));
+    }
+
     /** Whether the field estimated at the last real frame is usable. */
     private boolean motionValid = false;
     private volatile long realFrames = 0;
@@ -641,6 +745,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         // filtered average of four. See InterpolateMaterial's third point.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.vectorSize,
                                            vectors.width, vectors.height);
+        // Uniform, not per pixel. See SignMaterial. Until the probe has an
+        // answer the field is taken forward, which is the reading the extension's
+        // own wording suggests; the probe overrides it within a second of motion.
+        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.fieldSign,
+                                            fieldSign != 0f ? fieldSign : 1f);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
@@ -756,6 +865,9 @@ public class FrameSynthesizer implements FramePacer.Target {
         medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
                                       1f / vectors.width, 1f / vectors.height);
         renderToTarget(medianMaterial, vectors.texture, filtered);
+
+        // One bit about the whole field, settled once. See SignMaterial.
+        probeFieldSign();
         return true;
     }
 
@@ -903,6 +1015,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             }
             if (vectors != null) vectors.release();
             if (filtered != null) filtered.release();
+            if (signProbe != null) signProbe.release();
             if (output != null) output.release();
             if (probe != null) probe.release();
         }
@@ -910,6 +1023,9 @@ public class FrameSynthesizer implements FramePacer.Target {
         vectors = null;
         filtered = null;
         output = null;
+        signProbe = null;
+        fieldSign = 0f;
+        signVotes = 0f;
         probe = null;
         announced = false;
     }
@@ -1007,23 +1123,27 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (wants("quality")) {
-            // Read as: how often the four block vectors disagreed, how much of
-            // that disagreement reached the picture, and whether anything came
-            // out that interpolation should never produce.
+            // **One line, and the first one that can say frame generation is
+            // making things worse.**
             //
-            // **There is no "trusted" or "fell back" any more, and their absence
-            // is the point.** Those described a shader that chose one vector and
-            // bailed out to a real frame where it doubted the choice, which made
-            // parts of the frame run at half the rate of the rest. Overlapped
-            // block motion compensation has one path for every pixel, so the
-            // question is no longer whether a region was interpolated -- all of
-            // it was -- but how contentious the vectors under it were.
+            // Everything this replaces was measuring the shader against its own
+            // assumptions -- see InterpolateMaterial's diagnostic block for the
+            // four ways that failed. These are anchored to the two real captured
+            // frames and to nothing else.
+            //
+            // Read it as: of the part of the frame that actually changed, how
+            // much did we push *further* from the truth than simply leaving the
+            // old frame up. Anything above a per cent or two means the synthesis
+            // is actively damaging, however healthy it looks from the inside.
+            final float moving = measuredShadow;
+            final float harmedShare = moving > 0.001f ? measuredConfidence / moving : 0f;
             Log.i(TAG, String.format(
-                "fg quality: %.2f%% blocks disagreeing, %.2f%% where that reached"
-                    + " the picture, %.4f%% dark patches, %.1f%% departure from"
-                    + " the newer frame",
-                measuredShadow * 100f, measuredConfidence * 100f,
-                measuredDark * 100f, measuredSpeed * 25f));
+                "fg truth: %.1f%% of the moving frame is FURTHER from the real"
+                    + " frame than doing nothing, %.3f%% invented content,"
+                    + " %.0f%% of frame moving, sits %.0f%% of the way between"
+                    + " the endpoints (50%% is correct)",
+                harmedShare * 100f, measuredDark * 100f,
+                moving * 100f, measuredSpeed * 200f));
         }
 
         tier0Frames = 0;

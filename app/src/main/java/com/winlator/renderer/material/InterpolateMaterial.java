@@ -102,20 +102,29 @@ package com.winlator.renderer.material;
  * band, a neighbour penalty, a darkness threshold, a surround radius, a temporal
  * cap) is gone along with the machinery that needed it.
  *
- * <h2>The two things it still does per pixel</h2>
+ * <h2>What it still does per pixel, and what it deliberately does not</h2>
  *
- * <p><b>It resolves the field's sign.</b> {@code QCOM_motion_estimation} says its
- * output is "the estimated motion in pixels ... from the &lt;ref&gt; texture to
- * the &lt;target&gt; texture" and never says which image the vector is based at,
- * and a reconstruction test on this device could not separate the two hypotheses:
- * against an uncompensated error of 0.00248 they scored 0.00192 and 0.00182, so
- * the winner won by five per cent while both explained barely a quarter of the
- * difference between the frames. Rather than assume, both signs are scored
- * against the luma pair using the <em>blended</em> vector and the better one is
- * applied to all four blocks. The sign is a property of the field, so it is asked
- * once rather than per candidate; measured across a moving scene the answer is
- * consistent to within 0.4% of pixels, so this settles a convention rather than
- * making a choice.
+ * <p><b>The field's sign is no longer decided here, and that was the worst bug in
+ * this file.</b> It used to score both signs at every pixel and take the better,
+ * on the reasoning that a wrong sign displaces by twice the true motion and so
+ * loses decisively. The reasoning is sound; the implementation shredded every
+ * synthesised frame. Where the two costs are a near-tie the binary choice flips on
+ * image noise, and a flipped sign does not nudge a pixel -- it throws it twice the
+ * vector in the wrong direction, which during a fast rotation is on the order of
+ * 128 pixels. Neighbouring pixels then fetch unrelated parts of the scene, and in
+ * a dark game half of them land in shadow.
+ *
+ * <p>No measurement caught it, and could not have: every diagnostic asked whether
+ * the chosen vector explained the pixel, while the sign was chosen to minimise
+ * exactly that quantity. Decision and measurement optimised the same thing, so the
+ * measurement could only agree. It took stepping through a screen recording frame
+ * by frame -- every second frame, the synthesised one, eaten through with
+ * hard-edged black speckle wherever the scene had detail.
+ *
+ * <p>The sign is a property of the field, so {@link SignMaterial} settles it once
+ * over the whole frame and it arrives here as a uniform. Every pixel gets the same
+ * answer, there is no branch left to flip, and the interpolation loses four luma
+ * fetches per pixel as well.
  *
  * <p><b>It projects the field to this instant before reading it.</b> Sampling
  * {@code b} at {@code q} asks for the motion of whatever is at {@code q} in frame
@@ -145,6 +154,8 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform phase = new Uniform("phase");
         /** VESSEL: 1 makes this pass report on itself instead of drawing. */
         public final Uniform diagnostic = new Uniform("diagnostic");
+        /** VESSEL: which way the field points, settled once. See SignMaterial. */
+        public final Uniform fieldSign = new Uniform("fieldSign");
     }
 
     @Override
@@ -164,9 +175,6 @@ public class InterpolateMaterial extends ScreenMaterial {
             // sampler interpolate as well would blend twice, and would invent a
             // fifth vector that no block ever voted for.
             "uniform sampler2D motionTexture;",
-            // The same two frames as luma, used only to settle the field's sign.
-            "uniform sampler2D lumaNewerTexture;",
-            "uniform sampler2D lumaOlderTexture;",
             // One field unit in texture space: 1 / luma size.
             "uniform vec2 motionScale;",
             // Dimensions of the vector texture, which is the block grid.
@@ -176,20 +184,20 @@ public class InterpolateMaterial extends ScreenMaterial {
 
             // VESSEL: when 1, write four measurements instead of a picture.
             "uniform float diagnostic;",
+            // **Which way the field points, as one number for the whole frame.**
+            // This used to be decided here, per pixel, by scoring both signs and
+            // taking the better -- and that was the artefact. See SignMaterial:
+            // where the two costs are a near-tie the decision flips on image
+            // noise, and a flipped sign displaces the pixel by twice the vector
+            // in the wrong direction, so neighbouring pixels fetch unrelated
+            // parts of the scene. In a dark game half of those land in shadow,
+            // which is hard-edged black speckle through every detailed region of
+            // every synthesised frame.
+            "uniform float fieldSign;",
 
             "varying vec2 vUV;",
 
             "float max3(vec3 c) { return max(max(c.r, c.g), c.b); }",
-
-            // How badly a displacement fails to explain this pixel. Used once,
-            // for the sign, and for nothing else -- there is no candidate search
-            // any more, so this no longer decides what the frame looks like.
-            "float cost(vec2 b) {",
-                "vec2 fromNewer = clamp(vUV - b * (1.0 - phase), 0.0, 1.0);",
-                "vec2 fromOlder = clamp(vUV + b * phase, 0.0, 1.0);",
-                "return abs(texture2D(lumaNewerTexture, fromNewer).r",
-                         "- texture2D(lumaOlderTexture, fromOlder).r);",
-            "}",
 
             // One bilateral prediction: both endpoints displaced symmetrically
             // about this pixel and blended by phase, so each is trusted most
@@ -227,22 +235,19 @@ public class InterpolateMaterial extends ScreenMaterial {
                                    "(1.0 - w.x) * w.y,",
                                    "w.x * w.y);",
 
-                "vec2 m0 = texture2D(motionTexture, (base + vec2(0.5, 0.5)) * texel).rg * motionScale;",
-                "vec2 m1 = texture2D(motionTexture, (base + vec2(1.5, 0.5)) * texel).rg * motionScale;",
-                "vec2 m2 = texture2D(motionTexture, (base + vec2(0.5, 1.5)) * texel).rg * motionScale;",
-                "vec2 m3 = texture2D(motionTexture, (base + vec2(1.5, 1.5)) * texel).rg * motionScale;",
+                "vec2 scale = motionScale * fieldSign;",
+                "vec2 m0 = texture2D(motionTexture, (base + vec2(0.5, 0.5)) * texel).rg * scale;",
+                "vec2 m1 = texture2D(motionTexture, (base + vec2(1.5, 0.5)) * texel).rg * scale;",
+                "vec2 m2 = texture2D(motionTexture, (base + vec2(0.5, 1.5)) * texel).rg * scale;",
+                "vec2 m3 = texture2D(motionTexture, (base + vec2(1.5, 1.5)) * texel).rg * scale;",
 
-                // ---- which way the field points ------------------------------
-                // Asked once, of the blended vector, because the sign is a
-                // property of the field rather than of any one block.
                 "vec2 mean = weight.x * m0 + weight.y * m1",
                           "+ weight.z * m2 + weight.w * m3;",
-                "float direction = cost(mean) <= cost(-mean) ? 1.0 : -1.0;",
 
                 // ---- read the field where this instant's content is ----------
                 // See the class comment: sampling at vUV asks about whatever sits
                 // there in frame N, which near a moving edge is the wrong object.
-                "vec2 p = clamp(vUV - mean * direction * (1.0 - phase), 0.0, 1.0);",
+                "vec2 p = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
                 "vec2 pgrid = p * vectorSize - 0.5;",
                 "vec2 pbase = floor(pgrid);",
                 "vec2 pw = 0.5 - 0.5 * cos(PI * (pgrid - pbase));",
@@ -251,10 +256,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                               "(1.0 - pw.x) * pw.y,",
                               "pw.x * pw.y);",
 
-                "m0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel).rg * motionScale * direction;",
-                "m1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel).rg * motionScale * direction;",
-                "m2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel).rg * motionScale * direction;",
-                "m3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel).rg * motionScale * direction;",
+                "m0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel).rg * scale;",
+                "m1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel).rg * scale;",
+                "m2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel).rg * scale;",
+                "m3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel).rg * scale;",
 
                 // ---- overlapped block motion compensation --------------------
                 // Four predictions, one per block, combined under the window.
@@ -267,61 +272,82 @@ public class InterpolateMaterial extends ScreenMaterial {
                             "+ weight.z * q2 + weight.w * q3;",
 
                 "if (diagnostic > 0.5) {",
-                    // How far apart the four blocks' answers were. This is the
-                    // number that says where OBMC is doing work: zero means the
-                    // blocks agreed and the blend was a no-op, large means they
-                    // disagreed and the old winner-take-all would have committed
-                    // to one of them at full strength.
-                    "float spread = max(max(length(q0 - shown), length(q1 - shown)),",
-                                       "max(length(q2 - shown), length(q3 - shown)));",
+                    // ---- measurements that the shader cannot flatter ---------
+                    //
+                    // **Everything measured here before this was worthless, and
+                    // the way it was worthless is worth writing down.**
+                    //
+                    // It reported 100% trusted and 0.24% mean residual while
+                    // every synthesised frame was being shredded with black
+                    // speckle. Four separate reasons, all of them structural:
+                    //
+                    // 1. It was circular. The sign of the field was chosen to
+                    //    minimise a cost, and then that same cost was reported as
+                    //    "residual". A measurement downstream of an optimisation
+                    //    of itself can only ever agree with it.
+                    // 2. It averaged. A mean over 900,000 pixels reads fine while
+                    //    a few per cent of them are destroyed.
+                    // 3. It thresholded absolutely. `step(0.05, brightness)`
+                    //    switches the detector off across most of a dark corridor
+                    //    -- which is exactly where the fault lived.
+                    // 4. It had no ground truth. Every test compared the output
+                    //    against the inputs it was built from, so nothing was ever
+                    //    checked against something it had not already assumed.
+                    //
+                    // What replaces it is anchored to the two real frames and to
+                    // nothing else, and asks a question the shader has no way to
+                    // optimise: at phase t the synthesised pixel should sit
+                    // *between* the endpoints. So compare how far it lands from
+                    // frame N against how far frame N-1 already was. If the
+                    // synthesis is further from the truth than simply showing the
+                    // old frame unchanged, frame generation is doing harm at that
+                    // pixel, and no amount of internal self-consistency changes
+                    // that.
+                    "vec3 here  = texture2D(screenTexture,   vUV).rgb;",
+                    "vec3 there = texture2D(previousTexture, vUV).rgb;",
+                    "float dSynth = length(shown - here);",
+                    "float dBase  = length(there - here);",
 
-                    // Everything below is scored against the scene rather than
-                    // against a fixed level, so a reading means the same thing in
-                    // a dark corridor and in daylight.
-                    "vec3 here = texture2D(screenTexture, vUV).rgb;",
-                    "float outLuma = max3(shown);",
+                    // Only pixels that actually changed between the two real
+                    // frames can say anything: where nothing moved, both
+                    // distances are zero and the ratio is noise over noise.
+                    "float changed = step(0.008, dBase);",
 
-                    // A dot is a pixel far darker than everything around it. The
-                    // ring is read from the real frame undisplaced, because the
-                    // question is what belongs here rather than what the field
-                    // claims moved here, and all four must be lit -- a pixel on
-                    // the dark side of an ordinary edge has a dark neighbour and
-                    // that is not a fault. Six pixels out, because a wrongly
-                    // matched 8x8 block makes a patch about that wide and a
-                    // one-texel ring read 0.0000% while the screen plainly had
-                    // dots on it.
+                    // Content that is in neither endpoint. The output should not
+                    // be darker than everything real nearby -- there is nowhere
+                    // for such a pixel to have come from. Expressed as a
+                    // *difference* from the local floor rather than as an
+                    // absolute level, so it works identically in a black tunnel
+                    // and in daylight; the previous version used a fixed floor
+                    // and was blind in precisely the scene that needed it.
                     "vec2 rx = vec2(6.0 * motionScale.x, 0.0);",
                     "vec2 ry = vec2(0.0, 6.0 * motionScale.y);",
-                    "float s0 = max3(texture2D(screenTexture, clamp(vUV + rx, 0.0, 1.0)).rgb);",
-                    "float s1 = max3(texture2D(screenTexture, clamp(vUV - rx, 0.0, 1.0)).rgb);",
-                    "float s2 = max3(texture2D(screenTexture, clamp(vUV + ry, 0.0, 1.0)).rgb);",
-                    "float s3 = max3(texture2D(screenTexture, clamp(vUV - ry, 0.0, 1.0)).rgb);",
-                    "float dimmest = min(min(s0, s1), min(s2, s3));",
-
-                    // How far apart the four block vectors were, as a share of
-                    // how far they were pointing -- relative, so it reads the
-                    // same whether the camera is drifting or whipping round.
-                    "vec2 agreed = mean * direction;",
-                    "float vspread = max(max(length(m0 - agreed), length(m1 - agreed)),",
-                                        "max(length(m2 - agreed), length(m3 - agreed)));",
+                    "float floorLuma = min(min(max3(here), max3(there)),",
+                        "min(min(max3(texture2D(screenTexture, clamp(vUV + rx, 0.0, 1.0)).rgb),",
+                                "max3(texture2D(screenTexture, clamp(vUV - rx, 0.0, 1.0)).rgb)),",
+                            "min(max3(texture2D(screenTexture, clamp(vUV + ry, 0.0, 1.0)).rgb),",
+                                "max3(texture2D(screenTexture, clamp(vUV - ry, 0.0, 1.0)).rgb))));",
 
                     "gl_FragColor = vec4(",
-                        // R: how much of the frame OBMC actually had to blend --
-                        // where the four blocks predicted materially different
-                        // pictures, judged against the brightness of the pixel
-                        // itself rather than against a fixed level.
-                        "step(0.25, spread / max(outLuma, 0.02)),",
-                        // G: a dot this shader produced. Relative now: darker than
-                        // a quarter of its dimmest lit neighbour. The old
-                        // absolute-threshold version is what proved these were
-                        // real; this is the same test without the constant.
-                        "step(0.05, dimmest) * step(outLuma, 0.25 * dimmest),",
-                        // B: how contentious the block vectors were here, which is
-                        // where a winner-take-all search would have been guessing.
-                        "step(0.5, vspread / max(length(agreed), 0.5 * motionScale.x)),",
-                        // A: how far the result departs from simply showing the
-                        // newer frame, which is how much work interpolation did.
-                        "clamp(length(shown - here) * 4.0, 0.0, 1.0));",
+                        // R: **the number that matters.** Pixels where the
+                        // synthesised frame is further from frame N than frame
+                        // N-1 already was -- worse than having done nothing at
+                        // all. Counted only where something actually changed.
+                        "changed * step(dBase, dSynth),",
+                        // G: pixels darker than anything real in the
+                        // neighbourhood of either endpoint. Invented content, of
+                        // the kind a wrong displacement fetches out of shadow.
+                        "step(0.02, floorLuma - max3(shown)),",
+                        // B: how much of the frame changed at all, which is the
+                        // denominator R has to be read against. Without it a
+                        // small R could mean "almost nothing was harmed" or
+                        // "almost nothing was moving".
+                        "changed,",
+                        // A: how far the synthesis sits between the endpoints, on
+                        // average. Half is what a correct interpolation at the
+                        // midpoint looks like; approaching one means it is barely
+                        // better than the old frame, and beyond one it is worse.
+                        "clamp(dSynth / max(dBase, 0.008) * 0.5, 0.0, 1.0));",
                     "return;",
                 "}",
 
