@@ -6,7 +6,6 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import com.winlator.renderer.material.InterpolateMaterial;
-import com.winlator.renderer.material.MotionRefineMaterial;
 import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 
@@ -238,13 +237,11 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
-    private final MotionRefineMaterial refineMaterial = new MotionRefineMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
     private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
-    private final GpuTimer refineTimer = new GpuTimer("tier1 refine");
     private final GpuTimer interpolateTimer = new GpuTimer("tier1 interpolate");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
@@ -281,48 +278,6 @@ public class FrameSynthesizer implements FramePacer.Target {
      * mip reduction is far below the frame it protects.
      */
     private Target signProbe;
-
-    /**
-     * VESSEL: where the field is regularised, ping-ponged across the passes.
-     *
-     * <p>The matcher estimates every block in complete isolation, and at a 66 ms
-     * frame gap -- where displacing a vector by two whole blocks changes the
-     * matching cost by less than the margin across 73-95% of the frame -- blocks
-     * are free to disagree with their neighbours for no reason the picture
-     * supports. That disagreement is the ripple. See {@link MotionRefineMaterial}
-     * for why this is done inside the search rather than by smoothing afterwards,
-     * and for the measurement that ruled out the aperture explanation.
-     *
-     * <p>Two targets because a pass reads the whole field and writes the whole
-     * field, so it cannot be its own destination.
-     */
-    private final Target[] refine = new Target[2];
-    /** Which of {@link #refine} holds the field the interpolation should read. */
-    private int refined = -1;
-    /**
-     * Passes of propagation.
-     *
-     * <p>3DRS is recursive -- each block sees neighbours already decided -- and a
-     * fragment shader has no scan order, so the recursion becomes iteration and
-     * agreement spreads exactly one block per pass. Three carries a decision
-     * three blocks, which at 8x8 blocks is 24 pixels: the scale of the structures
-     * the ripple appears on. More passes cost linearly and propagate further than
-     * a genuine motion boundary should allow.
-     */
-    private static final int REFINE_PASSES = 3;
-    /**
-     * How much matching quality buys the right to disagree with the neighbours.
-     *
-     * <p>The only fitted number in the pass, and deliberately the only one: it is
-     * measured against {@code SAD(0)}, the cost of not compensating at all, which
-     * is a per-block quantity. So a block may deviate from its neighbourhood by
-     * one whole search block if doing so improves the match by half of how
-     * different the two frames were there to begin with -- which means the same
-     * thing in a dark corridor as in daylight, where an absolute threshold would
-     * not. See {@link MotionRefineMaterial}.
-     */
-    private static final float REFINE_LAMBDA = 0.5f;
-
     private int blockX = 8, blockY = 8;
 
     /**
@@ -522,16 +477,6 @@ public class FrameSynthesizer implements FramePacer.Target {
      * the phases somewhere no frame belongs.
      */
     private int activeMultiple = 2;
-
-    /**
-     * The motion field to build frames from: regularised if that ran, raw if not.
-     *
-     * <p>One accessor rather than a flag at each use, so there is no path where
-     * one pass reads the refined field and another reads the matcher's.
-     */
-    private int fieldTexture() {
-        return refined >= 0 ? refine[refined].texture : vectors.texture;
-    }
 
     /** Whether the field estimated at the last real frame is usable. */
     private boolean motionValid = false;
@@ -1065,7 +1010,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.previousTexture, 1);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldTexture());
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.motionTexture, 2);
         // The search runs on these rather than on the colour: one byte a texel
@@ -1163,85 +1108,7 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         // One bit about the whole field, settled once. See SignMaterial.
         probeFieldSign();
-
-        // Regularised before anything reads it, so every pass downstream sees the
-        // same field. Skipped until the sign is known: the cost function displaces
-        // by the vector, so scoring with the wrong sign would rank candidates by
-        // how well they explain the frame backwards.
-        if (refine[0] != null && fieldSign != 0f) refineField();
         return true;
-    }
-
-    /**
-     * Propagate agreement across the field. See {@link MotionRefineMaterial}.
-     *
-     * <p>Each pass reads one target and writes the other, starting from the
-     * matcher's own output and always offering it as a candidate, so a block
-     * whose neighbours are all wrong can return to the measurement rather than
-     * being carried away by them.
-     */
-    private void refineField() {
-        refineTimer.begin();
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        refineMaterial.use();
-        renderer.quadVertices.bind(refineMaterial.programId);
-        refineMaterial.setUniformBool(refineMaterial.uniforms.flipY, false);
-        refineMaterial.setUniformVec2(refineMaterial.refineUniforms.motionScale,
-                                      1f / Math.max(1, luma[0].width),
-                                      1f / Math.max(1, luma[0].height));
-        refineMaterial.setUniformVec2(refineMaterial.refineUniforms.vectorSize,
-                                      vectors.width, vectors.height);
-        refineMaterial.setUniformVec2(refineMaterial.refineUniforms.blockSpan,
-                                      (float)blockX / Math.max(1, luma[0].width),
-                                      (float)blockY / Math.max(1, luma[0].height));
-        refineMaterial.setUniformFloat(refineMaterial.refineUniforms.fieldSign, fieldSign);
-        refineMaterial.setUniformFloat(refineMaterial.refineUniforms.lambda, REFINE_LAMBDA);
-
-        // The matcher's field, offered as a candidate on every pass.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
-        refineMaterial.setUniformInt(refineMaterial.refineUniforms.originalTexture, 1);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-        refineMaterial.setUniformInt(refineMaterial.refineUniforms.lumaNewerTexture, 2);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-        refineMaterial.setUniformInt(refineMaterial.refineUniforms.lumaOlderTexture, 3);
-
-        GLES20.glViewport(0, 0, vectors.width, vectors.height);
-        renderer.viewportNeedsUpdate = true;
-
-        int source = vectors.texture;
-        for (int pass = 0; pass < REFINE_PASSES; pass++) {
-            final int destination = pass % 2;
-            // One update direction per pass rather than four per block. de Haan's
-            // own arrangement: propagation carries a useful update to the
-            // neighbours on the following pass, so trying them all at once costs
-            // four times as much to reach the same field.
-            final float step = (pass % 2 == 0) ? blockX : 0f;
-            final float stepY = (pass % 2 == 0) ? 0f : blockY;
-            refineMaterial.setUniformVec2(refineMaterial.refineUniforms.updateStep,
-                                          pass == 1 ? -step : step,
-                                          pass == 1 ? -stepY : stepY);
-
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, refine[destination].framebuffer);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source);
-            refineMaterial.setUniformInt(refineMaterial.uniforms.screenTexture, 0);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-            source = refine[destination].texture;
-            refined = destination;
-        }
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 3; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
-        refineTimer.end();
     }
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
@@ -1363,29 +1230,6 @@ public class FrameSynthesizer implements FramePacer.Target {
                 // at a motion boundary describes nothing in the scene.
                 vectors = new Target();
                 vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-
-                // **Rendering to RGBA16F is a capability, not a given.** The
-                // matcher writes `vectors` through the extension rather than
-                // through the pipeline, so its being allocated says nothing about
-                // whether a fragment shader may target that format. ES 3.2 makes
-                // it colour-renderable and this device reports 3.2, but asking is
-                // one call and guessing wrong is a blank field -- every vector
-                // zero, every synthesised frame a cross-fade.
-                for (int i = 0; i < 2; i++) {
-                    refine[i] = new Target();
-                    refine[i].allocate(lumaW / blockX, lumaH / blockY,
-                                       GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                }
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, refine[0].framebuffer);
-                final int complete = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-                if (complete != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-                    Log.w(TAG, "cannot render to RGBA16F (0x" + Integer.toHexString(complete)
-                        + "); the field will be used as the matcher produced it");
-                    refine[0].release();
-                    refine[1].release();
-                    refine[0] = refine[1] = null;
-                }
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -1410,15 +1254,12 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
-            for (int i = 0; i < 2; i++) if (refine[i] != null) refine[i].release();
             if (signProbe != null) signProbe.release();
             if (output != null) output.release();
             if (probe != null) probe.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
-        refine[0] = refine[1] = null;
-        refined = -1;
         output = null;
         signProbe = null;
         fieldSign = 0f;
@@ -1472,7 +1313,6 @@ public class FrameSynthesizer implements FramePacer.Target {
             captureTimer.report(now);
             lumaTimer.report(now);
             estimateTimer.report(now);
-            refineTimer.report(now);
             interpolateTimer.report(now);
             tier0Timer.report(now);
         }
@@ -1532,13 +1372,12 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " %s, matcher refusals %d",
+                    + " raw, matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
-                refined >= 0 ? REFINE_PASSES + " regularising passes" : "raw",
                 estimateFailures));
         }
 
