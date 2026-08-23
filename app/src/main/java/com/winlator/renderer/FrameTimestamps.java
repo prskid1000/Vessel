@@ -151,7 +151,12 @@ final class FrameTimestamps {
 
     /** Whether there is anything worth printing. */
     boolean hasData() {
-        return available && gaps > 0;
+        // **Unaccounted frames count as data.** With only `gaps > 0` here, a
+        // surface where the compositor answers INVALID for every frame reports
+        // nothing at all: hasData is false because no gap resolved, and
+        // unavailable is false because the extension did enable. The one case
+        // that most needs saying out loud was the one case that said nothing.
+        return available && (gaps > 0 || unaccounted > 0);
     }
 
     /** Whether the platform declined, so the caller can say so once. */
@@ -166,6 +171,15 @@ final class FrameTimestamps {
      *     were too short to be separate scanouts.
      */
     String describe(long refreshNanos) {
+        if (gaps == 0) {
+            final String none = String.format(
+                "fg presented: the display accepted the request and then could not"
+                    + " account for any of %d frames -- this surface has no real"
+                    + " present times, so every cadence figure is a draw schedule",
+                unaccounted);
+            unaccounted = 0;
+            return none;
+        }
         final float mean = gapTotal / (float)gaps / 1e6f;
         final String line = String.format(
             "fg presented: %.1f ms mean, %.1f shortest, %.1f longest, over %d"
