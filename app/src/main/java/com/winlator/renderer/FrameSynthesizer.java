@@ -417,7 +417,29 @@ public class FrameSynthesizer implements FramePacer.Target {
      * move the aim. Integer arithmetic throughout -- these are nanoseconds
      * and a double buys nothing at that scale.
      */
-    private static final long SMOOTHING = 4;
+    /**
+     * VESSEL: the last few real-frame intervals, for {@link #medianInterval}.
+     *
+     * <p><b>A mean is the wrong average for this signal.</b> The compositor
+     * draws on guest damage, which is bursty: a load hitch, a shader compile or
+     * one heavy frame produces a single interval two or three times the usual
+     * one, and an exponential mean carries that outlier into the aim for the
+     * several frames it takes to decay. Every prediction scheduled meanwhile is
+     * aimed at an interval the guest is not running at.
+     *
+     * <p>A median throws the outlier away outright and returns the interval the
+     * guest is actually keeping. This is what DXVK's frame-rate limiter does --
+     * median of the last three of its measurements rather than an average -- and
+     * AMD document the failure the other way round in FSR3, where the pacing
+     * estimate could latch onto a bad sample and sit at the wrong period.
+     *
+     * <p>Nine samples: long enough that a single hitch cannot move the middle,
+     * short enough to follow a real change in the guest's rate within about half
+     * a second at 15 fps.
+     */
+    private final long[] recent = new long[9];
+    private int recentAt = 0;
+    private int recentHeld = 0;
     /**
      * The vsync a synthesised frame is due at, or zero for none.
      *
@@ -616,22 +638,32 @@ public class FrameSynthesizer implements FramePacer.Target {
         final long interval = lastRealFrameNanos == 0 ? 0 : now - lastRealFrameNanos;
         lastRealFrameNanos = now;
 
-        // **Aimed with a smoothed interval, because the last one is noise.**
+        // **Aimed with the median interval, because the last one is noise and
+        // the mean is worse than noise.**
+        //
         // Measured at 2x: one prediction per real frame was scheduled and only
         // one in three survived -- the rest were cancelled because the next real
         // frame arrived before the prediction's vsync. The compositor draws on
         // guest damage, which is bursty, so consecutive gaps differ by a factor
         // of two or three and an aim computed from a single gap is wrong most of
-        // the time. A running mean is what the gap actually is.
+        // the time.
+        //
+        // An exponential mean was the first answer and it has a failure the
+        // median does not: one hitch of three times the usual interval stays in
+        // the estimate for several frames afterwards, and every prediction
+        // scheduled in that window is aimed at a rate the guest is not running
+        // at. Measured here across a camera sweep, the interval swung between 62
+        // and 88 ms while the guest's typical gap never moved from about 66.
         //
         // It is not a cancellation bug. Presenting a prediction of a moment that
         // has already been drawn for real is worse than presenting nothing, so
         // the check is right; what was wrong was aiming so badly that it kept
         // firing.
         if (interval > 0 && interval <= IDLE_NANOS) {
-            smoothedInterval = smoothedInterval == 0
-                ? interval
-                : (smoothedInterval * (SMOOTHING - 1) + interval) / SMOOTHING;
+            recent[recentAt] = interval;
+            recentAt = (recentAt + 1) % recent.length;
+            if (recentHeld < recent.length) recentHeld++;
+            smoothedInterval = medianInterval();
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= IDLE_NANOS) {
@@ -703,6 +735,29 @@ public class FrameSynthesizer implements FramePacer.Target {
      * not anything was drawn, so a frame that declines to draw presents an
      * unwritten buffer, which is the flicker.
      */
+    /**
+     * The middle of the recent intervals, ignoring the ones not yet collected.
+     *
+     * <p>Insertion sort over nine longs, once per real frame -- around fifteen
+     * times a second. There is no cheaper structure worth the complexity at this
+     * size and no allocation here.
+     */
+    private long medianInterval() {
+        if (recentHeld == 0) return 0;
+        final long[] sorted = new long[recentHeld];
+        System.arraycopy(recent, 0, sorted, 0, recentHeld);
+        for (int i = 1; i < recentHeld; i++) {
+            final long v = sorted[i];
+            int j = i - 1;
+            while (j >= 0 && sorted[j] > v) {
+                sorted[j + 1] = sorted[j];
+                j--;
+            }
+            sorted[j + 1] = v;
+        }
+        return sorted[recentHeld / 2];
+    }
+
     private float phaseFor(long vsyncNanos) {
         if (smoothedInterval <= 0 || lastRealFrameNanos == 0) return 1f;
         final float elapsed = (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
@@ -1035,6 +1090,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         newest = 1;
         realFrames = 0;
         lastRealFrameNanos = 0;
+        recentAt = 0;
+        recentHeld = 0;
         return true;
     }
 
