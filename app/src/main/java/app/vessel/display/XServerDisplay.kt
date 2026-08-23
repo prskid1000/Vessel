@@ -1128,7 +1128,10 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
             UnixSocketConfig.SYSVSHM_SERVER_PATH,
         )
 
-        val surface = SessionSurfaceView(context, xServer, request.fpsLimit, padBridge)
+        val surface = SessionSurfaceView(
+            context, xServer, request.fpsLimit, padBridge,
+            presentedFpsOf(request.fpsLimit, request.frameGeneration, request.frameGenerationDivides),
+        )
         view = surface
         xServer.setRenderer(surface.renderer)
 
@@ -1483,12 +1486,31 @@ private class GuestInputSink(
  * server. A real mouse and a real keyboard bypass both, because there is nothing
  * to interpret — the hardware already means what it says.
  */
+/**
+ * The rate frames actually reach the screen, from the limit and the mode.
+ *
+ * In `efficiency` the limit already counts presented frames and the guest is
+ * capped at the fraction, so the answer is the limit. In `smoothness` the limit
+ * counts the guest's own frames and the compositor presents the multiple, so the
+ * answer is the product. Frame generation off, or no limit, and there is nothing
+ * to compute.
+ */
+private fun presentedFpsOf(fpsLimit: Int?, frameGeneration: Int, divides: Boolean): Int? {
+    val limit = fpsLimit?.takeIf { it > 0 } ?: return null
+    return if (frameGeneration >= 2 && !divides) limit * frameGeneration else limit
+}
+
 private class SessionSurfaceView(
     context: Context,
     private val xServer: XServer,
     private val fpsLimit: Int?,
     /** The guest's gamepad bus. See [PadBridge]; `DisplaySession` owns its socket. */
     private val padBridge: PadBridge,
+    /**
+     * How many frames a second actually reach the screen, which is what the
+     * panel's refresh has to match. See [presentedFps].
+     */
+    private val presentedFps: Int?,
 ) : FrameLayout(context) {
 
     /** The physical pad, accumulated, because a HID report carries whole state. */
@@ -1514,7 +1536,7 @@ private class SessionSurfaceView(
         override fun onInputDeviceChanged(deviceId: Int) = refreshPads()
     }
 
-    private val xServerView = PacedXServerView(context, xServer, fpsLimit)
+    private val xServerView = PacedXServerView(context, xServer, fpsLimit, presentedFps)
 
     val renderer get() = xServerView.renderer
 
@@ -1757,7 +1779,31 @@ private class SessionSurfaceView(
         // no log, no crash, a panel still at 60 Hz, and no way to tell which
         // branch had taken it. One cycle of build-install-play to learn nothing
         // is one too many.
-        val wanted = fpsLimit?.takeIf { it > 0 } ?: return
+        // **What is presented, and then twice it.**
+        //
+        // Two separate mistakes lived on this line. It read `fpsLimit`, which is
+        // the presented rate in `efficiency` and half it in `smoothness` -- so
+        // every smoothness container presented two frames for every refresh the
+        // panel had been asked for, and half of them were never scanned out. And
+        // even in efficiency, asking for exactly the presented rate is the one
+        // configuration with no timing budget at all: 30 frames a second into a
+        // 30 Hz panel gives exactly as many refreshes as frames, so every frame
+        // must fall in its own 33 ms window and any jitter puts two in one window
+        // and leaves the next empty.
+        //
+        // At twice the rate the same stream has a spare refresh between every
+        // pair, so a frame arriving early still lands on a refresh of its own and
+        // quantisation error halves. This is what frame pacing means -- Unreal
+        // states it as "a system that restricts an application to rendering
+        // frames at a lower framerate than a device's native refresh rate", and
+        // Android's own frame rate guidance gives the same shape of example, a
+        // 24 Hz video moving the panel to 120 Hz rather than to 24.
+        //
+        // It costs panel power on an LTPO screen. It buys the difference between
+        // thirty frames a second and thirty frames a second that look like
+        // fifteen.
+        val presented = presentedFps?.takeIf { it > 0 } ?: return
+        val wanted = presented * 2
         val window = hostWindow()
         if (window == null) {
             Log.w("VesselDisplay", "no Activity window behind this view; cannot ask for a panel mode")
@@ -1772,7 +1818,17 @@ private class SessionSurfaceView(
             // Same resolution, or the request changes what the screen shows as
             // well as how often — some panels list lower-resolution modes.
             .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
-        val mode = sameSize.firstOrNull { kotlin.math.abs(it.refreshRate - wanted) < REFRESH_MATCH }
+        // The cheapest mode that carries the stream: the lowest at or above
+        // twice the presented rate, else the lowest that can at least carry it
+        // one-to-one, else the fastest the panel has. A panel that cannot double
+        // is no worse off than before this change, and saying which case applied
+        // is the difference between knowing the headroom was granted and assuming
+        // it.
+        val mode = sameSize.filter { it.refreshRate + REFRESH_MATCH >= wanted }
+            .minByOrNull { it.refreshRate }
+            ?: sameSize.filter { it.refreshRate + REFRESH_MATCH >= presented }
+                .minByOrNull { it.refreshRate }
+            ?: sameSize.maxByOrNull { it.refreshRate }
         if (mode == null) {
             Log.w(
                 "VesselDisplay",
@@ -1786,7 +1842,10 @@ private class SessionSurfaceView(
         window.attributes = window.attributes.apply { preferredDisplayModeId = mode.modeId }
         Log.i(
             "VesselDisplay",
-            "asked the panel for ${mode.refreshRate} Hz (mode ${mode.modeId}) to match the $wanted fps cap",
+            "asked the panel for ${mode.refreshRate} Hz (mode ${mode.modeId}) for $presented fps " +
+                "presented -- " +
+                if (mode.refreshRate >= presented * 1.5f) "a spare refresh between frames"
+                else "no headroom; expect uneven pacing",
         )
     }
 
@@ -2612,6 +2671,15 @@ private class PacedXServerView(
     context: Context,
     xServer: XServer,
     private val fpsLimit: Int?,
+    /**
+     * What actually reaches the screen, which is the limit in `efficiency` and
+     * the limit times the multiple in `smoothness`. See [presentedFpsOf].
+     *
+     * Separate from [fpsLimit] because the two are used for opposite purposes
+     * here: the limit throttles how often the *compositor* runs, and this decides
+     * what the *panel* is asked for.
+     */
+    private val presentedFps: Int?,
 ) : XServerView(context, xServer) {
 
     private val minFrameNanos: Long =
@@ -2720,8 +2788,12 @@ private class PacedXServerView(
      * platform go higher when something else on screen needs it.
      */
     private fun applyFrameRate(holder: SurfaceHolder) {
-        val capped = fpsLimit?.takeIf { it > 0 }
-        val wanted = (capped ?: DEFAULT_FRAME_RATE).toFloat()
+        // **The presented rate, doubled, for the reasons on
+        // applyPreferredDisplayMode**: `fpsLimit` undercounts by the multiple in
+        // `smoothness`, and parity with the content rate leaves no refresh to
+        // spare when a frame arrives a millisecond early.
+        val capped = presentedFps?.takeIf { it > 0 }
+        val wanted = (capped?.times(2) ?: DEFAULT_FRAME_RATE).toFloat()
         // **A capped container gets the assertive form of this call.**
         //
         // The two-argument overload defaults to `CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS`,
@@ -2743,9 +2815,20 @@ private class PacedXServerView(
         // and may rise, and the platform should stay free to follow it.
         runCatching {
             if (capped != null) {
+                // **_DEFAULT rather than _FIXED_SOURCE, now that the rate asked
+                // for is deliberately above the content rate.**
+                //
+                // _FIXED_SOURCE means "this surface produces exactly this rate".
+                // That was true when the number was the cap and it is false now:
+                // we are asking for twice what we present, precisely so the panel
+                // sits above the content. Asserting the source is fixed at a rate
+                // it does not produce also scores the panel at the rate, at twice
+                // it and at four times it all equally well, and the platform's
+                // selector breaks that tie by taking the *lowest* -- which would
+                // hand back exactly the parity this change exists to escape.
                 holder.surface.setFrameRate(
                     wanted,
-                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
                     Surface.CHANGE_FRAME_RATE_ALWAYS,
                 )
             } else {

@@ -64,6 +64,26 @@ data class DisplayRequest(
      * one of the numbers. See `ContainerDiagnostics.frameGenerationLog`.
      */
     val frameGenerationLog: Set<String> = emptySet(),
+
+    /**
+     * Whether [frameGeneration] divides the fps limit or multiplies it.
+     *
+     * True is `efficiency`, the default: the limit counts *presented* frames and
+     * the guest is capped at its fraction, so 30 with 2x means the guest renders
+     * 15 and the screen shows 30. False is `smoothness`: the limit counts the
+     * guest's own frames, so 30 with 2x means the guest renders 30 and the screen
+     * shows 60.
+     *
+     * **Carried down here because the panel's refresh has to match what is
+     * presented, and only these two numbers together say what that is.** The
+     * mode was added without this, so the display layer had only the limit --
+     * which is the presented rate in one mode and half it in the other. Every
+     * container using `smoothness` was therefore presenting twice what the panel
+     * had been asked to show, and half those frames arrived in a refresh that was
+     * already spoken for and were never scanned out. Nothing downstream can fix
+     * that; there is physically nowhere to put the frame.
+     */
+    val frameGenerationDivides: Boolean = true,
 )
 
 /**

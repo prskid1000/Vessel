@@ -590,6 +590,12 @@ class SessionRuntime @Inject constructor(
         val frameGeneration = parseFrameGeneration(
             text(profile, manifest, DisplayParams.FRAME_GENERATION),
         )
+        // Which of the two things `fpsLimit` counts. See
+        // DisplayRequest.frameGenerationDivides -- the panel's refresh depends on
+        // it, so the display layer needs it too and not only the environment.
+        val frameGenerationDivides =
+            text(profile, manifest, DisplayParams.FRAME_GENERATION_MODE) !=
+                DisplayParams.FRAME_GENERATION_MODE_SMOOTHNESS
 
         _state.value = SessionState(
             containerId = containerId,
@@ -651,7 +657,7 @@ class SessionRuntime @Inject constructor(
             prepare(containerId, profile, manifest, fpsLimit, log) ?: return
             runDesktop(
                 log, geometry, fpsLimit, upscaler, frameGeneration,
-                profile.diagnostics.frameGenerationLog(),
+                profile.diagnostics.frameGenerationLog(), frameGenerationDivides,
             )
         } finally {
             // Teardown runs after a cancellation as well as after an exit, and
@@ -1071,6 +1077,7 @@ class SessionRuntime @Inject constructor(
         upscaler: UpscalerRequest,
         frameGeneration: Int,
         frameGenerationLog: Set<String>,
+        frameGenerationDivides: Boolean,
     ) {
         val current = plan ?: return
         _state.update { it.copy(phase = SessionPhase.STARTING) }
@@ -1083,6 +1090,7 @@ class SessionRuntime @Inject constructor(
             upscaler = upscaler,
             frameGeneration = frameGeneration,
             frameGenerationLog = frameGenerationLog,
+            frameGenerationDivides = frameGenerationDivides,
         )
         // What the server answers with, not what was asked for. `DISPLAY` and
         // `WINE_SYSVSHM_SOCKET` name sockets that either got bound or did not,
