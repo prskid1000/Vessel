@@ -6,6 +6,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import com.winlator.renderer.material.InterpolateMaterial;
+import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 
 /**
@@ -235,6 +236,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final FramePacer pacer;
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
+    private final MedianMaterial medianMaterial = new MedianMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -244,6 +246,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
     private Target vectors;
+    /**
+     * The field with its outliers rejected, which is the one that gets used.
+     *
+     * <p>See {@link MedianMaterial}. It is a separate target rather than an
+     * in-place filter because a median reads nine texels to write one, so writing
+     * back into the source would let already-filtered values feed the filter.
+     */
+    private Target filtered;
     /**
      * Where an interpolated frame is built, at the guest's resolution.
      *
@@ -639,8 +649,9 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, colour[oldest()].texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.previousTexture, 1);
+        // The filtered field, not the raw one. See MedianMaterial.
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered.texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.motionTexture, 2);
         // The search runs on these rather than on the colour: one byte a texel
@@ -722,7 +733,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      *     should be attempted -- an unwritten field would warp by garbage.
      */
     private boolean estimateMotion() {
-        if (luma[0] == null || vectors == null || output == null) return false;
+        if (luma[0] == null || vectors == null || filtered == null || output == null) return false;
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
@@ -735,6 +746,16 @@ public class FrameSynthesizer implements FramePacer.Target {
             Log.e(TAG, "glTexEstimateMotionQCOM failed 0x" + Integer.toHexString(error));
             return false;
         }
+
+        // **Outliers rejected before anything warps by them.** See
+        // MedianMaterial: this is FidelityFX Optical Flow's filtering pass and
+        // the frame-rate-up-conversion literature's motion vector smoothing step,
+        // and it is the reason the interpolation can blend four block vectors
+        // without one bad block poisoning the blend. 14,400 pixels.
+        medianMaterial.use();
+        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
+                                      1f / vectors.width, 1f / vectors.height);
+        renderToTarget(medianMaterial, vectors.texture, filtered);
         return true;
     }
 
@@ -848,8 +869,17 @@ public class FrameSynthesizer implements FramePacer.Target {
                     luma[i] = new Target();
                     luma[i].allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
                 }
+                // **Nearest on both, and that is not an oversight.** The
+                // median wants the nine vectors that were actually estimated, and
+                // the interpolation wants the four blocks as the four answers they
+                // are -- it does its own spatial blending under overlapping
+                // windows. Letting the sampler interpolate as well would blend
+                // twice and would invent a vector no block ever voted for, which
+                // at a motion boundary describes nothing in the scene.
                 vectors = new Target();
-                vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
+                vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                filtered = new Target();
+                filtered.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -872,11 +902,13 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
+            if (filtered != null) filtered.release();
             if (output != null) output.release();
             if (probe != null) probe.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
+        filtered = null;
         output = null;
         probe = null;
         announced = false;
@@ -959,13 +991,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " %.2f%% of the frame badly explained, matcher refusals %d",
+                    + " median filtered, matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
-                measuredSpeed * 100f, estimateFailures));
+                estimateFailures));
         }
 
         if (wants("layers")) {
@@ -975,17 +1007,23 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (wants("quality")) {
-            // Read as: how much of the frame the interpolation stood behind, and
-            // of what it did not, which way it failed.
+            // Read as: how often the four block vectors disagreed, how much of
+            // that disagreement reached the picture, and whether anything came
+            // out that interpolation should never produce.
+            //
+            // **There is no "trusted" or "fell back" any more, and their absence
+            // is the point.** Those described a shader that chose one vector and
+            // bailed out to a real frame where it doubted the choice, which made
+            // parts of the frame run at half the rate of the rest. Overlapped
+            // block motion compensation has one path for every pixel, so the
+            // question is no longer whether a region was interpolated -- all of
+            // it was -- but how contentious the vectors under it were.
             Log.i(TAG, String.format(
-                "fg quality: %.1f%% trusted, %.1f%% fell back,"
-                    + " %.4f%% dark patches, %.2f%% where the search is blind to"
-                    + " a 16px error the picture would show",
-                measuredConfidence * 100f,
-                (1f - measuredConfidence) * 100f,
-                measuredDark * 100f, measuredShadow * 100f));
-
-
+                "fg quality: %.2f%% blocks disagreeing, %.2f%% where that reached"
+                    + " the picture, %.4f%% dark patches, %.1f%% departure from"
+                    + " the newer frame",
+                measuredShadow * 100f, measuredConfidence * 100f,
+                measuredDark * 100f, measuredSpeed * 25f));
         }
 
         tier0Frames = 0;
