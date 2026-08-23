@@ -181,6 +181,14 @@ public class InterpolateMaterial extends ScreenMaterial {
             "uniform vec2 vectorSize;",
             // Where between the two frames this one sits: 0 is N-1, 1 is N.
             "uniform float phase;",
+            // **The luma pair, for the static test only.** Both were already
+            // bound by FrameSynthesizer and both had Uniform objects here -- only
+            // the GLSL declarations were missing, deleted along with the
+            // per-pixel sign scoring that used to be the sole reader. Binding a
+            // sampler a shader does not declare is silent; reading one it does
+            // not declare is a compile error, which is how this surfaced.
+            "uniform sampler2D lumaNewerTexture;",
+            "uniform sampler2D lumaOlderTexture;",
 
             // VESSEL: when 1, write four measurements instead of a picture.
             "uniform float diagnostic;",
@@ -260,6 +268,51 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "m1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel).rg * scale;",
                 "m2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel).rg * scale;",
                 "m3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel).rg * scale;",
+
+                // ---- a pixel that did not change did not move ----------------
+                //
+                // **This is the subtitle ghost, and it is the one artefact a
+                // compositor can fix that FSR3 cannot.**
+                //
+                // The field is one vector per 8x8 block. A block holding a
+                // subtitle over a panning background reports the *background's*
+                // motion, because the background is most of the block and the
+                // matcher minimises the sum over all of it. The glyph is static in
+                // screen space, so its correct vector is zero -- and compensating
+                // it by the background's vector sends one bilateral sample to the
+                // glyph and the other to where the glyph would be had it moved.
+                // Blended at phase 0.5 that is the text at half strength plus a
+                // displaced copy of the text at half strength. Photographed
+                // during a camera pan: "a cadet before they accepted" legible
+                // twice, the second offset right and down along the pan.
+                //
+                // The 3D scene never shows it because its motion genuinely is the
+                // background's, so both samples land on the right content. Only
+                // screen-space overlays are wrong, and they are wrong in exactly
+                // the places the block matcher cannot know about.
+                //
+                // The test is the definition rather than a heuristic: if this
+                // pixel's brightness is the same in both real frames then nothing
+                // passed through it, whatever the block around it did. An opaque
+                // glyph is its own colour in both frames and scores zero; the
+                // background beside it changes and scores high. So the mask lands
+                // on the glyph without being told what a glyph is.
+                //
+                // It cannot backfire. Where it suppresses, the two frames agree,
+                // so a compensated fetch and an uncompensated one return the same
+                // content and the choice is invisible. Where anything genuinely
+                // moved, carry is 1 and nothing changes at all.
+                //
+                // The floor is the source's own 8-bit quantisation -- one step is
+                // 1/255, and two is the smallest difference that is a signal
+                // rather than rounding. The ramp reaches full strength at six
+                // times that, which is where a difference stops being plausibly
+                // noise and starts being content. Neither is fitted to a scene:
+                // both are properties of the buffer's precision.
+                "float moved = abs(texture2D(lumaNewerTexture, vUV).r",
+                              "- texture2D(lumaOlderTexture, vUV).r);",
+                "float carry = smoothstep(2.0 / 255.0, 12.0 / 255.0, moved);",
+                "m0 *= carry; m1 *= carry; m2 *= carry; m3 *= carry;",
 
                 // ---- overlapped block motion compensation --------------------
                 // Four predictions, one per block, combined under the window.
