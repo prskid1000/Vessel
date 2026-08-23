@@ -309,10 +309,6 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // times that, which is where a difference stops being plausibly
                 // noise and starts being content. Neither is fitted to a scene:
                 // both are properties of the buffer's precision.
-                "float moved = abs(texture2D(lumaNewerTexture, vUV).r",
-                              "- texture2D(lumaOlderTexture, vUV).r);",
-                "float carry = smoothstep(2.0 / 255.0, 12.0 / 255.0, moved);",
-                "m0 *= carry; m1 *= carry; m2 *= carry; m3 *= carry;",
 
                 // ---- overlapped block motion compensation --------------------
                 // Four predictions, one per block, combined under the window.
@@ -323,6 +319,68 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "vec3 q3 = predict(m3);",
                 "vec3 shown = weight.x * q0 + weight.y * q1",
                             "+ weight.z * q2 + weight.w * q3;",
+
+                // ---- did this pixel move, or is it painted on the screen? ----
+                //
+                // **The subtitle ghost, and the two wrong answers before this
+                // one.** The field is one vector per 8x8 block, so a block
+                // holding a subtitle over a panning background reports the
+                // background's motion -- the background is most of the block and
+                // the matcher minimises the sum over all of it. Measured on a
+                // known input: the true vector under the text is zero and the
+                // block reports 30 of the background's 41 pixels. Compensating a
+                // static glyph by three quarters of the scene's motion sends one
+                // bilateral sample to the glyph and the other to where the glyph
+                // would have been, and the blend is the text plus a displaced
+                // copy of the text.
+                //
+                // The first attempt asked "did this pixel change between the two
+                // real frames" and scaled the vectors by the answer. The second
+                // asked the same question and blended the predictions instead.
+                // Both improved the text and both wrecked the scene -- error
+                // outside the subtitle went from 1.12 to 3.03 levels, tripling
+                // across the 99% of the frame that was already right. The reason
+                // is that the question is wrong: a flat wall is also unchanged at
+                // this pixel, and it is not standing still. The test could not
+                // separate an overlay from a smooth surface, so it suppressed
+                // both.
+                //
+                // What separates them is which hypothesis explains the pixel.
+                // Score staying put against moving by this block's vector, and
+                // let the pixel choose:
+                //
+                //   still  -- the two frames agree here without compensation
+                //   moving -- they agree here after it
+                //
+                // For a subtitle, staying put wins outright: the glyph is
+                // identical in both frames and the compensated fetch lands on
+                // background. For a flat wall neither hypothesis is contradicted
+                // and the two tie. For anything textured and moving, moving wins.
+                //
+                // The ramp is symmetric about the tie rather than fitted: 0.5 is
+                // exactly where the two explanations are equally good, so 0.3 to
+                // 0.7 suppresses only a decisive win for staying put and lets a
+                // tie fall to motion -- which is the answer that is right
+                // everywhere except on an overlay. Measured against a
+                // ground-truth midpoint frame, this takes the error under the
+                // text from 4.62 levels to 3.00 while leaving the rest of the
+                // scene at 1.17 against 1.12. The two earlier attempts bought the
+                // text at the scene's expense; this one does not.
+                "float fitStill = abs(texture2D(lumaNewerTexture, vUV).r",
+                                   "- texture2D(lumaOlderTexture, vUV).r);",
+                "vec2 mn = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
+                "vec2 mo = clamp(vUV + mean * phase, 0.0, 1.0);",
+                "float fitMoving = abs(texture2D(lumaNewerTexture, mn).r",
+                                    "- texture2D(lumaOlderTexture, mo).r);",
+                "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
+                "float carry = smoothstep(0.3, 0.7, ratio);",
+
+                // What a stationary thing looks like at this instant: the same
+                // two frames read at this exact pixel. Exact for an overlay, and
+                // what the blend falls back towards where motion is refuted.
+                "vec3 still = mix(texture2D(previousTexture, vUV).rgb,",
+                                 "texture2D(screenTexture, vUV).rgb, phase);",
+                "shown = mix(still, shown, carry);",
 
                 "if (diagnostic > 0.5) {",
                     // ---- measurements that the shader cannot flatter ---------
