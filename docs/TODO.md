@@ -103,6 +103,38 @@ and both were free to avoid.
 
 ---
 
+## Frame generation, as of 2026-08-23
+
+Kept short because the reasoning that matters is in the commit messages and in
+`tools/frame-bench`, which is the thing to reach for before touching any of it.
+
+**What was measured and is settled.**
+
+- **The aperture explanation for the ripple is refuted frame-wide and true
+  locally.** Averaged over a scene, edges disagree along themselves 88% against
+  81% across — a wash. On one clean straight edge in the bench the along-edge
+  component is noise differing by 36 pixels between neighbouring blocks. Both
+  readings are right; the frame-wide one answers the wrong question, and it was
+  used to kill anisotropic smoothing on the first pass. Smoothing along the edge
+  was then measured directly and is worse than doing nothing (11.0, 12.1, 13.5
+  against 9.54). It is dead for a better reason now.
+- **3DRS regularisation is dead.** 2.27 ms for measurably worse output. The prior
+  pulls minority regions toward their surroundings, which is exactly wrong when
+  the minority region is a screen-space overlay.
+- **The median filter was removed unmeasured and that was the error.** Its own
+  farewell note predicted this. Restored, running twice: 70% off the edge
+  waviness, and the open scene improves with it.
+- **A real frame costs about 45x a synthesised one** (63 ms against 1.4 ms at
+  97% GPU). Any argument about saving GPU by making fewer synthesised frames is
+  arguing about the cheap half.
+
+**What is unfixed.** The waviness at motion boundaries, now at 2.88 px from
+9.54 px but not gone; and `eglGetFrameTimestampsANDROID` returning nothing usable
+on this surface, so every cadence figure remains a draw schedule rather than a
+scanout. The build says so rather than letting the number pass.
+
+---
+
 ## The blockers, in order
 
 - [x] **#56 — the world is not drawn.** Fixed 2026-08-19; it was an
@@ -248,20 +280,52 @@ regression gets attributed to the wrong change three days later.
   single digits earns the default; still tens of milliseconds means the mechanism
   argument was wrong and the container row turns DRI3 off with no rebuild.
 
-- [ ] **The D3D panel is empty for every D3D12 title, and the fix is unbuilt.**
-  `patches/dxvk/0001` hooks `DxvkDevice::presentImage`, so the counters exist for
-  D3D 8/9/10/11 and never for D3D 12 — Metro fills the panel, Requiem leaves it
-  blank. `patches/vkd3d/0007` is the same instrument on the other side of that
-  boundary, writing the same schema to the same path. `patches/dxvk/0001` also
-  gained the four idle/sync counters DXVK has always kept and nothing ever read,
-  which are the only thing in the family that says whether a frame was GPU-bound
-  or CPU-bound rather than how much work was in it.
+- [x] **The D3D panel is empty for every D3D12 title.** Fixed. `patches/dxvk/0001`
+  hooks `DxvkDevice::presentImage`, which exists for D3D 8/9/10/11 and never for
+  D3D 12; `patches/vkd3d/0007` is the same instrument on the other side of that
+  boundary. Proven 2026-08-23 by a Requiem session writing `d3dFps 15.53`,
+  `d3dDrawCallsPerFrame 45.0` and `d3dExecuteIndirectsPerFrame 647.1` into the
+  trace — the counters the earlier run failed to produce.
 
-  *Done when:* a Requiem session fills the `d3d · indirect` card. Both builds
-  shipped and installed (DXVK `2070101`, vkd3d `3000107`, verified on device by
-  the counter strings in the DLLs themselves) — and **the run produced no
-  counters anyway**, see the next item. It was once the next step for #56; that
-  entry closed without it, so this is now wanted for its own sake.
+- [ ] **The guest overruns its own frame cap, and the expensive half of that is
+  not ours to decline.** Measured 2026-08-23 on Requiem: `d3dFps` sat at 15.5
+  against a 15 fps limit and burst to **21.5**, with the compositor faithfully
+  doubling it to **43.9 presented** against a limit of 30.
+
+  The limiter is applied and vkd3d-proton says so —
+  `dxgi_vk_swap_chain_init_frame_rate_limiter: Set frame rate limit to 15.0 FPS
+  via environment`. Two things in the same log are the likely mechanism:
+  `Implementation supports neither present_wait1 or present_wait2` (its pacing
+  leans on timing this driver does not provide) and
+  `recreate_swapchain_in_present_task` (which resets that pacing).
+
+  **Note also that `dxvk.maxFrameRate` is irrelevant here and reading it cost
+  time.** Requiem is D3D12, so DXVK caps nothing for it; only `VKD3D_FRAME_RATE`
+  applies. The DXVK line in the log is present, correct, and about a different
+  API.
+
+  **Clamping the presented rate was tried and removed, deliberately.** At 97% GPU
+  and 15.5 guest frames a second a real frame costs about **63 ms of GPU against
+  1.4 ms for a synthesised one** — a factor of forty-five. So the expensive part
+  of an overrun is the six extra *real* frames the guest rendered, which nothing
+  on this side can decline, and suppressing the cheap half saved under one per
+  cent. The extra frames are kept: a real frame is better content than a
+  synthesised one, and more of them reads as smoother.
+
+  *Done when:* the burst is understood at its source rather than compensated
+  downstream. Nothing here should grow a clamp for it.
+
+- [ ] **Requiem renders 1920x1080 into a 1280x720 desktop, and it is the largest
+  GPU saving on the table.** We publish `wine explorer /desktop=vessel,1280x720`
+  and the log then reads `dxgi_vk_swap_chain_init: Creating swapchain
+  (1920 x 1080)`. Nothing is misconfigured: a DXGI swapchain's buffer size comes
+  from the application's own settings, not from the desktop, and DXGI scales it
+  down at present. So the game renders **2.25x the pixels** and throws them away,
+  on the side of the ledger that costs 63 ms a frame.
+
+  *Done when:* a run with the game's own resolution set to 1280x720 is compared
+  against one without, on `gpuPercent` and `d3dFps`. This is a container-side
+  experiment and needs no code.
 
 ---
 
