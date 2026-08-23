@@ -154,7 +154,12 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform phase = new Uniform("phase");
         /** VESSEL: 1 makes this pass report on itself instead of drawing. */
         public final Uniform diagnostic = new Uniform("diagnostic");
-        /** VESSEL: which way the field points, settled once. See SignMaterial. */
+        /**
+         * VESSEL: which way each axis of the field points, settled once.
+         *
+         * <p>Two components, not one: see {@link SignMaterial}. The axes can
+         * disagree, and a scalar has to sacrifice one of them.
+         */
         public final Uniform fieldSign = new Uniform("fieldSign");
     }
 
@@ -193,7 +198,7 @@ public class InterpolateMaterial extends ScreenMaterial {
             // parts of the scene. In a dark game half of those land in shadow,
             // which is hard-edged black speckle through every detailed region of
             // every synthesised frame.
-            "uniform float fieldSign;",
+            "uniform vec2 fieldSign;",
 
             "varying vec2 vUV;",
 
@@ -272,54 +277,51 @@ public class InterpolateMaterial extends ScreenMaterial {
                             "+ weight.z * q2 + weight.w * q3;",
 
                 "if (diagnostic > 0.5) {",
-                    // ---- measurements that the shader cannot flatter ---------
+                    // ---- measurements the shader cannot flatter --------------
                     //
-                    // **Everything measured here before this was worthless, and
-                    // the way it was worthless is worth writing down.**
+                    // **What was here before reported 100% trusted and 0.24%
+                    // residual while every synthesised frame was shredded.** Four
+                    // structural reasons, worth keeping written down:
                     //
-                    // It reported 100% trusted and 0.24% mean residual while
-                    // every synthesised frame was being shredded with black
-                    // speckle. Four separate reasons, all of them structural:
+                    // 1. Circular. The field's sign was chosen to minimise a
+                    //    cost, and that same cost was reported as the residual. A
+                    //    measurement downstream of an optimisation of itself can
+                    //    only ever agree with it.
+                    // 2. Averaged. A mean over 900,000 pixels reads fine while a
+                    //    few per cent of them are destroyed.
+                    // 3. Thresholded absolutely. step(0.05, brightness) switches
+                    //    the detector off across most of a dark corridor, which
+                    //    is exactly where the fault lived.
+                    // 4. No ground truth. Every test compared the output against
+                    //    the inputs it was built from.
                     //
-                    // 1. It was circular. The sign of the field was chosen to
-                    //    minimise a cost, and then that same cost was reported as
-                    //    "residual". A measurement downstream of an optimisation
-                    //    of itself can only ever agree with it.
-                    // 2. It averaged. A mean over 900,000 pixels reads fine while
-                    //    a few per cent of them are destroyed.
-                    // 3. It thresholded absolutely. `step(0.05, brightness)`
-                    //    switches the detector off across most of a dark corridor
-                    //    -- which is exactly where the fault lived.
-                    // 4. It had no ground truth. Every test compared the output
-                    //    against the inputs it was built from, so nothing was ever
-                    //    checked against something it had not already assumed.
-                    //
-                    // What replaces it is anchored to the two real frames and to
-                    // nothing else, and asks a question the shader has no way to
-                    // optimise: at phase t the synthesised pixel should sit
-                    // *between* the endpoints. So compare how far it lands from
-                    // frame N against how far frame N-1 already was. If the
-                    // synthesis is further from the truth than simply showing the
-                    // old frame unchanged, frame generation is doing harm at that
-                    // pixel, and no amount of internal self-consistency changes
-                    // that.
+                    // These are anchored to the two real frames only. At the
+                    // midpoint a synthesised pixel should sit between the
+                    // endpoints, so compare its distance from frame N against the
+                    // distance frame N-1 already had: further, and generation is
+                    // doing harm at that pixel whatever the internals say.
                     "vec3 here  = texture2D(screenTexture,   vUV).rgb;",
                     "vec3 there = texture2D(previousTexture, vUV).rgb;",
-                    "float dSynth = length(shown - here);",
-                    "float dBase  = length(there - here);",
-
-                    // Only pixels that actually changed between the two real
-                    // frames can say anything: where nothing moved, both
-                    // distances are zero and the ratio is noise over noise.
+                    "float dBase = length(there - here);",
                     "float changed = step(0.008, dBase);",
 
-                    // Content that is in neither endpoint. The output should not
-                    // be darker than everything real nearby -- there is nowhere
-                    // for such a pixel to have come from. Expressed as a
-                    // *difference* from the local floor rather than as an
-                    // absolute level, so it works identically in a black tunnel
-                    // and in daylight; the previous version used a fixed floor
-                    // and was blind in precisely the scene that needed it.
+                    // **And the same test run on what a single vector would have
+                    // drawn, so the two appear side by side in one frame.**
+                    // Overlapped blending costs four colour fetches where one
+                    // would do, and the case for it has to be measured rather
+                    // than argued -- the last time something looked obviously
+                    // right and was not, it cost a day. Same pixel, same field,
+                    // same threshold; only the compensation differs.
+                    "vec3 single = predict(mean);",
+
+                    // Content that is in neither endpoint: darker than everything
+                    // real nearby, with nowhere to have come from. **This is the
+                    // black-speckle guard** -- the artefact that a per-pixel sign
+                    // used to produce, and the one thing that must never come
+                    // back. Expressed as a difference from the local floor rather
+                    // than an absolute level, so it works the same in a black
+                    // tunnel and in daylight; the version that used a fixed floor
+                    // was blind in precisely the scene that needed it.
                     "vec2 rx = vec2(6.0 * motionScale.x, 0.0);",
                     "vec2 ry = vec2(0.0, 6.0 * motionScale.y);",
                     "float floorLuma = min(min(max3(here), max3(there)),",
@@ -329,25 +331,16 @@ public class InterpolateMaterial extends ScreenMaterial {
                                 "max3(texture2D(screenTexture, clamp(vUV - ry, 0.0, 1.0)).rgb))));",
 
                     "gl_FragColor = vec4(",
-                        // R: **the number that matters.** Pixels where the
-                        // synthesised frame is further from frame N than frame
-                        // N-1 already was -- worse than having done nothing at
-                        // all. Counted only where something actually changed.
-                        "changed * step(dBase, dSynth),",
-                        // G: pixels darker than anything real in the
-                        // neighbourhood of either endpoint. Invented content, of
-                        // the kind a wrong displacement fetches out of shadow.
+                        // R: harm done by what was actually drawn.
+                        "changed * step(dBase, length(shown - here)),",
+                        // G: invented content. The black-speckle guard.
                         "step(0.02, floorLuma - max3(shown)),",
-                        // B: how much of the frame changed at all, which is the
-                        // denominator R has to be read against. Without it a
-                        // small R could mean "almost nothing was harmed" or
-                        // "almost nothing was moving".
-                        "changed,",
-                        // A: how far the synthesis sits between the endpoints, on
-                        // average. Half is what a correct interpolation at the
-                        // midpoint looks like; approaching one means it is barely
-                        // better than the old frame, and beyond one it is worse.
-                        "clamp(dSynth / max(dBase, 0.008) * 0.5, 0.0, 1.0));",
+                        // B: harm a single vector would have done instead. The
+                        // gap between this and R is what OBMC is worth.
+                        "changed * step(dBase, length(single - here)),",
+                        // A: how much of the frame changed at all, the
+                        // denominator both harms have to be read against.
+                        "changed);",
                     "return;",
                 "}",
 

@@ -3,6 +3,10 @@ package com.winlator.renderer;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.opengl.EGL14;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLExt;
+import android.opengl.EGLSurface;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 
@@ -344,6 +348,37 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
     @Override
     public void onDrawFrame(GL10 gl) {
+        composite(gl);
+        stampPresentation();
+    }
+
+    /**
+     * VESSEL: tell SurfaceFlinger when this frame is meant to be seen.
+     *
+     * <p>Without it the frame is displayed at whatever vsync happens to follow
+     * the swap, so an evenly synthesised stream still reaches the panel unevenly
+     * -- three vsyncs for one frame and five for the next -- and that is judder
+     * the interpolation cannot be blamed for. Android's frame pacing
+     * documentation is direct about it: a presentation timestamp is what tells
+     * SurfaceFlinger when to present, and without one a pipeline either stuffs
+     * its queue or re-shows the last frame.
+     *
+     * <p>Called after the composite and before {@code GLSurfaceView} swaps, which
+     * is the window in which the timestamp applies to the frame just drawn. A
+     * zero from the synthesiser means it has no measured cadence yet, and then
+     * nothing is stamped and the old behaviour stands.
+     */
+    private void stampPresentation() {
+        if (!extrapolating()) return;
+        final long when = frameSynthesizer.presentationTimeNanos();
+        if (when <= 0) return;
+        final EGLDisplay display = EGL14.eglGetCurrentDisplay();
+        final EGLSurface surface = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW);
+        if (display == null || surface == null) return;
+        EGLExt.eglPresentationTimeANDROID(display, surface, when);
+    }
+
+    private void composite(GL10 gl) {
         // VESSEL: a predicted frame counts. This is documented as what the user
         // is actually shown, and a synthesised frame is shown.
         compositedFrames++;

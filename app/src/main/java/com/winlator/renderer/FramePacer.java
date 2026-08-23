@@ -54,6 +54,20 @@ class FramePacer {
 
         /** Frames composited for real, for the staleness check. */
         long realFrameCount();
+
+        /**
+         * A prediction a real frame got to first.
+         *
+         * <p><b>This exists because a frame used to be able to vanish without
+         * anything counting it.</b> When a real frame lands before its
+         * prediction is due, the prediction is dropped -- correctly, it is of a
+         * moment that has since been drawn properly -- but the old code simply
+         * returned. The presented rate fell from 30 a second to 24 and every
+         * counter in the log read healthy, {@code skipped} included, because
+         * nothing on this path touched one. A frame that disappears has to be
+         * counted somewhere or the pacing cannot be debugged at all.
+         */
+        void onSynthesisOvertaken();
     }
 
     /**
@@ -96,9 +110,28 @@ class FramePacer {
                 choreographer.postFrameCallback(new Choreographer.FrameCallback() {
                     @Override
                     public void doFrame(long frameTimeNanos) {
-                        // A real frame landed in the meantime, so this prediction
-                        // is of a moment that has already been drawn properly.
-                        if (target.realFrameCount() != stamp) return;
+                        // **A real frame landing first no longer cancels this,
+                        // and dropping it was the frame loss.**
+                        //
+                        // It used to return here, on the reasoning that the
+                        // prediction was of a moment already drawn properly. That
+                        // was true while the phase came from which slot the
+                        // prediction had been scheduled as. It is not true now:
+                        // the phase is re-derived from the vsync timestamp
+                        // against the newest real pair, so a prediction that
+                        // fires after a real frame is not stale -- it is simply
+                        // an early prediction of the new interval, at a small
+                        // phase, which is exactly what should be shown then.
+                        //
+                        // Measured before removing it: with the guest delivering
+                        // frames irregularly, this fired 0 to 6 times a second
+                        // and the synthesised rate tracked it exactly -- 15 a
+                        // second when it fired none, 8.9 when it fired six. At 2x
+                        // the generated count has to equal the rendered count,
+                        // and this was the whole shortfall.
+                        if (target.realFrameCount() != stamp) {
+                            target.onSynthesisOvertaken();
+                        }
 
                         // Not there yet: ride the next vsync rather than firing
                         // early. The display cannot show it sooner in any case,

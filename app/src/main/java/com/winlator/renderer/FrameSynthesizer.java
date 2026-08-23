@@ -315,11 +315,44 @@ public class FrameSynthesizer implements FramePacer.Target {
      * lives. See {@link SignMaterial} for why deciding this per pixel -- which is
      * what this replaces -- shredded every synthesised frame.
      */
-    private float fieldSign = 0f;
+    private float fieldSignX = 0f;
+    /** @see #fieldSignX */
+    private float fieldSignY = 0f;
     /** Share of the last probe that was moving enough to have an opinion. */
     private float signVotes = 0f;
+    /** How many times the probe has actually run, so silence can be read. */
+    private long signProbes = 0;
     /** When the sign was last probed, so a still scene retries rather than sticks. */
     private long signProbedAt = 0;
+
+    /**
+     * What the geometry says the sign must be, used until the probe is decisive.
+     *
+     * <p>Derived rather than guessed. {@code texEstimateMotion} is called with
+     * {@code ref = previous, target = latest}, and the extension defines its
+     * output as the motion from ref to target -- so the field is <em>forward</em>,
+     * call it {@code f}, and content at {@code p} in N-1 sits at {@code p + f} in
+     * N. A pixel of the synthesised frame at {@code q} and phase {@code t} holds
+     * content that was at {@code q - f t} in N-1 and will be at
+     * {@code q + f (1 - t)} in N. This shader fetches those two at
+     * {@code uv + v t} and {@code uv - v (1 - t)}, which agree only when
+     * {@code v = -f}.
+     *
+     * <p><b>The default used to be the opposite of this, and it showed.</b> With
+     * the probe silently never latching, every synthesised frame was displaced the
+     * wrong way along the motion -- which does not look like noise, it looks like
+     * objects arriving late and the picture failing to settle.
+     */
+    private static final float DERIVED_SIGN_X = -1f;
+    /**
+     * And the same for y, negated again for the handedness of texture space.
+     *
+     * <p>GL texture coordinates run y upward from the bottom; a block matcher
+     * working on an image runs y downward from the top. Two negations that
+     * cancel on x and compound on y, so until the probe reports, y is taken as
+     * the opposite of x. The probe settles both independently and overrides this.
+     */
+    private static final float DERIVED_SIGN_Y = 1f;
 
     /**
      * Vote on the field's sign, and latch the answer once it is decisive.
@@ -331,10 +364,15 @@ public class FrameSynthesizer implements FramePacer.Target {
      * pixel is precisely the thing that was wrong.
      */
     private void probeFieldSign() {
-        if (fieldSign != 0f) return;
+        if (fieldSignX != 0f && fieldSignY != 0f) return;
         final long now = SystemClock.uptimeMillis();
         if (signProbedAt != 0 && now - signProbedAt < 1000) return;
         signProbedAt = now;
+        // **Announced on entry, not only on the way out.** The last version of
+        // this went silent for a whole session and there was no way to tell
+        // whether it was running and undecided or never running at all. Those
+        // are opposite faults and the log has to separate them.
+        signProbes++;
 
         if (signProbe == null) {
             signProbe = new Target();
@@ -381,23 +419,40 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         renderer.viewportNeedsUpdate = true;
 
-        final float positive = (pixel.get(0) & 0xff) / 255f;
-        signVotes = (pixel.get(1) & 0xff) / 255f;
+        final float keepCost  = (pixel.get(0) & 0xff) / 255f;
+        final float flipXCost = (pixel.get(1) & 0xff) / 255f;
+        final float flipYCost = (pixel.get(2) & 0xff) / 255f;
+        signVotes = (pixel.get(3) & 0xff) / 255f;
 
-        // A still frame has no opinion: both signs fetch the same content, so the
-        // vote is a tie whatever the truth is. Wait for real motion rather than
-        // latch a coin toss.
-        if (signVotes < 0.05f) return;
+        // Nothing moving means both signs fetch the same content and the totals
+        // are equal whatever the truth is. Wait rather than latch a coin toss.
+        if (signVotes < 0.03f) {
+            Log.i(TAG, String.format(
+                "fg sign: %.1f%% of probe moving, no opinion yet (defaults x %+.0f y %+.0f)",
+                signVotes * 100f, DERIVED_SIGN_X, DERIVED_SIGN_Y));
+            return;
+        }
 
-        final float share = positive / signVotes;
-        if (share > 0.65f) fieldSign = 1f;
-        else if (share < 0.35f) fieldSign = -1f;
-        else return;
+        // Relative, so it reads the same in a dark corridor and in daylight.
+        // Positive means flipping that axis costs more, so it is already right.
+        final float marginX = (flipXCost - keepCost) / Math.max(flipXCost + keepCost, 0.004f);
+        final float marginY = (flipYCost - keepCost) / Math.max(flipYCost + keepCost, 0.004f);
 
         Log.i(TAG, String.format(
-            "fg sign: field points %s (%.0f%% of moving pixels agree, %.0f%% of the"
-                + " frame moving) -- latched",
-            fieldSign > 0 ? "forward" : "backward", share * 100f, signVotes * 100f));
+            "fg sign: keep %.3f flipX %.3f flipY %.3f -> margin x %+.3f y %+.3f,"
+                + " %.0f%% moving%s (defaults x %+.0f y %+.0f)",
+            keepCost, flipXCost, flipYCost, marginX, marginY, signVotes * 100f,
+            Math.abs(marginX) > 0.05f || Math.abs(marginY) > 0.05f ? " LATCHING" : " undecided",
+            DERIVED_SIGN_X, DERIVED_SIGN_Y));
+
+        // The margin is an accumulated difference over thousands of pixels, so a
+        // few per cent is already far outside anything noise produces.
+        if (fieldSignX == 0f && Math.abs(marginX) > 0.05f) {
+            fieldSignX = marginX > 0f ? DERIVED_SIGN_X : -DERIVED_SIGN_X;
+        }
+        if (fieldSignY == 0f && Math.abs(marginY) > 0.05f) {
+            fieldSignY = marginY > 0f ? DERIVED_SIGN_Y : -DERIVED_SIGN_Y;
+        }
     }
 
     /** Whether the field estimated at the last real frame is usable. */
@@ -437,9 +492,57 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private static final long IDLE_NANOS = 250_000_000L;
 
+    /**
+  * When the frame now being composed should actually reach the display.
+  *
+  * <p><b>Everything above this decides what to show; nothing decided when.</b>
+  * A frame handed to {@code GLSurfaceView} is swapped and then displayed at
+  * whatever vsync SurfaceFlinger picks. On a 120 Hz panel a 30 fps stream should
+  * occupy exactly four vsyncs per frame, and if scheduling jitter makes it three
+  * then five the picture judders however perfect the interpolated frame was --
+  * which is why the phase arithmetic could be measured correct on the recovered
+  * frames while the motion still did not feel smooth.
+  *
+  * <p>Android's answer is a presentation timestamp. Its frame pacing
+  * documentation is explicit that "setting a presentation timestamp indicates to
+  * SurfaceFlinger when to present the image", and that a pipeline left to itself
+  * either stuffs its queue or re-shows the previous frame when one arrives late.
+  * That is the whole purpose of the Frame Pacing library, and this path has never
+  * had it.
+  *
+  * <p>So each composited frame is stamped for an even cadence: one step of
+  * {@code interval / multiple} after the last, which is the rate the display is
+  * being asked to run at. The lead is kept to about one step -- enough for
+  * SurfaceFlinger to hold the frame until its moment, and short of the two-deep
+  * queue that would block the render thread instead.
+  */
+    private long nextPresentNanos = 0;
+
+    /**
+     * The moment the frame being composed now should be shown, or 0 for "as soon
+     * as possible" while there is no measured interval to pace against.
+     */
+    public long presentationTimeNanos() {
+        if (smoothedInterval <= 0 || multiple < 2) return 0;
+        final long step = Math.max(1_000_000L, smoothedInterval / multiple);
+        final long now = System.nanoTime();
+        // Resync when the cadence has fallen behind the clock, or run so far
+        // ahead that honouring it would stuff the queue. Three steps is past any
+        // jitter a real interval shows and still inside the depth the pipeline
+        // can hold.
+        if (nextPresentNanos <= now || nextPresentNanos > now + 3 * step) {
+            nextPresentNanos = now + step;
+        }
+        final long stamp = nextPresentNanos;
+        nextPresentNanos += step;
+        return stamp;
+    }
+
     private long tier0Frames = 0;
     private long tier1Frames = 0;
     private long skipped = 0;
+    /** Predictions overtaken by a real frame before they could be drawn. */
+    private long cancelled = 0;
     /** Times the matcher refused, which is invisible in the picture. */
     private long estimateFailures = 0;
     private long reportedAt = 0;
@@ -603,6 +706,11 @@ public class FrameSynthesizer implements FramePacer.Target {
      *
      * @param index which of the N-1 frames this is; t is index/N
      */
+    @Override
+    public void onSynthesisOvertaken() {
+        cancelled++;
+    }
+
     public void presentSynthesized(long vsyncNanos) {
         if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return;
 
@@ -664,7 +772,32 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float phaseFor(long vsyncNanos) {
         if (smoothedInterval <= 0 || lastRealFrameNanos == 0) return 1f;
         final float elapsed = (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
-        float phase = 1f / multiple + elapsed;
+
+        // **Phase is elapsed. There is no offset, and the offset was the bug.**
+        //
+        // Line the two clocks up and it falls out. The interval that follows the
+        // capture of frame N presents, in content time: frame N-1 at the start
+        // -- that is phase 0 of the pair being interpolated -- the synthesised
+        // moments through the middle, and frame N itself at the end, which is
+        // phase 1. So a vsync a fraction e through the interval must show phase
+        // e, whatever K is. At 3x the two predictions land at e = 1/3 and 2/3 and
+        // show exactly those phases.
+        //
+        // The original formula added 1/K to elapsed, so phase reached 1 halfway
+        // through every interval; past that point presentPhase takes its
+        // phase >= 1 branch and blits the real frame again, and the second half
+        // of every interval was duplicates. Scaling elapsed by (K-1)/K instead
+        // removed the duplicates but kept the offset, which put the synthesised
+        // frame at 0.7 of the way rather than 0.5 -- so the picture advanced
+        // 0.7 then 0.3, then 0.7 then 0.3, lurching forward and crawling, every
+        // pair.
+        //
+        // Both were found the same way and neither was visible from inside: the
+        // presented frames were recovered from a screen recording and each one
+        // located between its neighbours by direct search. That measurement is
+        // the only one in this whole path that the code cannot flatter, because
+        // it reads the pixels that reached the display.
+        float phase = elapsed;
         if (phase < lastPhase) phase = lastPhase;
         if (phase > 1f) phase = 1f;
         lastPhase = phase;
@@ -745,11 +878,12 @@ public class FrameSynthesizer implements FramePacer.Target {
         // filtered average of four. See InterpolateMaterial's third point.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.vectorSize,
                                            vectors.width, vectors.height);
-        // Uniform, not per pixel. See SignMaterial. Until the probe has an
-        // answer the field is taken forward, which is the reading the extension's
-        // own wording suggests; the probe overrides it within a second of motion.
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.fieldSign,
-                                            fieldSign != 0f ? fieldSign : 1f);
+        // Uniform, not per pixel. See SignMaterial. Until the probe is
+        // decisive this is DERIVED_SIGN, which is what the geometry requires
+        // rather than a guess; the probe only ever confirms or overrides it.
+        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.fieldSign,
+                                           fieldSignX != 0f ? fieldSignX : DERIVED_SIGN_X,
+                                           fieldSignY != 0f ? fieldSignY : DERIVED_SIGN_Y);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
@@ -861,6 +995,16 @@ public class FrameSynthesizer implements FramePacer.Target {
         // the frame-rate-up-conversion literature's motion vector smoothing step,
         // and it is the reason the interpolation can blend four block vectors
         // without one bad block poisoning the blend. 14,400 pixels.
+        // **Once, and the two attempts to do more than once both failed.**
+        // Iterating it three times, and separately projecting the field onto its
+        // low frequencies to approximate the global affine motion the
+        // frame-rate-up-conversion literature fits for a camera pan, each traded
+        // the block-scale ripple for something worse: every surface adopted the
+        // neighbourhood's motion, so surfaces at different depths were dragged
+        // to a common vector and smeared across one another. Recovered from a
+        // screen recording, the beams stopped waving and the whole frame went
+        // mushy instead. Removing the lone block that lost a tie is what this
+        // pass is good for, and it is kept for exactly that.
         medianMaterial.use();
         medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
                                       1f / vectors.width, 1f / vectors.height);
@@ -1024,7 +1168,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         filtered = null;
         output = null;
         signProbe = null;
-        fieldSign = 0f;
+        fieldSignX = 0f;
+        fieldSignY = 0f;
         signVotes = 0f;
         probe = null;
         announced = false;
@@ -1094,10 +1239,11 @@ public class FrameSynthesizer implements FramePacer.Target {
             final float perSecond = realThisSecond * 1000f / elapsed;
             Log.i(TAG, String.format(
                 "fg pacing: %.1f real/s, %.1f synthesised/s, %.1f presented/s,"
-                    + " %d skipped, interval %.1f ms (%.1f fps), %dx, %s",
+                    + " %d skipped, %d overtaken (still drawn),"
+                    + " interval %.1f ms (%.1f fps), %dx, %s",
                 perSecond, tier1Frames * 1000f / elapsed,
                 (perSecond + tier1Frames * 1000f / elapsed),
-                skipped,
+                skipped, cancelled,
                 smoothedInterval / 1e6f,
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple,
@@ -1135,20 +1281,22 @@ public class FrameSynthesizer implements FramePacer.Target {
             // much did we push *further* from the truth than simply leaving the
             // old frame up. Anything above a per cent or two means the synthesis
             // is actively damaging, however healthy it looks from the inside.
-            final float moving = measuredShadow;
-            final float harmedShare = moving > 0.001f ? measuredConfidence / moving : 0f;
+            final float moving = measuredSpeed;
+            final float harmObmc = moving > 0.001f ? measuredConfidence / moving : 0f;
+            final float harmOne  = moving > 0.001f ? measuredShadow / moving : 0f;
             Log.i(TAG, String.format(
-                "fg truth: %.1f%% of the moving frame is FURTHER from the real"
-                    + " frame than doing nothing, %.3f%% invented content,"
-                    + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints (50%% is correct)",
-                harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredSpeed * 200f));
+                "fg truth: harm %.1f%% with OBMC vs %.1f%% with one vector"
+                    + " (further from the real frame than doing nothing),"
+                    + " %.3f%% invented content, %.0f%% of frame moving,"
+                    + " sign probes %d",
+                harmObmc * 100f, harmOne * 100f,
+                measuredDark * 100f, moving * 100f, signProbes));
         }
 
         tier0Frames = 0;
         tier1Frames = 0;
         skipped = 0;
+        cancelled = 0;
         estimateFailures = 0;
     }
 
