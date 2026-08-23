@@ -6,6 +6,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import com.winlator.renderer.material.InterpolateMaterial;
+import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 
@@ -237,11 +238,13 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
+    private final MedianMaterial medianMaterial = new MedianMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
     private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
+    private final GpuTimer medianTimer = new GpuTimer("tier1 median");
     private final GpuTimer interpolateTimer = new GpuTimer("tier1 interpolate");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
@@ -278,6 +281,46 @@ public class FrameSynthesizer implements FramePacer.Target {
      * mip reduction is far below the frame it protects.
      */
     private Target signProbe;
+
+    /**
+     * VESSEL: where the field is filtered, ping-ponged across the passes.
+     *
+     * <p><b>This existed, was removed unmeasured, and the removal was wrong.</b>
+     * The note left behind said the filter was cheap and standard but that its
+     * benefit here had never been demonstrated in isolation, and that if what it
+     * suppressed came back, that would be the measurement that was missing. It
+     * came back, and it is the waviness on straight edges.
+     *
+     * <p>Measured on a bench where the answer is known -- a beam and the wall
+     * behind it panning at different rates, as depth parallax makes them, with a
+     * straight vertical edge between. The edge's deviation from the straight line
+     * it should be, in pixels:
+     *
+     * <pre>
+     *   ground truth                0.013
+     *   unfiltered field            9.540
+     *   one pass                    4.658
+     *   two passes                  2.880
+     *   three passes                3.496
+     * </pre>
+     *
+     * <p>Seventy per cent of the waviness, and the error either side of the edge
+     * improves with it rather than being traded away. Three passes start
+     * smoothing real motion back out, which is why this stops at two.
+     *
+     * <p>Two targets because a pass reads the whole field and writes the whole
+     * field, so it cannot be its own destination.
+     */
+    private final Target[] filtered = new Target[2];
+    /** Which of {@link #filtered} the interpolation should read, or -1 for none. */
+    private int filteredIndex = -1;
+    /**
+     * <b>Two, measured.</b> One pass leaves 4.658 pixels of waviness where two
+     * leave 2.880; a third takes it back up to 3.496 by smoothing motion that is
+     * really there. See {@link #filtered}.
+     */
+    private static final int MEDIAN_PASSES = 2;
+
     private int blockX = 8, blockY = 8;
 
     /**
@@ -460,6 +503,25 @@ public class FrameSynthesizer implements FramePacer.Target {
      * with it, and so does the answer.
      */
     private int effectiveMultiple() {
+        // **Not clamped to the fps limit, deliberately.**
+        //
+        // The guest overruns its cap -- measured at 21.5 fps against a 15 fps
+        // limit that vkd3d-proton had accepted and applied, because its limiter
+        // leans on present-wait timing this driver does not provide. Doubling
+        // that presents 43.9 frames a second where the limit says 30.
+        //
+        // Holding it back to 30 was tried and taken out again. The saving is not
+        // where it first appeared to be: at 97% GPU and 15.5 guest frames a
+        // second a real frame costs about 63 ms of GPU, against 1.4 ms for a
+        // synthesised one -- a factor of forty-five. So the expensive part of an
+        // overrun is the six extra *real* frames the guest rendered, which
+        // nothing here can decline, and suppressing the cheap half saves under
+        // one per cent. The remaining argument was pacing, and more frames
+        // unevenly spaced still reads as smoother than fewer frames evenly
+        // spaced at this rate.
+        //
+        // What is left is the one clamp that is not a preference: an interval
+        // cannot carry more frames than it contains refreshes.
         if (multiple < 2) return 1;
         final long period = vsyncPeriodNanos();
         if (period <= 0 || smoothedInterval <= 0) return multiple;
@@ -477,6 +539,16 @@ public class FrameSynthesizer implements FramePacer.Target {
      * the phases somewhere no frame belongs.
      */
     private int activeMultiple = 2;
+
+    /**
+     * The motion field to build frames from: filtered if that ran, raw if not.
+     *
+     * <p>One accessor rather than a decision at each use, so there is no path
+     * where one pass reads the filtered field and another reads the matcher's.
+     */
+    private int fieldTexture() {
+        return filteredIndex >= 0 ? filtered[filteredIndex].texture : vectors.texture;
+    }
 
     /** Whether the field estimated at the last real frame is usable. */
     private boolean motionValid = false;
@@ -1010,7 +1082,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.previousTexture, 1);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldTexture());
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.motionTexture, 2);
         // The search runs on these rather than on the colour: one byte a texel
@@ -1108,7 +1180,52 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         // One bit about the whole field, settled once. See SignMaterial.
         probeFieldSign();
+
+        // Filtered before anything reads it, so every pass downstream sees the
+        // same field. See MedianMaterial and the `filtered` pair.
+        filterField();
         return true;
+    }
+
+    /**
+     * Reject the vectors that disagree with everything around them.
+     *
+     * <p>Each pass reads one target and writes the other, starting from the
+     * matcher's own output. See {@link MedianMaterial} for why the winner is
+     * always one of the nine inputs rather than an average of them, and
+     * {@link #filtered} for why there are two passes.
+     */
+    private void filterField() {
+        if (filtered[0] == null) { filteredIndex = -1; return; }
+        medianTimer.begin();
+        GLES20.glDisable(GLES20.GL_BLEND);
+
+        medianMaterial.use();
+        renderer.quadVertices.bind(medianMaterial.programId);
+        medianMaterial.setUniformBool(medianMaterial.uniforms.flipY, false);
+        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
+                                      1f / Math.max(1, vectors.width),
+                                      1f / Math.max(1, vectors.height));
+        GLES20.glViewport(0, 0, vectors.width, vectors.height);
+        renderer.viewportNeedsUpdate = true;
+
+        int source = vectors.texture;
+        for (int pass = 0; pass < MEDIAN_PASSES; pass++) {
+            final int destination = pass % 2;
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[destination].framebuffer);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source);
+            medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+            source = filtered[destination].texture;
+            filteredIndex = destination;
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        renderer.invalidateBoundWindowMaterial();
+        medianTimer.end();
     }
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
@@ -1230,6 +1347,29 @@ public class FrameSynthesizer implements FramePacer.Target {
                 // at a motion boundary describes nothing in the scene.
                 vectors = new Target();
                 vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+
+                // **Rendering to RGBA16F is a capability, not a given.** The
+                // matcher writes `vectors` through the extension rather than
+                // through the pipeline, so its allocation says nothing about
+                // whether a fragment shader may target that format. ES 3.2 makes
+                // it colour-renderable and this device reports 3.2, but asking is
+                // one call and guessing wrong is a blank field -- every vector
+                // zero, every synthesised frame a cross-fade.
+                for (int i = 0; i < 2; i++) {
+                    filtered[i] = new Target();
+                    filtered[i].allocate(lumaW / blockX, lumaH / blockY,
+                                         GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                }
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[0].framebuffer);
+                final int complete = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+                if (complete != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                    Log.w(TAG, "cannot render to RGBA16F (0x" + Integer.toHexString(complete)
+                        + "); the field will be used as the matcher produced it");
+                    filtered[0].release();
+                    filtered[1].release();
+                    filtered[0] = filtered[1] = null;
+                }
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -1254,12 +1394,15 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
+            for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
             if (signProbe != null) signProbe.release();
             if (output != null) output.release();
             if (probe != null) probe.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
+        filtered[0] = filtered[1] = null;
+        filteredIndex = -1;
         output = null;
         signProbe = null;
         fieldSign = 0f;
@@ -1313,6 +1456,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             captureTimer.report(now);
             lumaTimer.report(now);
             estimateTimer.report(now);
+            medianTimer.report(now);
             interpolateTimer.report(now);
             tier0Timer.report(now);
         }
@@ -1372,12 +1516,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " raw, matcher refusals %d",
+                    + " %s, matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
+                filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
                 estimateFailures));
         }
 
