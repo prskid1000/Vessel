@@ -132,6 +132,93 @@ class FramePacer {
         });
     }
 
+    /**
+     * VESSEL: present on the display's own cadence, not on the guest's.
+     *
+     * <h2>Why the schedule no longer starts at the real frame</h2>
+     *
+     * <p><b>The guest does not deliver evenly, and everything that laid a
+     * schedule across its interval inherited that.</b> Measured over 2300 real
+     * frames at 4x, arrival spacing in whole refreshes of a 120 Hz panel:
+     *
+     * <pre>
+     *   0:1%  1:1%  2:7%  3:1%  6:5%  7:14%  8:51%  9:13%  10:5%
+     * </pre>
+     *
+     * <p>Eight refreshes is the only spacing that divides into four presents of
+     * two, and barely half the frames arrive on it. An interval that turns out to
+     * be seven refreshes long cannot hold four evenly spaced presents however
+     * carefully they are placed -- the last one is superseded by the next real
+     * frame and dropped, which is exactly the quarter of intervals observed
+     * holding two interpolated frames instead of three. The gaps that result are
+     * 63% correct, 13% a single refresh and 19% three.
+     *
+     * <p>Two corrections were made at the scheduling end before this was
+     * measured. Both were sound and both changed nothing: 25.6%, 27.0%, 24.5%,
+     * 27.0% of pictures evenly spaced across four recordings. They were reverted.
+     * Nothing done to a schedule can fix an interval that is the wrong length.
+     *
+     * <h2>What this does instead</h2>
+     *
+     * <p>Presents every N refreshes and never asks when the guest arrived. The
+     * gaps are then even by construction rather than by prediction, and the
+     * jitter lands where it does no harm: on the PHASE, which the synthesiser
+     * reads from the clock anyway. A short interval means the shown moment
+     * advances further per present; the picture still moves at the right average
+     * speed, and the display timing -- which is what judder actually is -- stops
+     * depending on the guest at all.
+     *
+     * <p>It costs nothing. A fixed cadence of one present every two refreshes is
+     * 60 a second, against 59.2 measured for the schedule it replaces. That
+     * matters because the first attempt at evenness in this project required a
+     * whole slot of spacing, declined presents that arrived early, and cost a
+     * sixth of the frame rate; and because a free-running clock tried here first
+     * dropped it from 59.2 to 39.1 by letting its slots drift out from under the
+     * frames they belonged to.
+     */
+    private volatile int cadence = 0;
+    private long presentedAtIndex = -1;
+    private boolean pumping = false;
+
+    /**
+     * @param intervalNanos measured spacing of real frames
+     * @param multiple presented frames per real frame
+     * @param refreshNanos one display refresh
+     */
+    void setCadence(long intervalNanos, int multiple, long refreshNanos) {
+        if (multiple < 2 || intervalNanos <= 0 || refreshNanos <= 0) {
+            cadence = 0;
+            return;
+        }
+        // How many refreshes one slot is worth, rounded to what the display can
+        // actually do. At 15 fps into 120 Hz at 4x that is two.
+        final long slot = intervalNanos / multiple;
+        cadence = Math.max(1, Math.round(slot / (float) refreshNanos));
+        pump();
+    }
+
+    /** Whether the cadence pump is placing frames. See {@link #setCadence}. */
+    boolean pumping() { return cadence > 0 && pumping; }
+
+    private void pump() {
+        if (pumping) return;
+        pumping = true;
+        main.post(() -> {
+            final Choreographer choreographer = Choreographer.getInstance();
+            choreographer.postFrameCallback(new Choreographer.FrameCallback() {
+                @Override
+                public void doFrame(long frameTimeNanos) {
+                    final int every = cadence;
+                    if (every > 0 && vsyncIndex - presentedAtIndex >= every) {
+                        presentedAtIndex = vsyncIndex;
+                        target.onSynthesisDue(frameTimeNanos);
+                    }
+                    choreographer.postFrameCallback(this);
+                }
+            });
+        });
+    }
+
     FramePacer(Target target) {
         this.target = target;
     }

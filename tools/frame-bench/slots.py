@@ -28,18 +28,18 @@ import collections
 import re
 import sys
 
-TOKEN = re.compile(r"(!|\+\d+)?(R|\d+)")
+TOKEN = re.compile(r"(!|\+(\d+):)?(R|\d+)")
 
 
 def parse(line):
     """Return [(gap_in_refreshes, phase_or_None), ...] for one trace line."""
     body = line.split("fg slots:", 1)[1]
     out = []
-    for gap, value in TOKEN.findall(body):
+    for gap, digits, value in TOKEN.findall(body):
         if gap == "!":
             step = 0
-        elif gap:
-            step = int(gap[1:])
+        elif digits:
+            step = int(digits)
         else:
             step = None          # the first entry has no predecessor
         out.append((step, None if value == "R" else int(value)))
