@@ -1659,6 +1659,31 @@ public class FrameSynthesizer implements FramePacer.Target {
         final float reach = range * 2f;
         if (!(Math.abs(guessX) <= reach) || !(Math.abs(guessY) <= reach)) return false;
 
+        // **The guess may not leave the still world outside the search window.**
+        //
+        // Aiming the matcher at `g` means it searches `g +- window`, so the
+        // motion it can express is the band [g - window, g + window]. A static
+        // object needs zero to be inside that band, which needs |g| <= window.
+        // Past that the band no longer contains zero and nothing slow can be
+        // recovered at all: the residual pass is asked for +142 px when it can
+        // only reach 113, so every still or slow object is dragged by the guess
+        // and cannot be corrected, while fast content is fitted perfectly.
+        // Objects at different depths then tear away from each other.
+        //
+        // Observed on the device during a fast pan: `aimed -142,-15 px`, band
+        // [-255, -29], 92% of the field beyond the fine window, and `fg truth`
+        // reporting 28.8% of the moving frame FURTHER from the real frame than
+        // doing nothing, with 5.5% invented content. Reported as objects
+        // shattering.
+        //
+        // Clamping costs reach and keeps correctness: the band becomes
+        // [-2*window, 0] at worst, so it always contains zero, and the furthest
+        // motion expressible is 2*window -- about 213 px rather than 226. That
+        // is a few per cent of range against losing the whole static world.
+        final float band = SEARCH_WINDOW_PIXELS;
+        guessX = Math.max(-band, Math.min(band, guessX));
+        guessY = Math.max(-band, Math.min(band, guessY));
+
         // Displace the older image onto the newer one. The sign is the latched
         // one: with it positive, latest(x) matches previous(x + v).
         shiftMaterial.use();
@@ -1881,6 +1906,18 @@ public class FrameSynthesizer implements FramePacer.Target {
     private Target shiftedLuma;
     private Target guessProbe;
     private Target biased;
+    /**
+     * VESSEL: how far the matcher can see, in pixels, measured rather than
+     * declared.
+     *
+     * <p>The extension does not report its search window. Vectors reached 113 px
+     * in the first survey of this driver and the field stops rising at about
+     * 120, so the window is around there. This is the number the aiming clamp
+     * needs: a guess larger than the window puts zero outside the searchable
+     * band and makes still content unrecoverable. See refineAgainstGuess.
+     */
+    private static final float SEARCH_WINDOW_PIXELS = 113f;
+
     private float guessX = 0f;
     private float guessY = 0f;
     private boolean refinedField = false;
