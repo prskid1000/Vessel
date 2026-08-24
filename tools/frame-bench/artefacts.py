@@ -52,10 +52,13 @@ def frames(path):
 
 def marked(a):
     """Which frames carry the synthesis stamp. See the header."""
-    # The stamp is magenta in the guest's bottom-left, which lands bottom-left
-    # here too. A generous patch, because the guest is letterboxed into the
-    # capture and the corner is not at pixel zero.
-    patch = a[:, -12:, :24, :]
+    # **The guest is letterboxed, so its corner is not the frame's corner.** The
+    # first version searched the bottom-left 24 pixels and found nothing on a
+    # recording that visibly carried the stamp -- because those 24 pixels are the
+    # black bar beside the guest, and the stamp was at x=70. Searching the whole
+    # bottom-left region instead, which costs nothing and does not depend on how
+    # the guest happens to be placed.
+    patch = a[:, -16:, :a.shape[2] // 4, :]
     r, g, b = patch[..., 0], patch[..., 1], patch[..., 2]
     hit = ((r > 150) & (b > 150) & (g < 90)).sum(axis=(1, 2))
     return hit > 4
@@ -92,21 +95,27 @@ def softness(a, synth):
 
 
 def ghosting(a, synth):
-    """A displaced duplicate of the frame's own content, found by self-similarity.
+    """Bright content in a frame that is in neither of its neighbours.
 
-    A ghost is the frame containing a shifted copy of part of itself, so the
-    correlation between the frame and a shifted version of it has a second peak
-    away from zero. Measured on the horizontal axis only, which is where a camera
-    pan puts it, and normalised so a flat scene cannot score.
+    **A whole-frame self-similarity was tried first and could not see this.** A
+    ghost is a displaced copy of a subtitle, which occupies about five per cent of
+    the frame, and its duplicate a fraction of that -- so the scene's own
+    structure swamped the correlation and it reported a 0.3% difference between
+    real and synthesised frames on a recording that visibly carried a ghost. That
+    is the same blindness that made RMS error reject the fix for it.
+
+    The test that works is temporal rather than spatial. A ghost is a piece of
+    bright content sitting where neither real frame has anything bright: the text
+    is at its true position in both, so a displaced copy of it lands on
+    background in both. Comparing each frame against its own neighbours therefore
+    isolates exactly the invention, at the scale it actually occurs, and needs no
+    knowledge of where overlays live or what colour they are.
     """
     gray = a.mean(-1)
-    gray = gray - gray.mean(axis=(1, 2), keepdims=True)
-    best = np.zeros(len(a))
-    zero = (gray * gray).mean(axis=(1, 2)) + 1e-6
-    for shift in range(6, 40, 2):
-        c = (gray[:, :, shift:] * gray[:, :, :-shift]).mean(axis=(1, 2))
-        best = np.maximum(best, c / zero)
-    return best[~synth].mean(), best[synth].mean()
+    lo = np.minimum(gray[:-2], gray[2:])
+    brighter = (gray[1:-1] > lo + 25).mean(axis=(1, 2)) * 100
+    s = synth[1:-1]
+    return brighter[~s].mean(), brighter[s].mean()
 
 
 def invented(a, synth):
@@ -164,11 +173,11 @@ def main():
 
     real_g, synth_g = ghosting(a, synth)
     print()
-    print("GHOSTING  self-similarity at an offset: real %.4f, synthesised %.4f"
-          % (real_g, synth_g))
-    print("          (%.1f%% higher on synthesised frames -- a displaced copy of"
-          % (100 * (synth_g / max(real_g, 1e-6) - 1)))
-    print("           the frame's own content is what a ghost is)")
+    print("GHOSTING  bright content in neither neighbour: real %.3f%%,"
+          " synthesised %.3f%%" % (real_g, synth_g))
+    print("          (%.1fx more on synthesised frames -- a displaced copy of"
+          % (synth_g / max(real_g, 1e-9)))
+    print("           text lands where neither real frame has any)")
 
     real_i, synth_i = invented(a, synth)
     print()
