@@ -100,3 +100,28 @@ metrics it could not establish rather than guessing them.
 - **That perfect motion knowledge makes the background beside a subtitle four
   times worse** (25.85 against 6.25), because that background is occluded by the
   overlay in both frames and was never photographed.
+
+## What none of this can see
+
+**The desktop mouse cursor.** Two pacing changes were reverted because four
+recordings showed no movement in the hold histogram — 25.6%, 27.0%, 24.5%,
+27.0% of pictures held for the correct two refreshes. What the histogram did
+not say, and what the user reported immediately, is that those same builds
+visibly distorted the cursor on the Wine desktop.
+
+A cursor is on the order of a thousand pixels in a million. Every metric in
+this directory averages over the frame or over the moving part of it, so a
+badly displaced cursor moves `ghosting` and `invented content` by roughly
+nothing. The frame-average blindness that made RMS error reject the subtitle
+fix is not specific to image metrics: it applied here to a *timing* change,
+where nothing in the tooling was even looking at the image.
+
+Two consequences worth keeping:
+
+- **A small, fast, high-contrast object on a still background is the worst case
+  for interpolation and the best case for spotting it by eye.** The desktop
+  cursor is a free test scene that is always available and needs no game.
+- **Agreement between a metric and a person is worth more than either.** The
+  histogram said "no change" and the eye said "worse"; both pointed at reverting
+  the same two changes, for different reasons, and only the second one would
+  have justified reverting on its own.
