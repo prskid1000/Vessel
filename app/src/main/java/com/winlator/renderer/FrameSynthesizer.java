@@ -2307,7 +2307,9 @@ public class FrameSynthesizer implements FramePacer.Target {
                 // downstream, so it reported the same number whether the coarse
                 // pass worked, was mis-wired, or was absent.
                 refinedField
-                    ? String.format("aimed %.0f,%.0f px then refined", guessX, guessY)
+                    ? String.format("sign %+.0f with %.0f%% of the frame moving,"
+                                        + " aimed %.0f,%.0f px then refined",
+                                    fieldSign, signVotes * 100f, guessX, guessY)
                     : (coarseVectors == null ? "no coarse pass"
                        : (fieldSign == 0f ? "sign not yet latched, unaimed"
                           : "refine declined, unaimed")),
