@@ -1016,8 +1016,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            // Anchored to the arrival rather than to now: see FramePacer.schedule.
-            pacer.schedule(lastRealFrameNanos, smoothedInterval, activeMultiple);
+            pacer.schedule(smoothedInterval, activeMultiple);
         }
         report();
     }
@@ -1043,6 +1042,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             // The real frame is never withheld; an interpolated one yields.
             if (phase < 1f && !clearOfLastPresent()) return;
             presentPhase(phase);
+            noteLatency(vsyncNanos);
             // **Phase 1 is the real frame**, presented through presentLatest by
             // presentPhase. Counting it here inflated the synthesised rate by
             // exactly the real rate -- and at 2x the pacer's single slot always
@@ -1130,9 +1130,31 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private float phaseFor(long vsyncNanos) {
         if (smoothedInterval <= 0 || lastRealFrameNanos == 0) return 1f;
-        final float elapsed = (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
+        final float elapsed =
+            (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
         float phase = 1f / activeMultiple + elapsed;
         if (phase < lastPhase) phase = lastPhase;
+
+        // **A phase within half a refresh of the end is the real frame.**
+        //
+        // The last slot of an interval is due exactly at phase 1, and the pacer
+        // fires on the nearest vsync -- which is as often just before as just
+        // after. Landing just before produced a phase of 0.96 to 0.99: an
+        // interpolated approximation of a picture already held exactly, drawn at
+        // full cost, and then followed a refresh later by the real frame itself.
+        // Two nearly identical pictures, five presents in an interval divided
+        // into four, and the real frame crowded into the refresh before the next
+        // arrival -- at which point clearOfLastPresent declines the next
+        // interval's opening frame and the sequence starts a slot down.
+        //
+        // Recovered from the present trace, which reads +2 46 +2 73 +2 99 +1 R
+        // +1 R where it should read +2 +2 +2 +2. Nothing between here and the
+        // end of the interval can be shown anyway: the display has no refresh
+        // left to put it in.
+        if (smoothedInterval > 0) {
+            final float halfRefresh = (vsyncPeriodNanos() * 0.5f) / smoothedInterval;
+            if (phase > 1f - halfRefresh) phase = 1f;
+        }
         if (phase > 1f) phase = 1f;
         // **Not assigned here.** This is asked for a phase before anything has
         // decided to present one, and the paths below can decline -- at which
@@ -1144,6 +1166,47 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     /** The most recent phase presented, so the picture cannot run backwards. */
     private float lastPhase = 0f;
+
+    /**
+     * VESSEL: how long after its vsync a paced frame actually reaches the screen.
+     *
+     * <p>The Choreographer hands over the timestamp of the refresh its callback
+     * belongs to; the frame that callback asks for is drawn on another thread and
+     * swapped some time later. That gap is what pushes every paced frame a
+     * refresh past where it was aimed while the inline frame at phase 1/K lands
+     * on time, and it is the whole of the uneven spacing. See
+     * FramePacer.schedule.
+     *
+     * <p>A median of the last nine rather than a mean, for the same reason the
+     * frame interval is: one long draw behind a busy GPU should not move the aim
+     * for the next interval, and a median ignores it while a mean chases it.
+     */
+    private final long[] latencies = new long[9];
+    private int latencyAt = 0;
+    private int latencyHeld = 0;
+
+    private void noteLatency(long vsyncNanos) {
+        if (vsyncNanos <= 0) return;
+        final long taken = System.nanoTime() - vsyncNanos;
+        // A frame that took longer than a whole guest interval was stalled on
+        // something else, and says nothing about where to aim.
+        if (taken < 0 || (smoothedInterval > 0 && taken > smoothedInterval)) return;
+        latencies[latencyAt] = taken;
+        latencyAt = (latencyAt + 1) % latencies.length;
+        if (latencyHeld < latencies.length) latencyHeld++;
+    }
+
+    private long presentLatency() {
+        return latencyAt(latencyHeld / 2);
+    }
+
+    private long latencyAt(int rank) {
+        if (latencyHeld == 0) return 0;
+        final long[] sorted = new long[latencyHeld];
+        System.arraycopy(latencies, 0, sorted, 0, latencyHeld);
+        java.util.Arrays.sort(sorted);
+        return sorted[Math.max(0, Math.min(latencyHeld - 1, rank))];
+    }
 
     /**
      * Show the frame at {@code phase} between the two real frames.
@@ -1978,6 +2041,34 @@ public class FrameSynthesizer implements FramePacer.Target {
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
+        }
+
+        if (wants("slots") && latencyHeld > 0) {
+            // **The quantity both pacing corrections depend on, printed.**
+            // Everything aimed at the spacing is a bet that this number is what
+            // pushes paced frames past where they were aimed, and the lead is
+            // clamped to one slot -- so a latency at or beyond that clamp means
+            // the correction is capped and cannot finish the job. Leaving it
+            // unobservable is exactly how the saturation figure, the magnitude
+            // clamp and the betweenness expectation each hid a fault.
+            //
+            // The spread matters as much as the middle: aiming earlier can move
+            // where frames land on average, and can do nothing at all about how
+            // much that varies. If the range here is wider than a refresh, that
+            // is a floor under how even the spacing can be made from this end.
+            final long refresh = Math.max(1, vsyncPeriodNanos());
+            final long slot = smoothedInterval > 0 && activeMultiple > 0
+                ? smoothedInterval / activeMultiple : 0;
+            Log.i(TAG, String.format(
+                "fg latency: paced frames reach the screen %.1f refreshes after"
+                    + " their vsync (%.1f to %.1f over %d), aiming %.1f early,"
+                    + " clamped at %.1f",
+                presentLatency() / (float) refresh,
+                latencyAt(0) / (float) refresh,
+                latencyAt(latencyHeld - 1) / (float) refresh,
+                latencyHeld,
+                Math.max(0, Math.min(presentLatency(), slot)) / (float) refresh,
+                slot / (float) refresh));
         }
 
         if (wants("slots") && slotHeld > 1) {
