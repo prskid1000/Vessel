@@ -1000,18 +1000,7 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         realPresented = false;
         lastPhase = 0f;
-        // **The cadence pump places every interpolated frame now, so the arrival
-        // must not place one too.** An inline present here happens on the
-        // guest's timing rather than the display's, and one present in four
-        // arriving on a different clock is the whole of the uneven spacing this
-        // change exists to remove. See FramePacer.setCadence.
-        //
-        // The fallback remains for the cases the pump cannot cover: no field, a
-        // multiple of one, or the pump not yet running.
-        if (pacer.pumping() && motionValid && activeMultiple >= 2) {
-            // Nothing to do. The next refresh due a frame will show the moment
-            // the clock says, which now includes this frame.
-        } else if (motionValid && activeMultiple >= 2 && clearOfLastPresent()) {
+        if (motionValid && activeMultiple >= 2 && clearOfLastPresent()) {
             presentPhase(1f / activeMultiple);
             // **Counted here, because nothing else counts it.** At 2x this is the
             // only genuinely synthesised frame an interval produces -- the pacer's
@@ -1028,7 +1017,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            pacer.setCadence(smoothedInterval, activeMultiple, vsyncPeriodNanos());
+            pacer.schedule(smoothedInterval, activeMultiple);
         }
         report();
     }

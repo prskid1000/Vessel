@@ -10,7 +10,7 @@ that cannot reproduce the histogram the device actually produces is not evidence
 about anything, and one of the models in this directory has already been wrong in
 exactly that way -- see the note at the top of scheduling.py.
 
-    python holds.py recording.mp4 [--ideal 2]
+    python holds.py recording.mp4 [--ideal 2] [--sensitive]
 """
 import subprocess
 import sys
@@ -32,13 +32,30 @@ def frames(path):
     return a[:n * W * H * 3].reshape(n, H, W, 3).astype(np.int16)
 
 
-def holds(a, threshold=0.35):
+def holds(a, threshold=0.35, sensitive=False):
     """How many captured frames each distinct picture stayed up.
 
     The capture runs at the panel's rate, so a run of identical frames is a
     refresh the compositor had nothing new for.
+
+    **The mean is blind to a small moving object, and the desktop cursor is the
+    case that proves it.** A cursor is on the order of a thousand pixels in two
+    hundred thousand, so it moves the frame mean by far less than any usable
+    threshold: on a fifteen-second recording of a cursor being moved around a
+    still desktop this reported two distinct pictures, one held for nine hundred
+    refreshes. The pipeline was presenting sixty frames a second throughout.
+
+    `sensitive` switches to a high percentile of the per-pixel difference, which
+    asks "did anything change anywhere" instead of "did the average change".
+    That is the right question for a small bright thing on a still background,
+    and the wrong one for a whole scene in motion, where it saturates.
     """
-    d = np.abs(np.diff(a.astype(np.float32), axis=0)).mean(axis=(1, 2, 3))
+    diff = np.abs(np.diff(a.astype(np.float32), axis=0))
+    if sensitive:
+        d = np.percentile(diff.reshape(len(diff), -1), 99.9, axis=1)
+        threshold = 8.0
+    else:
+        d = diff.mean(axis=(1, 2, 3))
     runs, run = [], 1
     for changed in d > threshold:
         if changed:
@@ -77,7 +94,11 @@ def main():
     ideal = 2
     if "--ideal" in sys.argv:
         ideal = int(sys.argv[sys.argv.index("--ideal") + 1])
-    describe(holds(frames(sys.argv[1])), ideal)
+    sensitive = "--sensitive" in sys.argv
+    if sensitive:
+        print("sensitive: a high percentile per pixel, for small moving objects")
+        print()
+    describe(holds(frames(sys.argv[1]), sensitive=sensitive), ideal)
 
 
 if __name__ == "__main__":
