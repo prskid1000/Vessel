@@ -299,14 +299,18 @@ public class FrameSynthesizer implements FramePacer.Target {
      * <pre>
      *   ground truth                0.013
      *   unfiltered field            9.540
-     *   one pass                    4.658
-     *   two passes                  2.880
-     *   three passes                3.496
+     *   two passes, unanchored      2.880
+     *   three passes, unanchored    3.496   <- worse; the field had drifted
+     *   three passes, anchored      2.136
+     *   six passes, anchored        0.576
      * </pre>
      *
-     * <p>Seventy per cent of the waviness, and the error either side of the edge
-     * improves with it rather than being traded away. Three passes start
-     * smoothing real motion back out, which is why this stops at two.
+     * <p>Ninety-four per cent of the waviness, and the error either side of the
+     * edge improves with it rather than being traded away. Unanchored the pass
+     * count was a trade -- a third pass measured worse than the second, because
+     * each pass drew its candidates only from the one before and the field drifted
+     * away from anything the matcher had observed. Keeping the original on offer
+     * removes that ceiling; see {@link MedianMaterial}.
      *
      * <p>Two targets because a pass reads the whole field and writes the whole
      * field, so it cannot be its own destination.
@@ -315,11 +319,23 @@ public class FrameSynthesizer implements FramePacer.Target {
     /** Which of {@link #filtered} the interpolation should read, or -1 for none. */
     private int filteredIndex = -1;
     /**
-     * <b>Two, measured.</b> One pass leaves 4.658 pixels of waviness where two
-     * leave 2.880; a third takes it back up to 3.496 by smoothing motion that is
-     * really there. See {@link #filtered}.
+     * <b>Six, measured, and deliberately not ten.</b>
+     *
+     * <p>Anchored passes keep improving: 3.10 at two, 2.14 at three, 1.55 at
+     * five, 0.576 at six, and 0.013 at ten -- which is the ground truth's own
+     * figure, a perfectly straight edge.
+     *
+     * <p>Ten is not taken, because reaching the ground truth exactly means the
+     * field converged to piecewise-constant, and on a bench holding two rigid
+     * motions that is the right answer. A real camera pan is depth-varying
+     * parallax, which is a smooth gradient of motion, and enough passes would
+     * staircase it. Neither bench scene can show that, so the last stretch of
+     * that curve is partly a property of the test rather than of the filter.
+     *
+     * <p>Six is where the artefact stops being visible -- 0.576 of a pixel -- at
+     * two thirds the cost and without leaning on what the bench cannot check.
      */
-    private static final int MEDIAN_PASSES = 2;
+    private static final int MEDIAN_PASSES = 6;
 
     private int blockX = 8, blockY = 8;
 
@@ -1216,13 +1232,20 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source);
             medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
+            // The matcher's own field, on offer every pass. See MedianMaterial.
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+            medianMaterial.setUniformInt(medianMaterial.medianUniforms.originalTexture, 1);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
             source = filtered[destination].texture;
             filteredIndex = destination;
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        for (int unit = 1; unit >= 0; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
         medianTimer.end();
