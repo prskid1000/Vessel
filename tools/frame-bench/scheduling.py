@@ -1,20 +1,27 @@
 """Try scheduling algorithms against the measured stutter, keeping the frame rate.
 
-THE CONSTRAINT. The first attempt at evenness required a whole slot of spacing and
-declined any present that arrived early. That evened nothing -- it converted short
-holds into long ones -- and cost a sixth of the frame rate, because a declined
-present is a frame thrown away. Any candidate here has to hold the rate.
+**READ THIS FIRST: this model was wrong about the panel rate, on the device.**
 
-WHAT IS MODELLED. Guest arrivals on their own irregular rhythm; the pipeline's
-median estimate of the interval; slots spread across the predicted interval; the
-Choreographer landing each present on a real refresh; and -- the piece the first
-model lacked and which turned out to matter more than any rule -- the variable
-delay between a present being due and the GL thread having drawn and swapped it.
+Sweeping the refresh rate here said parity -- one refresh per frame -- was 100%
+even where a doubled panel was 55%, consistently across six configurations and
+every draw-jitter level. That was shipped and measured worse on the phone: stutter
+roughly doubled, and scenes that had been smooth began stuttering where previously
+only fast movement did. It was reverted.
 
-WHAT IS REPORTED. Hold lengths, because that is what judder is. An even stream
-holds every picture the same number of refreshes. The frame rate is reported
-beside it so a candidate cannot buy evenness by presenting less.
-"""
+What the model is missing is the *coupling* between presents. It rounds each
+present to a refresh independently, so a late one simply lands later. On the
+device a late present at parity has nowhere to go: the buffer queue has no spare
+slot, the swap blocks, the GL thread stalls behind it, and the next draw starts
+late as well. One miss propagates. The doubled panel leaves a spare refresh for
+exactly that, which is what the original headroom reasoning was reaching for even
+though the collision it cited had a different cause.
+
+So the refresh-rate conclusion from this file is not to be trusted, and any
+candidate that depends on presents being independent is suspect. The parts that
+did hold up on the device -- that no schedule-side rule moves evenness, and that
+draw-latency variance rather than its mean is what the spread is made of -- were
+measured the same way and carry the same caveat until something confirms them.
+
 import numpy as np
 
 REFRESH = 120.0
