@@ -767,7 +767,41 @@ public class FrameSynthesizer implements FramePacer.Target {
     private long presentGapTotal = 0;
     private long presentGaps = 0;
 
+    /**
+     * VESSEL: the phase and refresh of every present, kept for one second.
+     *
+     * <p><b>Every pacing conclusion this project has drawn from a summary has
+     * been wrong.</b> The mean present interval reads 16 ms and the frame rate
+     * reads 60/s while a quarter of the pictures are on screen for one refresh
+     * and a third for three or more -- those statistics cannot distinguish an
+     * even stream from an alternating one, which is precisely the difference
+     * between smooth and juddering. A simulator was built instead, recommended a
+     * change that doubled the stutter on the device, and had to be reverted.
+     *
+     * <p>So this records the actual sequence: which refresh each present landed
+     * on, and what moment it was showing. From that the cadence is not inferred
+     * but read -- a phase repeated on two different refreshes is a duplicate, a
+     * gap of one refresh where the others are two is the short hold that shows as
+     * judder, and a phase missing from the sequence is a moment never shown.
+     *
+     * <p>Costs two array writes per present and nothing when the diagnostic is
+     * off.
+     */
+    private final long[] slotVsync = new long[48];
+    private final float[] slotPhase = new float[48];
+    private int slotAt = 0;
+    private int slotHeld = 0;
+
+    /** The moment the present now in flight is showing. See {@link #slotVsync}. */
+    private float presentingPhase = 1f;
+
     private void notePresented() {
+        if (wants("slots")) {
+            slotVsync[slotAt] = FramePacer.vsyncIndex();
+            slotPhase[slotAt] = presentingPhase;
+            slotAt = (slotAt + 1) % slotVsync.length;
+            if (slotHeld < slotVsync.length) slotHeld++;
+        }
         // Before the swap, which is the only moment the frame about to be
         // produced has an id. See FrameTimestamps.onDraw.
         if (wants("pacing")) {
@@ -1119,6 +1153,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * sets {@link #realPresented}.
      */
     private void presentPhase(float phase) {
+        presentingPhase = phase;
         if (phase >= 1f) {
             presentLatest();
             return;
@@ -1188,6 +1223,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     private void presentLatest() {
+        presentingPhase = 1f;
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         // Upscaled once, here, rather than before any of the work. See
         // GLRenderer.presentGuestFrame.
@@ -1291,7 +1327,22 @@ public class FrameSynthesizer implements FramePacer.Target {
      * <p>Once a second, and only when asked for. The extra pass costs about what
      * one interpolated frame costs, once per second.
      */
+    /**
+     * VESSEL: the phase the last measurement was taken at.
+     *
+     * <p><b>Without this the betweenness figure is unreadable.</b> It was
+     * reported against a fixed "50% is correct", but {@link #measure} runs on
+     * whichever frame happens to be current when the once-a-second timer
+     * expires, and at 4x that is phase 0.25, 0.5 or 0.75 about equally often. A
+     * frame at phase 0.75 that sits 73% of the way between the endpoints is very
+     * nearly perfect; the same reading at phase 0.25 would mean the interpolation
+     * had barely moved off the newer frame. The old line could not tell those
+     * apart, and read as a large bias in every scene including the good ones.
+     */
+    private float measuredPhase = 0.5f;
+
     private void measure(float phase) {
+        measuredPhase = phase;
         if (probe == null) {
             probe = new Target();
             probe.allocateAveraging(colour[0].width, colour[0].height);
@@ -1911,6 +1962,29 @@ public class FrameSynthesizer implements FramePacer.Target {
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
         }
 
+        if (wants("slots") && slotHeld > 1) {
+            // Oldest first, from the ring.
+            final StringBuilder line = new StringBuilder("fg slots:");
+            long previous = -1;
+            for (int i = 0; i < slotHeld; i++) {
+                final int at = (slotAt - slotHeld + i + slotVsync.length * 2)
+                    % slotVsync.length;
+                final long vsync = slotVsync[at];
+                final float phase = slotPhase[at];
+                if (previous >= 0) {
+                    final long step = vsync - previous;
+                    // A present sharing a refresh with the one before it was
+                    // never shown, whatever the frame counter says.
+                    line.append(step == 0 ? " !" : (" +" + step));
+                } else {
+                    line.append(" ");
+                }
+                line.append(phase >= 1f ? "R" : String.valueOf((int) (phase * 100f)));
+                previous = vsync;
+            }
+            Log.i(TAG, line.toString());
+        }
+
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
@@ -1962,9 +2036,10 @@ public class FrameSynthesizer implements FramePacer.Target {
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
                     + " frame than doing nothing, %.3f%% invented content,"
                     + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints (50%% is correct)",
+                    + " the endpoints at phase %.0f%% (%+.0f points off)",
                 harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredSpeed * 200f));
+                moving * 100f, measuredSpeed * 200f, measuredPhase * 100f,
+                (measuredSpeed * 200f) - (measuredPhase * 100f)));
         }
 
         tier0Frames = 0;
