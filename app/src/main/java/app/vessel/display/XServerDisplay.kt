@@ -1779,31 +1779,40 @@ private class SessionSurfaceView(
         // no log, no crash, a panel still at 60 Hz, and no way to tell which
         // branch had taken it. One cycle of build-install-play to learn nothing
         // is one too many.
-        // **What is presented, and then twice it.**
+        // **The lowest mode that can carry the stream, and asking for twice it
+        // was the stutter.**
         //
-        // Two separate mistakes lived on this line. It read `fpsLimit`, which is
-        // the presented rate in `efficiency` and half it in `smoothness` -- so
-        // every smoothness container presented two frames for every refresh the
-        // panel had been asked for, and half of them were never scanned out. And
-        // even in efficiency, asking for exactly the presented rate is the one
-        // configuration with no timing budget at all: 30 frames a second into a
-        // 30 Hz panel gives exactly as many refreshes as frames, so every frame
-        // must fall in its own 33 ms window and any jitter puts two in one window
-        // and leaves the next empty.
+        // This asked for double the presented rate, on the reasoning that parity
+        // leaves no timing budget: 30 frames into 30 Hz gives exactly as many
+        // refreshes as frames, so any jitter puts two in one window. That was
+        // measured -- 0.2 ms between presents and then 80 ms of nothing -- and the
+        // diagnosis was wrong. Those collisions were two schedulers writing to
+        // one surface with no knowledge of each other, which is fixed elsewhere
+        // now, and the extra window was treating a symptom.
         //
-        // At twice the rate the same stream has a spare refresh between every
-        // pair, so a frame arriving early still lands on a refresh of its own and
-        // quantisation error halves. This is what frame pacing means -- Unreal
-        // states it as "a system that restricts an application to rendering
-        // frames at a lower framerate than a device's native refresh rate", and
-        // Android's own frame rate guidance gives the same shape of example, a
-        // 24 Hz video moving the panel to 120 Hz rather than to 24.
+        // With the collision gone the doubling is actively harmful, because the
+        // error it has to absorb is not frames arriving early. It is the variance
+        // between a present being due and the GL thread having drawn and swapped
+        // it -- about 3 ms at 97% GPU -- and halving the refresh window doubles
+        // how often that variance crosses a boundary and rounds to a different
+        // refresh. Simulated across six configurations in
+        // tools/frame-bench/scheduling.py, with the presented rate held constant
+        // and only the panel changed:
         //
-        // It costs panel power on an LTPO screen. It buys the difference between
-        // thirty frames a second and thirty frames a second that look like
-        // fifteen.
+        //   guest 15 at 4x = 60/s     100% even at 60 Hz     55% at 120 Hz
+        //   guest 30 at 2x = 60/s     100% at 60 Hz          56% at 120 Hz
+        //   guest 15 at 2x = 30/s     100% at 30 Hz          90% at 60 Hz
+        //
+        // At one refresh per frame a late present simply takes the next vsync and
+        // the *spacing* survives, because the next present is generated a period
+        // later regardless. The stream re-synchronises itself. At two refreshes
+        // per frame the jitter decides which of two vsyncs each present lands on,
+        // and that choice is the judder.
+        //
+        // So: the lowest mode that can carry what is presented. Nothing lower can
+        // show every frame, and nothing higher helps.
         val presented = presentedFps?.takeIf { it > 0 } ?: return
-        val wanted = presented * 2
+        val wanted = presented
         val window = hostWindow()
         if (window == null) {
             Log.w("VesselDisplay", "no Activity window behind this view; cannot ask for a panel mode")
@@ -1826,8 +1835,6 @@ private class SessionSurfaceView(
         // it.
         val mode = sameSize.filter { it.refreshRate + REFRESH_MATCH >= wanted }
             .minByOrNull { it.refreshRate }
-            ?: sameSize.filter { it.refreshRate + REFRESH_MATCH >= presented }
-                .minByOrNull { it.refreshRate }
             ?: sameSize.maxByOrNull { it.refreshRate }
         if (mode == null) {
             Log.w(
@@ -1844,8 +1851,10 @@ private class SessionSurfaceView(
             "VesselDisplay",
             "asked the panel for ${mode.refreshRate} Hz (mode ${mode.modeId}) for $presented fps " +
                 "presented -- " +
-                if (mode.refreshRate >= presented * 1.5f) "a spare refresh between frames"
-                else "no headroom; expect uneven pacing",
+                if (mode.refreshRate <= presented * 1.2f) "one refresh per frame, which is what"
+                    + " absorbs the draw jitter"
+                else "${"%.1f".format(mode.refreshRate / presented)} refreshes per frame; the"
+                    + " panel offers nothing closer, so expect some unevenness",
         )
     }
 
@@ -2792,8 +2801,11 @@ private class PacedXServerView(
         // applyPreferredDisplayMode**: `fpsLimit` undercounts by the multiple in
         // `smoothness`, and parity with the content rate leaves no refresh to
         // spare when a frame arrives a millisecond early.
+        // The presented rate itself, for the reasons on applyPreferredDisplayMode:
+        // one refresh per frame is what absorbs the draw jitter, and asking for
+        // more splits it across two candidate refreshes instead.
         val capped = presentedFps?.takeIf { it > 0 }
-        val wanted = (capped?.times(2) ?: DEFAULT_FRAME_RATE).toFloat()
+        val wanted = (capped ?: DEFAULT_FRAME_RATE).toFloat()
         // **A capped container gets the assertive form of this call.**
         //
         // The two-argument overload defaults to `CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS`,
