@@ -1126,6 +1126,27 @@ public class FrameSynthesizer implements FramePacer.Target {
      * carries a later phase, so the motion continues from where it should rather
      * than from where the skipped frame would have put it.
      */
+    /**
+     * <b>One refresh, and tightening it was tried and measured worse.</b>
+     *
+     * <p>This stops two presents sharing a scanout, where the first is drawn,
+     * paid for and never seen. It does not make the stream even, and the
+     * recording says so: at 4x on a 120 Hz panel, where an even stream holds
+     * every picture two refreshes, 38% were held for one, 32% for two and 30% for
+     * three or more.
+     *
+     * <p>The obvious repair is to require a whole slot of spacing rather than a
+     * refresh. Simulated in tools/frame-bench/pacing.py against measured guest
+     * jitter and GL draw latency, that trades one artefact for a worse one --
+     * short holds fall from 21% to 6% and long ones rise from 21% to 38%, with
+     * the present rate down a sixth. A 30 ms hitch is more visible than an 8 ms
+     * one.
+     *
+     * <p>And the reason no rule here helps: every variant leaves "even" at 56 to
+     * 58 per cent. The spread does not come from when a present is *scheduled*,
+     * it comes from the variance between then and when the GL thread has actually
+     * drawn and swapped. The lever is that latency, not this inequality.
+     */
     private boolean clearOfLastPresent() {
         final long period = vsyncPeriodNanos();
         if (period <= 0 || lastPresentNanos == 0) return true;
@@ -1167,6 +1188,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.diagnostic,
                                             measuring ? 1f : 0f);
+        // Only frames this shader draws carry the stamp, which is what makes
+        // them countable in a recording. See InterpolateMaterial's `mark`.
+        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.mark,
+                                            !measuring && wants("mark") ? 1f : 0f);
         // The vectors are in luma pixels, and the luma is the block-rounded frame,
         // so dividing by its size is what puts them in texture space.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,

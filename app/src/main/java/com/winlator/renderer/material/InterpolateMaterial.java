@@ -154,6 +154,8 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform phase = new Uniform("phase");
         /** VESSEL: 1 makes this pass report on itself instead of drawing. */
         public final Uniform diagnostic = new Uniform("diagnostic");
+        /** VESSEL: 1 stamps synthesised frames so they can be told apart. */
+        public final Uniform mark = new Uniform("mark");
         /** VESSEL: which way the field points, settled once. See SignMaterial. */
         public final Uniform fieldSign = new Uniform("fieldSign");
     }
@@ -192,6 +194,20 @@ public class InterpolateMaterial extends ScreenMaterial {
 
             // VESSEL: when 1, write four measurements instead of a picture.
             "uniform float diagnostic;",
+            // **A corner this shader paints and a real frame never does.**
+            //
+            // Real and synthesised frames cannot be told apart in a recording by
+            // inference, and it was tried: screenrecord captures at the panel's
+            // rate while the compositor presents at its own, so the two are not
+            // locked. A 4x periodicity that looked clean across thirty frames --
+            // the synthesised ones 10% softer -- washed out to 0.4% across a
+            // thousand, and the classification was worthless.
+            //
+            // Sixteen magenta pixels settle it. Every GPU vendor ships the same
+            // idea: FSR3 has FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_TEAR_LINES "to
+            // assist visualizing if interpolated frames are getting presented",
+            // and Intel tags interpolated frames with purple boxes.
+            "uniform float mark;",
             // **Which way the field points, as one number for the whole frame.**
             // This used to be decided here, per pixel, by scoring both signs and
             // taking the better -- and that was the artefact. See SignMaterial:
@@ -510,6 +526,13 @@ public class InterpolateMaterial extends ScreenMaterial {
                         // midpoint looks like; approaching one means it is barely
                         // better than the old frame, and beyond one it is worse.
                         "clamp(dSynth / max(dBase, 0.008) * 0.5, 0.0, 1.0));",
+                    "return;",
+                "}",
+
+                // The stamp, last, so nothing downstream can overwrite it.
+                "if (mark > 0.5 && vUV.x < 16.0 * motionScale.x",
+                                "&& vUV.y < 16.0 * motionScale.y) {",
+                    "gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);",
                     "return;",
                 "}",
 
