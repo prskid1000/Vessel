@@ -1165,9 +1165,34 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final int[] guestIntervals = new int[24];
     private long guestSamples = 0;
 
+    /**
+     * VESSEL: the same intervals in microseconds, because the refresh-count
+     * histogram cannot be read.
+     *
+     * <p><b>Rounding to whole refreshes manufactures the spread it reports.</b>
+     * At 15 fps into a 120 Hz panel one guest interval is 8.004 refreshes, so a
+     * millisecond of noise either side of a perfectly paced 66.7 ms lands in the
+     * 7 bin or the 9 bin. The first version of this diagnostic did exactly that
+     * and reported "51% on the commonest, 8", which was read as the guest
+     * delivering on time only half the time -- and a whole present-pacing
+     * mechanism was built and reverted on the strength of it.
+     *
+     * <p>DXVK's limiter is deadline-based: on schedule it advances the deadline
+     * by exactly one interval, and it busy-waits the last few milliseconds
+     * rather than trusting a sleep. It should pace tightly. Whether it does is a
+     * question about milliseconds, and a histogram quantised to 8.33 ms of them
+     * cannot answer it.
+     */
+    private final long[] guestMicros = new long[256];
+    private int guestMicrosAt = 0;
+    private int guestMicrosHeld = 0;
+
     private void noteGuestInterval(long intervalNanos) {
         final long refresh = vsyncPeriodNanos();
         if (intervalNanos <= 0 || refresh <= 0) return;
+        guestMicros[guestMicrosAt] = intervalNanos / 1000L;
+        guestMicrosAt = (guestMicrosAt + 1) % guestMicros.length;
+        if (guestMicrosHeld < guestMicros.length) guestMicrosHeld++;
         final int refreshes = (int) Math.round(intervalNanos / (double) refresh);
         if (refreshes < 0 || refreshes >= guestIntervals.length) return;
         guestIntervals[refreshes]++;
@@ -2069,6 +2094,32 @@ public class FrameSynthesizer implements FramePacer.Target {
                                    100.0 * guestIntervals[ideal] / guestSamples,
                                    ideal, guestSamples));
             Log.i(TAG, g.toString());
+
+            // The same thing without the quantisation, which is the only form
+            // of it that can say whether the guest is actually irregular.
+            if (guestMicrosHeld > 8) {
+                final long[] sorted = new long[guestMicrosHeld];
+                System.arraycopy(guestMicros, 0, sorted, 0, guestMicrosHeld);
+                java.util.Arrays.sort(sorted);
+                double sum = 0;
+                for (int i = 0; i < guestMicrosHeld; i++) sum += sorted[i];
+                final double mean = sum / guestMicrosHeld;
+                double variance = 0;
+                for (int i = 0; i < guestMicrosHeld; i++) {
+                    final double d = sorted[i] - mean;
+                    variance += d * d;
+                }
+                Log.i(TAG, String.format(
+                    "fg guest ms: mean %.2f, sd %.2f, p10 %.2f, p50 %.2f, p90 %.2f,"
+                        + " min %.2f, max %.2f, over %d"
+                        + " -- one refresh is %.2f",
+                    mean / 1000.0, Math.sqrt(variance / guestMicrosHeld) / 1000.0,
+                    sorted[guestMicrosHeld / 10] / 1000.0,
+                    sorted[guestMicrosHeld / 2] / 1000.0,
+                    sorted[guestMicrosHeld * 9 / 10] / 1000.0,
+                    sorted[0] / 1000.0, sorted[guestMicrosHeld - 1] / 1000.0,
+                    guestMicrosHeld, vsyncPeriodNanos() / 1e6));
+            }
         }
 
         if (wants("slots") && latencyHeld > 0) {

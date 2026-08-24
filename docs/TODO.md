@@ -133,6 +133,168 @@ Kept short because the reasoning that matters is in the commit messages and in
 on this surface, so every cadence figure remains a draw schedule rather than a
 scanout. The build says so rather than letting the number pass.
 
+**Where the delivery jitter comes from — the reading, 2026-08-24.** Research only;
+nothing below was measured on the device, and each item says what it explains or
+contradicts. The short version: **three of the five candidates are on our side of
+the boundary, and the two strongest are already instrumented in this tree.**
+
+- **The 8.33 ms histogram cannot be trusted, and neither can the hold histogram.**
+  This section already concedes that `eglGetFrameTimestampsANDROID` returns
+  nothing usable, *so every cadence figure is a draw schedule and not a scanout* —
+  which means the arrival histogram and the hold histogram are both measured
+  against our own sampling grid. PresentMon keeps `MsBetweenPresents` and
+  `MsBetweenDisplayChange` as separate metrics for exactly this reason
+  (<https://presentmon.com/>). Rounding an interval onto the refresh grid before
+  you look at it is a known trap: Themaister hit the same rounding when driving
+  `VK_GOOGLE_display_timing`, where a naive `observed + n*refresh` gets rounded up
+  to the next vblank and wastes frames
+  (<https://themaister.net/blog/2018/11/09/experimenting-with-vk_google_display_timing-taking-control-over-the-swap-chain/>).
+  66.7 ms is 8.004 refreshes, so a *clean* stream should read 8 about 99.6% of the
+  time; 51% is either real spread of several ms or a grid we imposed ourselves.
+  The sub-millisecond instrument is the right next read.
+
+- **A perfectly paced client arriving unevenly at a compositor is the expected
+  result, not an anomaly.** Owen Taylor, 2012, on exactly our shape — a source at a
+  fixed rate *below* the display rate, 24 fps into 60 Hz, graphically trivial:
+  *"when anything else started going on the system — if I moved a window, if a web
+  page updated — I would see frames displayed at the wrong time"*. The mechanism is
+  the compositor redrawing on damage arrival, so another client's frame queued
+  ahead pushes ours a whole refresh late. His fix is entirely compositor-side:
+  schedule the redraw at a **fixed offset after vblank** (he used 2 ms) so the
+  client can know when its frame will land, and accept the latency. He also notes
+  the fix that is *not* available: *"submit application frames tagged with their
+  intended frame times ... it's basically unworkable for X, since there is no way
+  to queue application frames."*
+  (<https://blog.fishsoup.net/2012/11/28/avoiding-jitter-in-composited-frame-display/>).
+  **This explains fact 7 directly.** Four attempts to fix the unevenness at our
+  *present* end failed because the jitter is in *arrival*, and the published fix
+  for arrival jitter is a fixed-phase compositor wakeup, not a present-side aim.
+
+- **Present plus a compositing manager costs a frame, and its timestamps are
+  wrong.** Keith Packard: with a compositor the `CopyArea` and Damage *"don't occur
+  until the display has already started the next frame"*, the compositor then waits
+  for the following vblank, and `PresentComplete` carries *"incorrect UST/MSC
+  values since they're generated after vblank has already passed"*
+  (<https://keithp.com/blogs/present-compositor/>).
+
+- **Our own X server is a stronger suspect than the guest, and we already have the
+  number, though it is a comment and not a live reading.** The figure below is
+  quoted from a source comment in this tree, and that same comment already
+  records that the reasoning it was gathered for was refuted. No session log
+  from 2026-08-24 contains a single `copyArea` line, so nothing here has been
+  confirmed against the build that is running. `copy_pool.c:12` —
+  `Present copyArea x6720 mean=19114us max=385490us
+  last=69539us 1280x720`. That copy sits between the guest's `PresentPixmap` and
+  the compositor seeing anything, it is synchronous, and it runs under the
+  server-wide lock. **A 19.1 ms mean is 2.3 refreshes and the tail is 46.** No
+  amount of pacing inside DXVK survives that. This *is* the "queuing after the
+  limiter" question, answered by our own instrument before it was asked. The
+  `min` and the sync-in/copy/sync-out split already added to `PresentExtension`
+  are the experiment that settles whether it is bandwidth or blocking.
+
+- **We fabricate the clock the guest paces against.** `PresentExtension.java:33`
+  is `FAKE_INTERVAL = 1000000 / 60` and `:173-175` derives both UST and MSC from
+  `System.nanoTime()` against it — on a 120 Hz panel, with no vblank anywhere in
+  it. Mesa's X11 WSI paces FIFO off precisely these values. So the guest is being
+  told, on a non-periodic clock at the wrong rate, when its frames appeared.
+  That is a jitter source that **originates here and presents as the guest's
+  delivery**, and it is consistent with the class's own docstring, which already
+  says the UST is fabricated.
+
+- **`present_wait` is present; only the newer wait-timing query is not.**
+  Checked against the session log after this was written, because the first
+  version of this entry said the extension was absent and that was wrong.
+  The device reports `presentWait: 1` and vkd3d uses it --
+  `dxgi_vk_swap_chain_init_sync_objects: Ensure maximum latency of 3 frames
+  with KHR_present_wait`. What is missing is `presentWait2: 0`, and with it
+  the wait-timing capability query: `dxgi_vk_swap_chain_update_wait_timing_
+  capabilities: Implementation supports neither present_wait1 or
+  present_wait2. Latency will increase.` So the conclusion survives in a
+  weaker form -- vkd3d says latency will increase, in its own words -- but
+  not the claim that nothing is available to pace against.
+  In DXVK master the limiter runs on the `dxvk-frame` thread *after*
+  `vkWaitForPresentKHR`, with the comment *"Apply FPS limiter here to align it as
+  closely with scanout as we can"*; with no present_wait that branch is never
+  taken and `Presenter::signalFrame` falls back to delaying the frame-latency
+  signal straight after present submission
+  (<https://github.com/doitsujin/dxvk/blob/master/src/dxvk/dxvk_presenter.cpp>).
+  vkd3d-proton's limiter has the same dependency, which the guest-overrun item
+  below already noticed. **One missing extension explains both DXVK and vkd3d
+  pacing badly without needing two bugs.** Implementing `VK_KHR_present_id` +
+  `VK_KHR_present_wait` — or `VK_GOOGLE_display_timing`, which Android documents
+  as the wide-support option
+  (<https://developer.android.com/games/develop/vulkan/frame-pacing-extensions>) —
+  is the single change that would let both guests pace against real scanout.
+  Mesa merged `VK_EXT_present_timing` for X11/XWayland in 26.2 for this reason
+  (<https://www.phoronix.com/news/Mesa-26.2-X11-Present-Timing>); Khronos's own
+  write-up says `present_wait` *"did not enable the same precision as explicit
+  time-based presentation"*
+  (<https://www.khronos.org/blog/vk-ext-present-timing-the-journey-to-state-of-the-art-frame-pacing-in-vulkan>).
+
+- **DXVK's own position is that `maxFrameRate` does not pace well.** Its limiter
+  logs, on every engage: *"Built-in frame rate limiter enabled. Please enable an
+  external limiter instead in order to avoid poor frame pacing"*
+  (<https://github.com/doitsujin/dxvk/blob/master/src/util/util_fps_limiter.cpp>).
+  DXVK 3.0 removed `DXVK_FRAME_RATE` outright: *"Users are encouraged to use
+  external limiters such as those of Gamescope or Mangohud instead, which will
+  usually provide a smoother experience"*
+  (<https://github.com/doitsujin/dxvk/releases/tag/v3.0>). And doitsujin, on the
+  limiter's original PR: DXVK's own frame times *"are merely the CPU-side present
+  intervals on ... one of our internal threads, they don't really correspond to
+  when the rendered picture will actually be displayed"*
+  (<https://github.com/doitsujin/dxvk/pull/2091>). So the cap is honest about the
+  **average** and promises nothing about the **spacing** — which is fact 1 and
+  fact 2 together, with no contradiction between them.
+
+- **A number we have been quoting is wrong.** The limiter does not busy-wait the
+  last ~4 ms. `Sleep::sleep` sets `sleepThreshold = 4*granularity + duration/6`
+  (`src/util/util_sleep.cpp`); at a 66.7 ms interval that is ~2 ms + 11.1 ms ≈
+  **13 ms of spin per frame**, per limited swapchain, on a phone.
+
+- **What the frame-generation implementations do with an irregular source: they
+  buffer and smooth, always.** FSR3's interpolation swapchain runs its own
+  high-priority pacing thread on its own CPU clock, estimates frame time from *"the
+  moving average of several frames ... to prevent frame time spikes from impacting
+  pacing too much"*, and busy-waits for precision — and AMD documents it as
+  unreliable below ~60 fps source, with back-to-back generated frames when vsync is
+  off (<https://gpuopen.com/manuals/fsr_sdk/techniques/frame-interpolation-swap-chain/>).
+  NVIDIA moved pacing off the CPU into the display engine for DLSS 4 *because*
+  CPU-side pacing variability compounds once you generate more than one frame
+  (<https://www.nvidia.com/en-us/geforce/news/dlss4-multi-frame-generation-ai-innovations/>).
+  That is the jitter-buffer answer, and its cost is the standard one: added delay
+  proportional to the smoothing window. **No published design pushes an irregular
+  source straight to the screen.**
+
+- **The trap specific to us.** A generated frame has no animation time of its own,
+  so if the source delta varies and the interpolation factors stay fixed at
+  0.25/0.5/0.75, the synthesised frames depict the **wrong instants even when they
+  are displayed perfectly evenly** — GamersNexus's animation-error work is exactly
+  this argument, `(AnimationTime_N - AnimationTime_N-1) - MsBetweenDisplayChange_N`
+  (<https://gamersnexus.net/gpus-cpus-deep-dive/fps-benchmarks-are-flawed-introducing-animation-error-engineering-discussion>).
+  If real frames genuinely arrive 60-73 ms apart, our factors must be scaled by the
+  **measured** delta, not assumed. This is a candidate for the residual waviness
+  that survives the median filter, and it is cheap to test.
+
+- **Present modes, for the record.** DXVK picks FIFO when sync interval > 0 unless
+  `dxvk.tearFree=false` (then FIFO_RELAXED), and IMMEDIATE then MAILBOX when it is
+  0 unless `tearFree=true`; `numBackBuffers` was deleted as useless
+  (`dxvk_presenter.cpp:pickPresentMode`, PR #4609). vkd3d-proton exposes
+  `VKD3D_SWAPCHAIN_PRESENT_MODE` and `VKD3D_SWAPCHAIN_LATENCY_FRAMES`.
+  **Gamescope's architecture is the one worth copying:** force FIFO onto the guest
+  swapchain, take pictures whenever they are ready, and do every bit of the pacing
+  in the compositor (<https://github.com/ValveSoftware/gamescope>). That is what
+  fact 7 has been pointing at all along.
+
+- **Not found, said plainly.** No published characterisation of a DXVK
+  `maxFrameRate` as low as 15; no published measurement of DXVK present-to-visible
+  jitter on X11; and **nothing anywhere claiming a well-paced present is expected
+  to arrive evenly at an X compositor** — every primary source says the opposite.
+
+*Done when:* the sub-millisecond arrival instrument is read against a
+`Present copyArea` line carrying its `min` and its three-way split, from the same
+session. Those two lines together decide whether the jitter is the guest's
+delivery, our copy, or our clock — and no further reading is needed to choose.
+
 ---
 
 ## The blockers, in order
