@@ -5,7 +5,6 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
-import com.winlator.renderer.material.ChooseMaterial;
 import com.winlator.renderer.material.FieldMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
@@ -244,7 +243,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final MedianMaterial medianMaterial = new MedianMaterial();
     private final ShiftMaterial shiftMaterial = new ShiftMaterial();
     private final FieldMaterial fieldMaterial = new FieldMaterial();
-    private final ChooseMaterial chooseMaterial = new ChooseMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -1610,43 +1608,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         fieldMaterial.setUniformFloat(fieldMaterial.fieldUniforms.encode, 0f);
         fieldMaterial.setUniformVec2(fieldMaterial.fieldUniforms.bias, guessX, guessY);
         renderToTarget(fieldMaterial, vectors.texture, biased);
-
-        // **A second hypothesis, unaimed.** One global guess fits whichever
-        // layer dominates the frame and damages the other; offering the plain
-        // field alongside it and letting each block keep the better of the two
-        // repairs that. See ChooseMaterial for the measurement.
-        if (plainVectors != null && chosen != null) {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-            texEstimateMotion(previousLuma().texture, latestLuma().texture,
-                              plainVectors.texture);
-            if (GLES20.glGetError() == GLES20.GL_NO_ERROR) {
-                chooseMaterial.use();
-                chooseMaterial.setUniformVec2(chooseMaterial.chooseUniforms.motionScale,
-                                              1f / Math.max(1, luma[0].width),
-                                              1f / Math.max(1, luma[0].height));
-                chooseMaterial.setUniformFloat(chooseMaterial.chooseUniforms.fieldSign,
-                                               fieldSign);
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, plainVectors.texture);
-                chooseMaterial.setUniformInt(chooseMaterial.chooseUniforms.plainTexture, 1);
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-                chooseMaterial.setUniformInt(
-                    chooseMaterial.chooseUniforms.lumaNewerTexture, 2);
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-                chooseMaterial.setUniformInt(
-                    chooseMaterial.chooseUniforms.lumaOlderTexture, 3);
-                renderToTarget(chooseMaterial, biased.texture, chosen);
-                for (int unit = 3; unit >= 1; unit--) {
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-                }
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            }
-        }
         return true;
     }
 
@@ -1848,19 +1809,12 @@ public class FrameSynthesizer implements FramePacer.Target {
     private Target shiftedLuma;
     private Target guessProbe;
     private Target biased;
-    /** The unaimed field, and the per-block winner. See {@link ChooseMaterial}. */
-    private Target plainVectors;
-    private Target chosen;
     private float guessX = 0f;
     private float guessY = 0f;
     private boolean refinedField = false;
 
     /** The field the filter should read: the refined one when there is one. */
-    private Target rawField() {
-        if (!refinedField) return vectors;
-        if (chosen != null) return chosen;
-        return biased != null ? biased : vectors;
-    }
+    private Target rawField() { return refinedField && biased != null ? biased : vectors; }
 
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
@@ -1938,14 +1892,6 @@ public class FrameSynthesizer implements FramePacer.Target {
                                     GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
                     guessProbe = new Target();
                     guessProbe.allocateAveraging(cw / blockX, ch / blockY);
-
-                    // The second hypothesis, and the winner. See ChooseMaterial.
-                    plainVectors = new Target();
-                    plainVectors.allocate(lumaW / blockX, lumaH / blockY,
-                                          GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    chosen = new Target();
-                    chosen.allocate(lumaW / blockX, lumaH / blockY,
-                                    GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
                 }
 
                 // **Rendering to RGBA16F is a capability, not a given.** The
@@ -1999,8 +1945,6 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (shiftedLuma != null) shiftedLuma.release();
             if (biased != null) biased.release();
             if (guessProbe != null) guessProbe.release();
-            if (plainVectors != null) plainVectors.release();
-            if (chosen != null) chosen.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
             if (signProbe != null) signProbe.release();
             if (output != null) output.release();
@@ -2013,8 +1957,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         shiftedLuma = null;
         biased = null;
         guessProbe = null;
-        plainVectors = null;
-        chosen = null;
         refinedField = false;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
