@@ -52,6 +52,7 @@ def main():
         sys.exit("no `fg slots` lines on stdin -- is FG_LOG=all set?")
 
     gaps = collections.Counter()
+    by_slot = collections.defaultdict(collections.Counter)
     per_interval = collections.Counter()
     phase_steps = collections.Counter()
     reals_in_a_row = collections.Counter()
@@ -62,6 +63,9 @@ def main():
         for step, phase in events:
             if step is not None:
                 gaps[step] += 1
+                # Which present this gap leads into, named by its phase.
+                label = "R" if phase is None else "%d" % (round(phase / 25.0) * 25)
+                by_slot[label][step] += 1
             if phase is None:
                 # An interval ends at the real frame. Count what it held.
                 if count:
@@ -105,6 +109,21 @@ def main():
         for k in sorted(reals_in_a_row):
             print("  %2d  %5d  %5.1f%%" % (k, reals_in_a_row[k],
                                            100.0 * reals_in_a_row[k] / m))
+
+    if by_slot:
+        print()
+        print("GAP BY SLOT   which present each gap leads into")
+        print("              (a bad gap that clusters on one slot is a")
+        print("               scheduling fault; one that scatters is not)")
+        print("  %-12s %7s %7s %7s %7s" % ("leads into", "+1", "+2", "+3", "n"))
+        for slot in sorted(by_slot, key=lambda s: (s == "R", s)):
+            row = by_slot[slot]
+            n = sum(row.values())
+            if n < 5:
+                continue
+            print("  %-12s %6.0f%% %6.0f%% %6.0f%% %7d"
+                  % (slot, 100.0 * row[1] / n, 100.0 * row[2] / n,
+                     100.0 * row[3] / n, n))
 
     if phase_steps:
         s = sum(phase_steps.values())
