@@ -5,10 +5,12 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.winlator.renderer.material.FieldMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
+import com.winlator.renderer.material.ShiftMaterial;
 
 /**
  * VESSEL: frames the guest never drew, built from what the compositor knows.
@@ -239,6 +241,8 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
+    private final ShiftMaterial shiftMaterial = new ShiftMaterial();
+    private final FieldMaterial fieldMaterial = new FieldMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -1332,20 +1336,24 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
-        // The coarse pass, for motion the fine one cannot reach. Free: the
-        // matcher measures 0.001 ms, so the second call costs nothing worth
-        // counting. See coarseLuma.
+        // The coarse pass runs first, because the fine pass is now aimed by it.
+        // Free: the matcher measures 0.001 ms, so a second call costs nothing
+        // worth counting. See coarseLuma.
+        //
+        // **Previous first, then latest -- the same order as the fine pass.**
+        // This was written the other way round and every vector it produced
+        // therefore pointed backwards. Measured on the laptop at a 167 px
+        // displacement: 150 px of vector error became 249, and the interpolated
+        // frame went from 20.05 RMS to 22.74, which is worse than not
+        // compensating at all (21.03). See tools/frame-bench/pyramid.py.
+        refinedField = false;
         if (coarseVectors != null && coarseLuma[0] != null) {
-            // **Previous first, then latest -- the same order as the fine pass
-            // above.** This was written the other way round and every
-            // substituted vector therefore pointed backwards. Measured on the
-            // laptop at a 167 px displacement: 150 px of vector error became
-            // 249, and the interpolated frame went from 20.05 RMS to 22.74,
-            // which is worse than not compensating at all (21.03). See
-            // tools/frame-bench/pyramid.py.
             texEstimateMotion(coarseLuma[oldest()].texture, coarseLuma[newest].texture,
                               coarseVectors.texture);
+            refinedField = refineAgainstGuess();
+        }
+        if (!refinedField) {
+            texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
         }
         final int error = GLES20.glGetError();
         estimateTimer.end();
@@ -1373,6 +1381,75 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
+     * Aim the fine pass with the coarse field, then measure what is left over.
+     *
+     * <p>See the {@code shiftedLuma} note for why this beats substituting the
+     * coarse vector, and {@link ShiftMaterial} for why the image is displaced
+     * rather than the search window -- the extension has no parameter for a
+     * search centre, so the only way to move it is to move one of the pictures.
+     *
+     * @return false if the guess could not be established, in which case the
+     *     caller runs the plain fine pass and nothing is lost.
+     */
+    private boolean refineAgainstGuess() {
+        if (shiftedLuma == null || guessProbe == null || biased == null) return false;
+        // The shift needs to know which way the field points, and that is not
+        // known until the sign is latched. Until then, the ordinary pass.
+        if (fieldSign == 0f) return false;
+
+        // One vector for the whole coarse field, by mipmap reduction. The mean
+        // rather than the median, which is a compromise the guess can afford:
+        // see FieldMaterial.
+        fieldMaterial.use();
+        fieldMaterial.setUniformFloat(fieldMaterial.fieldUniforms.encode, 1f);
+        renderToTarget(fieldMaterial, coarseVectors.texture, guessProbe);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, guessProbe.texture);
+        GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+
+        final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, guessProbe.topFramebuffer);
+        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.viewportNeedsUpdate = true;
+
+        // Undo the encoding, then double: the coarse pass measured in its own
+        // half-resolution pixels, and everything downstream is in full ones.
+        final float range = 2f * FieldMaterial.RANGE;
+        guessX = (((pixel.get(0) & 0xff) / 255f) - 0.5f) * range * 2f;
+        guessY = (((pixel.get(1) & 0xff) / 255f) - 0.5f) * range * 2f;
+
+        // A wild readback must not turn into a wild shift. Nothing beyond the
+        // coarse pass's own reach can be a real measurement.
+        final float reach = range * 2f;
+        if (!(Math.abs(guessX) <= reach) || !(Math.abs(guessY) <= reach)) return false;
+
+        // Displace the older image onto the newer one. The sign is the latched
+        // one: with it positive, latest(x) matches previous(x + v).
+        shiftMaterial.use();
+        shiftMaterial.setUniformVec2(shiftMaterial.shiftUniforms.offset,
+                                     fieldSign * guessX / Math.max(1, luma[0].width),
+                                     fieldSign * guessY / Math.max(1, luma[0].height));
+        renderToTarget(shiftMaterial, previousLuma().texture, shiftedLuma);
+
+        // The matcher wants no framebuffer bound and no pending error.
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
+        texEstimateMotion(shiftedLuma.texture, latestLuma().texture, vectors.texture);
+        if (GLES20.glGetError() != GLES20.GL_NO_ERROR) return false;
+
+        // The true vector is the guess plus the residual. Added here, once, so
+        // that everything downstream sees an ordinary field.
+        fieldMaterial.use();
+        fieldMaterial.setUniformFloat(fieldMaterial.fieldUniforms.encode, 0f);
+        fieldMaterial.setUniformVec2(fieldMaterial.fieldUniforms.bias, guessX, guessY);
+        renderToTarget(fieldMaterial, vectors.texture, biased);
+        return true;
+    }
+
+    /**
      * Reject the vectors that disagree with everything around them.
      *
      * <p>Each pass reads one target and writes the other, starting from the
@@ -1396,12 +1473,19 @@ public class FrameSynthesizer implements FramePacer.Target {
         // rising: 120 pixels observed, against vectors reaching 113 in the first
         // survey of this driver. A hundred is below both, so a vector at or past
         // it is one the fine pass can no longer be trusted about.
+        //
+        // **Off entirely once the field is refined.** Substitution exists to
+        // rescue vectors pinned at the window; a refined vector is long because
+        // the scene moved that far, not because it ran out of window, and
+        // replacing those with coarse ones would throw away the precision the
+        // refine pass just bought. The two mechanisms answer the same problem and
+        // the better one wins.
         medianMaterial.setUniformFloat(medianMaterial.medianUniforms.searchLimit,
-                                       coarseVectors != null ? 100f : 0f);
+                                       (coarseVectors != null && !refinedField) ? 100f : 0f);
         GLES20.glViewport(0, 0, vectors.width, vectors.height);
         renderer.viewportNeedsUpdate = true;
 
-        int source = vectors.texture;
+        int source = rawField().texture;
         for (int pass = 0; pass < MEDIAN_PASSES; pass++) {
             final int destination = pass % 2;
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[destination].framebuffer);
@@ -1410,7 +1494,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
             // The matcher's own field, on offer every pass. See MedianMaterial.
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, rawField().texture);
             medianMaterial.setUniformInt(medianMaterial.medianUniforms.originalTexture, 1);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
@@ -1527,6 +1611,49 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final Target[] coarseLuma = new Target[2];
     private Target coarseVectors;
 
+    /**
+     * VESSEL: the refine step, which is what actually recovers the motion.
+     *
+     * <p>Substituting the coarse vector where the fine pass is pinned buys reach
+     * and pays for it in precision -- a coarse block covers sixteen pixels and
+     * cannot separate two motions. Measured against an exact ground truth at a
+     * 167 px displacement, substitution took the vector error from 150 px to 93
+     * and stopped there, while an unbounded full-resolution search reached 43.
+     *
+     * <p>A pyramid does not substitute. It uses the coarse result as a starting
+     * point and runs the FINE pass again to find what is left over. That is what
+     * these three targets are for: {@code guessProbe} reduces the coarse field to
+     * one vector, {@code shiftedLuma} holds the older image displaced by it, and
+     * {@code biased} holds the residual with the guess added back. The matcher
+     * then works at full resolution on a residual that is small by construction.
+     *
+     * <pre>
+     *   field                          vec err   textured   image rms
+     *   fine only (bounded)              150.1      141.4       20.05
+     *   coarse vector substituted         92.8       76.3       16.74
+     *   coarse offset, fine refine         1.4        0.3        2.62
+     *   unbounded full-res search         43.1       19.5       12.71
+     * </pre>
+     *
+     * <p>Three tenths of a pixel on the blocks that carry enough detail for a
+     * match to mean anything, and five times better than a search with no window
+     * at all -- because it has that search's reach and a fine block's precision
+     * together. See {@code tools/frame-bench/pyramid.py} and {@link ShiftMaterial}.
+     *
+     * <p>It needs the sign, so it cannot run until {@link SignMaterial} has
+     * latched one; until then the plain fine pass runs and the field is whatever
+     * it always was. That is also the fallback if anything here fails.
+     */
+    private Target shiftedLuma;
+    private Target guessProbe;
+    private Target biased;
+    private float guessX = 0f;
+    private float guessY = 0f;
+    private boolean refinedField = false;
+
+    /** The field the filter should read: the refined one when there is one. */
+    private Target rawField() { return refinedField && biased != null ? biased : vectors; }
+
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
         // **The guest's own resolution, not the panel's.** Every pass downstream
@@ -1594,6 +1721,15 @@ public class FrameSynthesizer implements FramePacer.Target {
                     coarseVectors = new Target();
                     coarseVectors.allocate(cw / blockX, ch / blockY,
                                            GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+
+                    // The refine step. See the shiftedLuma note.
+                    shiftedLuma = new Target();
+                    shiftedLuma.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
+                    biased = new Target();
+                    biased.allocate(lumaW / blockX, lumaH / blockY,
+                                    GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    guessProbe = new Target();
+                    guessProbe.allocateAveraging(cw / blockX, ch / blockY);
                 }
 
                 // **Rendering to RGBA16F is a capability, not a given.** The
@@ -1644,6 +1780,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (vectors != null) vectors.release();
             for (int i = 0; i < 2; i++) if (coarseLuma[i] != null) coarseLuma[i].release();
             if (coarseVectors != null) coarseVectors.release();
+            if (shiftedLuma != null) shiftedLuma.release();
+            if (biased != null) biased.release();
+            if (guessProbe != null) guessProbe.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
             if (signProbe != null) signProbe.release();
             if (output != null) output.release();
@@ -1653,6 +1792,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         vectors = null;
         coarseLuma[0] = coarseLuma[1] = null;
         coarseVectors = null;
+        shiftedLuma = null;
+        biased = null;
+        guessProbe = null;
+        refinedField = false;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
         output = null;
@@ -1772,7 +1915,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
                     + " %s, mean %.0f px, %.0f%% beyond the fine window,"
-                    + " matcher refusals %d",
+                    + " %s, matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
@@ -1780,6 +1923,17 @@ public class FrameSynthesizer implements FramePacer.Target {
                 luma[0] != null ? luma[0].height : 0,
                 filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
                 fieldMagnitude, fieldAtLimit * 100f,
+                // **Whether the fine pass was aimed, and where.** Without this
+                // the refine step is unobservable from the log, which is the
+                // mistake the saturation figure already made once: it read the
+                // raw field while the change it was meant to judge happened
+                // downstream, so it reported the same number whether the coarse
+                // pass worked, was mis-wired, or was absent.
+                refinedField
+                    ? String.format("aimed %.0f,%.0f px then refined", guessX, guessY)
+                    : (coarseVectors == null ? "no coarse pass"
+                       : (fieldSign == 0f ? "sign not yet latched, unaimed"
+                          : "refine declined, unaimed")),
                 estimateFailures));
         }
 

@@ -129,7 +129,6 @@ public class SignMaterial extends ScreenMaterial {
                     // to show the extension working could not show it. Against
                     // 256 the whole reachable range is distinguishable.
                     "clamp(pixels / 256.0, 0.0, 1.0),",
-                    // A: whether it is at the edge of what can be measured.
                     // A: the share of the field describing motion the fine
                     // pass cannot reach, which is where the coarse vectors are
                     // taken. Above the fine window rather than at it: after
