@@ -213,11 +213,34 @@ public class InterpolateMaterial extends ScreenMaterial {
             // vector pointing off the edge has no source, and repeating the
             // border smears where wrapping would fetch the opposite side of the
             // screen -- a much louder wrong answer.
-            "vec3 predict(vec2 v) {",
+            // **A moving pixel has no business fetching from an overlay.**
+            //
+            // The subtitle ghost has two halves and only one of them is the
+            // glyph being displaced. The other is the background beside it doing
+            // everything right: those pixels really did move, so they really are
+            // compensated, and the position they sample in the other frame is
+            // where a subtitle happens to be sitting. A subtitle does not move,
+            // so it is in both frames at the same place, and a background pixel
+            // reaching past it collects it. Photographed during a fast pan:
+            // "Ranger's Badge, on the spot!" legible a second time, offset down
+            // and right, while the real text beside it was sharp and correct.
+            //
+            // Handing that case perfect motion knowledge makes it worse rather
+            // than better -- measured at 25.85 levels against 6.25 -- because the
+            // background behind an overlay was never photographed and no vector
+            // can recover it. What can be done is to notice the contamination:
+            // if this pixel moved and the place it is sampling did not, that
+            // sample is an overlay and the other endpoint is the honest one.
+            //
+            // So the two endpoints carry weights instead of a straight phase mix.
+            // Where neither is contaminated the weights are (1-phase) and phase
+            // and nothing changes at all.
+            "vec3 predict(vec2 v, float wOlder, float wNewer) {",
                 "vec2 fromNewer = clamp(vUV - v * (1.0 - phase), 0.0, 1.0);",
                 "vec2 fromOlder = clamp(vUV + v * phase, 0.0, 1.0);",
-                "return mix(texture2D(previousTexture, fromOlder).rgb,",
-                           "texture2D(screenTexture, fromNewer).rgb, phase);",
+                "vec3 older = texture2D(previousTexture, fromOlder).rgb;",
+                "vec3 newer = texture2D(screenTexture, fromNewer).rgb;",
+                "return (older * wOlder + newer * wNewer) / max(wOlder + wNewer, 1.0e-4);",
             "}",
 
             "void main() {",
@@ -313,10 +336,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // ---- overlapped block motion compensation --------------------
                 // Four predictions, one per block, combined under the window.
                 // Nothing is discarded and nothing is chosen.
-                "vec3 q0 = predict(m0);",
-                "vec3 q1 = predict(m1);",
-                "vec3 q2 = predict(m2);",
-                "vec3 q3 = predict(m3);",
+                "vec3 q0 = predict(m0, wOlder, wNewer);",
+                "vec3 q1 = predict(m1, wOlder, wNewer);",
+                "vec3 q2 = predict(m2, wOlder, wNewer);",
+                "vec3 q3 = predict(m3, wOlder, wNewer);",
                 "vec3 shown = weight.x * q0 + weight.y * q1",
                             "+ weight.z * q2 + weight.w * q3;",
 
@@ -374,6 +397,27 @@ public class InterpolateMaterial extends ScreenMaterial {
                                     "- texture2D(lumaOlderTexture, mo).r);",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
+
+                // How still the content is at each of the two places this pixel
+                // reads from. Computed on the mean vector rather than per block:
+                // the four predictions sample within a block of each other, so
+                // one answer describes all of them and costs two fetches instead
+                // of eight. See predict().
+                "float stillAtNewer = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
+                    "abs(texture2D(lumaNewerTexture, mn).r",
+                      "- texture2D(lumaOlderTexture, mn).r));",
+                "float stillAtOlder = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
+                    "abs(texture2D(lumaNewerTexture, mo).r",
+                      "- texture2D(lumaOlderTexture, mo).r));",
+                // And whether this pixel is one that moved at all. A still pixel
+                // reading still content is a subtitle reading itself, which is
+                // correct and must not be disturbed.
+                "float moves = smoothstep(2.0 / 255.0, 12.0 / 255.0, fitStill);",
+                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves);",
+                "float wNewer = phase * (1.0 - stillAtNewer * moves);",
+                // Both refused: nothing to prefer, so fall back to the plain mix
+                // rather than dividing by nothing.
+                "if (wOlder + wNewer < 1.0e-3) { wOlder = 1.0 - phase; wNewer = phase; }",
 
                 // What a stationary thing looks like at this instant: the same
                 // two frames read at this exact pixel. Exact for an overlay, and

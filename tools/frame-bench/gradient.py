@@ -46,7 +46,7 @@ def profile():
 
 
 def compose(t):
-    bg = np.asarray(Image.open(os.path.join(HERE, "bench", "bg.png"))
+    bg = np.asarray(Image.open(os.path.join(HERE, "bg.png"))
                     .convert("RGB"), dtype=np.float32) / 255.0
     return np.clip(_remap(bg, profile() * t), 0.0, 1.0)
 
