@@ -804,12 +804,16 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
         // Before the swap, which is the only moment the frame about to be
         // produced has an id. See FrameTimestamps.onDraw.
+        // **Outside the diagnostic gate, because the guard depends on it.**
+        // clearOfLastPresent asks whether this present would share a scanout
+        // with the last, and it can only answer that if the last one's index
+        // was recorded -- for every present, not only when a log line wanted it.
+        final long vsync = FramePacer.vsyncIndex();
         if (wants("pacing")) {
             timestamps.onDraw();
-            final long vsync = FramePacer.vsyncIndex();
             if (vsync == lastPresentVsync) collisions++;
-            lastPresentVsync = vsync;
         }
+        lastPresentVsync = vsync;
         final long now = System.nanoTime();
         if (lastPresentNanos != 0) {
             final long gap = now - lastPresentNanos;
@@ -954,7 +958,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("setup")) announce();
         // The display's own refresh counter, for the collision check that
         // replaces the scanout timestamp this device will not provide.
-        if (wants("pacing")) FramePacer.countRefreshes();
+        // Counted whenever frame generation is on: clearOfLastPresent needs the
+        // index, not just the pacing diagnostic. One callback per refresh, on a
+        // clock the platform is already running.
+        FramePacer.countRefreshes();
 
         // **The interval is measured before anything is presented, because the
         // present depends on it.** It used to be taken afterwards, so the
@@ -1000,7 +1007,28 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         realPresented = false;
         lastPhase = 0f;
-        if (motionValid && activeMultiple >= 2 && clearOfLastPresent()) {
+        // **Nothing at all, rather than a second real frame into one refresh.**
+        //
+        // endRealFrame has just presented the previous real frame if the pacer
+        // never reached it. That present makes clearOfLastPresent false here by
+        // construction, so the old `else` branch below fired and presented THIS
+        // real frame into the same scanout -- overwriting a picture that had not
+        // been shown yet. Every collision on the device was this: 299 of them in
+        // one session, all on real frames, reported by `fg cadence` as
+        // "shared a refresh with the present before them and were never shown"
+        // and visible in the slot trace as `+2:R !R`.
+        //
+        // Presenting nothing is also the right thing on its own terms. The
+        // newest frame belongs at the END of the interval it opens -- the
+        // interval shows phases of the (previous, newest) pair and arrives at
+        // the newest last -- so jumping straight to it here would run the
+        // picture ahead and then wait. The invariant still holds: if the pacer
+        // does not reach it, the next interval's endRealFrame presents it, which
+        // is what that catch-up is for.
+        final boolean canInterpolate = motionValid && activeMultiple >= 2;
+        if (canInterpolate && !clearOfLastPresent()) {
+            // Nothing to do. See above.
+        } else if (canInterpolate) {
             presentPhase(1f / activeMultiple);
             // **Counted here, because nothing else counts it.** At 2x this is the
             // only genuinely synthesised frame an interval produces -- the pacer's
@@ -1316,6 +1344,30 @@ public class FrameSynthesizer implements FramePacer.Target {
      * drawn and swapped. The lever is that latency, not this inequality.
      */
     private boolean clearOfLastPresent() {
+        // **Ask the question the collision is defined by.**
+        //
+        // A present that shares a scanout with the one before it is never seen:
+        // the work is done, the power is spent, and the display shows the later
+        // picture only. `fg cadence` counts those by comparing vsync indices,
+        // and reports 4 to 8 a second -- 6.5% of all presents.
+        //
+        // This used to test elapsed wall-clock time against one refresh period,
+        // which is a *proxy* for landing in a different scanout and not the same
+        // question. The two disagree in both directions: the clock runs on the
+        // GL thread while the index advances on the Choreographer's, so a
+        // present 8.4 ms after the last can still be counted into the same
+        // refresh, and the guard waves it through. Guarding on the index closes
+        // that by construction -- the test and the measurement become the same
+        // quantity, which is the only way they cannot drift apart.
+        //
+        // Declining such a present costs no frame the user would have seen. The
+        // picture was going to be overwritten within the same scanout either
+        // way; all that changes is that the draw is not done at all.
+        final long vsync = FramePacer.vsyncIndex();
+        if (vsync != 0 && lastPresentVsync != 0) return vsync != lastPresentVsync;
+
+        // The counter only runs when something started it. Until then, the old
+        // proxy, which is better than declining every present.
         final long period = vsyncPeriodNanos();
         if (period <= 0 || lastPresentNanos == 0) return true;
         return System.nanoTime() - lastPresentNanos >= period;
