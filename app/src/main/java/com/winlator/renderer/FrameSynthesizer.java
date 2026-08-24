@@ -1016,7 +1016,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            pacer.schedule(smoothedInterval, activeMultiple);
+            // Anchored to the arrival rather than to now: see FramePacer.schedule.
+            pacer.schedule(lastRealFrameNanos, smoothedInterval, activeMultiple);
         }
         report();
     }
@@ -1340,6 +1341,23 @@ public class FrameSynthesizer implements FramePacer.Target {
      * apart, and read as a large bias in every scene including the good ones.
      */
     private float measuredPhase = 0.5f;
+
+    /**
+     * <p><b>And the figure is a distance from the NEW frame, not a position
+     * between the endpoints.</b> The shader divides {@code |shown - newer|} by
+     * {@code |newer - older|}, so a correct interpolation at phase p reads
+     * {@code 1 - p}: a quarter-phase frame should be three quarters of the way
+     * back towards the old picture. The first attempt at this fix compared the
+     * reading against the phase itself and made a correct pipeline look
+     * catastrophically wrong at every phase except a half, where the two
+     * readings coincide -- which is exactly why the constant "50% is correct"
+     * survived as long as it did.
+     *
+     * <p>Read the lag term rather than the raw figure, and read it softly: it is
+     * a ratio of frame averages with a clamp and a denominator floor, so it says
+     * reliably whether the picture is travelling far enough and does not claim to
+     * say by exactly how much.
+     */
 
     private void measure(float phase) {
         measuredPhase = phase;
@@ -2035,11 +2053,13 @@ public class FrameSynthesizer implements FramePacer.Target {
             Log.i(TAG, String.format(
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
                     + " frame than doing nothing, %.3f%% invented content,"
-                    + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints at phase %.0f%% (%+.0f points off)",
+                    + " %.0f%% of frame moving, %.0f%% of the way from the new"
+                    + " frame back towards the old at phase %.0f%%"
+                    + " (%.0f%% expected, %+.0f points of lag)",
                 harmedShare * 100f, measuredDark * 100f,
                 moving * 100f, measuredSpeed * 200f, measuredPhase * 100f,
-                (measuredSpeed * 200f) - (measuredPhase * 100f)));
+                (1f - measuredPhase) * 100f,
+                (measuredSpeed * 200f) - (1f - measuredPhase) * 100f));
         }
 
         tier0Frames = 0;

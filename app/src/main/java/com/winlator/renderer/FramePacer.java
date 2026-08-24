@@ -140,16 +140,47 @@ class FramePacer {
      * Schedule the N-1 synthesised frames that belong between this real frame and
      * the next.
      *
+     * <p><b>Anchored to when the real frame arrived, not to when this was
+     * called.</b> The two differ by the whole composite -- the interpolated
+     * frame for phase 1/K is drawn, upscaled and swapped before scheduling gets
+     * a turn -- and taking {@code System.nanoTime()} here silently added that
+     * duration to every slot in the interval.
+     *
+     * <p>It is a constant offset, so it does not shift the picture; it
+     * compresses it. The last slot of an interval is pushed towards the next
+     * real frame and the first slot of the next interval is pushed away from it,
+     * which turns an even cadence into an uneven one at no cost in frame rate --
+     * the rate stays exactly right while the spacing goes wrong, which is why
+     * every summary statistic said the pipeline was healthy.
+     *
+     * <p>Recovered from the present trace on the device, at 4x into a 120 Hz
+     * panel with a 67 ms interval, so eight refreshes to fill:
+     *
+     * <pre>
+     *   arrival, phase 1/4 drawn immediately     refresh 0
+     *   schedule() runs, one refresh later       refresh 1   &lt;- the offset
+     *   slot 1 due at +2                         refresh 3
+     *   slot 2 due at +4                         refresh 5
+     *   slot 3 due at +6, the real frame         refresh 7
+     *   next arrival                             refresh 8
+     * </pre>
+     *
+     * <p>Gaps of 3, 2, 2, 1 where every one of them should be 2. The recorded
+     * trace reads {@code R +1 25 +3 53 +2 77 +2 R}, which is that sequence
+     * exactly, and the recording it came from holds 40% of its pictures for a
+     * single refresh against 27% for the correct two.
+     *
+     * @param anchorNanos when the real frame arrived, on {@code System.nanoTime}
      * @param intervalNanos measured spacing of real frames
      * @param multiple presented frames per real frame; 2 means one prediction
      */
-    void schedule(long intervalNanos, int multiple) {
-        if (multiple < 2 || intervalNanos <= 0) return;
+    void schedule(long anchorNanos, long intervalNanos, int multiple) {
+        if (multiple < 2 || intervalNanos <= 0 || anchorNanos <= 0) return;
         final long stamp = target.realFrameCount();
         for (int i = 1; i < multiple; i++) {
             // Evenly spaced across the interval. See the class comment for why
             // there is no longer a bias here.
-            final long dueNanos = System.nanoTime() + (intervalNanos * i) / multiple;
+            final long dueNanos = anchorNanos + (intervalNanos * i) / multiple;
             main.post(() -> {
                 final Choreographer choreographer = Choreographer.getInstance();
                 choreographer.postFrameCallback(new Choreographer.FrameCallback() {
