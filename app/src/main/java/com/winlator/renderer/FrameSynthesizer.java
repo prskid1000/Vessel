@@ -374,24 +374,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         return diagnostics.contains(category) || diagnostics.contains("all");
     }
 
-    /**
-     * VESSEL: a category that {@code all} does not switch on.
-     *
-     * <p>Most diagnostics here read something the pipeline was computing anyway.
-     * A few make the pipeline do extra work, and those should be asked for by
-     * name rather than swept up by a blanket setting -- otherwise the common case,
-     * which is FG_LOG=all, quietly carries the cost of every probe anyone ever
-     * added.
-     *
-     * <p>The refresh counter is the first of these. It costs a Choreographer
-     * callback per refresh, 120 a second, on the main thread -- which is the
-     * same thread the pacer posts its slot callbacks to, and therefore the one
-     * place where a diagnostic could plausibly disturb what it is measuring.
-     */
-    private boolean wantsExactly(String category) {
-        return diagnostics.contains(category);
-    }
-
     /** Whether the one-time setup line has been printed for this allocation. */
     private boolean announced = false;
 
@@ -904,18 +886,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("setup")) announce();
         // The display's own refresh counter, for the collision check that
         // replaces the scanout timestamp this device will not provide.
-        // **Opt-in, by name, because it makes work rather than reading it.**
-        //
-        // Counting refreshes is what makes a shared scanout detectable: two
-        // presents landing in one refresh means the first was drawn, upscaled,
-        // swapped and then overwritten before anyone saw it, and no frame
-        // counter can see that by construction. It is how 299 wasted presents a
-        // second were found.
-        //
-        // It is also a callback per refresh on the main thread, so it is not
-        // left running. FG_LOG=refresh turns it on; FG_LOG=all deliberately does
-        // not. See wantsExactly.
-        if (wantsExactly("refresh")) FramePacer.countRefreshes();
+        if (wants("pacing")) FramePacer.countRefreshes();
 
         // **The interval is measured before anything is presented, because the
         // present depends on it.** It used to be taken afterwards, so the
@@ -960,6 +931,10 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         realPresented = false;
         lastPhase = 0f;
+        // **The arrival never asks.** A failing guard here sends control to
+        // the `else`, which presents a SECOND real frame into the same
+        // scanout -- 299 collisions in one session, every one a real frame.
+        // Only paced frames yield; see clearOfLastPresent.
         if (motionValid && activeMultiple >= 2) {
             presentPhase(1f / activeMultiple);
             // **Counted here, because nothing else counts it.** At 2x this is the
@@ -1135,25 +1110,25 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * VESSEL: whether a present now would land clear of the one before it.
+     * Whether a present now would land clear of the one before it.
      *
-     * <p>Two presents into one scanout means the first was never seen: drawn,
-     * upscaled, swapped and overwritten. The frame counter cannot see that by
-     * construction, which is why it needs a rule of its own.
+     * <p><b>The margin that protects the real frame shrinks as 1/K, which is why
+     * 2x is clean and 4x is not.</b> Frame N has to be delayed so the
+     * interpolations between N-1 and N can be shown before it, so the interval
+     * runs 1/K, 2/K ... K/K with K/K being N itself. That puts N's present at
+     * (K-1)/K of the way through, while N+1 arrives at the end -- leaving
+     * interval/K between them: 33 ms at 2x, 16.5 at 4x, 8.3 at 8x. A few
+     * milliseconds of scheduling jitter on either side is nothing against 33 and
+     * routine against 8.3.
      *
-     * <p><b>Used for interpolated frames only, and that is the whole of the
-     * lesson.</b> This guard arrived bundled into a commit about static overlays
-     * along with a second use, in the branch that opens an interval -- and that
-     * second use created a bug rather than preventing one. endRealFrame presents
-     * the real frame when the pacer has not reached it, which makes this false
-     * immediately afterwards, which sent the arrival branch to its `else` and
-     * presented the NEXT real frame into the same scanout. 299 collisions in one
-     * session, every one of them a real frame, caused entirely by a guard meant
-     * to prevent collisions.
+     * <p>Measured at 4x on a 15 fps guest: gaps between presents from 0.3 ms to
+     * 26 ms, and 11 of every 70 presents landing on a refresh another present had
+     * already used -- drawn, paid for, never shown.
      *
-     * <p>So the arrival always presents its phase, and only the paced frames
-     * ask. An interpolated frame that cannot be seen is worth skipping; a real
-     * frame is never withheld and never needs to ask.
+     * <p>So a present waits rather than colliding. What is skipped is only ever an
+     * interpolated frame, and skipping it costs nothing: the pacer's next slot
+     * carries a later phase, so the motion continues from where it should rather
+     * than from where the skipped frame would have put it.
      */
     private boolean clearOfLastPresent() {
         final long period = vsyncPeriodNanos();
@@ -1632,29 +1607,13 @@ public class FrameSynthesizer implements FramePacer.Target {
             // Even spacing is what smooth motion is, not the count. A mean of
             // 33 ms with a spread from 0.2 to 56 is two frames inside one
             // refresh -- the first never scanned out -- and then a long wait.
-            // **The collision figure needs the refresh counter, and says so
-            // when it does not have it.**
-            //
-            // Collisions are counted by comparing the vsync index of one present
-            // against the last. With the counter not running the index is always
-            // zero, every present compares equal to its predecessor, and the
-            // line reports that every frame shared a refresh and none were shown
-            // -- while the picture is fine. Observed exactly that: "72 shared a
-            // refresh ... over 72 gaps".
-            //
-            // A diagnostic that reports total failure when its input is missing
-            // is worse than one that stays quiet, because the failure it invents
-            // is more alarming than anything it was built to find.
-            final boolean counted = FramePacer.vsyncIndex() != 0;
             Log.i(TAG, String.format(
                 "fg cadence: presented every %.1f ms mean, %.1f shortest,"
-                    + " %.1f longest, over %d gaps; %s",
+                    + " %.1f longest, over %d gaps; %d shared a refresh with"
+                    + " the present before them and were never shown",
                 presentGapTotal / (float)presentGaps / 1e6f,
                 presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps,
-                counted
-                    ? String.format("%d shared a refresh with the present before"
-                                        + " them and were never shown", collisions)
-                    : "collisions not counted -- the refresh counter is off"));
+                collisions));
             collisions = 0;
             presentGapMin = Long.MAX_VALUE;
             presentGapMax = 0;
