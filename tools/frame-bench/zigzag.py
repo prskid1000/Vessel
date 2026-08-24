@@ -105,7 +105,7 @@ for mode in ("off", "fit"):
     band[:, EDGE_X - 30:EDGE_X + 30] = True
     print("  %-28s %8.3f      %6.2f" % (mode, wav, e[band].mean()))
     Image.fromarray((np.clip(out[120:400, EDGE_X - 90:EDGE_X + 90], 0, 1) * 255)
-                    .astype(np.uint8)).save(os.path.join(HERE, "bench", "zig_%s.png" % mode))
+                    .astype(np.uint8)).save(os.path.join(HERE, "zig_%s.png" % mode))
 Image.fromarray((np.clip(truth[120:400, EDGE_X - 90:EDGE_X + 90], 0, 1) * 255)
-                .astype(np.uint8)).save(os.path.join(HERE, "bench", "zig_truth.png"))
+                .astype(np.uint8)).save(os.path.join(HERE, "zig_truth.png"))
 print("\nwrote zig_*.png")
