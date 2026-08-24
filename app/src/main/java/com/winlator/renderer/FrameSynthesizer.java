@@ -971,6 +971,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         // covers the union of the two, which is why the cheaper tier is now the
         // fallback for when there is no field rather than the preferred answer.
         if (motionValid) {
+            // The real frame is never withheld; an interpolated one yields.
+            if (phase < 1f && !clearOfLastPresent()) return;
             presentPhase(phase);
             // **Phase 1 is the real frame**, presented through presentLatest by
             // presentPhase. Counting it here inflated the synthesised rate by
@@ -1101,6 +1103,33 @@ public class FrameSynthesizer implements FramePacer.Target {
                 && SystemClock.uptimeMillis() - measuredAt >= 1000) {
             measure(phase);
         }
+    }
+
+    /**
+     * VESSEL: whether a present now would land clear of the one before it.
+     *
+     * <p>Two presents into one scanout means the first was never seen: drawn,
+     * upscaled, swapped and overwritten. The frame counter cannot see that by
+     * construction, which is why it needs a rule of its own.
+     *
+     * <p><b>Used for interpolated frames only, and that is the whole of the
+     * lesson.</b> This guard arrived bundled into a commit about static overlays
+     * along with a second use, in the branch that opens an interval -- and that
+     * second use created a bug rather than preventing one. endRealFrame presents
+     * the real frame when the pacer has not reached it, which makes this false
+     * immediately afterwards, which sent the arrival branch to its `else` and
+     * presented the NEXT real frame into the same scanout. 299 collisions in one
+     * session, every one of them a real frame, caused entirely by a guard meant
+     * to prevent collisions.
+     *
+     * <p>So the arrival always presents its phase, and only the paced frames
+     * ask. An interpolated frame that cannot be seen is worth skipping; a real
+     * frame is never withheld and never needs to ask.
+     */
+    private boolean clearOfLastPresent() {
+        final long period = vsyncPeriodNanos();
+        if (period <= 0 || lastPresentNanos == 0) return true;
+        return System.nanoTime() - lastPresentNanos >= period;
     }
 
     private void presentLatest() {
@@ -1574,13 +1603,29 @@ public class FrameSynthesizer implements FramePacer.Target {
             // Even spacing is what smooth motion is, not the count. A mean of
             // 33 ms with a spread from 0.2 to 56 is two frames inside one
             // refresh -- the first never scanned out -- and then a long wait.
+            // **The collision figure needs the refresh counter, and says so
+            // when it does not have it.**
+            //
+            // Collisions are counted by comparing the vsync index of one present
+            // against the last. With the counter not running the index is always
+            // zero, every present compares equal to its predecessor, and the
+            // line reports that every frame shared a refresh and none were shown
+            // -- while the picture is fine. Observed exactly that: "72 shared a
+            // refresh ... over 72 gaps".
+            //
+            // A diagnostic that reports total failure when its input is missing
+            // is worse than one that stays quiet, because the failure it invents
+            // is more alarming than anything it was built to find.
+            final boolean counted = FramePacer.vsyncIndex() != 0;
             Log.i(TAG, String.format(
                 "fg cadence: presented every %.1f ms mean, %.1f shortest,"
-                    + " %.1f longest, over %d gaps; %d shared a refresh with"
-                    + " the present before them and were never shown",
+                    + " %.1f longest, over %d gaps; %s",
                 presentGapTotal / (float)presentGaps / 1e6f,
                 presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps,
-                collisions));
+                counted
+                    ? String.format("%d shared a refresh with the present before"
+                                        + " them and were never shown", collisions)
+                    : "collisions not counted -- the refresh counter is off"));
             collisions = 0;
             presentGapMin = Long.MAX_VALUE;
             presentGapMax = 0;
