@@ -631,7 +631,14 @@ public class FrameSynthesizer implements FramePacer.Target {
      * where one pass reads the filtered field and another reads the matcher's.
      */
     private int fieldTexture() {
-        return filteredIndex >= 0 ? filtered[filteredIndex].texture : vectors.texture;
+        // **rawField(), not vectors.** When the refine pass has run, `vectors`
+        // holds the RESIDUAL against a displaced image and the true field is
+        // that plus the guess, which is what rawField returns. Falling back to
+        // `vectors` here would warp by a near-zero residual and the picture
+        // would barely move -- silently, and only on the path where the median
+        // filter could not allocate.
+        return filteredIndex >= 0 ? filtered[filteredIndex].texture
+                                  : rawField().texture;
     }
 
     /** Whether the field estimated at the last real frame is usable. */
@@ -2183,23 +2190,21 @@ public class FrameSynthesizer implements FramePacer.Target {
             // unobservable is exactly how the saturation figure, the magnitude
             // clamp and the betweenness expectation each hid a fault.
             //
-            // The spread matters as much as the middle: aiming earlier can move
-            // where frames land on average, and can do nothing at all about how
-            // much that varies. If the range here is wider than a refresh, that
-            // is a floor under how even the spacing can be made from this end.
+            // **Nothing aims by this. It is measured and printed only.**
+            // A correction that led each slot by this quantity was written,
+            // shipped and reverted -- it moved nothing, because the latency is a
+            // tenth of a refresh and there was nothing to aim around. This line
+            // said "aiming %.1f early, clamped at %.1f" for a while after that
+            // revert, describing behaviour the code no longer had, which is the
+            // same class of fault as every broken instrument found today.
             final long refresh = Math.max(1, vsyncPeriodNanos());
-            final long slot = smoothedInterval > 0 && activeMultiple > 0
-                ? smoothedInterval / activeMultiple : 0;
             Log.i(TAG, String.format(
                 "fg latency: paced frames reach the screen %.1f refreshes after"
-                    + " their vsync (%.1f to %.1f over %d), aiming %.1f early,"
-                    + " clamped at %.1f",
+                    + " their vsync (%.1f to %.1f over %d), not corrected for",
                 presentLatency() / (float) refresh,
                 latencyAt(0) / (float) refresh,
                 latencyAt(latencyHeld - 1) / (float) refresh,
-                latencyHeld,
-                Math.max(0, Math.min(presentLatency(), slot)) / (float) refresh,
-                slot / (float) refresh));
+                latencyHeld));
         }
 
         if (wants("slots") && slotHeld > 1) {
