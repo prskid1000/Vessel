@@ -1136,26 +1136,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         float phase = 1f / activeMultiple + elapsed;
         if (phase < lastPhase) phase = lastPhase;
 
-        // **A phase within half a refresh of the end is the real frame.**
-        //
-        // The last slot of an interval is due exactly at phase 1, and the pacer
-        // fires on the nearest vsync -- which is as often just before as just
-        // after. Landing just before produced a phase of 0.96 to 0.99: an
-        // interpolated approximation of a picture already held exactly, drawn at
-        // full cost, and then followed a refresh later by the real frame itself.
-        // Two nearly identical pictures, five presents in an interval divided
-        // into four, and the real frame crowded into the refresh before the next
-        // arrival -- at which point clearOfLastPresent declines the next
-        // interval's opening frame and the sequence starts a slot down.
-        //
-        // Recovered from the present trace, which reads +2 46 +2 73 +2 99 +1 R
-        // +1 R where it should read +2 +2 +2 +2. Nothing between here and the
-        // end of the interval can be shown anyway: the display has no refresh
-        // left to put it in.
-        if (smoothedInterval > 0) {
-            final float halfRefresh = (vsyncPeriodNanos() * 0.5f) / smoothedInterval;
-            if (phase > 1f - halfRefresh) phase = 1f;
-        }
         if (phase > 1f) phase = 1f;
         // **Not assigned here.** This is asked for a phase before anything has
         // decided to present one, and the paths below can decline -- at which
