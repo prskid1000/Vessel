@@ -987,6 +987,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // the check is right; what was wrong was aiming so badly that it kept
         // firing.
         if (interval > 0 && interval <= idleGate()) {
+            noteGuestInterval(interval);
             recent[recentAt] = interval;
             recentAt = (recentAt + 1) % recent.length;
             if (recentHeld < recent.length) recentHeld++;
@@ -1162,6 +1163,35 @@ public class FrameSynthesizer implements FramePacer.Target {
         // was never shown, so the next genuine frame was clamped forward to it.
         // The callers that actually present set it.
         return phase;
+    }
+
+    /**
+     * VESSEL: how irregularly the guest actually delivers, in refreshes.
+     *
+     * <p><b>The one input a pacing model cannot do without, and the one nobody
+     * has measured.</b> Every simulator written for this problem assumed the
+     * guest arrives on a smooth rhythm with a few per cent of jitter, and every
+     * one of them predicted a far more even stream than the device produces --
+     * 55% of pictures correctly spaced against a measured 27%. A schedule laid
+     * out across an interval that turns out to be a refresh longer or shorter
+     * than predicted cannot be even, however carefully its slots are placed, and
+     * no amount of work at the scheduling end reaches that.
+     *
+     * <p>Counted in whole refreshes because that is the only resolution the
+     * display has. At 15 fps into a 120 Hz panel the ideal is eight every time;
+     * a spread here is a floor under how even the presented stream can be, and
+     * if it is wide then the answer is not a better schedule.
+     */
+    private final int[] guestIntervals = new int[24];
+    private long guestSamples = 0;
+
+    private void noteGuestInterval(long intervalNanos) {
+        final long refresh = vsyncPeriodNanos();
+        if (intervalNanos <= 0 || refresh <= 0) return;
+        final int refreshes = (int) Math.round(intervalNanos / (double) refresh);
+        if (refreshes < 0 || refreshes >= guestIntervals.length) return;
+        guestIntervals[refreshes]++;
+        guestSamples++;
     }
 
     /** The most recent phase presented, so the picture cannot run backwards. */
@@ -2043,6 +2073,24 @@ public class FrameSynthesizer implements FramePacer.Target {
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
         }
 
+        if (wants("slots") && guestSamples > 0) {
+            final StringBuilder g = new StringBuilder("fg guest: real frames arrive");
+            int ideal = 0;
+            for (int i = 1; i < guestIntervals.length; i++) {
+                if (guestIntervals[i] > guestIntervals[ideal]) ideal = i;
+            }
+            for (int i = 0; i < guestIntervals.length; i++) {
+                if (guestIntervals[i] == 0) continue;
+                g.append(String.format(" %d:%.0f%%", i,
+                                       100.0 * guestIntervals[i] / guestSamples));
+            }
+            g.append(String.format(" refreshes apart (%.0f%% on the commonest, %d),"
+                                   + " over %d",
+                                   100.0 * guestIntervals[ideal] / guestSamples,
+                                   ideal, guestSamples));
+            Log.i(TAG, g.toString());
+        }
+
         if (wants("slots") && latencyHeld > 0) {
             // **The quantity both pacing corrections depend on, printed.**
             // Everything aimed at the spacing is a bet that this number is what
@@ -2084,7 +2132,15 @@ public class FrameSynthesizer implements FramePacer.Target {
                     final long step = vsync - previous;
                     // A present sharing a refresh with the one before it was
                     // never shown, whatever the frame counter says.
-                    line.append(step == 0 ? " !" : (" +" + step));
+                    //
+                    // **The colon is load-bearing.** Written as "+2" followed by
+                    // "46" this ran together into "+246", which cannot be read
+                    // back: the step and the phase are both variable-width
+                    // numbers. The parser recovered "+24" and "6" and produced a
+                    // gap histogram with entries at 12, 22, 27 and 35 refreshes,
+                    // none of which happened. A diagnostic that cannot be parsed
+                    // unambiguously is not a diagnostic.
+                    line.append(step == 0 ? " !" : (" +" + step + ":"));
                 } else {
                     line.append(" ");
                 }
