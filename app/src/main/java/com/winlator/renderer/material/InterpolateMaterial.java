@@ -333,6 +333,43 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // noise and starts being content. Neither is fitted to a scene:
                 // both are properties of the buffer's precision.
 
+                // ---- did this pixel move, and is what it reads trustworthy? --
+                //
+                // Both questions are answered here, above the predictions,
+                // because both feed them: `carry` decides how far the result is
+                // pulled back towards a stationary reading, and the two endpoint
+                // weights decide which of the two frames is worth reading at all.
+                "float fitStill = abs(texture2D(lumaNewerTexture, vUV).r",
+                                   "- texture2D(lumaOlderTexture, vUV).r);",
+                "vec2 mn = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
+                "vec2 mo = clamp(vUV + mean * phase, 0.0, 1.0);",
+                "float fitMoving = abs(texture2D(lumaNewerTexture, mn).r",
+                                    "- texture2D(lumaOlderTexture, mo).r);",
+                "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
+                "float carry = smoothstep(0.3, 0.7, ratio);",
+
+                // How still the content is at each of the two places this pixel
+                // reads from. Computed on the mean vector rather than per block:
+                // the four predictions sample within a block of each other, so
+                // one answer describes all of them and costs two fetches instead
+                // of eight. See predict().
+                "float stillAtNewer = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
+                    "abs(texture2D(lumaNewerTexture, mn).r",
+                      "- texture2D(lumaOlderTexture, mn).r));",
+                "float stillAtOlder = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
+                    "abs(texture2D(lumaNewerTexture, mo).r",
+                      "- texture2D(lumaOlderTexture, mo).r));",
+                // And whether this pixel is one that moved at all. A still pixel
+                // reading still content is a subtitle reading itself, which is
+                // correct and must not be disturbed.
+                "float moves = smoothstep(2.0 / 255.0, 12.0 / 255.0, fitStill);",
+                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves);",
+                "float wNewer = phase * (1.0 - stillAtNewer * moves);",
+                // Both refused: nothing to prefer, so fall back to the plain mix
+                // rather than dividing by nothing.
+                "if (wOlder + wNewer < 1.0e-3) { wOlder = 1.0 - phase; wNewer = phase; }",
+
+
                 // ---- overlapped block motion compensation --------------------
                 // Four predictions, one per block, combined under the window.
                 // Nothing is discarded and nothing is chosen.
@@ -389,36 +426,6 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // text from 4.62 levels to 3.00 while leaving the rest of the
                 // scene at 1.17 against 1.12. The two earlier attempts bought the
                 // text at the scene's expense; this one does not.
-                "float fitStill = abs(texture2D(lumaNewerTexture, vUV).r",
-                                   "- texture2D(lumaOlderTexture, vUV).r);",
-                "vec2 mn = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
-                "vec2 mo = clamp(vUV + mean * phase, 0.0, 1.0);",
-                "float fitMoving = abs(texture2D(lumaNewerTexture, mn).r",
-                                    "- texture2D(lumaOlderTexture, mo).r);",
-                "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
-                "float carry = smoothstep(0.3, 0.7, ratio);",
-
-                // How still the content is at each of the two places this pixel
-                // reads from. Computed on the mean vector rather than per block:
-                // the four predictions sample within a block of each other, so
-                // one answer describes all of them and costs two fetches instead
-                // of eight. See predict().
-                "float stillAtNewer = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                    "abs(texture2D(lumaNewerTexture, mn).r",
-                      "- texture2D(lumaOlderTexture, mn).r));",
-                "float stillAtOlder = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                    "abs(texture2D(lumaNewerTexture, mo).r",
-                      "- texture2D(lumaOlderTexture, mo).r));",
-                // And whether this pixel is one that moved at all. A still pixel
-                // reading still content is a subtitle reading itself, which is
-                // correct and must not be disturbed.
-                "float moves = smoothstep(2.0 / 255.0, 12.0 / 255.0, fitStill);",
-                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves);",
-                "float wNewer = phase * (1.0 - stillAtNewer * moves);",
-                // Both refused: nothing to prefer, so fall back to the plain mix
-                // rather than dividing by nothing.
-                "if (wOlder + wNewer < 1.0e-3) { wOlder = 1.0 - phase; wNewer = phase; }",
-
                 // What a stationary thing looks like at this instant: the same
                 // two frames read at this exact pixel. Exact for an overlay, and
                 // what the blend falls back towards where motion is refuted.
