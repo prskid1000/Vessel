@@ -374,6 +374,24 @@ public class FrameSynthesizer implements FramePacer.Target {
         return diagnostics.contains(category) || diagnostics.contains("all");
     }
 
+    /**
+     * VESSEL: a category that {@code all} does not switch on.
+     *
+     * <p>Most diagnostics here read something the pipeline was computing anyway.
+     * A few make the pipeline do extra work, and those should be asked for by
+     * name rather than swept up by a blanket setting -- otherwise the common case,
+     * which is FG_LOG=all, quietly carries the cost of every probe anyone ever
+     * added.
+     *
+     * <p>The refresh counter is the first of these. It costs a Choreographer
+     * callback per refresh, 120 a second, on the main thread -- which is the
+     * same thread the pacer posts its slot callbacks to, and therefore the one
+     * place where a diagnostic could plausibly disturb what it is measuring.
+     */
+    private boolean wantsExactly(String category) {
+        return diagnostics.contains(category);
+    }
+
     /** Whether the one-time setup line has been printed for this allocation. */
     private boolean announced = false;
 
@@ -886,7 +904,18 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("setup")) announce();
         // The display's own refresh counter, for the collision check that
         // replaces the scanout timestamp this device will not provide.
-        // BISECT: refresh counting off. Item 4 is not applied.
+        // **Opt-in, by name, because it makes work rather than reading it.**
+        //
+        // Counting refreshes is what makes a shared scanout detectable: two
+        // presents landing in one refresh means the first was drawn, upscaled,
+        // swapped and then overwritten before anyone saw it, and no frame
+        // counter can see that by construction. It is how 299 wasted presents a
+        // second were found.
+        //
+        // It is also a callback per refresh on the main thread, so it is not
+        // left running. FG_LOG=refresh turns it on; FG_LOG=all deliberately does
+        // not. See wantsExactly.
+        if (wantsExactly("refresh")) FramePacer.countRefreshes();
 
         // **The interval is measured before anything is presented, because the
         // present depends on it.** It used to be taken afterwards, so the
