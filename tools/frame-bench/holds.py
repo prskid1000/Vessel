@@ -1,17 +1,63 @@
-"""Print the hold-length histogram of a recording, which is what judder is.
+"""How long each distinct picture stayed on screen, measured in time.
 
 A frame counter cannot see judder and neither can a mean. At 15 fps guest, 4x,
 into a 120 Hz panel, an even stream holds every distinct picture for exactly two
 refreshes; the frame rate reads 60/s whether it does that or alternates one and
 three. So the thing to look at is the whole distribution.
 
-This exists to give the pacing simulator something to be checked against. A model
-that cannot reproduce the histogram the device actually produces is not evidence
-about anything, and one of the models in this directory has already been wrong in
-exactly that way -- see the note at the top of scheduling.py.
+**THIS FILE PREVIOUSLY MEASURED FFMPEG'S FRAME DUPLICATION, AND EVERY NUMBER IT
+PRODUCED ON 2026-08-24 WAS WRONG.** It counted decoded frames between changes and
+called them refreshes. Two assumptions were buried in that, and both are false:
 
-    python holds.py recording.mp4 [--ideal 2] [--sensitive]
+  - `screenrecord` does not capture at the panel's rate. It captures at about
+    60 fps -- 1517 frames over 24.97 s -- while tagging the container 120/1.
+  - Piping that to rawvideo without `-fps_mode passthrough` makes ffmpeg conform
+    the stream to the tagged 120 fps by DUPLICATING frames, and 60.74 into 120 is
+    not a clean doubling, so the duplication is uneven.
+
+The tell was arithmetic and sat in the output the whole time: the histogram's own
+counts summed to 2997 frame-slots on a 1517-frame file. A day of conclusions came
+out of it -- five changes reverted, one shipped and pulled back -- while the
+`fg slots` trace on the device, which counts real vsync indices and disagreed
+with it, was assumed to be the broken one.
+
+WHAT IT DOES NOW. Decodes with `-fps_mode passthrough`, so exactly the frames in
+the file come out and none are invented; reads each frame's presentation
+timestamp; and measures how long each distinct picture was on screen in
+milliseconds. Refreshes are that duration divided by the panel period, which is a
+real quantity rather than a decoder artefact.
+
+**AND IT STILL CANNOT MEASURE PACING. NOTHING BUILT ON A SCREEN RECORDING CAN.**
+Fixing the duplication made the output self-consistent -- 60.1 pictures a second
+against 60 presents, mean hold 16.64 ms, which is exactly one capture interval --
+and that self-consistency is what exposes the real problem:
+
+    panel refresh      8.33 ms
+    screenrecord       16.67 ms   (60 fps, measured, not assumed)
+    our presents       ~16 ms
+
+The capture samples at HALF the panel rate. A picture held two refreshes occupies
+exactly one captured frame; a picture held one refresh may land in a capture or
+fall between two and never appear. An even stream and an uneven one produce the
+same recording. This is Nyquist, not a threshold or a decoder flag, and no
+amount of work on this file reaches it.
+
+So the "45% of pictures held too short" this reported was the capture's own
+sampling. The device's `fg slots` trace, which counts real vsync indices and
+disagreed with this file all day, gives 63% of presents correctly spaced.
+**`fg slots` is the pacing instrument; this file is not, and every pacing
+conclusion drawn from it on 2026-08-24 has to be re-taken.**
+
+What a recording is still good for is the picture rather than its timing:
+ghosting, invented content, smearing, and whether an artefact is visible at all.
+Those need the frames, not their schedule.
+
+The frame-average threshold is separately blind to a small moving object -- see
+the README, and `--sensitive`.
+
+    python holds.py recording.mp4 [--refresh 8.333] [--sensitive]
 """
+import json
 import subprocess
 import sys
 
@@ -20,10 +66,27 @@ import numpy as np
 W, H = 695, 316
 
 
-def frames(path):
+def probe(path):
+    """Every frame's presentation timestamp, in seconds, in decode order."""
     p = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", path, "-vf", "scale=%d:%d" % (W, H),
-         "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "frame=pts_time", "-of", "json", path],
+        capture_output=True)
+    if p.returncode:
+        sys.exit(p.stderr.decode()[:600])
+    times = [float(f["pts_time"])
+             for f in json.loads(p.stdout).get("frames", []) if "pts_time" in f]
+    if len(times) < 3:
+        sys.exit("no frame timestamps in %s" % path)
+    return np.array(times)
+
+
+def frames(path):
+    """The frames themselves, exactly as stored -- none conformed or invented."""
+    p = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path,
+         "-vf", "scale=%d:%d" % (W, H), "-pix_fmt", "rgb24",
+         "-fps_mode", "passthrough", "-f", "rawvideo", "-"],
         capture_output=True)
     if p.returncode:
         sys.exit(p.stderr.decode()[:600])
@@ -32,73 +95,69 @@ def frames(path):
     return a[:n * W * H * 3].reshape(n, H, W, 3).astype(np.int16)
 
 
-def holds(a, threshold=0.35, sensitive=False):
-    """How many captured frames each distinct picture stayed up.
-
-    The capture runs at the panel's rate, so a run of identical frames is a
-    refresh the compositor had nothing new for.
-
-    **The mean is blind to a small moving object, and the desktop cursor is the
-    case that proves it.** A cursor is on the order of a thousand pixels in two
-    hundred thousand, so it moves the frame mean by far less than any usable
-    threshold: on a fifteen-second recording of a cursor being moved around a
-    still desktop this reported two distinct pictures, one held for nine hundred
-    refreshes. The pipeline was presenting sixty frames a second throughout.
-
-    `sensitive` switches to a high percentile of the per-pixel difference, which
-    asks "did anything change anywhere" instead of "did the average change".
-    That is the right question for a small bright thing on a still background,
-    and the wrong one for a whole scene in motion, where it saturates.
-    """
+def changed(a, sensitive=False):
+    """Which frames differ from the one before them."""
     diff = np.abs(np.diff(a.astype(np.float32), axis=0))
     if sensitive:
-        d = np.percentile(diff.reshape(len(diff), -1), 99.9, axis=1)
-        threshold = 8.0
-    else:
-        d = diff.mean(axis=(1, 2, 3))
-    runs, run = [], 1
-    for changed in d > threshold:
-        if changed:
-            runs.append(run)
-            run = 1
-        else:
-            run += 1
-    runs.append(run)
-    return np.array(runs)
+        return np.percentile(diff.reshape(len(diff), -1), 99.9, axis=1) > 8.0
+    return diff.mean(axis=(1, 2, 3)) > 0.35
 
 
-def describe(runs, ideal=2):
-    n = len(runs)
-    print("%d distinct pictures, mean hold %.3f refreshes, std %.3f"
-          % (n, runs.mean(), runs.std()))
-    print("an even stream would hold every one of them for %d\n" % ideal)
+def holds(path, sensitive=False):
+    """Seconds each distinct picture was on screen, and the span covered."""
+    times = probe(path)
+    a = frames(path)
+    n = min(len(a), len(times))
+    if len(a) != len(times):
+        print("note: %d frames decoded, %d timestamps -- using %d\n"
+              % (len(a), len(times), n))
+    a, times = a[:n], times[:n]
+
+    marks = [times[0]]
+    for i, c in enumerate(changed(a, sensitive)):
+        if c:
+            marks.append(times[i + 1])
+    marks.append(times[-1])
+    return np.diff(np.array(marks)), times[-1] - times[0]
+
+
+def describe(seconds, span, refresh_ms=8.333):
+    refreshes = seconds * 1000.0 / refresh_ms
+    n = len(refreshes)
+    print("%d distinct pictures over %.1f s -- %.1f/s" % (n, span, n / span))
+    print("mean hold %.2f refreshes (%.2f ms), median %.2f, sd %.2f"
+          % (refreshes.mean(), seconds.mean() * 1000, np.median(refreshes),
+             refreshes.std()))
+    print("an even stream at 60 presents/s into a %.2f ms refresh holds every"
+          " picture 2\n" % refresh_ms)
     print("  refreshes   count    share")
-    for k in range(1, min(runs.max(), 14) + 1):
-        c = int((runs == k).sum())
+    rounded = np.round(refreshes).astype(int)
+    for k in range(0, min(int(rounded.max()), 12) + 1):
+        c = int((rounded == k).sum())
         if not c:
             continue
-        bar = "#" * int(round(60.0 * c / n))
-        print("  %9d %7d %6.1f%%  %s" % (k, c, 100.0 * c / n, bar))
-    over = int((runs > 14).sum())
+        print("  %9d %7d %6.1f%%  %s"
+              % (k, c, 100.0 * c / n, "#" * int(round(60.0 * c / n))))
+    over = int((rounded > 12).sum())
     if over:
-        print("  %9s %7d %6.1f%%" % (">14", over, 100.0 * over / n))
+        print("  %9s %7d %6.1f%%" % (">12", over, 100.0 * over / n))
     print()
     print("even  %.1f%%   too short %.1f%%   too long %.1f%%"
-          % ((runs == ideal).mean() * 100, (runs < ideal).mean() * 100,
-             (runs > ideal).mean() * 100))
+          % ((rounded == 2).mean() * 100, (rounded < 2).mean() * 100,
+             (rounded > 2).mean() * 100))
 
 
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    ideal = 2
-    if "--ideal" in sys.argv:
-        ideal = int(sys.argv[sys.argv.index("--ideal") + 1])
+    refresh = 8.333
+    if "--refresh" in sys.argv:
+        refresh = float(sys.argv[sys.argv.index("--refresh") + 1])
     sensitive = "--sensitive" in sys.argv
     if sensitive:
-        print("sensitive: a high percentile per pixel, for small moving objects")
-        print()
-    describe(holds(frames(sys.argv[1]), sensitive=sensitive), ideal)
+        print("sensitive: a high percentile per pixel, for small moving objects\n")
+    seconds, span = holds(sys.argv[1], sensitive)
+    describe(seconds, span, refresh)
 
 
 if __name__ == "__main__":
