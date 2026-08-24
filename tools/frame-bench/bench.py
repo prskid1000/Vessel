@@ -25,7 +25,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BENCH = os.path.join(HERE, "bench")
+BENCH = HERE
 BLOCK = 8
 
 TEXT = "That's nice for him - I had to spend two years as a cadet"

@@ -397,6 +397,18 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float fieldSign = 0f;
     /** Share of the last probe that was moving enough to have an opinion. */
     private float signVotes = 0f;
+    /**
+     * Mean block displacement in pixels, and the share of blocks at the edge of
+     * what the matcher can measure.
+     *
+     * <p>See SignMaterial. A field pinned at its search limit is not a field --
+     * every vector reads the same number whatever the truth is, so every
+     * interpolated frame under-compensates by however far the scene really went.
+     * That produces judder rather than blur, and only when the camera is fast
+     * enough and the gap wide enough to reach the limit.
+     */
+    private float fieldMagnitude = 0f;
+    private float fieldAtLimit = 0f;
     /** When the sign was last probed, so a still scene retries rather than sticks. */
     private long signProbedAt = 0;
     /** A decisive vote awaiting a second, agreeing one. See {@link #probeFieldSign}. */
@@ -412,7 +424,13 @@ public class FrameSynthesizer implements FramePacer.Target {
      * pixel is precisely the thing that was wrong.
      */
     private void probeFieldSign() {
-        if (fieldSign != 0f) return;
+        // **The sign latches once; the magnitude has to keep being read.** The
+        // search window is bounded, and whether the scene is moving further than
+        // it can measure changes from moment to moment -- it is a property of how
+        // fast the camera is turning, not of the driver. So once a diagnostic
+        // asks for the field, this keeps running after the latch purely for the
+        // magnitude, at the same once-a-second cost the sign paid.
+        if (fieldSign != 0f && !wants("field")) return;
         final long now = SystemClock.uptimeMillis();
         if (signProbedAt != 0 && now - signProbedAt < 1000) return;
         signProbedAt = now;
@@ -434,7 +452,7 @@ public class FrameSynthesizer implements FramePacer.Target {
                                     1f / Math.max(1, luma[0].width),
                                     1f / Math.max(1, luma[0].height));
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldTexture());
         signMaterial.setUniformInt(signMaterial.uniforms.screenTexture, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
@@ -464,6 +482,12 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         final float positive = (pixel.get(0) & 0xff) / 255f;
         signVotes = (pixel.get(1) & 0xff) / 255f;
+        fieldMagnitude = (pixel.get(2) & 0xff) / 255f * 256f;
+        fieldAtLimit = (pixel.get(3) & 0xff) / 255f;
+
+        // Nothing below this line is about the magnitude, and the sign only needs
+        // deciding once.
+        if (fieldSign != 0f) return;
 
         // A still frame has no opinion: both signs fetch the same content, so the
         // vote is a tie whatever the truth is. Wait for real motion rather than
@@ -865,6 +889,12 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (motionEstimationSupported()) {
             lumaTimer.begin();
             renderToTarget(lumaMaterial, written.texture, writeLuma());
+            // The same frame again at half the size. A plain blit, because the
+            // sampler's own filtering is the downsample and the matcher wants
+            // brightness rather than detail.
+            if (coarseLuma[0] != null) {
+                renderToTarget(blitMaterial, writeLuma().texture, coarseLuma[oldest()]);
+            }
             lumaTimer.end();
         }
 
@@ -1303,6 +1333,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
         texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
+        // The coarse pass, for motion the fine one cannot reach. Free: the
+        // matcher measures 0.001 ms, so the second call costs nothing worth
+        // counting. See coarseLuma.
+        if (coarseVectors != null && coarseLuma[0] != null) {
+            // **Previous first, then latest -- the same order as the fine pass
+            // above.** This was written the other way round and every
+            // substituted vector therefore pointed backwards. Measured on the
+            // laptop at a 167 px displacement: 150 px of vector error became
+            // 249, and the interpolated frame went from 20.05 RMS to 22.74,
+            // which is worse than not compensating at all (21.03). See
+            // tools/frame-bench/pyramid.py.
+            texEstimateMotion(coarseLuma[oldest()].texture, coarseLuma[newest].texture,
+                              coarseVectors.texture);
+        }
         final int error = GLES20.glGetError();
         estimateTimer.end();
         if (error != GLES20.GL_NO_ERROR) {
@@ -1311,12 +1355,20 @@ public class FrameSynthesizer implements FramePacer.Target {
             return false;
         }
 
-        // One bit about the whole field, settled once. See SignMaterial.
-        probeFieldSign();
-
         // Filtered before anything reads it, so every pass downstream sees the
         // same field. See MedianMaterial and the `filtered` pair.
         filterField();
+
+        // One bit about the whole field, settled once. See SignMaterial.
+        //
+        // **After the filter, not before.** The probe used to read `vectors`,
+        // the raw matcher output, while the coarse substitution happens inside
+        // the median filter -- so the saturation figure it reported described a
+        // field nothing downstream uses, and could not move however well or
+        // badly the extension worked. It read `mean 119 px, 90% at the search
+        // limit` identically with the coarse pass wired up, mis-wired, and
+        // absent. A metric that cannot distinguish those three is not a metric.
+        probeFieldSign();
         return true;
     }
 
@@ -1339,6 +1391,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
                                       1f / Math.max(1, vectors.width),
                                       1f / Math.max(1, vectors.height));
+        // **The limit is measured, not declared.** The extension does not report
+        // its search window, so the number that matters is where the field stops
+        // rising: 120 pixels observed, against vectors reaching 113 in the first
+        // survey of this driver. A hundred is below both, so a vector at or past
+        // it is one the fine pass can no longer be trusted about.
+        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.searchLimit,
+                                       coarseVectors != null ? 100f : 0f);
         GLES20.glViewport(0, 0, vectors.width, vectors.height);
         renderer.viewportNeedsUpdate = true;
 
@@ -1353,13 +1412,17 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
             medianMaterial.setUniformInt(medianMaterial.medianUniforms.originalTexture, 1);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
+                                 coarseVectors != null ? coarseVectors.texture : 0);
+            medianMaterial.setUniformInt(medianMaterial.medianUniforms.coarseTexture, 2);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
             source = filtered[destination].texture;
             filteredIndex = destination;
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 1; unit >= 0; unit--) {
+        for (int unit = 2; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -1433,6 +1496,37 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final Target[] colour = new Target[2];
     private final Target[] luma = new Target[2];
 
+    /**
+     * VESSEL: the same luma pair at half resolution, and the field from it.
+     *
+     * <p><b>The matcher's search window is a hard limit, and at a 67 ms gap the
+     * scene routinely moves further than it.</b> Measured on Requiem at 4x while
+     * the camera swung at full speed: mean block displacement plateaued at 120
+     * pixels and would not rise further, with 94% of blocks reporting the edge of
+     * the window. That is not a field. Every vector reads the same number
+     * whatever the truth is, so every interpolated frame under-compensates by
+     * however far the scene really went -- the picture lags, then snaps to the
+     * real frame. Judder with perfect timing, only at high speed, and only at the
+     * multiples wide enough to reach the limit.
+     *
+     * <p>The fix is free, because the matcher is free: 0.001 ms per call, measured.
+     * Run it a second time on a half-resolution pair and its vectors come back in
+     * half-resolution pixels, so the same window covers twice the distance.
+     * Doubling them gives a field that can describe motion the fine pass cannot
+     * see at all.
+     *
+     * <p>Coarser, necessarily -- a block covers 16 full-resolution pixels rather
+     * than 8, so it cannot separate two motions as finely. That is the trade, and
+     * it is only taken where the fine field has already failed: a coarse vector
+     * that is right beats a fine one pinned at its limit.
+     *
+     * <p>This is the pyramid that was tried this morning and abandoned. It was
+     * aimed at accuracy during ordinary motion, where the field is not saturated
+     * and there was nothing to win. Its value is range.
+     */
+    private final Target[] coarseLuma = new Target[2];
+    private Target coarseVectors;
+
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
         // **The guest's own resolution, not the panel's.** Every pass downstream
@@ -1488,6 +1582,20 @@ public class FrameSynthesizer implements FramePacer.Target {
                 vectors = new Target();
                 vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
 
+                // Half of each dimension, rounded down to a whole block so the
+                // extension's own requirement still holds.
+                final int cw = ((lumaW / 2) / blockX) * blockX;
+                final int ch = ((lumaH / 2) / blockY) * blockY;
+                if (cw > 0 && ch > 0) {
+                    for (int i = 0; i < 2; i++) {
+                        coarseLuma[i] = new Target();
+                        coarseLuma[i].allocate(cw, ch, GLES30.GL_R8, GLES20.GL_LINEAR);
+                    }
+                    coarseVectors = new Target();
+                    coarseVectors.allocate(cw / blockX, ch / blockY,
+                                           GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                }
+
                 // **Rendering to RGBA16F is a capability, not a given.** The
                 // matcher writes `vectors` through the extension rather than
                 // through the pipeline, so its allocation says nothing about
@@ -1534,6 +1642,8 @@ public class FrameSynthesizer implements FramePacer.Target {
                 if (luma[i] != null) luma[i].release();
             }
             if (vectors != null) vectors.release();
+            for (int i = 0; i < 2; i++) if (coarseLuma[i] != null) coarseLuma[i].release();
+            if (coarseVectors != null) coarseVectors.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
             if (signProbe != null) signProbe.release();
             if (output != null) output.release();
@@ -1541,6 +1651,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
         vectors = null;
+        coarseLuma[0] = coarseLuma[1] = null;
+        coarseVectors = null;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
         output = null;
@@ -1659,13 +1771,15 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " %s, matcher refusals %d",
+                    + " %s, mean %.0f px, %.0f%% beyond the fine window,"
+                    + " matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
                 filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
+                fieldMagnitude, fieldAtLimit * 100f,
                 estimateFailures));
         }
 
