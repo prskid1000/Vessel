@@ -47,11 +47,6 @@ public class MedianMaterial extends ScreenMaterial {
          * <p>See the shader: this is what lets the pass run more than twice.
          */
         public final Uniform originalTexture = new Uniform("originalTexture");
-        /** The same field measured at half resolution, for motion beyond the
-         *  fine pass's search window. Zero-size when unavailable. */
-        public final Uniform coarseTexture = new Uniform("coarseTexture");
-        /** Above this displacement the fine pass is at its limit and lying. */
-        public final Uniform searchLimit = new Uniform("searchLimit");
     }
 
     @Override
@@ -81,24 +76,6 @@ public class MedianMaterial extends ScreenMaterial {
             // It is de Haan's reason for keeping the matcher's own vector in a
             // 3DRS candidate set, applied to a filter rather than to a search.
             "uniform sampler2D originalTexture;",
-            // **The coarse field, for motion the fine pass cannot see.**
-            //
-            // The matcher's search window is bounded. Measured on this device at
-            // 4x with the camera swinging at full speed: mean block displacement
-            // plateaued at 120 pixels and would not rise, with 94% of blocks
-            // reporting the edge of the window. A vector at the limit is not a
-            // measurement -- it reads the same number however far the scene
-            // actually went -- so every frame built from it under-compensates,
-            // the picture lags, and then snaps to the real frame. Judder with
-            // perfect timing, only at high speed.
-            //
-            // The second pass runs on a half-resolution pair, so its vectors are
-            // in half-resolution pixels and the same window reaches twice as far.
-            // Doubling one describes motion the fine pass has no way to express.
-            // It is coarser -- a block covers 16 pixels rather than 8 -- which is
-            // why it is used only where the fine pass has already failed.
-            "uniform sampler2D coarseTexture;",
-            "uniform float searchLimit;",
             "uniform vec2 texelSize;",
             "varying vec2 vUV;",
 
@@ -127,25 +104,6 @@ public class MedianMaterial extends ScreenMaterial {
                 "vec2 c8 = texture2D(screenTexture, vUV + vec2( texelSize.x,  texelSize.y)).rg;",
                 // The tenth: what the matcher said here, before any pass ran.
                 "vec2 c9 = texture2D(originalTexture, vUV).rg;",
-
-                // Where the fine pass is pinned, take twice the coarse vector
-                // instead. Only there: a coarse vector is a worse description of
-                // a motion the fine pass could measure, and a better one of a
-                // motion it could not.
-                // **Both passes have to agree the motion is long.** A fine
-                // vector at the window is not proof the scene went that far: a
-                // block with nothing to match in it lands there on a tie-break.
-                // If the coarse pass, which sees twice as far, reports something
-                // short in the same place, the fine reading was spurious and
-                // replacing it would trade precision for nothing. Requiring
-                // both is what keeps the extension free where it is not needed.
-                "if (searchLimit > 0.0) {",
-                    "vec2 coarse = texture2D(coarseTexture, vUV).rg * 2.0;",
-                    "if (length(coarse) >= searchLimit) {",
-                        "if (length(c4) >= searchLimit) c4 = coarse;",
-                        "if (length(c9) >= searchLimit) c9 = coarse;",
-                    "}",
-                "}",
 
                 // Seeded with the centre, so the pass is a no-op wherever the
                 // nine already agree -- which is most of the field, most of the

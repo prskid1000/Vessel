@@ -452,55 +452,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
      */
     private volatile boolean guestDamaged = false;
 
-    /**
-     * VESSEL: which window event claimed each "real frame", counted.
-     *
-     * <p><b>A real frame here is any of five X11 events on any window, and only
-     * one of them is a guest present.</b> A map, an unmap, a Z-order change and
-     * a geometry change all set {@code guestDamaged}, and the draw that follows
-     * rotates the frame history, counts a real frame and restarts the phase
-     * clock exactly as a new picture would.
-     *
-     * <p>That matters because the whole pipeline is built on the interval
-     * between real frames. If events outnumber presents, the interval is too
-     * short, phases advance too fast and reach the newest frame before the next
-     * one arrives, and the schedule is laid across a span the guest is not
-     * actually using. It would also estimate motion between two captures of
-     * identical content.
-     *
-     * <p>The suspicion is concrete: vkd3d reports "Set frame rate limit to 15.0
-     * FPS via environment" and the compositor counts 23.5 real frames a second.
-     * One of those two numbers is not measuring what it says. This settles which.
-     */
-    private final java.util.concurrent.atomic.AtomicIntegerArray damageReasons =
-        new java.util.concurrent.atomic.AtomicIntegerArray(5);
-    private long damageReportedAt = 0;
-
-    private void noteDamage(int reason) {
-        damageReasons.incrementAndGet(reason);
-        final long now = android.os.SystemClock.uptimeMillis();
-        if (damageReportedAt == 0) damageReportedAt = now;
-        final long elapsed = now - damageReportedAt;
-        if (elapsed < 1000) return;
-        damageReportedAt = now;
-        final int map = damageReasons.getAndSet(0, 0);
-        final int unmap = damageReasons.getAndSet(1, 0);
-        final int zorder = damageReasons.getAndSet(2, 0);
-        final int content = damageReasons.getAndSet(3, 0);
-        final int geometry = damageReasons.getAndSet(4, 0);
-        final int total = map + unmap + zorder + content + geometry;
-        android.util.Log.i("FrameSynthesizer", String.format(
-            "fg damage: %d/s counted as real frames -- content %d, map %d,"
-                + " unmap %d, z-order %d, geometry %d."
-                + " Only content is a guest present.",
-            Math.round(total * 1000f / elapsed), content, map, unmap, zorder,
-            geometry));
-    }
-
     @Override
     public void onMapWindow(Window window) {
         guestDamaged = true;
-        noteDamage(0);
         xServerView.queueEvent(this::updateScene);
         xServerView.requestRender();
     }
@@ -508,7 +462,6 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     @Override
     public void onUnmapWindow(Window window) {
         guestDamaged = true;
-        noteDamage(1);
         xServerView.queueEvent(this::updateScene);
         xServerView.requestRender();
     }
@@ -516,7 +469,6 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     @Override
     public void onChangeWindowZOrder(Window window) {
         guestDamaged = true;
-        noteDamage(2);
         xServerView.queueEvent(this::updateScene);
         xServerView.requestRender();
     }
@@ -525,14 +477,12 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
     public void onUpdateWindowContent(Window window) {
         // The one that matters: a game rendering calls this every frame.
         guestDamaged = true;
-        noteDamage(3);
         xServerView.requestRender();
     }
 
     @Override
     public void onUpdateWindowGeometry(final Window window, boolean resized) {
         guestDamaged = true;
-        noteDamage(4);
         if (resized) {
             xServerView.queueEvent(this::updateScene);
         }

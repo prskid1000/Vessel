@@ -107,55 +107,6 @@ class FramePacer {
     private static volatile long vsyncIndex = 0;
     private static boolean counting = false;
 
-    /**
-     * VESSEL: how late each paced slot actually fires, by slot.
-     *
-     * <p><b>The quantity two failed corrections needed and neither measured.</b>
-     * The gap-by-slot breakdown says the unevenness is two gaps at the interval
-     * boundary and that slots two and three are clean at 93% and 97%.
-     * Reconstructing the modal sequence, presents land at +0, +3, +5 and +7
-     * refreshes inside an eight-refresh interval while the slots are due at +2,
-     * +4 and +6 -- every paced slot a refresh late, and the inline arrival frame
-     * on time.
-     *
-     * <p>A correction that led the slots was written for exactly this and
-     * under-corrected, because what it led by was the wrong interval: the gap
-     * from a callback's vsync to the frame reaching the screen, which measures a
-     * tenth of a refresh. The gap that matters is from when a slot was DUE to
-     * when its frame was actually shown, and nothing has ever recorded it.
-     *
-     * <p>Recorded here rather than in the synthesiser because the due time only
-     * exists here. Indexed by slot so that "the first slot is late" can be told
-     * apart from "everything is late", which are different faults.
-     */
-    private static final java.util.concurrent.atomic.AtomicLongArray lateNanos =
-        new java.util.concurrent.atomic.AtomicLongArray(9);
-    private static final java.util.concurrent.atomic.AtomicLongArray lateCount =
-        new java.util.concurrent.atomic.AtomicLongArray(9);
-
-    static void noteFired(int slot, long lateBy) {
-        if (slot < 0 || slot >= 9) return;
-        lateNanos.addAndGet(slot, lateBy);
-        lateCount.incrementAndGet(slot);
-    }
-
-    /** Mean lateness per slot in refreshes, and cleared, for the log. */
-    static String describeLateness(long refreshNanos) {
-        if (refreshNanos <= 0) return "";
-        final StringBuilder out = new StringBuilder("fg due: paced slots fire");
-        boolean any = false;
-        for (int i = 1; i < 9; i++) {
-            final long n = lateCount.getAndSet(i, 0);
-            final long total = lateNanos.getAndSet(i, 0);
-            if (n == 0) continue;
-            any = true;
-            out.append(String.format(" slot%d %+.2f", i,
-                                     (total / (double) n) / refreshNanos));
-        }
-        out.append(" refreshes from when they were due");
-        return any ? out.toString() : "";
-    }
-
     static long vsyncIndex() { return vsyncIndex; }
 
     /**
@@ -196,7 +147,6 @@ class FramePacer {
         if (multiple < 2 || intervalNanos <= 0) return;
         final long stamp = target.realFrameCount();
         for (int i = 1; i < multiple; i++) {
-            final int slot = i;
             // Evenly spaced across the interval. See the class comment for why
             // there is no longer a bias here.
             final long dueNanos = System.nanoTime() + (intervalNanos * i) / multiple;
@@ -216,9 +166,6 @@ class FramePacer {
                             choreographer.postFrameCallback(this);
                             return;
                         }
-                        // What this callback cost against its own deadline.
-                        // See lateNanos.
-                        noteFired(slot, frameTimeNanos - dueNanos);
                         target.onSynthesisDue(frameTimeNanos);
                     }
                 });
