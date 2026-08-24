@@ -174,14 +174,7 @@
           "title": "Multiple",
           "help": "Shows frames the guest never drew, built between the last two it did rather than guessed past them: the GPU’s block matcher measures where everything moved, and each synthesised frame reads both real frames along that motion. Costs one frame of latency, because a frame cannot be shown until the frames belonging before it have been. Sharpest at 2x. EXPERIMENTAL.",
           "type": "enum",
-          "options": [
-            "off",
-            "2",
-            "3",
-            "4",
-            "6",
-            "8"
-          ],
+          "options": ["off", "2", "3", "4", "5", "6", "7", "8"],
           "default": "off",
           "optionLabels": {
             "off": "Off",

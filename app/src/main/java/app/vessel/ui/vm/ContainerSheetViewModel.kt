@@ -12,6 +12,8 @@ import app.vessel.core.parseGeometry
 import kotlinx.coroutines.flow.first
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.params.ParamType
+import app.vessel.core.FrameGenerationLimits
+import app.vessel.data.DisplayCapabilities
 import app.vessel.core.params.ParamValue
 import app.vessel.core.params.ResolvedParam
 import app.vessel.core.params.resolve
@@ -219,6 +221,7 @@ class ContainerSheetViewModel @Inject constructor(
     private val inputProfiles: InputProfileRepository,
     private val paths: ContainerPaths,
     private val json: Json,
+    private val displays: DisplayCapabilities,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ContainerSheetUiState())
@@ -644,9 +647,24 @@ class ContainerSheetViewModel @Inject constructor(
         val current = draft ?: return
         val values = currentManifest.defaults() + current.params
 
+        // **What this container can actually use, not what the feature offers.**
+        //
+        // The frame generation ceiling depends on two other settings and on the
+        // panel, and it points in opposite directions for the two modes -- see
+        // FrameGenerationLimits. A list written into the manifest would be wrong
+        // for one mode and wrong again on the next phone, so it is narrowed here,
+        // where the sibling values and the display are both in reach.
+        val fpsLimit = (values[DisplayParams.FPS_LIMIT] as? ParamValue.Text)
+            ?.value?.toIntOrNull()
+        val divides = (values[DisplayParams.FRAME_GENERATION_MODE] as? ParamValue.Text)
+            ?.value != DisplayParams.FRAME_GENERATION_MODE_SMOOTHNESS
+        val panelHz = displays.maxRefreshHz()
+
         val groups = currentManifest.groups.mapNotNull { group ->
             val params = group.params
-                .mapNotNull { spec -> spec.resolve(values)?.let { toEditorParam(it) } }
+                .mapNotNull { spec ->
+                    spec.resolve(values)?.let { toEditorParam(narrow(it, fpsLimit, divides, panelHz)) }
+                }
             if (params.isEmpty()) null else EditorGroup(group.id, group.title, group.help, params)
         }
 
@@ -721,6 +739,27 @@ class ContainerSheetViewModel @Inject constructor(
             sessionCount = logSessionCount,
             neverLaunched = profile.lastRun == null,
         )
+    }
+
+    /**
+     * Narrow the frame generation options to the ones this container can use.
+     *
+     * <p>Everything else passes through untouched. See [FrameGenerationLimits]
+     * for why the ceiling cannot be a constant and why the two modes disagree
+     * about which direction it moves in.
+     */
+    private fun narrow(
+        resolved: ResolvedParam,
+        fpsLimit: Int?,
+        divides: Boolean,
+        panelHz: Int,
+    ): ResolvedParam {
+        if (resolved.spec.key != DisplayParams.FRAME_GENERATION) return resolved
+        val allowed = FrameGenerationLimits.allowed(
+            resolved.spec.options, fpsLimit, divides, panelHz,
+        )
+        if (allowed.size == resolved.spec.options.size) return resolved
+        return resolved.copy(spec = resolved.spec.copy(options = allowed))
     }
 
     private fun toEditorParam(resolved: ResolvedParam): EditorParam {

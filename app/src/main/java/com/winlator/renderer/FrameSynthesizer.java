@@ -535,6 +535,27 @@ public class FrameSynthesizer implements FramePacer.Target {
      * actually delivers every 45 ms the number of refreshes in that gap changes
      * with it, and so does the answer.
      */
+    /**
+     * The widest gap between real frames still worth interpolating across.
+     *
+     * <p><b>The multiple adapting to a stall was filling it with invention.</b>
+     * Measured on Requiem at 8x: the guest fell to 7.3 frames a second, a 137 ms
+     * interval, and the refresh check fitted all eight -- there are sixteen
+     * refreshes in 137 ms, so by that test nothing was wrong. But the refresh
+     * check asks whether there is somewhere to *put* a frame and never whether
+     * the frame is worth making. Every part of this pipeline degrades with the
+     * distance between the two real frames it reads, and 137 ms is twice the
+     * 66 ms gap that already produces the ambiguity, the ripple and the ghosting.
+     *
+     * <p>A hundred milliseconds, ten frames a second, and derived rather than
+     * chosen: the widest gap any configuration the settings offer can
+     * legitimately produce is a 24 fps limit at 2x, which leaves the guest at 12
+     * and the gap at 83 ms. So every valid setup passes, and anything wider means
+     * the guest has stopped rather than slowed -- where the honest response is to
+     * show the frame that exists rather than invent seven around it.
+     */
+    private static final long WORTH_INTERPOLATING_NANOS = 100_000_000L;
+
     private int effectiveMultiple() {
         // **Not clamped to the fps limit, deliberately.**
         //
@@ -553,9 +574,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         // unevenly spaced still reads as smoother than fewer frames evenly
         // spaced at this rate.
         //
-        // What is left is the one clamp that is not a preference: an interval
-        // cannot carry more frames than it contains refreshes.
+        // What is left are the two clamps that are not preferences: a gap too
+        // wide to interpolate across, and an interval that cannot carry the
+        // frames. See WORTH_INTERPOLATING_NANOS for the first.
         if (multiple < 2) return 1;
+        if (smoothedInterval > WORTH_INTERPOLATING_NANOS) return 1;
         final long period = vsyncPeriodNanos();
         if (period <= 0 || smoothedInterval <= 0) return multiple;
         final int refreshes = (int)(smoothedInterval / period);

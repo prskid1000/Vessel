@@ -40,6 +40,7 @@ import app.vessel.core.fexCacheLink
 import app.vessel.core.hardwareLimits
 import app.vessel.core.isDisplayAbsenceDiagnostic
 import app.vessel.core.params.ParamManifest
+import app.vessel.core.FrameGenerationLimits
 import app.vessel.core.params.ParamValue
 import app.vessel.core.parseFpsLimit
 import app.vessel.core.parseGeometry
@@ -206,6 +207,7 @@ class SessionRuntime @Inject constructor(
     private val setup: ComponentSetup,
     private val inputProfiles: InputProfileRepository,
     private val json: Json,
+    private val displays: DisplayCapabilities,
 ) : PrefixBootstrap {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -587,9 +589,6 @@ class SessionRuntime @Inject constructor(
         val geometry = parseGeometry(text(profile, manifest, DisplayParams.RESOLUTION), native)
         val fpsLimit = parseFpsLimit(text(profile, manifest, DisplayParams.FPS_LIMIT))
         val upscaler = upscalerOf(profile, manifest)
-        val frameGeneration = parseFrameGeneration(
-            text(profile, manifest, DisplayParams.FRAME_GENERATION),
-        )
         // Which of the two things `fpsLimit` counts. See
         // DisplayRequest.frameGenerationDivides -- the panel's refresh depends on
         // it, so the display layer needs it too and not only the environment.
@@ -597,6 +596,9 @@ class SessionRuntime @Inject constructor(
             text(profile, manifest, DisplayParams.FRAME_GENERATION_MODE) !=
                 DisplayParams.FRAME_GENERATION_MODE_SMOOTHNESS
 
+        val frameGeneration = parseFrameGeneration(
+            text(profile, manifest, DisplayParams.FRAME_GENERATION),
+        )
         _state.value = SessionState(
             containerId = containerId,
             containerName = profile.name,
@@ -609,6 +611,33 @@ class SessionRuntime @Inject constructor(
 
         units = GuestUnits()
         val log = logs.open(containerId, startedAt, profile.diagnostics.limits)
+
+        // **Clamped here as well as in the settings sheet, because a document
+        // outlives the sheet that wrote it.** A container saved at 8x and later
+        // moved to a 30 fps limit still holds "8", and nothing else on this path
+        // would notice. See FrameGenerationLimits for why the ceiling is
+        // arithmetic over the limit, the mode and the panel rather than a table:
+        // the two modes bound it in opposite directions, and only one of them is
+        // the same on every device.
+        val carried = FrameGenerationLimits.clamp(
+            frameGeneration, fpsLimit, frameGenerationDivides, displays.maxRefreshHz(),
+        )
+        if (carried != frameGeneration) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "frame generation asked for ${frameGeneration}x and this container can carry " +
+                    "${carried}x: " +
+                    if (frameGenerationDivides) {
+                        "$fpsLimit fps divided by $frameGeneration would run the game below " +
+                            "${FrameGenerationLimits.MIN_GUEST_FPS} fps, where the motion field " +
+                            "stops describing the scene"
+                    } else {
+                        "$fpsLimit fps times $frameGeneration is more frames a second than this " +
+                            "${displays.maxRefreshHz()} Hz panel can show"
+                    },
+            )
+        }
         // **The header no longer names component versions, because at this
         // point it cannot know them.**
         //
@@ -656,7 +685,7 @@ class SessionRuntime @Inject constructor(
         try {
             prepare(containerId, profile, manifest, fpsLimit, log) ?: return
             runDesktop(
-                log, geometry, fpsLimit, upscaler, frameGeneration,
+                log, geometry, fpsLimit, upscaler, carried,
                 profile.diagnostics.frameGenerationLog(), frameGenerationDivides,
             )
         } finally {
