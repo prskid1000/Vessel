@@ -1,0 +1,66 @@
+vkd3d: an explicit frame rate cap must not depend on present_wait.
+
+`VKD3D_FRAME_RATE` is read at swapchain init, sets `frame_rate_limit.enable`
+and `has_user_override`, and announces itself:
+
+    dxgi_vk_swap_chain_init_frame_rate_limiter:
+      Set frame rate limit to 15.0 FPS via environment.
+
+And then never runs. The function that actually sleeps is called from one
+place, behind a gate that has nothing to do with the cap:
+
+    if (chain->present.wait && !entry.present_timing_enabled)
+        dxgi_vk_swap_chain_delay_next_frame(chain, end_frame_time_ns);
+
+`chain->present.wait` is `presentWait || wait2`, and on this device it is
+false -- the neighbouring FIXME fires in every session log:
+
+    Implementation supports neither present_wait1 or present_wait2.
+    Latency will increase.
+
+So a cap the user asked for is configured, logged, and silently discarded.
+Measured on device with `VKD3D_FRAME_RATE=15`: Requiem delivers **42 frames a
+second**, and the D3D11 title in the same container with DXVK's independent
+limiter and the same cap delivers exactly 15.0. That is the whole difference
+between the two APIs stuttering differently, and it is one condition.
+
+`delay_next_frame` is safe to call without present_wait. Its only use of the
+flag is choosing `frame_latency` for the *heuristic*, which decides whether to
+engage a limiter that was not explicitly requested -- and that branch is
+skipped outright when `enable` is already true, which an explicit cap makes it.
+Everything after that is the deadline arithmetic, which needs a completion time
+and nothing else. Without present_wait the wait thread takes the
+`drain_complete_semaphore` path instead, so `end_frame_time_ns` is still a real
+present completion; it is a weaker instant than scanout, which is exactly what
+the FIXME above is warning about, and it is what DXVK's limiter has always used
+to pace this container's D3D11 titles correctly.
+
+Gated on `has_user_override` rather than on `enable`, so this changes behaviour
+only where the user set the variable. The heuristic path, which needs
+present_wait to reason about buffering, is left exactly as it was.
+
+diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
+index 5f2e9355..58dad508 100644
+--- a/libs/vkd3d/swapchain.c
++++ b/libs/vkd3d/swapchain.c
+@@ -3659,7 +3659,19 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
+ 
+         end_frame_time_ns = vkd3d_get_current_time_ns();
+ 
+-        if (chain->present.wait && !entry.present_timing_enabled)
++        /* An explicitly requested cap does not depend on present_wait.
++         *
++         * This gate used to be `chain->present.wait` alone, so on an
++         * implementation offering neither present_wait1 nor present_wait2 the
++         * limiter was initialised, announced in the log, and then never asked
++         * to sleep. delay_next_frame only consults present.wait to size the
++         * heuristic's frame latency, and the heuristic is skipped when the
++         * limiter is already enabled -- which an explicit VKD3D_FRAME_RATE
++         * makes it. Without present_wait the completion time is a drained
++         * semaphore rather than scanout, which is less precise and is what the
++         * FIXME at init already warns about. */
++        if ((chain->present.wait || chain->frame_rate_limit.has_user_override) &&
++                !entry.present_timing_enabled)
+             dxgi_vk_swap_chain_delay_next_frame(chain, end_frame_time_ns);
+ 
+         /* If we're rendering with IMMEDIATE, we ignore present timing. */
