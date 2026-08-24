@@ -631,14 +631,22 @@ public class FrameSynthesizer implements FramePacer.Target {
      * where one pass reads the filtered field and another reads the matcher's.
      */
     private int fieldTexture() {
-        // **rawField(), not vectors.** When the refine pass has run, `vectors`
-        // holds the RESIDUAL against a displaced image and the true field is
-        // that plus the guess, which is what rawField returns. Falling back to
-        // `vectors` here would warp by a near-zero residual and the picture
-        // would barely move -- silently, and only on the path where the median
-        // filter could not allocate.
-        return filteredIndex >= 0 ? filtered[filteredIndex].texture
-                                  : rawField().texture;
+        // **vectors, deliberately, even though it is the residual once the
+        // refine pass has run.**
+        //
+        // Returning the full field here instead was tried, on the argument that
+        // the residual alone is not the motion. It was reported from the device
+        // as objects shattering, and the argument was incomplete: this is the
+        // path where the median filter has NOT run, so whatever comes back is
+        // raw block-matcher output. Raw and small warps the picture hardly at
+        // all; raw and carrying the guess warps every block by a large vector
+        // that disagrees with its neighbours, which is what shattering is.
+        //
+        // Neither is correct. One is quiet about it. Until the reachability of
+        // this path is established -- it should require the median targets to
+        // have failed to allocate -- quiet is the right default, and the fix
+        // belongs in filterField rather than here.
+        return filteredIndex >= 0 ? filtered[filteredIndex].texture : vectors.texture;
     }
 
     /** Whether the field estimated at the last real frame is usable. */
