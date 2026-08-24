@@ -32,6 +32,26 @@ Noise is the point, not a detail. Without it the two costs are exactly tied or
 exactly separated and nothing flips; with it, near-ties resolve differently each
 frame, which is the artefact.
 
+READ THE FIGURES AS RELATIVE, NOT ABSOLUTE. This scores the field the matcher
+produces, BEFORE the ten median passes the device runs over it. Those passes
+exist precisely to suppress vectors that disagree with their neighbours, so the
+raw jitter here is far larger than anything that reaches the screen: measured on
+a sequence whose true motion never changes, the unaimed field moves 52.2 px
+between consecutive pairs and the aimed field 51.8 -- while the global guess
+driving the aiming is bit-for-bit identical every frame, at (-40, 8).
+
+That control matters, because without it these numbers look like an indictment
+of the refine pass and they are nothing of the sort. The instability is the block
+matcher on flat and ambiguous content, it predates every change made this year,
+and the median filter is the answer to it.
+
+What the tool is good for is the DIFFERENCE between two algorithms on identical
+input. When the two-hypothesis chooser added 14.3% of blocks changing their
+answer while the motion never changed, that 14.3% was new, and it was the
+flashing reported from the device. It also showed a decision margin cutting the
+flips almost in half while leaving output flicker at 36.8% either way -- which
+is exactly what the margin did on the phone: fewer switches, no less flashing.
+
     python flicker.py
 """
 import numpy as np
