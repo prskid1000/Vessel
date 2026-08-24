@@ -33,15 +33,27 @@ import sys
 import numpy as np
 
 import bench
+import consensus
 import gameplay
 import pyramid as P
 
 BLOCK = P.BLOCK
+MEDIAN_PASSES = 10
 
 
-def interpolate(a, c):
-    """Our pipeline's answer for the midpoint of a and c."""
+def interpolate(a, c, filtered=True):
+    """Our pipeline's answer for the midpoint of a and c.
+
+    **Filtered, because the device filters.** The first version of this file
+    warped with the raw block-matcher output and reported that interpolation was
+    43% worse than a plain blend -- a number that says nothing about the shipped
+    pipeline, which runs ten anchored median passes over the field before
+    anything reads it. That filter is what took edge waviness from 9.54 px to
+    0.013; leaving it out measures an algorithm nobody runs.
+    """
     field = bench.estimate(c, a, radius=P.WINDOW)
+    if filtered:
+        field = consensus.vector_median(field, field, passes=MEDIAN_PASSES)
     return P.warp(c, a, field, 0.5)
 
 
@@ -70,7 +82,7 @@ def main():
     got = gameplay.triples(sys.argv[1], limit)
     print("%d triples of consecutive real frames\n" % len(got))
 
-    ours, held, blended = [], [], []
+    ours, raw, held, blended = [], [], [], []
     on_edge, off_edge, on_seam, off_seam, worst1 = [], [], [], [], []
 
     for A, B, C, _ in got:
@@ -78,6 +90,7 @@ def main():
         err = np.abs(mid - B).mean(axis=2)
 
         ours.append(np.sqrt((err ** 2).mean()) * 255)
+        raw.append(np.sqrt(((interpolate(A, C, filtered=False) - B) ** 2).mean()) * 255)
         held.append(np.sqrt(((A - B) ** 2).mean()) * 255)
         blended.append(np.sqrt((((A + C) / 2 - B) ** 2).mean()) * 255)
 
@@ -98,7 +111,8 @@ def main():
     print("  %-34s %8s" % ("against the real middle frame", "rms"))
     print("  %-34s %8.2f" % ("show the old frame", m(held)))
     print("  %-34s %8.2f" % ("blend, no motion compensation", m(blended)))
-    print("  %-34s %8.2f" % ("interpolated", m(ours)))
+    print("  %-34s %8.2f" % ("interpolated, raw field", m(raw)))
+    print("  %-34s %8.2f" % ("interpolated, 10 median passes", m(ours)))
     print()
     print("  WHERE THE ERROR IS (mean absolute, levels)")
     print("  %-34s %8.2f" % ("on edges", m(on_edge)))
