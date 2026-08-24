@@ -44,11 +44,50 @@ final class FrameTimestamps {
         System.loadLibrary("winlator");
     }
 
-    private static native boolean enable();
+    /** @return a bitmask over {@link #CANDIDATES}, or 0 if the surface offers none. */
+    private static native int enable();
 
     private static native long nextFrameId();
 
-    private static native long presentTime(long frameId);
+    private static native long presentTime(long frameId, int token);
+
+    /** Writes {composite-to-present latency, composite interval} in nanoseconds. */
+    private static native void compositorTiming(long[] out);
+
+    // The registry's values, so a log line can name what it is reporting.
+    private static final int DISPLAY_PRESENT = 0x343A;
+    private static final int LAST_COMPOSITION = 0x3438;
+    private static final int FIRST_COMPOSITION = 0x3437;
+    private static final int LATCH = 0x3436;
+
+    /**
+     * The tokens worth asking for, best first.
+     *
+     * <p>Only the first measures the display. The rest measure the compositor and
+     * need {@link #presentLatencyNanos} added to mean anything about the screen.
+     */
+    private static final int[] CANDIDATES =
+        {DISPLAY_PRESENT, LAST_COMPOSITION, FIRST_COMPOSITION, LATCH};
+
+    /**
+     * How many invalid answers in a row condemn a token.
+     *
+     * <p>A frame can legitimately be unaccountable -- dropped, or the surface
+     * resized under it -- so one invalid means nothing. Thirty-two in a row, with
+     * nothing else having succeeded, means the surface cannot answer this
+     * question however firmly it said it could.
+     */
+    private static final int CONDEMN_AFTER = 32;
+
+    private static String sourceName(int token) {
+        switch (token) {
+            case DISPLAY_PRESENT: return "the display's own scanout time";
+            case LAST_COMPOSITION: return "SurfaceFlinger's last composition, corrected";
+            case FIRST_COMPOSITION: return "SurfaceFlinger's first composition, corrected";
+            case LATCH: return "the buffer latch, corrected";
+            default: return "an unknown source";
+        }
+    }
 
     /** The extension's own sentinels, passed through by the native side. */
     private static final long PENDING = -2L;
@@ -71,6 +110,37 @@ final class FrameTimestamps {
      */
     private boolean available = false;
     private boolean asked = false;
+    /**
+     * Which timestamp this surface answers.
+     *
+     * <p><b>The first version asked only for the scanout time and reported
+     * nothing when it came back invalid, which on this device was every frame of
+     * a whole session.</b> That timestamp comes from the hardware composer's
+     * present fence, so a surface routed through GPU composition, or a display
+     * pipeline that does not report fences, cannot produce it -- and the spec
+     * says outright that not every implementation supports every query. It also
+     * provides the question that was not being asked,
+     * {@code eglGetFrameTimestampSupportedANDROID}, so the choice is now made
+     * from what the surface admits to rather than from what would be nicest.
+     */
+    private int source = 0;
+    /** Which of {@link #CANDIDATES} is being tried. */
+    private int candidate = 0;
+    /** Claimed support, from {@link #enable()}. */
+    private int supported = 0;
+    /** Invalid answers in a row for the current token, and whether any worked. */
+    private int refused = 0;
+    private boolean everAnswered = false;
+    /**
+     * The platform's own estimate of composition-start to on-screen.
+     *
+     * <p>Only the scanout timestamp needs no correction. Every fallback measures
+     * the compositor rather than the display, and this is the documented gap
+     * between the two -- so a composition time plus this is an honest estimate of
+     * a present time, and saying which of the two produced a number is the
+     * difference between a measurement and a guess wearing its clothes.
+     */
+    private long presentLatencyNanos = 0;
 
     /** Present times are useless in isolation; the gaps between them are not. */
     private long lastPresentNanos = 0;
@@ -91,7 +161,10 @@ final class FrameTimestamps {
     void onDraw() {
         if (!asked) {
             asked = true;
-            available = enable();
+            supported = enable();
+            available = supported != 0;
+            candidate = -1;
+            advance();
         }
         if (!available) return;
 
@@ -108,6 +181,32 @@ final class FrameTimestamps {
     }
 
     /**
+     * Move to the next token the surface claims, and set the correction for it.
+     *
+     * <p>Called at the start and again whenever the current token has refused
+     * enough frames to be disbelieved.
+     */
+    private void advance() {
+        for (int i = candidate + 1; i < CANDIDATES.length; i++) {
+            if ((supported & (1 << i)) == 0) continue;
+            candidate = i;
+            source = CANDIDATES[i];
+            refused = 0;
+            presentLatencyNanos = 0;
+            if (source != DISPLAY_PRESENT) {
+                final long[] timing = new long[2];
+                compositorTiming(timing);
+                presentLatencyNanos = timing[0];
+            }
+            return;
+        }
+        // Nothing left to try.
+        candidate = CANDIDATES.length;
+        source = 0;
+        available = false;
+    }
+
+    /**
      * Turn every resolved id into a gap, oldest first.
      *
      * <p>Oldest first matters. The gap between two presents is only meaningful
@@ -120,7 +219,7 @@ final class FrameTimestamps {
         while (held > 0) {
             final int tail = (head - held + RING) % RING;
             final long id = ids[tail];
-            final long when = presentTime(id);
+            final long when = presentTime(id, source);
 
             if (when == PENDING) return;
             held--;
@@ -131,11 +230,22 @@ final class FrameTimestamps {
                 // across the hole.
                 unaccounted++;
                 lastPresentNanos = 0;
+                // **And the claim of support is not the last word.** Measured on
+                // this device: the support query returns true for the scanout
+                // time and then every frame is invalid. A token that has refused
+                // this many in a row without ever answering is not going to.
+                if (!everAnswered && ++refused >= CONDEMN_AFTER) {
+                    advance();
+                    if (!available) return;
+                }
                 continue;
             }
+            everAnswered = true;
 
+            // A composition time is not a present time. See presentLatencyNanos.
+            final long shown = when + presentLatencyNanos;
             if (lastPresentNanos != 0) {
-                final long gap = when - lastPresentNanos;
+                final long gap = shown - lastPresentNanos;
                 // A quarter second is a pause, not a cadence -- the same rule the
                 // draw-side measurement uses, so the two are comparable.
                 if (gap > 0 && gap < 250_000_000L) {
@@ -145,7 +255,7 @@ final class FrameTimestamps {
                     gaps++;
                 }
             }
-            lastPresentNanos = when;
+            lastPresentNanos = shown;
         }
     }
 
@@ -164,6 +274,13 @@ final class FrameTimestamps {
         return asked && !available;
     }
 
+    /** What the numbers below actually measure. See {@link #source}. */
+    String sourceDescription() {
+        return sourceName(source)
+            + (source != DISPLAY_PRESENT && presentLatencyNanos > 0
+               ? String.format(" (+%.1f ms)", presentLatencyNanos / 1.0e6f) : "");
+    }
+
     /**
      * One line describing the real cadence, and reset for the next second.
      *
@@ -172,19 +289,31 @@ final class FrameTimestamps {
      */
     String describe(long refreshNanos) {
         if (gaps == 0) {
+            // **Whether the compositor will talk to us at all.** Per-frame
+            // timestamps and compositor timing are separate calls into
+            // SurfaceFlinger, and a surface that answers none of the first can
+            // still answer the second -- which at least yields an authoritative
+            // refresh interval, and says whether the silence is this surface or
+            // the whole path.
+            final long[] timing = new long[2];
+            compositorTiming(timing);
+            final String composite = timing[1] > 0
+                ? String.format("; the compositor does answer, interval %.2f ms,"
+                    + " present latency %.2f ms",
+                    timing[1] / 1.0e6f, timing[0] / 1.0e6f)
+                : "; the compositor does not answer either";
             final String none = String.format(
-                "fg presented: the display accepted the request and then could not"
-                    + " account for any of %d frames -- this surface has no real"
-                    + " present times, so every cadence figure is a draw schedule",
-                unaccounted);
+                "fg presented: %s was chosen and then could not account for any of"
+                    + " %d frames -- so every cadence figure is a draw schedule%s",
+                sourceDescription(), unaccounted, composite);
             unaccounted = 0;
             return none;
         }
         final float mean = gapTotal / (float)gaps / 1e6f;
         final String line = String.format(
             "fg presented: %.1f ms mean, %.1f shortest, %.1f longest, over %d"
-                + " frames the display confirmed%s (a refresh is %.2f ms)",
-            mean, gapMin / 1e6f, gapMax / 1e6f, gaps,
+                + " frames, from %s%s (a refresh is %.2f ms)",
+            mean, gapMin / 1e6f, gapMax / 1e6f, gaps, sourceDescription(),
             unaccounted > 0 ? ", " + unaccounted + " it could not account for" : "",
             refreshNanos / 1e6f);
         gapMin = Long.MAX_VALUE;

@@ -695,6 +695,21 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private final FrameTimestamps timestamps = new FrameTimestamps();
 
+    /**
+     * VESSEL: presents that landed on a refresh another present had already used.
+     *
+     * <p>The one thing the cadence numbers could never establish. A gap measured
+     * on this thread says when a draw was issued, and two draws issued 0.3 ms
+     * apart may or may not have shared a scanout depending on a queue nothing
+     * here can see. Counting the display's own refreshes settles it: two presents
+     * recording the same refresh shared it, and the earlier one was never shown.
+     *
+     * <p>See FramePacer.vsyncIndex for why this replaces the timestamp the
+     * platform refuses to provide.
+     */
+    private long lastPresentVsync = -1;
+    private long collisions = 0;
+
     private long lastPresentNanos = 0;
     private long presentGapMin = Long.MAX_VALUE;
     private long presentGapMax = 0;
@@ -704,7 +719,12 @@ public class FrameSynthesizer implements FramePacer.Target {
     private void notePresented() {
         // Before the swap, which is the only moment the frame about to be
         // produced has an id. See FrameTimestamps.onDraw.
-        if (wants("pacing")) timestamps.onDraw();
+        if (wants("pacing")) {
+            timestamps.onDraw();
+            final long vsync = FramePacer.vsyncIndex();
+            if (vsync == lastPresentVsync) collisions++;
+            lastPresentVsync = vsync;
+        }
         final long now = System.nanoTime();
         if (lastPresentNanos != 0) {
             final long gap = now - lastPresentNanos;
@@ -841,6 +861,9 @@ public class FrameSynthesizer implements FramePacer.Target {
         // interval it belongs to. That delay is the whole latency cost of
         // interpolation and is what buys an answerable question.
         if (wants("setup")) announce();
+        // The display's own refresh counter, for the collision check that
+        // replaces the scanout timestamp this device will not provide.
+        if (wants("pacing")) FramePacer.countRefreshes();
 
         // **The interval is measured before anything is presented, because the
         // present depends on it.** It used to be taken afterwards, so the
@@ -1519,9 +1542,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             // right and that one is measuring the queue.
             Log.i(TAG, timestamps.describe(vsyncPeriodNanos()));
         } else if (wants("pacing") && timestamps.unavailable()) {
-            Log.i(TAG, "fg presented: the display cannot report present times on"
-                + " this surface; every cadence figure below is a draw schedule,"
-                + " not a scanout");
+            Log.i(TAG, "fg presented: this surface answers none of the frame"
+                + " timestamps -- not scanout, not composition, not latch. Every"
+                + " cadence figure below is a draw schedule.");
         }
 
         if (wants("pacing") && presentGaps > 0) {
@@ -1530,9 +1553,12 @@ public class FrameSynthesizer implements FramePacer.Target {
             // refresh -- the first never scanned out -- and then a long wait.
             Log.i(TAG, String.format(
                 "fg cadence: presented every %.1f ms mean, %.1f shortest,"
-                    + " %.1f longest, over %d gaps",
+                    + " %.1f longest, over %d gaps; %d shared a refresh with"
+                    + " the present before them and were never shown",
                 presentGapTotal / (float)presentGaps / 1e6f,
-                presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps));
+                presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps,
+                collisions));
+            collisions = 0;
             presentGapMin = Long.MAX_VALUE;
             presentGapMax = 0;
             presentGapTotal = 0;

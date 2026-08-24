@@ -76,6 +76,62 @@ class FramePacer {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Target target;
 
+    /**
+     * VESSEL: which display refresh is currently on screen, counted.
+     *
+     * <p><b>Because the platform will not say when a frame was scanned out, and
+     * the question that needed answering was never really "when".</b>
+     * EGL_ANDROID_get_frame_timestamps is inert on this device -- the extension
+     * resolves, enabling collection on the surface succeeds,
+     * eglGetFrameTimestampSupportedANDROID claims all four timestamps, and then
+     * every frame of every session comes back EGL_TIMESTAMP_INVALID_ANDROID for
+     * all of them. eglGetCompositorTimingANDROID does not answer either.
+     *
+     * <p>What that measurement was wanted for is narrower than it sounds. Two
+     * frames presented into one refresh means the first was never seen: work
+     * done, power spent, nothing shown -- and that failure is invisible to a
+     * frame count by construction, which is the whole reason it needed its own
+     * instrument. Knowing the exact nanosecond of scanout is not required to
+     * detect it. Knowing which refresh each present landed on is.
+     *
+     * <p>The Choreographer hands over a vsync timestamp on every pulse, and
+     * counting those pulses gives exactly that -- a number that increments once
+     * per refresh, in the display's own rhythm rather than in this thread's.
+     * Two presents recording the same value shared a scanout, and no timestamp
+     * from anywhere is needed to say so.
+     *
+     * <p>Volatile and static: written by the one callback below on the main
+     * thread, read by the synthesiser on the GL thread, and belonging to the
+     * display rather than to any instance.
+     */
+    private static volatile long vsyncIndex = 0;
+    private static boolean counting = false;
+
+    static long vsyncIndex() { return vsyncIndex; }
+
+    /**
+     * Start counting refreshes, once, and never stop.
+     *
+     * <p>One Choreographer callback that re-posts itself. The platform is already
+     * running this clock for anything on screen, so subscribing to it costs a
+     * callback per refresh and nothing else. Started only when a diagnostic asked
+     * for pacing, because that is the only thing that reads the count.
+     */
+    static void countRefreshes() {
+        if (counting) return;
+        counting = true;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            final Choreographer choreographer = Choreographer.getInstance();
+            choreographer.postFrameCallback(new Choreographer.FrameCallback() {
+                @Override
+                public void doFrame(long frameTimeNanos) {
+                    vsyncIndex++;
+                    choreographer.postFrameCallback(this);
+                }
+            });
+        });
+    }
+
     FramePacer(Target target) {
         this.target = target;
     }
