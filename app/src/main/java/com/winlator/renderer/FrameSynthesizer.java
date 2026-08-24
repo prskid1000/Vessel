@@ -319,23 +319,40 @@ public class FrameSynthesizer implements FramePacer.Target {
     /** Which of {@link #filtered} the interpolation should read, or -1 for none. */
     private int filteredIndex = -1;
     /**
-     * <b>Six, measured, and deliberately not ten.</b>
+     * <b>Ten, measured on four scenes, and the reason it is not six is that the
+     * objection to ten was tested and failed.</b>
      *
-     * <p>Anchored passes keep improving: 3.10 at two, 2.14 at three, 1.55 at
-     * five, 0.576 at six, and 0.013 at ten -- which is the ground truth's own
-     * figure, a perfectly straight edge.
+     * <p>Anchored passes keep improving the straight edge right to ten, where the
+     * waviness reaches 0.013 px -- the ground truth's own figure. That was held
+     * back to six at first on the suspicion that reaching it exactly meant the
+     * field had converged to piecewise constant, which is correct for the rigid
+     * motions both original bench scenes contain and would be wrong for real
+     * depth parallax, where motion is a smooth gradient and a locally-constant
+     * field would staircase it into block-wide steps.
      *
-     * <p>Ten is not taken, because reaching the ground truth exactly means the
-     * field converged to piecewise-constant, and on a bench holding two rigid
-     * motions that is the right answer. A real camera pan is depth-varying
-     * parallax, which is a smooth gradient of motion, and enough passes would
-     * staircase it. Neither bench scene can show that, so the last stretch of
-     * that curve is partly a property of the test rather than of the filter.
+     * <p>So a third scene was built to catch exactly that: a ground plane with
+     * horizontal sweep ramping from 8 px at the horizon to 72 at the front, and a
+     * metric that reports the staircase specifically -- the second difference of
+     * the field down the rows, which is zero for any straight ramp and spikes at
+     * every step. It does not staircase. Banding *falls* with passes and settles:
      *
-     * <p>Six is where the artefact stops being visible -- 0.576 of a pixel -- at
-     * two thirds the cost and without leaning on what the bench cannot check.
+     * <pre>
+     *   passes        waviness   objEdge   gradBand   gradErr    ink
+     *   none             9.540      6.70     4.0293     1.287   0.55
+     *   six              0.576      4.92     1.1875     0.642   0.62
+     *   ten              0.013      4.87     1.1861     0.641   0.68
+     *   twenty               -         -     1.1889     0.639      -
+     * </pre>
+     *
+     * <p>The anchor is why. The matcher's original vector encodes the true ramp
+     * and stays a candidate on every pass, so the field cannot converge away from
+     * it -- the same mechanism that lets the passes repeat is the one that
+     * protects the gradient.
+     *
+     * <p>What ten costs is 0.13 levels on subtitle glyphs, against the 5.8 levels
+     * the per-pixel static test wins there, and about 0.9 ms of a 33 ms budget.
      */
-    private static final int MEDIAN_PASSES = 6;
+    private static final int MEDIAN_PASSES = 10;
 
     private int blockX = 8, blockY = 8;
 
