@@ -2207,6 +2207,11 @@ public class FrameSynthesizer implements FramePacer.Target {
                 latencyHeld));
         }
 
+        if (wants("slots")) {
+            final String late = FramePacer.describeLateness(vsyncPeriodNanos());
+            if (!late.isEmpty()) Log.i(TAG, late);
+        }
+
         if (wants("slots") && slotHeld > 1) {
             // Oldest first, from the ring.
             final StringBuilder line = new StringBuilder("fg slots:");
