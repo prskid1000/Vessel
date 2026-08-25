@@ -1044,8 +1044,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            // The deadline, not the description. See scheduleInterval.
-            pacer.schedule(scheduleInterval(), activeMultiple, deferredArrival);
+            pacer.schedule(smoothedInterval, activeMultiple, deferredArrival);
         }
         report();
         return !deferredArrival || presentedHere;
@@ -1178,57 +1177,6 @@ public class FrameSynthesizer implements FramePacer.Target {
      * size and no allocation here.
      */
     private long medianInterval() {
-        return percentileInterval(0.5f);
-    }
-
-    /**
-     * VESSEL: a deadline the slots can actually meet, which is not the median.
-     *
-     * <p><b>A median is by construction too long for half of all intervals.</b>
-     * That is right for describing what the guest is doing and wrong for
-     * scheduling against. The pacer spaces its slots across an interval
-     * estimate; when the interval that actually arrives is shorter than that
-     * estimate, the last slot has not fired when the next real frame lands and
-     * {@code realFrameCount() != stamp} discards it.
-     *
-     * <p>Counted from recordings rather than reasoned about: on 1348 Metro
-     * intervals, 39% were missing at least one slot, the correlation between
-     * interval length and slots delivered was 0.67, and a mean shortfall of 0.26
-     * frames across fifteen intervals a second is the 53.7 to 61.4 swing in
-     * presented rate. Replaying the recorded interval sequences against several
-     * estimators, each formed only from the intervals preceding it:
-     *
-     * <pre>
-     *   estimator          slots/int   of 3    intervals complete
-     *   10th percentile      2.96        3         96%
-     *   25th percentile      2.89        3         91%
-     *   median (ships)       2.67        3         75%
-     *   75th percentile      2.36        3         57%
-     * </pre>
-     *
-     * <p>The simulation predicts 2.67 for the median and the recordings measured
-     * 2.74, which is the cross-check that makes the rest of the table worth
-     * reading. The tenth is not taken for the extra 0.07: a much shorter
-     * deadline bunches the slots early and stretches the silent tail before the
-     * next real frame.
-     *
-     * <p><b>Only the pacer sees this.</b> {@link #smoothedInterval} also drives
-     * {@link #phaseFor}, where {@code elapsed / smoothedInterval} decides which
-     * moment to show -- shortening it there would advance content faster than
-     * wall time, which is judder by another route. The phase keeps the median;
-     * only the deadline moves.
-     *
-     * <p>It is also not a bias towards the start of the interval. FramePacer
-     * records that being tried and removed, for squeezing K phases into a
-     * fraction of the interval so that motion ran fast and then stopped dead.
-     * The slots here stay evenly spaced; what changes is the estimate they are
-     * evenly spaced across.
-     */
-    private long scheduleInterval() {
-        return percentileInterval(0.25f);
-    }
-
-    private long percentileInterval(float pct) {
         if (recentHeld == 0) return 0;
         final long[] sorted = new long[recentHeld];
         System.arraycopy(recent, 0, sorted, 0, recentHeld);
@@ -1241,7 +1189,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             }
             sorted[j + 1] = v;
         }
-        return sorted[Math.round((recentHeld - 1) * pct)];
+        return sorted[recentHeld / 2];
     }
 
     private float phaseFor(long vsyncNanos) {
