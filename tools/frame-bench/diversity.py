@@ -67,6 +67,41 @@ def diversity(field):
     return float(np.linalg.norm(flat - centre, axis=-1).mean())
 
 
+def contrast(frame):
+    """Mean gradient per block: how much a block has to match ON.
+
+    **Metro is a game set in dark tunnels and the luma target is GL_R8.** The
+    matcher compares 8-bit luma, so a block whose pixels all sit within a few
+    levels of each other offers almost nothing to distinguish one offset from
+    another, however fast the scene is moving. That would make matching
+    unreliable for a reason with nothing to do with speed -- which is exactly the
+    shape of "harm is flat against displacement".
+    """
+    l = bench.luma(frame)
+    gx = np.abs(np.diff(l, axis=1, append=l[:, -1:]))
+    gy = np.abs(np.diff(l, axis=0, append=l[-1:, :]))
+    return float((gx + gy).mean() * 255.0)
+
+
+def darkness(frame):
+    """Mean luma in 8-bit levels. How much of R8's range the scene occupies."""
+    return float(bench.luma(frame).mean() * 255.0)
+
+
+def sharpness(frame):
+    """High-frequency energy: what motion blur takes away.
+
+    A blurred frame has less of it, and a block match on blurred content has a
+    flatter cost surface -- the minimum sits in the right place but shallow, so
+    noise moves it. Metro renders with camera motion blur, strongest during
+    exactly the fast pans where the artefact is worst.
+    """
+    l = bench.luma(frame)
+    lap = (l[:-2, 1:-1] + l[2:, 1:-1] + l[1:-1, :-2] + l[1:-1, 2:]
+           - 4.0 * l[1:-1, 1:-1])
+    return float(np.abs(lap).mean() * 255.0)
+
+
 def harm(shown, older, truth):
     """The device's metric: worse than having done nothing, among moved pixels."""
     d_synth = np.linalg.norm(shown - truth, axis=-1)
@@ -108,11 +143,12 @@ def main():
         if h is None:
             continue
         mag = float(np.median(np.linalg.norm(raw, axis=-1)))
+        stats = (contrast(C), darkness(C), sharpness(C))
         # **Diversity of the FILTERED field.** The raw one is full of tie-breaks
         # from flat blocks, which are noise rather than a second motion, and they
         # dominate the very quantity being tested -- the first run measured 84 px
         # of "diversity" on footage that is mostly one camera pan.
-        rows.append((mag, diversity(field), h))
+        rows.append((mag, diversity(field), h) + stats)
 
     if not rows:
         sys.exit("no triple had enough movement to score")
@@ -146,9 +182,20 @@ def main():
             return float("nan")
         return float(np.corrcoef(x, h)[0, 1])
 
+    con = np.array([r[3] for r in rows])
+    dark = np.array([r[4] for r in rows])
+    sharp = np.array([r[5] for r in rows])
+
     print("  CORRELATION WITH HARM, over every triple")
     print("  %-24s %8.2f" % ("displacement", corr(mag)))
     print("  %-24s %8.2f" % ("diversity", corr(div)))
+    print("  %-24s %8.2f" % ("contrast", corr(con)))
+    print("  %-24s %8.2f" % ("darkness (mean luma)", corr(dark)))
+    print("  %-24s %8.2f" % ("sharpness (blur)", corr(sharp)))
+    print()
+    print("  %-24s %8.1f to %.1f" % ("contrast range", con.min(), con.max()))
+    print("  %-24s %8.1f to %.1f" % ("mean luma range", dark.min(), dark.max()))
+    print("  %-24s %8.1f to %.1f" % ("sharpness range", sharp.min(), sharp.max()))
     print()
     print("  Diversity clearly ahead is the finding: the artefact is how many")
     print("  motions are present, not how large they are, and nothing in the")
