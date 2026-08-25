@@ -95,10 +95,56 @@ public class GuardMaterial extends ScreenMaterial {
 
     /**
      * How much better a block's own vector must explain its own pixels before it
-     * is taken back from the neighbourhood. See the class comment: anything from
-     * 12 to 32 measures identically, and this sits in the middle.
+     * is taken back from the neighbourhood, as a ramp rather than a step.
+     *
+     * <p>The plateau measured 12 to 32, so those bracket the ramp: below it
+     * nothing is restored, above it all of it is, and in between the vector moves
+     * continuously between the two answers.
      */
-    public static final float MARGIN = 20.0f;
+    public static final float RATIO_LO = 8.0f, RATIO_HI = 32.0f;
+
+    /**
+     * How far a block must be moving before the guard may act, in luma pixels.
+     *
+     * <p><b>Because a threshold recomputed every frame is a thing that flashes,
+     * and this one did.</b> Shipped as a hard comparison it fixed the fast cursor
+     * and made slow movement stutter -- the cursor splitting into separate copies
+     * at short intervals. Measured as churn: how much of the decision flips
+     * between frames on a sequence whose true motion never changes, with only
+     * sensor noise differing.
+     *
+     * <pre>
+     *   speed      no gate             gate 32..64
+     *              churn / trailing    churn / trailing
+     *    6 px      0.098 /  4.58       0.098 /  5.48
+     *   16 px      0.080 /  0.19       0.000 /  2.59
+     *   24 px      0.217 /  0.30       0.001 /  2.71
+     *   48 px      0.163 /  0.58       0.099 /  5.40
+     *   96 px      0.000 /  0.76       0.000 /  5.58
+     * </pre>
+     *
+     * <p>consensus.py had already written this failure down: "an argmin between
+     * two costs is a knife-edge decision remade from scratch every frame", which
+     * measured well on a frame pair and flashed on screen. This was that, rebuilt.
+     *
+     * <p>The table also contains the way out. Churn is zero at 96 px and worst at
+     * 24, while the ghost the guard removes grows with speed -- so the guard is
+     * stable exactly where it is needed and unstable exactly where it is not.
+     * Gating on displacement, which varies smoothly, rather than on a cost ratio,
+     * which does not, takes churn at 24 px from 0.217 to 0.001 and leaves the fast
+     * case untouched. Ramping the cost ratio alone does not help at all -- 0.245
+     * against 0.243 -- because the ratio swings across the whole range rather than
+     * hovering at the edge.
+     *
+     * <p>What it costs is the slow end, where a cross-fade is nearly invisible
+     * anyway because the two positions overlap: 2.59 of trailing ink at 16 px,
+     * against 19.4 with no guard at all.
+     *
+     * <p>Not fixed by this: past the search window the raw field is unstable in
+     * its own right, and churn at 160 px goes from 0.401 to 0.460. There the
+     * vector is already wrong by 215 px and this pass is not what is wrong.
+     */
+    public static final float MOVING_LO = 32.0f, MOVING_HI = 64.0f;
 
     public static class GuardUniforms {
         /** The field as the matcher produced it, before any median pass. */
@@ -157,31 +203,41 @@ public class GuardMaterial extends ScreenMaterial {
                 "float costOwn = cost(own * scale);",
                 "float costKept = cost(kept.rg * scale);",
 
-                // Strictly better by the whole margin, so a tie or a marginal
-                // win leaves the neighbourhood's answer in place. This is what
-                // keeps it off the 99.98% of blocks that were never in dispute.
-                // **Blue says "motion is proven here", and InterpolateMaterial
-                // reads it.** Restoring the vector is only half the repair: the
-                // interpolation then pulls its result back towards an
-                // UNCOMPENSATED cross-fade wherever staying put explains the
-                // pixel as well as moving does -- the subtitle fix -- and for a
-                // small object on a flat background that test cannot tell the
-                // two apart. Measured on the cursor scene, the guarded field
-                // warps to 0.76 of trailing ink on its own and to 64.67 once
-                // that pull-back runs, which is most of the way back to doing
-                // nothing at all.
+                // **Two smooth ramps multiplied, and no branch anywhere.** How
+                // much better this block's own vector explains its own pixels,
+                // and whether the block is moving far enough for the difference
+                // to be worth having. Either at zero leaves the neighbourhood's
+                // answer exactly as it was, which is the case for very nearly
+                // every block of any frame.
                 //
-                // Where this pass has fired there is positive evidence that
-                // motion explains the block twenty times better than the
-                // alternative, so pulling towards stillness is wrong by
-                // construction. The flag says so rather than making the
-                // interpolation guess again from the same ambiguous numbers.
-                "if (costOwn * MARGIN_VALUE < costKept) {",
-                    "gl_FragColor = vec4(own, 1.0, 1.0);",
-                    "return;",
-                "}",
-                "gl_FragColor = vec4(kept.rg, 0.0, 1.0);",
+                // The second factor is not decoration; see MOVING_LO. Shipped as
+                // a hard comparison this fixed the fast cursor and made slow
+                // movement stutter, because a threshold recomputed every frame
+                // flips whenever the noisier of two costs crosses it.
+                "float ratio = costKept / max(costOwn, 1.0e-5);",
+                "float w = smoothstep(RATIO_LO_V, RATIO_HI_V, ratio)",
+                        "* smoothstep(MOVING_LO_V, MOVING_HI_V, length(own));",
+
+                // **Blue carries the weight, and InterpolateMaterial reads it.**
+                // Restoring the vector is only half the repair: the interpolation
+                // then pulls its result back towards an UNCOMPENSATED cross-fade
+                // wherever staying put explains the pixel as well as moving does
+                // -- the subtitle fix -- and for a small object on a flat
+                // background that test cannot tell the two apart. Measured on the
+                // cursor scene, the guarded field warps to 0.76 of trailing ink
+                // on its own and to 64.67 once that pull-back runs, which is most
+                // of the way back to doing nothing at all.
+                //
+                // Passing the weight rather than a flag means the pull releases
+                // as smoothly as the vector arrives, so there is no edge for
+                // either of them to snap across.
+                "gl_FragColor = vec4(mix(kept.rg, own, w), w, 1.0);",
             "}"
-        ).replace("MARGIN_VALUE", String.format(java.util.Locale.ROOT, "%.1f", MARGIN));
+        ).replace("RATIO_LO_V", fmt(RATIO_LO)).replace("RATIO_HI_V", fmt(RATIO_HI))
+         .replace("MOVING_LO_V", fmt(MOVING_LO)).replace("MOVING_HI_V", fmt(MOVING_HI));
+    }
+
+    private static String fmt(float v) {
+        return String.format(java.util.Locale.ROOT, "%.1f", v);
     }
 }
