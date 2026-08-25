@@ -381,11 +381,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         this.diagnostics = categories == null
             ? java.util.Collections.emptySet() : categories;
         this.announced = false;
-        // **A behaviour switch, not a diagnostic, and named so.** It rides the
-        // same row because that is the one channel a container already has, and
-        // it is deliberately not part of `all`: everything else here only reads
-        // the pipeline, and this one changes what is shown.
-        this.saturationGuard = this.diagnostics.contains("halve-when-saturated");
     }
 
     private boolean wants(String category) {
@@ -711,8 +706,8 @@ public class FrameSynthesizer implements FramePacer.Target {
      * VESSEL: fewer frames when the matcher cannot see how far the scene went.
      *
      * <p><b>This does not make any frame better. It makes fewer bad ones.</b>
-     * Opt-in, and off unless the container asks, because the trade it makes is
-     * one only a person watching can judge.
+     * It was built as an opt-in switch because the trade is one only a person
+     * watching can judge; that judgement was made, and it is on.
      *
      * <p>The matcher's window is about {@link #SEARCH_WINDOW_PX} luma pixels and
      * Metro sweeps 129 to 151 between real frames, so most of the field is
@@ -745,7 +740,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * them disagree. See activeMultiple.
      */
     private int saturatedMultiple(int asked) {
-        if (!saturationGuard || asked < 4 || fieldMagnitude <= 0f) return asked;
+        if (asked < 4 || fieldMagnitude <= 0f) return asked;
         // **Two thresholds, because one would pulse.** Metro runs at 129 to 151
         // px against a window of 112, which is to say it sits ON the trigger.
         // A single threshold sampled once a second would engage and release
@@ -768,8 +763,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     /** Whether the guard is currently holding the multiple down. Hysteretic. */
     private boolean saturationEngaged = false;
 
-    /** VESSEL: whether FG_LOG asked for the saturation guard. See {@link #saturatedMultiple}. */
-    private boolean saturationGuard = false;
+
 
     /**
      * The multiple actually in force for the interval now running.
@@ -1999,12 +1993,13 @@ public class FrameSynthesizer implements FramePacer.Target {
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
-            if (saturationGuard) {
-                Log.i(TAG, String.format(
-                    "fg saturation: %s -- field %.0f px, engages at %d, releases at %.0f",
-                    saturationEngaged ? "HOLDING the multiple down" : "not engaged",
-                    fieldMagnitude, SEARCH_WINDOW_PX, SEARCH_WINDOW_PX * 0.7f));
-            }
+            // Which state the saturation guard is in and both thresholds, so
+            // whether it is chattering is visible rather than a matter of
+            // opinion. Once a second, alongside the rate it changes.
+            Log.i(TAG, String.format(
+                "fg saturation: %s -- field %.0f px, engages at %d, releases at %.0f",
+                saturationEngaged ? "HOLDING the multiple down (half)" : "not engaged",
+                fieldMagnitude, SEARCH_WINDOW_PX, SEARCH_WINDOW_PX * 0.7f));
         }
 
         if (wants("field")) {

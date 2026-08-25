@@ -300,17 +300,8 @@ data class ContainerDiagnostics(
      *   frames and the generated ones are indistinguishable afterwards, so a
      *   broken frame cannot be attributed to the pipeline rather than to a cut
      *   or a muzzle flash. Every tool in `tools/frame-bench` looks for it.
-     * - `halve-when-saturated` — **not a diagnostic; it changes what is shown.**
-     *   Halves the frame-generation multiple whenever the motion field is pinned
-     *   at the matcher's search window, which on Metro is most of the time: the
-     *   scene sweeps 129-151 luma pixels between real frames against a window of
-     *   about 112. It does not make any frame better, it makes fewer bad ones,
-     *   and it costs smoothness — 4x to 2x is roughly 57 presented frames a
-     *   second down to 30. A switch because only a person watching can judge
-     *   that trade. Deliberately excluded from `all`.
      * - `all` — every category, this one included, so recordings made with
-     *   `all` carry the stamp and look different from ordinary play. It does NOT
-     *   include `halve-when-saturated`, which has to be asked for by name.
+     *   `all` carry the stamp and look different from ordinary play.
      *
      * Unknown names are kept rather than dropped. A category added later should
      * work on a container configured today, and a typo is visible in the log line
