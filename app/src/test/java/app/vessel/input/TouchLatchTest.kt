@@ -144,10 +144,16 @@ class TouchLatchTest {
     }
 
     @Test
-    fun `the boundary is exactly three seconds`() {
-        val below = translator(l3).also { tap(it, l3, at = 0L, heldFor = 2_999L) }
+    fun `the boundary is exactly the latch threshold`() {
+        // Against the constant, not against a literal. This test named three
+        // seconds and hard-coded 2_999/3_000, so shortening the threshold to one
+        // second turned a correct change into a failing test about a number
+        // nobody meant to pin. What is worth pinning is that the comparison is
+        // strict on one side and inclusive on the other.
+        val ms = TouchControlTranslator.LATCH_HOLD_MS
+        val below = translator(l3).also { tap(it, l3, at = 0L, heldFor = ms - 1) }
         assertTrue(below.latchedIds.isEmpty())
-        val at = translator(l3).also { tap(it, l3, at = 0L, heldFor = 3_000L) }
+        val at = translator(l3).also { tap(it, l3, at = 0L, heldFor = ms) }
         assertEquals(setOf("l3"), at.latchedIds)
     }
     @Test

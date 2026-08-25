@@ -977,13 +977,16 @@ fails the build.
 | `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22, 31 |
 | `app/src/main/java/com/winlator/renderer/FramePacer.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/FrameSynthesizer.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/FrameTimestamps.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/GpuTimer.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/RenderableWindow.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
 | `app/src/main/java/com/winlator/renderer/material/InterpolateMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/material/MedianMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
+| `app/src/main/java/com/winlator/renderer/material/SignMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
 | `app/src/main/java/com/winlator/widget/XServerView.java` | 31 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
@@ -1016,6 +1019,7 @@ fails the build.
 | `app/src/main/cpp/winlator/src/copy_pool.c` | 28 |
 | `app/src/main/cpp/winlator/src/drawable.c` | 28 |
 | `app/src/main/cpp/winlator/src/frame_extrapolation.c` | 31 |
+| `app/src/main/cpp/winlator/src/frame_timestamps.c` | 31 |
 | `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 | `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |
