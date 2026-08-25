@@ -143,10 +143,17 @@ class FramePacer {
      * @param intervalNanos measured spacing of real frames
      * @param multiple presented frames per real frame; 2 means one prediction
      */
-    void schedule(long intervalNanos, int multiple) {
+    void schedule(long intervalNanos, int multiple, boolean deferredArrival) {
         if (multiple < 2 || intervalNanos <= 0) return;
         final long stamp = target.realFrameCount();
-        for (int i = 1; i < multiple; i++) {
+        // **Slot zero exists only when the arrival could not have a refresh of
+        // its own.** See FrameSynthesizer: the frame drawn inline when a real
+        // frame arrives collided with the present before it about half the time
+        // -- seven to nine of every sixteen, while paced slots collided zero
+        // times out of thirty-six. Due immediately, so the Choreographer turns
+        // it into the very next refresh: shown one refresh late rather than
+        // drawn into a scanout somebody else already owns.
+        for (int i = deferredArrival ? 0 : 1; i < multiple; i++) {
             // Evenly spaced across the interval. See the class comment for why
             // there is no longer a bias here.
             final long dueNanos = System.nanoTime() + (intervalNanos * i) / multiple;

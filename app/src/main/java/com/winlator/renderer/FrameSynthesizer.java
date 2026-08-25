@@ -1077,7 +1077,36 @@ public class FrameSynthesizer implements FramePacer.Target {
         // the `else`, which presents a SECOND real frame into the same
         // scanout -- 299 collisions in one session, every one a real frame.
         // Only paced frames yield; see clearOfLastPresent.
-        if (motionValid && activeMultiple >= 2) {
+        // **The arrival now asks, because the trace says it should.** It was
+        // made unconditional after a guard here sent control to the `else`,
+        // which presented a SECOND real frame into the same scanout -- 299
+        // collisions in one session. That fix was right about the branch and
+        // wrong about the frame: the answer is not to stop asking, it is to not
+        // fall through to presentLatest when the answer is no.
+        //
+        // Attributed per path, this is where nearly all the waste is:
+        //
+        //     arrival 7/16, paced 0/36, real 0/16
+        //     arrival 8/16, paced 0/39, real 2/16
+        //     arrival 9/16, paced 0/39, real 0/16
+        //
+        // Half of every arrival drawn, upscaled, swapped and overwritten before
+        // the panel read it, while the paced slots -- which do ask -- collided
+        // not once in a hundred and ten.
+        //
+        // A collided arrival is handed to the pacer as slot zero instead, due
+        // immediately. Dropping it was measured and is worse: two thirds of
+        // arrivals disappeared and the present rate fell from 63-65 a second to
+        // 55-57. Deferring keeps the frame and costs it one refresh.
+        // Nothing is counted or latched here: slot zero goes through
+        // presentSynthesized like any other, which counts it and advances
+        // lastPhase only once it has actually been drawn. See phaseFor -- a
+        // monotonic guard advanced past a moment that was never shown clamps
+        // the next genuine frame forward to it.
+        boolean deferredArrival = false;
+        if (motionValid && activeMultiple >= 2 && !clearOfLastPresent()) {
+            deferredArrival = true;
+        } else if (motionValid && activeMultiple >= 2) {
             presentingSource = SRC_ARRIVAL;
             presentPhase(1f / activeMultiple);
             // **Counted here, because nothing else counts it.** At 2x this is the
@@ -1095,7 +1124,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            pacer.schedule(smoothedInterval, activeMultiple);
+            pacer.schedule(smoothedInterval, activeMultiple, deferredArrival);
         }
         report();
     }
