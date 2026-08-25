@@ -521,11 +521,34 @@ public class InterpolateMaterial extends ScreenMaterial {
                         // small R could mean "almost nothing was harmed" or
                         // "almost nothing was moving".
                         "changed,",
-                        // A: how far the synthesis sits between the endpoints, on
-                        // average. Half is what a correct interpolation at the
-                        // midpoint looks like; approaching one means it is barely
-                        // better than the old frame, and beyond one it is worse.
-                        "clamp(dSynth / max(dBase, 0.008) * 0.5, 0.0, 1.0));",
+                        // A: **how far this pixel moved, in luma pixels over 255.**
+                        //
+                        // This channel used to hold dSynth/dBase, described as
+                        // "how far the synthesis sits between the endpoints".
+                        // It is not that -- it is a ratio of two distances, which
+                        // only coincides with a position when the motion is a
+                        // straight fade. landing.py measured the real thing from
+                        // a recording, by projecting each synthesised frame onto
+                        // the line between the two real ones, and found the
+                        // pipeline's phases rise correctly (60 intervals of 60)
+                        // while this channel implied they were inverted. So it
+                        // was answering a question nobody asked, with a number
+                        // that read as an inversion that is not there.
+                        //
+                        // What is worth its place instead is displacement, and
+                        // specifically displacement measured HERE: harm is read
+                        // from this same pass, on this same frame, from these
+                        // same pixels. The separate probe in SignMaterial gives
+                        // the same quantity a second away from the harm figure
+                        // it has to be plotted against, and at fifteen real
+                        // frames a second the camera can go from still to a full
+                        // sweep inside that second -- which is why pairing the
+                        // two across log lines produced no relationship at all,
+                        // 0% and 33% harm at the same 124 px.
+                        //
+                        // `mean` is the OBMC-blended vector in texture space, so
+                        // dividing by motionScale returns it to luma pixels.
+                        "clamp(length(mean / motionScale) / 255.0, 0.0, 1.0));",
                     "return;",
                 "}",
 

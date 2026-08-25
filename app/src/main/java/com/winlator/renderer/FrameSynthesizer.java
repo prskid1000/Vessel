@@ -389,7 +389,16 @@ public class FrameSynthesizer implements FramePacer.Target {
     private boolean announced = false;
 
     /** Frame-wide measurements, most recently read back. See {@link #measure}. */
-    private float measuredConfidence, measuredDark, measuredShadow, measuredSpeed;
+    private float measuredConfidence, measuredDark, measuredShadow;
+    /**
+     * How far the frame moved where it was measured, in luma pixels.
+     *
+     * <p>Read from the same diagnostic pass, on the same frame, as the
+     * harm figure it exists to be plotted against. Named for what it is:
+     * the channel used to be called a speed and to carry dSynth/dBase,
+     * which is a ratio of distances rather than a displacement or a phase.
+     */
+    private float measuredMoved;
     private long measuredAt = 0;
     /**
      * The phase the measured frame was actually drawn at.
@@ -1328,7 +1337,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         measuredConfidence = (pixel.get(0) & 0xff) / 255f;
         measuredDark = (pixel.get(1) & 0xff) / 255f;
         measuredShadow = (pixel.get(2) & 0xff) / 255f;
-        measuredSpeed = (pixel.get(3) & 0xff) / 255f;
+        measuredMoved = (pixel.get(3) & 0xff) / 255f;
         measuredPhase = phase;
         measuredAt = SystemClock.uptimeMillis();
 
@@ -1737,12 +1746,16 @@ public class FrameSynthesizer implements FramePacer.Target {
             final float moving = measuredShadow;
             final float harmedShare = moving > 0.001f ? measuredConfidence / moving : 0f;
             Log.i(TAG, String.format(
+                // **Harm and displacement on one line, from one pass, one
+                // frame.** The pair is the whole point: the question is at what
+                // speed motion compensation stops paying, and it cannot be
+                // answered from two numbers measured a second apart.
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
                     + " frame than doing nothing, %.3f%% invented content,"
-                    + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints (%.0f%% was asked for)",
+                    + " %.0f%% of frame moving, moved %.0f px here,"
+                    + " phase %.0f%%",
                 harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredSpeed * 200f, measuredPhase * 100f));
+                moving * 100f, measuredMoved * 255f, measuredPhase * 100f));
         }
 
         tier0Frames = 0;
