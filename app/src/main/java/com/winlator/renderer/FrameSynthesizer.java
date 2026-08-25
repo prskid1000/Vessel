@@ -381,6 +381,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         this.diagnostics = categories == null
             ? java.util.Collections.emptySet() : categories;
         this.announced = false;
+        // **A behaviour switch, not a diagnostic, and named so.** It rides the
+        // same row because that is the one channel a container already has, and
+        // it is deliberately not part of `all`: everything else here only reads
+        // the pipeline, and this one changes what is shown.
+        this.saturationGuard = this.diagnostics.contains("halve-when-saturated");
     }
 
     private boolean wants(String category) {
@@ -699,8 +704,53 @@ public class FrameSynthesizer implements FramePacer.Target {
         final long period = vsyncPeriodNanos();
         if (period <= 0 || smoothedInterval <= 0) return multiple;
         final int refreshes = (int)(smoothedInterval / period);
-        return Math.min(multiple, Math.max(1, refreshes));
+        return Math.min(saturatedMultiple(multiple), Math.max(1, refreshes));
     }
+
+    /**
+     * VESSEL: fewer frames when the matcher cannot see how far the scene went.
+     *
+     * <p><b>This does not make any frame better. It makes fewer bad ones.</b>
+     * Opt-in, and off unless the container asks, because the trade it makes is
+     * one only a person watching can judge.
+     *
+     * <p>The matcher's window is about {@link #SEARCH_WINDOW_PX} luma pixels and
+     * Metro sweeps 129 to 151 between real frames, so most of the field is
+     * pinned at a limit rather than measuring anything. Every attempt to repair
+     * that has been measured and failed: a 224 px window scored WORSE than the
+     * 112 px one (87.00 against 80.43 on the worst 1% of pixels) because more
+     * range finds more distant wrong matches; a half-and-quarter pyramid came
+     * out neutral at 79.20; aiming the fine pass with a coarse guess scored
+     * 88.73. There is no reach fix, and displacement does not predict harm
+     * either -- it is flat from 20 px to 200 px -- so there is nothing to key a
+     * per-pixel or per-region decision on.
+     *
+     * <p>What is left is arithmetic rather than estimation. At 4x, three frames
+     * in four are built from vectors that cannot describe the motion. Halving
+     * the multiple halves how many of those exist and puts each survivor closer
+     * to a real frame, where {@code fg truth} reads 0.0% harm rather than 10 to
+     * 28%.
+     *
+     * <p>The cost is smoothness and it is not small: 4x to 2x takes about 57
+     * presented frames a second to about 30. That is why this is a switch rather
+     * than a default.
+     *
+     * <p>Whole-frame on purpose. A per-region version of this is the fallback
+     * InterpolateMaterial records removing, where parts of the picture ran at
+     * half the rate of the rest and read as objects dragging.
+     *
+     * <p>Read from the once-a-second field probe, which is coarse and is meant
+     * to be: the multiple is settled per interval and used by three separate
+     * phase decisions inside it, so a value that moved every frame would make
+     * them disagree. See activeMultiple.
+     */
+    private int saturatedMultiple(int asked) {
+        if (!saturationGuard || asked < 4 || fieldMagnitude <= 0f) return asked;
+        return fieldMagnitude >= SEARCH_WINDOW_PX ? Math.max(2, asked / 2) : asked;
+    }
+
+    /** VESSEL: whether FG_LOG asked for the saturation guard. See {@link #saturatedMultiple}. */
+    private boolean saturationGuard = false;
 
     /**
      * The multiple actually in force for the interval now running.
