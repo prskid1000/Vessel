@@ -380,6 +380,19 @@ public class FrameSynthesizer implements FramePacer.Target {
     /** Frame-wide measurements, most recently read back. See {@link #measure}. */
     private float measuredConfidence, measuredDark, measuredShadow, measuredSpeed;
     private long measuredAt = 0;
+    /**
+     * The phase the measured frame was actually drawn at.
+     *
+     * <p><b>Because the alternative was a constant, and the constant was wrong.</b>
+     * {@link #measure} samples ONE frame, whichever happens to fall on the
+     * once-a-second boundary, and that frame is drawn at 1/K, 2/K ... (K-1)/K --
+     * never reliably at a half. The line reported "(50% is correct)" regardless,
+     * so at 4x it compared a frame legitimately drawn at 0.25 or 0.75 against
+     * 0.5 and called the difference an error. Readings of 55-83% were taken as
+     * evidence of a systematic phase bias in the pipeline; they were evidence of
+     * this string.
+     */
+    private float measuredPhase = 0f;
 
     private int allocWidth = 0;
     private int allocHeight = 0;
@@ -1171,6 +1184,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.diagnostic,
                                             measuring ? 1f : 0f);
+        // **Restored: the one line that made recordings analysable.**
+        //
+        // The shader has always painted this corner; `5010b3e` dropped the line
+        // that switched it on, and the loss was silent. Every ground-truth tool
+        // in tools/frame-bench separates real frames from synthesised ones by
+        // looking for these pixels, so without it a recording is a wall of
+        // frames with no labels: a scan of 5,139 RE9 frames reported "0
+        // synthesised, 5,139 real" and could not say whether a broken frame was
+        // the pipeline or a muzzle flash.
+        //
+        // Never while measuring -- the diagnostic pass writes four measurements
+        // into the same pixels, and stamping them would corrupt the readback.
+        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.mark,
+                                            !measuring && wants("mark") ? 1f : 0f);
         // The vectors are in luma pixels, and the luma is the block-rounded frame,
         // so dividing by its size is what puts them in texture space.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
@@ -1264,6 +1291,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         measuredDark = (pixel.get(1) & 0xff) / 255f;
         measuredShadow = (pixel.get(2) & 0xff) / 255f;
         measuredSpeed = (pixel.get(3) & 0xff) / 255f;
+        measuredPhase = phase;
         measuredAt = SystemClock.uptimeMillis();
 
         renderer.viewportNeedsUpdate = true;
@@ -1673,9 +1701,9 @@ public class FrameSynthesizer implements FramePacer.Target {
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
                     + " frame than doing nothing, %.3f%% invented content,"
                     + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints (50%% is correct)",
+                    + " the endpoints (%.0f%% was asked for)",
                 harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredSpeed * 200f));
+                moving * 100f, measuredSpeed * 200f, measuredPhase * 100f));
         }
 
         tier0Frames = 0;
