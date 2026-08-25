@@ -5,6 +5,7 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.winlator.renderer.material.GuardMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.SignMaterial;
@@ -239,6 +240,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
+    private final GuardMaterial guardMaterial = new GuardMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -1330,6 +1332,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         // own wording suggests; the probe overrides it within a second of motion.
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.fieldSign,
                                             fieldSign != 0f ? fieldSign : 1f);
+        // Only then does the field's blue channel mean anything. See
+        // InterpolateMaterial's `proven`.
+        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.guarded,
+                                            fieldGuarded ? 1f : 0f);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
@@ -1453,7 +1459,11 @@ public class FrameSynthesizer implements FramePacer.Target {
      * always one of the nine inputs rather than an average of them, and
      * {@link #filtered} for why there are two passes.
      */
+    /** Whether the current field came through GuardMaterial. */
+    private boolean fieldGuarded = false;
+
     private void filterField() {
+        fieldGuarded = false;
         if (filtered[0] == null) { filteredIndex = -1; return; }
         medianTimer.begin();
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -1483,11 +1493,49 @@ public class FrameSynthesizer implements FramePacer.Target {
             filteredIndex = destination;
         }
 
+        // **One pass back the other way.** See GuardMaterial: ten passes of
+        // agree-with-your-neighbours erase a small object that genuinely moves
+        // differently from its surroundings, because it is outnumbered eight to
+        // one and each pass strips the outermost ring of it. This hands a block
+        // its own measurement back where that measurement explains its own
+        // pixels enormously better than what the neighbourhood overwrote it
+        // with. It touches about two blocks in three and a half thousand.
+        if (luma[0] != null && filteredIndex >= 0) {
+            final int guarded = 1 - filteredIndex;
+            guardMaterial.use();
+            renderer.quadVertices.bind(guardMaterial.programId);
+            guardMaterial.setUniformBool(guardMaterial.uniforms.flipY, false);
+            guardMaterial.setUniformVec2(guardMaterial.guardUniforms.motionScale,
+                                         1f / Math.max(1, luma[0].width),
+                                         1f / Math.max(1, luma[0].height));
+            // The same sign the interpolation will use; scoring under a
+            // different convention would answer a different question.
+            guardMaterial.setUniformFloat(guardMaterial.guardUniforms.fieldSign,
+                                          fieldSign != 0f ? fieldSign : 1f);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[guarded].framebuffer);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered[filteredIndex].texture);
+            guardMaterial.setUniformInt(guardMaterial.uniforms.screenTexture, 0);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+            guardMaterial.setUniformInt(guardMaterial.guardUniforms.originalTexture, 1);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
+            guardMaterial.setUniformInt(guardMaterial.guardUniforms.lumaNewerTexture, 2);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
+            guardMaterial.setUniformInt(guardMaterial.guardUniforms.lumaOlderTexture, 3);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+            filteredIndex = guarded;
+            fieldGuarded = true;
+        }
+
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 1; unit >= 0; unit--) {
+        for (int unit = 3; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
+        renderer.invalidateBoundWindowMaterial();
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
         medianTimer.end();
