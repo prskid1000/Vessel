@@ -85,30 +85,39 @@ def triples(path, limit=40, min_motion=1.5, with_phase=False):
     the real one, from the recorded frame indices, so a test can score where the
     truth actually is.
     """
-    a = frames(path)
-    mark = stamped(a)
-    if not mark.any():
-        sys.exit("no synthesis stamp in this recording -- real and synthesised\n"
-                 "frames cannot be separated, so there is no ground truth.\n"
-                 "Set FG_LOG=mark (or all) in the container and record again.")
-    real = np.flatnonzero(~mark)
+    # **Streamed, because the obvious version cannot be afforded.** This used to
+    # decode the whole recording into one array to find the unstamped frames.
+    # Ninety seconds of 1280x720 captured at 120 fps is 10,793 frames, which is
+    # 29 GB; the recordings that made it work were shorter and it was luck. Only
+    # three real frames are ever needed at once, so only three are ever held.
+    import scan
 
-    out = []
-    for i in range(len(real) - 2):
-        x, y, z = real[i], real[i + 1], real[i + 2]
+    out, recent, seen_mark = [], [], False
+    for i, f in enumerate(scan.stream(path)):
+        if scan.marked(f):
+            seen_mark = True
+            continue
+        recent.append((i, f.astype(np.float32) / 255.0))
+        if len(recent) > 3:
+            recent.pop(0)
+        if len(recent) < 3:
+            continue
+        (x, A), (y, B), (z, C) = recent
         # Adjacent in the real stream, not either side of a gap.
         if y - x > 12 or z - y > 12:
             continue
-        A = a[x].astype(np.float32) / 255.0
-        B = a[y].astype(np.float32) / 255.0
-        C = a[z].astype(np.float32) / 255.0
-        moved = np.abs(C - A).mean() * 255.0
+        moved = float(np.abs(C - A).mean() * 255.0)
         if moved < min_motion:
             continue
         out.append((A, B, C, moved, (y - x) / float(z - x)) if with_phase
                    else (A, B, C, moved))
         if len(out) >= limit:
             break
+
+    if not seen_mark:
+        sys.exit("no synthesis stamp in this recording -- real and synthesised\n"
+                 "frames cannot be separated, so there is no ground truth.\n"
+                 "Set FG_LOG to include `mark` in the container and record again.")
     if not out:
         sys.exit("no usable triples: every run of three real frames was static")
     return out
