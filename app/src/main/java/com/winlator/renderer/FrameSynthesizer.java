@@ -699,71 +699,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         final long period = vsyncPeriodNanos();
         if (period <= 0 || smoothedInterval <= 0) return multiple;
         final int refreshes = (int)(smoothedInterval / period);
-        return Math.min(saturatedMultiple(multiple), Math.max(1, refreshes));
+        return Math.min(multiple, Math.max(1, refreshes));
     }
-
-    /**
-     * VESSEL: fewer frames when the matcher cannot see how far the scene went.
-     *
-     * <p><b>This does not make any frame better. It makes fewer bad ones.</b>
-     * It was built as an opt-in switch because the trade is one only a person
-     * watching can judge; that judgement was made, and it is on.
-     *
-     * <p>The matcher's window is about {@link #SEARCH_WINDOW_PX} luma pixels and
-     * Metro sweeps 129 to 151 between real frames, so most of the field is
-     * pinned at a limit rather than measuring anything. Every attempt to repair
-     * that has been measured and failed: a 224 px window scored WORSE than the
-     * 112 px one (87.00 against 80.43 on the worst 1% of pixels) because more
-     * range finds more distant wrong matches; a half-and-quarter pyramid came
-     * out neutral at 79.20; aiming the fine pass with a coarse guess scored
-     * 88.73. There is no reach fix, and displacement does not predict harm
-     * either -- it is flat from 20 px to 200 px -- so there is nothing to key a
-     * per-pixel or per-region decision on.
-     *
-     * <p>What is left is arithmetic rather than estimation. At 4x, three frames
-     * in four are built from vectors that cannot describe the motion. Halving
-     * the multiple halves how many of those exist and puts each survivor closer
-     * to a real frame, where {@code fg truth} reads 0.0% harm rather than 10 to
-     * 28%.
-     *
-     * <p>The cost is smoothness and it is not small: 4x to 2x takes about 57
-     * presented frames a second to about 30. That is why this is a switch rather
-     * than a default.
-     *
-     * <p>Whole-frame on purpose. A per-region version of this is the fallback
-     * InterpolateMaterial records removing, where parts of the picture ran at
-     * half the rate of the rest and read as objects dragging.
-     *
-     * <p>Read from the once-a-second field probe, which is coarse and is meant
-     * to be: the multiple is settled per interval and used by three separate
-     * phase decisions inside it, so a value that moved every frame would make
-     * them disagree. See activeMultiple.
-     */
-    private int saturatedMultiple(int asked) {
-        if (asked < 4 || fieldMagnitude <= 0f) return asked;
-        // **Two thresholds, because one would pulse.** Metro runs at 129 to 151
-        // px against a window of 112, which is to say it sits ON the trigger.
-        // A single threshold sampled once a second would engage and release
-        // repeatedly, and each change moves the presented rate between about 57
-        // frames a second and about 30 -- smoothness visibly pumping in and out,
-        // which is a worse artefact than the one being traded away.
-        //
-        // So it engages at the window and releases only well under it. Unlike
-        // the cost ratio GuardMaterial keys on, camera speed varies smoothly, so
-        // a Schmitt trigger on it actually holds: getting from 112 back down to
-        // 78 means the camera genuinely slowed rather than the number wobbling.
-        if (saturationEngaged) {
-            if (fieldMagnitude <= SEARCH_WINDOW_PX * 0.7f) saturationEngaged = false;
-        } else if (fieldMagnitude >= SEARCH_WINDOW_PX) {
-            saturationEngaged = true;
-        }
-        return saturationEngaged ? Math.max(2, asked / 2) : asked;
-    }
-
-    /** Whether the guard is currently holding the multiple down. Hysteretic. */
-    private boolean saturationEngaged = false;
-
-
 
     /**
      * The multiple actually in force for the interval now running.
@@ -1993,13 +1930,6 @@ public class FrameSynthesizer implements FramePacer.Target {
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
-            // Which state the saturation guard is in and both thresholds, so
-            // whether it is chattering is visible rather than a matter of
-            // opinion. Once a second, alongside the rate it changes.
-            Log.i(TAG, String.format(
-                "fg saturation: %s -- field %.0f px, engages at %d, releases at %.0f",
-                saturationEngaged ? "HOLDING the multiple down (half)" : "not engaged",
-                fieldMagnitude, SEARCH_WINDOW_PX, SEARCH_WINDOW_PX * 0.7f));
         }
 
         if (wants("field")) {
