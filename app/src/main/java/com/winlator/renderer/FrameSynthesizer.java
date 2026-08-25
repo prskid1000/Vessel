@@ -607,6 +607,67 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private static final long WORTH_INTERPOLATING_NANOS = 100_000_000L;
 
+    /**
+     * VESSEL: the same question asked of this guest rather than of a constant.
+     *
+     * <p><b>"The guest has stopped rather than slowed" is a relative statement
+     * and 100 ms cannot express it.</b> A hundred milliseconds is a stall for a
+     * title running at 15 fps and the perfectly normal interval of one capped at
+     * 10, and the fixed number treats them the same. Measured across two games
+     * on this device, that is not academic: Metro holds 61 to 69 ms and never
+     * approaches the line, while RE9 swings 44.8 to 140 ms and crosses it five
+     * times in sixty-one seconds. Each crossing takes the multiple from 4x to 1x
+     * -- about sixty presented frames a second to about seven -- and back.
+     *
+     * <p>{@link #idleGate} already made this move for the other gate in this
+     * file, and for the same reason: a threshold that scales with what the
+     * pipeline is actually configured to do, rather than one chosen once against
+     * one configuration.
+     *
+     * <p>So the gate is now twice the interval this guest habitually keeps. The
+     * floor is the old constant, so nothing is ever gated more eagerly than
+     * before; the ceiling is 250 ms, because past that the guest has genuinely
+     * stopped -- a loading screen or a shader compile -- and inventing three
+     * frames across it is what the original comment was written about.
+     *
+     * <p><b>What this is not.</b> It is not a claim that the frames it now
+     * permits look good. Nothing measured this session predicts harm --
+     * displacement, motion diversity, contrast and brightness all came out flat
+     * -- so there is no evidence either way about the picture. What it removes is
+     * an arbitrary line that one game happens to sit on top of.
+     */
+    private static final long WORTH_INTERPOLATING_CEILING_NANOS = 250_000_000L;
+
+    /**
+     * A long-horizon view of the guest's interval, for {@link #worthInterpolating}.
+     *
+     * <p>Separate from {@link #recent} on purpose. That one holds nine samples so
+     * it can follow a real change in rate within about half a second, which is
+     * what the aim needs; this one has to describe the guest's habit and must not
+     * move when the guest hitches. Sixty-four samples is about four seconds at 15
+     * fps -- long enough that a stall lasting several frames cannot shift the
+     * middle, short enough to follow a genuine change of scene or settings.
+     */
+    private final long[] baseline = new long[64];
+    private int baselineAt = 0;
+    private int baselineHeld = 0;
+
+    private long baselineInterval() {
+        if (baselineHeld == 0) return 0;
+        final long[] sorted = new long[baselineHeld];
+        System.arraycopy(baseline, 0, sorted, 0, baselineHeld);
+        java.util.Arrays.sort(sorted);
+        return sorted[baselineHeld / 2];
+    }
+
+    /** The widest gap still worth interpolating across, for THIS guest. */
+    private long worthInterpolating() {
+        final long base = baselineInterval();
+        if (base <= 0) return WORTH_INTERPOLATING_NANOS;
+        return Math.min(Math.max(base * 2, WORTH_INTERPOLATING_NANOS),
+                        WORTH_INTERPOLATING_CEILING_NANOS);
+    }
+
     private int effectiveMultiple() {
         // **Not clamped to the fps limit, deliberately.**
         //
@@ -629,7 +690,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // wide to interpolate across, and an interval that cannot carry the
         // frames. See WORTH_INTERPOLATING_NANOS for the first.
         if (multiple < 2) return 1;
-        if (smoothedInterval > WORTH_INTERPOLATING_NANOS) return 1;
+        if (smoothedInterval > worthInterpolating()) return 1;
         final long period = vsyncPeriodNanos();
         if (period <= 0 || smoothedInterval <= 0) return multiple;
         final int refreshes = (int)(smoothedInterval / period);
@@ -985,6 +1046,11 @@ public class FrameSynthesizer implements FramePacer.Target {
             recentAt = (recentAt + 1) % recent.length;
             if (recentHeld < recent.length) recentHeld++;
             smoothedInterval = medianInterval();
+            // The guest's habit, on a horizon long enough that a hitch cannot
+            // move it. See worthInterpolating.
+            baseline[baselineAt] = interval;
+            baselineAt = (baselineAt + 1) % baseline.length;
+            if (baselineHeld < baseline.length) baselineHeld++;
         }
 
         // Settled once, here, and used by all three of the phase decisions that
@@ -1779,6 +1845,15 @@ public class FrameSynthesizer implements FramePacer.Target {
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
+            // Where the gate currently sits and what it was derived from, so a
+            // 4x-to-1x drop can be read rather than guessed at.
+            Log.i(TAG, String.format(
+                "fg gate: interpolating up to %.0f ms (guest habit %.0f ms),"
+                    + " interval now %.0f ms -- %s",
+                worthInterpolating() / 1e6f, baselineInterval() / 1e6f,
+                smoothedInterval / 1e6f,
+                smoothedInterval > worthInterpolating() ? "OFF, guest has stopped"
+                                                       : "interpolating"));
         }
 
         if (wants("field")) {
