@@ -981,8 +981,17 @@ public class FrameSynthesizer implements FramePacer.Target {
         return true;
     }
 
-    /** Present the real frame, remember what it looked like, and queue the rest. */
-    public void endRealFrame() {
+    /**
+     * Present the real frame, remember what it looked like, and queue the rest.
+     *
+     * @return whether anything reached the buffer. **False means the caller must
+     *     re-present**, because GLSurfaceView swaps regardless and the buffer it
+     *     publishes is two or three presents old -- see {@link
+     *     #repeatLastPresent}. This path can now decline: an arrival that would
+     *     land in a scanout already taken is handed to the pacer instead of
+     *     drawn, and on those draws nothing here writes anything at all.
+     */
+    public boolean endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         renderer.endGuestScaleCapture();
@@ -998,8 +1007,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         // game. Presenting it here, before the history rotates, bounds the
         // failure: a real frame can be late by at most one interval and can
         // never be skipped.
+        boolean presentedHere = false;
         if (!realPresented && realFrames >= 1) {
             presentLatest();
+            presentedHere = true;
         }
 
         // Luma for this frame, so the pair is ready without re-deriving the older
@@ -1127,6 +1138,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             pacer.schedule(smoothedInterval, activeMultiple, deferredArrival);
         }
         report();
+        return !deferredArrival || presentedHere;
     }
 
     /**
