@@ -890,8 +890,17 @@ public class FrameSynthesizer implements FramePacer.Target {
         return true;
     }
 
-    /** Present the real frame, remember what it looked like, and queue the rest. */
-    public void endRealFrame() {
+    /**
+     * Present the real frame, remember what it looked like, and queue the rest.
+     *
+     * @return whether anything reached the buffer. **False means the caller must
+     *     re-present**, because GLSurfaceView swaps regardless and the buffer it
+     *     publishes is two or three presents old -- see {@link
+     *     #repeatLastPresent}. This path can now decline: an arrival that would
+     *     land in a scanout already taken is handed to the pacer instead of
+     *     drawn, and on those draws nothing here writes anything at all.
+     */
+    public boolean endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         renderer.endGuestScaleCapture();
@@ -907,8 +916,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         // game. Presenting it here, before the history rotates, bounds the
         // failure: a real frame can be late by at most one interval and can
         // never be skipped.
+        boolean presentedHere = false;
         if (!realPresented && realFrames >= 1) {
             presentLatest();
+            presentedHere = true;
         }
 
         // Luma for this frame, so the pair is ready without re-deriving the older
@@ -986,7 +997,37 @@ public class FrameSynthesizer implements FramePacer.Target {
         // the `else`, which presents a SECOND real frame into the same
         // scanout -- 299 collisions in one session, every one a real frame.
         // Only paced frames yield; see clearOfLastPresent.
-        if (motionValid && activeMultiple >= 2) {
+        // **The arrival now asks, because the trace says it should.** It was
+        // made unconditional after a guard here sent control to the `else`,
+        // which presented a SECOND real frame into the same scanout -- 299
+        // collisions in one session. That fix was right about the branch and
+        // wrong about the frame: the answer is not to stop asking, it is to not
+        // fall through to presentLatest when the answer is no.
+        //
+        // Attributed per path, this is where nearly all the waste is:
+        //
+        //     arrival 7/16, paced 0/36, real 0/16
+        //     arrival 8/16, paced 0/39, real 2/16
+        //     arrival 9/16, paced 0/39, real 0/16
+        //
+        // Half of every arrival drawn, upscaled, swapped and overwritten before
+        // the panel read it, while the paced slots -- which do ask -- collided
+        // not once in a hundred and ten.
+        //
+        // A collided arrival is handed to the pacer as slot zero instead, due
+        // immediately. Dropping it was measured and is worse: two thirds of
+        // arrivals disappeared and the present rate fell from 63-65 a second to
+        // 55-57. Deferring keeps the frame and costs it one refresh.
+        //
+        // Nothing is counted or latched here: slot zero goes through
+        // presentSynthesized like any other, which counts it and advances
+        // lastPhase only once it has actually been drawn. See phaseFor -- a
+        // monotonic guard advanced past a moment that was never shown clamps
+        // the next genuine frame forward to it.
+        boolean deferredArrival = false;
+        if (motionValid && activeMultiple >= 2 && !clearOfLastPresent()) {
+            deferredArrival = true;
+        } else if (motionValid && activeMultiple >= 2) {
             presentPhase(1f / activeMultiple);
             // **Counted here, because nothing else counts it.** At 2x this is the
             // only genuinely synthesised frame an interval produces -- the pacer's
@@ -1003,9 +1044,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            pacer.schedule(smoothedInterval, activeMultiple);
+            pacer.schedule(smoothedInterval, activeMultiple, deferredArrival);
         }
         report();
+        return !deferredArrival || presentedHere;
     }
 
     /**

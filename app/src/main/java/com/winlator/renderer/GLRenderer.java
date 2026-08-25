@@ -383,7 +383,12 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             }
             if (frameSynthesizer.beginRealFrame()) {
                 drawFrame();
-                frameSynthesizer.endRealFrame();
+                // Same reason as the synthesised branch above: this path can now
+                // decline too, when the arrival is deferred to the pacer, and a
+                // draw that writes nothing still swaps.
+                if (!frameSynthesizer.endRealFrame()) {
+                    frameSynthesizer.repeatLastPresent();
+                }
                 if (listener != null) listener.onFrameEnd();
                 return;
             }
