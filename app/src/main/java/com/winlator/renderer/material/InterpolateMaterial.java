@@ -445,9 +445,60 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // What a stationary thing looks like at this instant: the same
                 // two frames read at this exact pixel. Exact for an overlay, and
                 // what the blend falls back towards where motion is refuted.
-                "vec3 still = mix(texture2D(previousTexture, vUV).rgb,",
-                                 "texture2D(screenTexture, vUV).rgb, phase);",
+                "vec3 stillOlder = texture2D(previousTexture, vUV).rgb;",
+                "vec3 stillNewer = texture2D(screenTexture, vUV).rgb;",
+                "vec3 still = mix(stillOlder, stillNewer, phase);",
                 "shown = mix(still, shown, carry);",
+
+                // ---- nothing may be invented ---------------------------------
+                //
+                // **The one artefact that is visible on screen and has a
+                // measured driver.** `fg truth` reports invented content --
+                // pixels darker than anything real in the neighbourhood, which
+                // is content fetched from nowhere -- and unlike every other
+                // figure in that line it tracks displacement rather than phase:
+                // 0.00% below 20 px, ~4% by 50 px, flat after. Metro and RE9 run
+                // at 40-150 px per interval, so they sit permanently in the
+                // saturated part of that curve, and the frame this session
+                // captured at the worst point of a fast pan has liquefied --
+                // vertical smears, edges dragged into streaks, a painted number
+                // pulled apart.
+                //
+                // This is a CLAMP, not a confidence test, and the distinction is
+                // the whole reason it is allowed to exist. The class comment
+                // above records that scoring vectors and falling back where a
+                // test failed was tried and removed: every "is the winner good?"
+                // test passed while the picture was wrong, and dropping a region
+                // to the nearest real frame made that region stop advancing, so
+                // parts of the picture ran at half the rate of the rest. Nothing
+                // here decides anything or switches paths. Every pixel takes
+                // exactly the same instructions, the result moves continuously,
+                // and where the prediction was already reasonable the clamp is
+                // the identity.
+                //
+                // The box is the content that genuinely exists at the places
+                // this pixel could legitimately have come from: both real frames
+                // at the compensated positions, and both at the uncompensated
+                // one. A colour outside that box was in neither frame anywhere
+                // this pixel looked, so it was manufactured by the blend and
+                // there is nowhere it could have come from.
+                //
+                // **Where this can be wrong, stated rather than discovered
+                // later.** OBMC blends four predictions from four block vectors,
+                // and the box is built from the mean vector only -- two fetches
+                // rather than eight. At a motion boundary a neighbouring block
+                // can legitimately fetch content outside the mean's range, and
+                // clamping there pulls its contribution back, which is a partial
+                // undoing of the smooth hand-over OBMC exists to provide. The
+                // uncompensated pair is included to widen the box for exactly
+                // that case. Whether the trade is worth it is not arguable from
+                // here: `fg truth` prints invented content every second, so the
+                // same recording that showed 4% will say.
+                "vec3 srcOlder = texture2D(previousTexture, mo).rgb;",
+                "vec3 srcNewer = texture2D(screenTexture, mn).rgb;",
+                "vec3 lo = min(min(srcOlder, srcNewer), min(stillOlder, stillNewer));",
+                "vec3 hi = max(max(srcOlder, srcNewer), max(stillOlder, stillNewer));",
+                "shown = clamp(shown, lo, hi);",
 
                 "if (diagnostic > 0.5) {",
                     // ---- measurements that the shader cannot flatter ---------
