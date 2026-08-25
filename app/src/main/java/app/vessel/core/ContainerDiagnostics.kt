@@ -294,7 +294,14 @@ data class ContainerDiagnostics(
      *   went into it.
      * - `quality` — what the interpolation did with it: how much was trusted,
      *   how much fell back, how much came out darker than either source.
-     * - `all` — every category.
+     * - `mark` — stamp every synthesised frame with sixteen magenta pixels in
+     *   one corner. The only category that changes what is on screen, and the
+     *   one that makes a screen recording worth analysing: without it the real
+     *   frames and the generated ones are indistinguishable afterwards, so a
+     *   broken frame cannot be attributed to the pipeline rather than to a cut
+     *   or a muzzle flash. Every tool in `tools/frame-bench` looks for it.
+     * - `all` — every category, this one included, so recordings made with
+     *   `all` carry the stamp and look different from ordinary play.
      *
      * Unknown names are kept rather than dropped. A category added later should
      * work on a container configured today, and a typo is visible in the log line
