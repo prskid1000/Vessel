@@ -39,27 +39,75 @@ import flicker as F
 BLOCK = P.BLOCK
 
 
-def vector_median(field, original, extra=None, passes=10):
+def vector_median(field, original, extra=None, passes=10, weights=None):
     """The device's filter: least total L1 distance to every candidate.
 
     Anchored -- `original` is on offer in every pass, not only the first -- which
     is what removes the ceiling on how many passes help. `extra` is the second
     field, offered the same way.
+
+    `weights`, if given, is a per-block confidence in [0, 1] that scales how much
+    each NEIGHBOUR's opinion counts. See textured_weights and island.py: with
+    every neighbour voting equally, a small object on a flat background is
+    outvoted 8-to-1 by blocks whose vectors are tie-breaks rather than
+    measurements, ten times over, and its motion is deleted.
     """
     current = field
+    wpad = None
+    if weights is not None:
+        wpad = np.pad(weights, 1, mode="edge")
     for _ in range(passes):
         padded = np.pad(current, ((1, 1), (1, 1), (0, 0)), mode="edge")
-        neighbours = [padded[dy:dy + current.shape[0], dx:dx + current.shape[1]]
+        h, w = current.shape[:2]
+        neighbours = [padded[dy:dy + h, dx:dx + w]
                       for dy in range(3) for dx in range(3)]
         candidates = neighbours + [original]
         if extra is not None:
             candidates.append(extra)
         stack = np.stack(candidates, axis=0)
         # Sum of L1 distances from each candidate to all of them.
-        cost = np.abs(stack[:, None] - stack[None, :]).sum(axis=(0, -1))
+        d = np.abs(stack[:, None] - stack[None, :]).sum(axis=-1)
+        if wpad is not None:
+            # How much each candidate's opinion counts when judging the others.
+            # The anchor and the extra always count fully -- they are the
+            # measurement, not an opinion about it.
+            nw = [wpad[dy:dy + h, dx:dx + w] for dy in range(3) for dx in range(3)]
+            vote = nw + [np.ones((h, w), dtype=np.float32)]
+            if extra is not None:
+                vote.append(np.ones((h, w), dtype=np.float32))
+            vote = np.stack(vote, axis=0)
+            d = d * vote[None, :]
+        cost = d.sum(axis=1)
         best = np.argmin(cost, axis=0)
         current = np.take_along_axis(stack, best[None, ..., None], axis=0)[0]
     return current
+
+
+def textured_weights(frame, floor=2.0 / 255.0, full=12.0 / 255.0):
+    """How much a block's vector deserves to be believed, from its own gradient.
+
+    **A flat block has not measured anything.** It matches equally well at every
+    offset, so whatever vector came back is the search losing a tie -- and on a
+    desktop, or a painted wall, or a patch of sky, every neighbour of a small
+    moving object is exactly that. Letting them vote at full strength is what
+    erases the object: island.py shows the filtered field driven to exactly zero
+    and the picture becoming, bit for bit, the same as no motion compensation at
+    all.
+
+    The ramp is the buffer's own precision rather than a fitted constant, the
+    same pair InterpolateMaterial already uses for its stillness tests: one 8-bit
+    step is 1/255, two is the smallest difference that is signal rather than
+    rounding, and six times that is where a difference stops being plausibly
+    noise. A block above the top of the ramp votes fully, as it always did.
+    """
+    l = bench.luma(frame)
+    h, w = l.shape
+    gh, gw = h // BLOCK, w // BLOCK
+    gx = np.abs(np.diff(l, axis=1, append=l[:, -1:]))
+    gy = np.abs(np.diff(l, axis=0, append=l[-1:, :]))
+    g = (gx + gy)[:gh * BLOCK, :gw * BLOCK]
+    per = g.reshape(gh, BLOCK, gw, BLOCK).mean(axis=(1, 3))
+    return np.clip((per - floor) / max(full - floor, 1e-6), 0.0, 1.0).astype(np.float32)
 
 
 def accuracy():
