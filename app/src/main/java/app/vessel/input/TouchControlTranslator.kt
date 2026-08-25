@@ -361,30 +361,17 @@ class TouchControlTranslator(
             }
         }
 
-    // `internal` rather than `private` so the boundary test can assert against
-    // the threshold instead of restating it. The test that pinned this used the
-    // literals 2_999 and 3_000, which made shortening the hold a test failure
-    // about a number nobody meant to fix.
-    internal companion object {
+    private companion object {
         /**
          * How long a press has to last to latch, in milliseconds.
          *
-         * One second, because three was long enough to be unpleasant to wait out
-         * for a gesture whose whole purpose is convenience -- latching a walk or
-         * an aim so a finger can leave the glass.
-         *
-         * The cost is real and worth stating: three seconds was chosen so that
-         * nothing done in play could reach it, and one second is inside the
-         * range of a deliberate in-game hold -- sprinting, aiming down sights,
-         * charging an attack. Those will now latch by accident on a latchable
-         * button. What limits the damage is that the same gesture releases it,
-         * and that a tap on a latched button is deliberately not a release, so
-         * an accidental latch is undone the same way it was made rather than
-         * leaving the button stuck with no obvious way out.
-         *
-         * Only buttons marked latchable are affected; see [latches].
+         * Three seconds is long enough that no press made in play reaches it --
+         * a tapped button is tens of milliseconds and a deliberate hold in a
+         * fight is under one second -- and short enough to be worth waiting out
+         * on purpose. The same threshold releases it, so there is one gesture to
+         * learn rather than two.
          */
-        const val LATCH_HOLD_MS = 1_000L
+        const val LATCH_HOLD_MS = 3_000L
 
         /**
          * Which control drives each of the two stick slots.

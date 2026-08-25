@@ -370,25 +370,13 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             final long synthesized = frameSynthesizer.consumePending();
 
             if (!haveReal && synthesized > 0) {
-                // **A declined frame still swaps, so it still has to be
-                // written.** See FrameSynthesizer.repeatLastPresent: the buffer
-                // about to be published is two or three presents old rather than
-                // the one on screen, so returning without drawing publishes an
-                // old frame instead of leaving the picture alone.
-                if (!frameSynthesizer.presentSynthesized(synthesized)) {
-                    frameSynthesizer.repeatLastPresent();
-                }
+                frameSynthesizer.presentSynthesized(synthesized);
                 if (listener != null) listener.onFrameEnd();
                 return;
             }
             if (frameSynthesizer.beginRealFrame()) {
                 drawFrame();
-                // Same reason as the synthesised branch above: this path can now
-                // decline too, when the arrival is deferred to the pacer, and a
-                // draw that writes nothing still swaps.
-                if (!frameSynthesizer.endRealFrame()) {
-                    frameSynthesizer.repeatLastPresent();
-                }
+                frameSynthesizer.endRealFrame();
                 if (listener != null) listener.onFrameEnd();
                 return;
             }
@@ -420,26 +408,6 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
 
-        updatePointerTransform();
-
-        renderWindows();
-        // **Not while capturing.** See presentGuestFrame: a frame captured for
-        // frame generation must not contain the cursor, because everything
-        // downstream would then try to infer its motion from an 8x8 block match
-        // and get it wrong. It is drawn over the presented frame instead.
-        if (cursorVisible && !capturingAtGuestScale) renderCursor();
-    }
-
-    /**
-     * VESSEL: the magnifier and screen-offset transform the cursor draws through.
-     *
-     * <p>Lifted out of {@link #drawFrame} because the cursor is now drawn from two
-     * places -- there when compositing straight to the screen, and from {@link
-     * #presentGuestFrame} when a captured frame is being shown -- and {@link
-     * #renderCursorDrawable} multiplies by {@code tmpXForm2}, so both paths have
-     * to have set it.
-     */
-    private void updatePointerTransform() {
         float pointerX = 0;
         float pointerY = 0;
         float magnifierZoom = !screenOffsetYRelativeToCursor ? this.magnifierZoom : 1.0f;
@@ -455,6 +423,9 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         }
 
         XForm.makeTransform(tmpXForm2, -pointerX, -pointerY, magnifierZoom, magnifierZoom, 0);
+
+        renderWindows();
+        if (cursorVisible) renderCursor();
     }
 
     /**
@@ -710,33 +681,6 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         GLES20.glEnable(GLES20.GL_BLEND);
         boundWindowMaterial = null;
-
-        // **The cursor goes on top of the frame, not into it.**
-        //
-        // It used to be composited into the captured frame, which sent it
-        // through the block matcher like scenery -- and the matcher is the wrong
-        // instrument for it twice over. A cursor is about sixteen 8x8 blocks on a
-        // desktop where every neighbour correctly reports zero, so the median
-        // filter that exists to reject lone dissenters deletes its motion
-        // (GuardMaterial); and a quick flick moves it further in one interval
-        // than the 112 px search window can see at all, so there is no vector to
-        // find. Measured on ninety seconds of real pointer movement, 9 to 16% of
-        // synthesised frames lost the motion entirely and fell back to a
-        // cross-fade, which puts the pointer half way back -- one bad frame every
-        // other interval at 4x, seen as the cursor splitting and lagging.
-        //
-        // None of that had to be inferred. The X server holds the exact pointer
-        // position, and this is a compositor: it can simply draw the thing where
-        // it is. Reading it here rather than at capture time also makes the
-        // cursor FRESHER than the frame under it, which is what a hardware cursor
-        // plane does and why they exist.
-        //
-        // Tier 0 is untouched -- drawSynthesizedFrame goes through drawFrame with
-        // capturingAtGuestScale false, so it still draws its own cursor there.
-        if (cursorVisible) {
-            updatePointerTransform();
-            renderCursor();
-        }
     }
 
     /**

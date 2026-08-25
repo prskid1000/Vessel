@@ -158,8 +158,6 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform mark = new Uniform("mark");
         /** VESSEL: which way the field points, settled once. See SignMaterial. */
         public final Uniform fieldSign = new Uniform("fieldSign");
-        /** VESSEL: 1 when the field came through GuardMaterial. */
-        public final Uniform guarded = new Uniform("guarded");
     }
 
     @Override
@@ -220,9 +218,6 @@ public class InterpolateMaterial extends ScreenMaterial {
             // which is hard-edged black speckle through every detailed region of
             // every synthesised frame.
             "uniform float fieldSign;",
-            // VESSEL: 1 when GuardMaterial has written this field, so its blue
-            // channel means something. See `proven` below.
-            "uniform float guarded;",
 
             "varying vec2 vUV;",
 
@@ -308,26 +303,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                               "(1.0 - pw.x) * pw.y,",
                               "pw.x * pw.y);",
 
-                "vec4 f0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel);",
-                "vec4 f1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel);",
-                "vec4 f2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel);",
-                "vec4 f3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel);",
-                "m0 = f0.rg * scale;",
-                "m1 = f1.rg * scale;",
-                "m2 = f2.rg * scale;",
-                "m3 = f3.rg * scale;",
-                // **Motion proven, so do not argue with it below.** GuardMaterial
-                // sets this where a block's own vector explained its own pixels
-                // twenty times better than what the median passes overwrote it
-                // with. Read from the same four fetches the vectors come from,
-                // so it costs a swizzle rather than a tap.
-                //
-                // **Gated on the guard having run**, because when it has not the
-                // field is the matcher's own texture and nothing owns its blue
-                // channel. MedianMaterial writes zero there, so a filtered field
-                // is safe either way; the raw one is not, and a stray value would
-                // silently disable the overlay fix across the whole frame.
-                "float proven = guarded * max(max(f0.b, f1.b), max(f2.b, f3.b));",
+                "m0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel).rg * scale;",
+                "m1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel).rg * scale;",
+                "m2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel).rg * scale;",
+                "m3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel).rg * scale;",
 
                 // ---- a pixel that did not change did not move ----------------
                 //
@@ -384,13 +363,6 @@ public class InterpolateMaterial extends ScreenMaterial {
                                     "- texture2D(lumaOlderTexture, mo).r);",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
-                // The pull towards a stationary reading exists for screen-space
-                // overlays, which the block matcher cannot know about. It must
-                // not fire on an object the guard has just measured to be
-                // moving: on the cursor scene it takes a corrected field from
-                // 0.76 of trailing ink back to 64.67, which is most of the way
-                // back to no compensation at all.
-                "carry = max(carry, proven);",
 
                 // How still the content is at each of the two places this pixel
                 // reads from. Computed on the mean vector rather than per block:
@@ -473,60 +445,9 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // What a stationary thing looks like at this instant: the same
                 // two frames read at this exact pixel. Exact for an overlay, and
                 // what the blend falls back towards where motion is refuted.
-                "vec3 stillOlder = texture2D(previousTexture, vUV).rgb;",
-                "vec3 stillNewer = texture2D(screenTexture, vUV).rgb;",
-                "vec3 still = mix(stillOlder, stillNewer, phase);",
+                "vec3 still = mix(texture2D(previousTexture, vUV).rgb,",
+                                 "texture2D(screenTexture, vUV).rgb, phase);",
                 "shown = mix(still, shown, carry);",
-
-                // ---- nothing may be invented ---------------------------------
-                //
-                // **The one artefact that is visible on screen and has a
-                // measured driver.** `fg truth` reports invented content --
-                // pixels darker than anything real in the neighbourhood, which
-                // is content fetched from nowhere -- and unlike every other
-                // figure in that line it tracks displacement rather than phase:
-                // 0.00% below 20 px, ~4% by 50 px, flat after. Metro and RE9 run
-                // at 40-150 px per interval, so they sit permanently in the
-                // saturated part of that curve, and the frame this session
-                // captured at the worst point of a fast pan has liquefied --
-                // vertical smears, edges dragged into streaks, a painted number
-                // pulled apart.
-                //
-                // This is a CLAMP, not a confidence test, and the distinction is
-                // the whole reason it is allowed to exist. The class comment
-                // above records that scoring vectors and falling back where a
-                // test failed was tried and removed: every "is the winner good?"
-                // test passed while the picture was wrong, and dropping a region
-                // to the nearest real frame made that region stop advancing, so
-                // parts of the picture ran at half the rate of the rest. Nothing
-                // here decides anything or switches paths. Every pixel takes
-                // exactly the same instructions, the result moves continuously,
-                // and where the prediction was already reasonable the clamp is
-                // the identity.
-                //
-                // The box is the content that genuinely exists at the places
-                // this pixel could legitimately have come from: both real frames
-                // at the compensated positions, and both at the uncompensated
-                // one. A colour outside that box was in neither frame anywhere
-                // this pixel looked, so it was manufactured by the blend and
-                // there is nowhere it could have come from.
-                //
-                // **Where this can be wrong, stated rather than discovered
-                // later.** OBMC blends four predictions from four block vectors,
-                // and the box is built from the mean vector only -- two fetches
-                // rather than eight. At a motion boundary a neighbouring block
-                // can legitimately fetch content outside the mean's range, and
-                // clamping there pulls its contribution back, which is a partial
-                // undoing of the smooth hand-over OBMC exists to provide. The
-                // uncompensated pair is included to widen the box for exactly
-                // that case. Whether the trade is worth it is not arguable from
-                // here: `fg truth` prints invented content every second, so the
-                // same recording that showed 4% will say.
-                "vec3 srcOlder = texture2D(previousTexture, mo).rgb;",
-                "vec3 srcNewer = texture2D(screenTexture, mn).rgb;",
-                "vec3 lo = min(min(srcOlder, srcNewer), min(stillOlder, stillNewer));",
-                "vec3 hi = max(max(srcOlder, srcNewer), max(stillOlder, stillNewer));",
-                "shown = clamp(shown, lo, hi);",
 
                 "if (diagnostic > 0.5) {",
                     // ---- measurements that the shader cannot flatter ---------
@@ -600,34 +521,11 @@ public class InterpolateMaterial extends ScreenMaterial {
                         // small R could mean "almost nothing was harmed" or
                         // "almost nothing was moving".
                         "changed,",
-                        // A: **how far this pixel moved, in luma pixels over 255.**
-                        //
-                        // This channel used to hold dSynth/dBase, described as
-                        // "how far the synthesis sits between the endpoints".
-                        // It is not that -- it is a ratio of two distances, which
-                        // only coincides with a position when the motion is a
-                        // straight fade. landing.py measured the real thing from
-                        // a recording, by projecting each synthesised frame onto
-                        // the line between the two real ones, and found the
-                        // pipeline's phases rise correctly (60 intervals of 60)
-                        // while this channel implied they were inverted. So it
-                        // was answering a question nobody asked, with a number
-                        // that read as an inversion that is not there.
-                        //
-                        // What is worth its place instead is displacement, and
-                        // specifically displacement measured HERE: harm is read
-                        // from this same pass, on this same frame, from these
-                        // same pixels. The separate probe in SignMaterial gives
-                        // the same quantity a second away from the harm figure
-                        // it has to be plotted against, and at fifteen real
-                        // frames a second the camera can go from still to a full
-                        // sweep inside that second -- which is why pairing the
-                        // two across log lines produced no relationship at all,
-                        // 0% and 33% harm at the same 124 px.
-                        //
-                        // `mean` is the OBMC-blended vector in texture space, so
-                        // dividing by motionScale returns it to luma pixels.
-                        "clamp(length(mean / motionScale) / 255.0, 0.0, 1.0));",
+                        // A: how far the synthesis sits between the endpoints, on
+                        // average. Half is what a correct interpolation at the
+                        // midpoint looks like; approaching one means it is barely
+                        // better than the old frame, and beyond one it is worse.
+                        "clamp(dSynth / max(dBase, 0.008) * 0.5, 0.0, 1.0));",
                     "return;",
                 "}",
 

@@ -5,7 +5,6 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
-import com.winlator.renderer.material.GuardMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.SignMaterial;
@@ -240,7 +239,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
-    private final GuardMaterial guardMaterial = new GuardMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -356,17 +354,6 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private static final int MEDIAN_PASSES = 10;
 
-    /**
-     * Roughly how far {@code GL_QCOM_motion_estimation} can see, in luma pixels.
-     *
-     * <p>Not reported by the extension, so this is measured rather than declared:
-     * vectors reached 113 px in the first survey of this driver and the field
-     * stops rising at about 120. Printed beside the mean displacement only so a
-     * log line says whether the scene is moving further than the matcher can
-     * follow -- nothing branches on it.
-     */
-    private static final int SEARCH_WINDOW_PX = 112;
-
     private int blockX = 8, blockY = 8;
 
     /**
@@ -391,30 +378,8 @@ public class FrameSynthesizer implements FramePacer.Target {
     private boolean announced = false;
 
     /** Frame-wide measurements, most recently read back. See {@link #measure}. */
-    private float measuredConfidence, measuredDark, measuredShadow;
-    /**
-     * How far the frame moved where it was measured, in luma pixels.
-     *
-     * <p>Read from the same diagnostic pass, on the same frame, as the
-     * harm figure it exists to be plotted against. Named for what it is:
-     * the channel used to be called a speed and to carry dSynth/dBase,
-     * which is a ratio of distances rather than a displacement or a phase.
-     */
-    private float measuredMoved;
+    private float measuredConfidence, measuredDark, measuredShadow, measuredSpeed;
     private long measuredAt = 0;
-    /**
-     * The phase the measured frame was actually drawn at.
-     *
-     * <p><b>Because the alternative was a constant, and the constant was wrong.</b>
-     * {@link #measure} samples ONE frame, whichever happens to fall on the
-     * once-a-second boundary, and that frame is drawn at 1/K, 2/K ... (K-1)/K --
-     * never reliably at a half. The line reported "(50% is correct)" regardless,
-     * so at 4x it compared a frame legitimately drawn at 0.25 or 0.75 against
-     * 0.5 and called the difference an error. Readings of 55-83% were taken as
-     * evidence of a systematic phase bias in the pipeline; they were evidence of
-     * this string.
-     */
-    private float measuredPhase = 0f;
 
     private int allocWidth = 0;
     private int allocHeight = 0;
@@ -438,38 +403,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float pendingSign = 0f;
 
     /**
-     * Consecutive decisive probes that contradict the latched sign.
-     *
-     * <p>The way back from a wrong latch, which had no way back at all. See
-     * {@link #probeFieldSign}.
-     */
-    private int signDissent = 0;
-
-    /**
-     * How many seconds of disagreement it takes to abandon a latched sign.
-     *
-     * <p>Five, because the two costs are wildly asymmetric and both are known. A
-     * wrong latch inverts every pixel of every synthesised frame until the
-     * context dies. A wrong UNLATCH costs one more probe cycle before the same
-     * answer is latched again, since the vote that follows sees the same scene.
-     * Five separate seconds each voting past eighty per cent against what is
-     * held is not something a correct latch produces.
-     */
-    private static final int SIGN_DISSENT_LIMIT = 5;
-
-    /**
-     * Mean length of the motion field, in luma pixels. See {@link #probeFieldSign}.
-     *
-     * <p>Reported so that harm and displacement can be read off the same log and
-     * plotted against each other. Every estimate of "how fast is too fast" so
-     * far has come from a stand-in block matcher on the laptop, and that matcher
-     * behaves nothing like the hardware one at low speed -- it put 19% of blocks
-     * past 100 pixels on a nearly-static scene, where the device reports 0.0%
-     * harm. This is the field the driver actually produced.
-     */
-    private float fieldMagnitude = 0f;
-
-    /**
      * Vote on the field's sign, and latch the answer once it is decisive.
      *
      * <p>Runs at most once a second and stops entirely once latched, so the
@@ -479,17 +412,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * pixel is precisely the thing that was wrong.
      */
     private void probeFieldSign() {
-        // **Three reasons to run, and the sign is only the first.**
-        //
-        // It used to stop the moment the sign latched. It no longer stops at
-        // all, because the same reduction carries two things that matter after
-        // that: how far the scene moved -- the number every attempt to bound
-        // motion compensation has been missing -- and a continuing vote on the
-        // sign itself, which is the only way back from a wrong latch.
-        //
-        // The cost is one readback a second, which is the rate this has always
-        // run at and the rate the other diagnostics run at safely.
-        final boolean needSign = fieldSign == 0f;
+        if (fieldSign != 0f) return;
         final long now = SystemClock.uptimeMillis();
         if (signProbedAt != 0 && now - signProbedAt < 1000) return;
         signProbedAt = now;
@@ -541,51 +464,11 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         final float positive = (pixel.get(0) & 0xff) / 255f;
         signVotes = (pixel.get(1) & 0xff) / 255f;
-        // Mean vector length over the whole field, back in luma pixels. See
-        // SignMaterial's blue channel for why this is worth a readback.
-        fieldMagnitude = (pixel.get(2) & 0xff);
 
         // A still frame has no opinion: both signs fetch the same content, so the
         // vote is a tie whatever the truth is. Wait for real motion rather than
         // latch a coin toss.
-        if (signVotes < 0.05f) { if (!needSign) signDissent = 0; return; }
-
-        // **A latch that cannot be undone is the worst failure mode in this
-        // file, and until now there was no path back from one.**
-        //
-        // The sign is decided once and read by every pixel of every synthesised
-        // frame thereafter. Get it wrong and the field displaces everything by
-        // twice its motion, backwards, for as long as the context lives -- which
-        // is the whole session. The guard in front of it is good (eighty per
-        // cent, twice, a second apart) but "good" and "irreversible" is a bad
-        // pairing: the cost of a rare wrong latch is total, and the cost of
-        // checking is one readback a second that is now taken anyway for the
-        // displacement figure.
-        //
-        // So the probe keeps voting after the latch. It does not get to flip on
-        // one disagreement -- that would reintroduce, at frame rate, exactly the
-        // instability that made deciding this per pixel an artefact. It has to
-        // disagree decisively, on moving frames, five times running: five
-        // separate seconds of scene, each voting past eighty per cent against
-        // what is latched. Anything undecided, or any vote that agrees, resets
-        // the counter to zero.
-        //
-        // Five seconds of a visibly inverted picture is bad. It is not a session.
-        final float shareNow = positive / signVotes;
-        if (!needSign) {
-            final boolean against = fieldSign > 0f ? shareNow < 0.2f : shareNow > 0.8f;
-            if (!against) { signDissent = 0; return; }
-            if (++signDissent < SIGN_DISSENT_LIMIT) return;
-            Log.w(TAG, String.format(
-                "fg sign: %d consecutive probes disagree with the latched %s field"
-                    + " (%.0f%% agree now) -- unlatching and deciding again",
-                signDissent, fieldSign > 0 ? "forward" : "backward",
-                shareNow * 100f));
-            fieldSign = 0f;
-            pendingSign = 0f;
-            signDissent = 0;
-            return;
-        }
+        if (signVotes < 0.05f) return;
 
         // **Two decisive probes that agree, not one.**
         //
@@ -602,7 +485,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         // apart -- which is two different moments of the scene. An undecided
         // probe clears the pending answer rather than leaving it to pair up with
         // a vote from some unrelated moment.
-        final float vote = shareNow > 0.8f ? 1f : (shareNow < 0.2f ? -1f : 0f);
+        final float share = positive / signVotes;
+        final float vote = share > 0.8f ? 1f : (share < 0.2f ? -1f : 0f);
         if (vote == 0f) { pendingSign = 0f; return; }
         if (pendingSign != vote) { pendingSign = vote; return; }
         fieldSign = vote;
@@ -610,8 +494,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         Log.i(TAG, String.format(
             "fg sign: field points %s (%.0f%% of moving pixels agree, %.0f%% of the"
                 + " frame moving) -- latched",
-            fieldSign > 0 ? "forward" : "backward", shareNow * 100f,
-            signVotes * 100f));
+            fieldSign > 0 ? "forward" : "backward", share * 100f, signVotes * 100f));
     }
 
     /**
@@ -850,27 +733,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private long lastPresentVsync = -1;
     private long collisions = 0;
 
-    /**
-     * VESSEL: which path presented, so a collision can be attributed to one.
-     *
-     * <p><b>Attribution before repair.</b> Ten to fifteen presents a second land
-     * in a refresh already taken and are never scanned out -- drawn, upscaled,
-     * swapped, overwritten. Three paths present, and two of them never yield:
-     * the arrival is deliberately unconditional (a guard there once sent control
-     * to the branch that presented a second real frame into the same scanout,
-     * 299 times in one session) and the real frame at phase 1 is never held
-     * back. Only paced frames consult {@link #clearOfLastPresent}.
-     *
-     * <p>So there are at least three candidate explanations and no way to choose
-     * between them from the total. Every repair reasoned into existence this
-     * session has failed; the two that worked came from a trace that named the
-     * fault. This is that trace.
-     */
-    private static final int SRC_ARRIVAL = 0, SRC_PACED = 1, SRC_REAL = 2, SRC_TIER0 = 3;
-    private int presentingSource = SRC_REAL;
-    private final long[] collisionsBySource = new long[4];
-    private final long[] presentsBySource = new long[4];
-
     private long lastPresentNanos = 0;
     private long presentGapMin = Long.MAX_VALUE;
     private long presentGapMax = 0;
@@ -883,11 +745,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("pacing")) {
             timestamps.onDraw();
             final long vsync = FramePacer.vsyncIndex();
-            presentsBySource[presentingSource]++;
-            if (vsync == lastPresentVsync) {
-                collisions++;
-                collisionsBySource[presentingSource]++;
-            }
+            if (vsync == lastPresentVsync) collisions++;
             lastPresentVsync = vsync;
         }
         final long now = System.nanoTime();
@@ -981,17 +839,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         return true;
     }
 
-    /**
-     * Present the real frame, remember what it looked like, and queue the rest.
-     *
-     * @return whether anything reached the buffer. **False means the caller must
-     *     re-present**, because GLSurfaceView swaps regardless and the buffer it
-     *     publishes is two or three presents old -- see {@link
-     *     #repeatLastPresent}. This path can now decline: an arrival that would
-     *     land in a scanout already taken is handed to the pacer instead of
-     *     drawn, and on those draws nothing here writes anything at all.
-     */
-    public boolean endRealFrame() {
+    /** Present the real frame, remember what it looked like, and queue the rest. */
+    public void endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         renderer.endGuestScaleCapture();
@@ -1007,10 +856,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         // game. Presenting it here, before the history rotates, bounds the
         // failure: a real frame can be late by at most one interval and can
         // never be skipped.
-        boolean presentedHere = false;
         if (!realPresented && realFrames >= 1) {
             presentLatest();
-            presentedHere = true;
         }
 
         // Luma for this frame, so the pair is ready without re-deriving the older
@@ -1088,37 +935,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // the `else`, which presents a SECOND real frame into the same
         // scanout -- 299 collisions in one session, every one a real frame.
         // Only paced frames yield; see clearOfLastPresent.
-        // **The arrival now asks, because the trace says it should.** It was
-        // made unconditional after a guard here sent control to the `else`,
-        // which presented a SECOND real frame into the same scanout -- 299
-        // collisions in one session. That fix was right about the branch and
-        // wrong about the frame: the answer is not to stop asking, it is to not
-        // fall through to presentLatest when the answer is no.
-        //
-        // Attributed per path, this is where nearly all the waste is:
-        //
-        //     arrival 7/16, paced 0/36, real 0/16
-        //     arrival 8/16, paced 0/39, real 2/16
-        //     arrival 9/16, paced 0/39, real 0/16
-        //
-        // Half of every arrival drawn, upscaled, swapped and overwritten before
-        // the panel read it, while the paced slots -- which do ask -- collided
-        // not once in a hundred and ten.
-        //
-        // A collided arrival is handed to the pacer as slot zero instead, due
-        // immediately. Dropping it was measured and is worse: two thirds of
-        // arrivals disappeared and the present rate fell from 63-65 a second to
-        // 55-57. Deferring keeps the frame and costs it one refresh.
-        // Nothing is counted or latched here: slot zero goes through
-        // presentSynthesized like any other, which counts it and advances
-        // lastPhase only once it has actually been drawn. See phaseFor -- a
-        // monotonic guard advanced past a moment that was never shown clamps
-        // the next genuine frame forward to it.
-        boolean deferredArrival = false;
-        if (motionValid && activeMultiple >= 2 && !clearOfLastPresent()) {
-            deferredArrival = true;
-        } else if (motionValid && activeMultiple >= 2) {
-            presentingSource = SRC_ARRIVAL;
+        if (motionValid && activeMultiple >= 2) {
             presentPhase(1f / activeMultiple);
             // **Counted here, because nothing else counts it.** At 2x this is the
             // only genuinely synthesised frame an interval produces -- the pacer's
@@ -1135,10 +952,9 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
-            pacer.schedule(smoothedInterval, activeMultiple, deferredArrival);
+            pacer.schedule(smoothedInterval, activeMultiple);
         }
         report();
-        return !deferredArrival || presentedHere;
     }
 
     /**
@@ -1146,8 +962,8 @@ public class FrameSynthesizer implements FramePacer.Target {
      *
      * @param index which of the N-1 frames this is; t is index/N
      */
-    public boolean presentSynthesized(long vsyncNanos) {
-        if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return false;
+    public void presentSynthesized(long vsyncNanos) {
+        if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return;
 
         final float phase = phaseFor(vsyncNanos);
 
@@ -1160,8 +976,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // fallback for when there is no field rather than the preferred answer.
         if (motionValid) {
             // The real frame is never withheld; an interpolated one yields.
-            if (phase < 1f && !clearOfLastPresent()) return false;
-            presentingSource = SRC_PACED;
+            if (phase < 1f && !clearOfLastPresent()) return;
             presentPhase(phase);
             // **Phase 1 is the real frame**, presented through presentLatest by
             // presentPhase. Counting it here inflated the synthesised rate by
@@ -1170,14 +985,13 @@ public class FrameSynthesizer implements FramePacer.Target {
             // real one. It is the number the whole feature was being judged by.
             if (phase < 1f) tier1Frames++;
             lastPhase = phase;
-            return true;
+            return;
         }
 
         // No field: re-composite at carried positions, which is exact for a
         // translation and is all that is available without one.
         if (renderer.anyWindowMoved()) {
             tier0Timer.begin();
-            presentingSource = SRC_TIER0;
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             renderer.drawSynthesizedFrame(phase);
             tier0Timer.end();
@@ -1190,7 +1004,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             tier0Frames++;
             lastPhase = phase;
             if (phase >= 1f) realPresented = true;
-            return true;
+            return;
         }
 
         // **Nothing to show, so show nothing.** This used to re-present the
@@ -1200,43 +1014,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // frame is already there; the honest response to having nothing to add
         // is to add nothing.
         skipped++;
-        return false;
     }
-
-    /**
-     * VESSEL: put the frame that is already on screen back into the buffer.
-     *
-     * <p><b>A draw that declines to draw does not leave the screen alone.</b>
-     * {@code GLSurfaceView} swaps whether or not anything was rendered, and the
-     * buffer it swaps in is not the one being displayed -- it is the one from two
-     * or three presents ago. Every path above that returns without drawing
-     * therefore publishes an old frame, and at 120 presents a second that is an
-     * old frame several times a second, interleaved with correct ones.
-     *
-     * <p>Measured on the desktop by tracking the pointer through a recording: the
-     * position sequence is not monotonic, and the values that repeat do so
-     * EXACTLY -- 383.0 three times, 388.1 four times -- interleaved with a
-     * sequence advancing normally. Exact repetition is not a cursor drawn late,
-     * it is the same image shown again. 16.2% of frames step backwards against a
-     * 1.3% floor measured on the guest's own frames, which is the hand changing
-     * direction.
-     *
-     * <p>The {@code skipped} comment above argued that "the frame is already
-     * there; the honest response to having nothing to add is to add nothing".
-     * The premise is wrong. The frame is already on the SCREEN; this is about the
-     * BUFFER, which holds something else.
-     *
-     * <p>Repeating costs one upscale and is deliberately not counted as a
-     * present: nothing new was shown, and the cadence statistics describe new
-     * content. What it buys is that the picture cannot go backwards.
-     */
-    public void repeatLastPresent() {
-        if (repeatTexture == 0) return;
-        renderer.presentGuestFrame(repeatTexture, true);
-    }
-
-    /** The texture last put on screen. See {@link #repeatLastPresent}. */
-    private int repeatTexture = 0;
 
     /**
      * VESSEL: which moment to show, taken from the clock rather than from a slot.
@@ -1319,7 +1097,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, output.framebuffer);
         interpolate(phase);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        repeatTexture = output.texture;
         renderer.presentGuestFrame(output.texture, true);
         notePresented();
         interpolateTimer.end();
@@ -1360,9 +1137,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     private void presentLatest() {
-        presentingSource = SRC_REAL;
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        repeatTexture = latestColour().texture;
         // Upscaled once, here, rather than before any of the work. See
         // GLRenderer.presentGuestFrame.
         renderer.presentGuestFrame(latestColour().texture, true);
@@ -1396,20 +1171,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.diagnostic,
                                             measuring ? 1f : 0f);
-        // **Restored: the one line that made recordings analysable.**
-        //
-        // The shader has always painted this corner; `5010b3e` dropped the line
-        // that switched it on, and the loss was silent. Every ground-truth tool
-        // in tools/frame-bench separates real frames from synthesised ones by
-        // looking for these pixels, so without it a recording is a wall of
-        // frames with no labels: a scan of 5,139 RE9 frames reported "0
-        // synthesised, 5,139 real" and could not say whether a broken frame was
-        // the pipeline or a muzzle flash.
-        //
-        // Never while measuring -- the diagnostic pass writes four measurements
-        // into the same pixels, and stamping them would corrupt the readback.
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.mark,
-                                            !measuring && wants("mark") ? 1f : 0f);
         // The vectors are in luma pixels, and the luma is the block-rounded frame,
         // so dividing by its size is what puts them in texture space.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
@@ -1424,10 +1185,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         // own wording suggests; the probe overrides it within a second of motion.
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.fieldSign,
                                             fieldSign != 0f ? fieldSign : 1f);
-        // Only then does the field's blue channel mean anything. See
-        // InterpolateMaterial's `proven`.
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.guarded,
-                                            fieldGuarded ? 1f : 0f);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
@@ -1506,8 +1263,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         measuredConfidence = (pixel.get(0) & 0xff) / 255f;
         measuredDark = (pixel.get(1) & 0xff) / 255f;
         measuredShadow = (pixel.get(2) & 0xff) / 255f;
-        measuredMoved = (pixel.get(3) & 0xff) / 255f;
-        measuredPhase = phase;
+        measuredSpeed = (pixel.get(3) & 0xff) / 255f;
         measuredAt = SystemClock.uptimeMillis();
 
         renderer.viewportNeedsUpdate = true;
@@ -1551,11 +1307,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * always one of the nine inputs rather than an average of them, and
      * {@link #filtered} for why there are two passes.
      */
-    /** Whether the current field came through GuardMaterial. */
-    private boolean fieldGuarded = false;
-
     private void filterField() {
-        fieldGuarded = false;
         if (filtered[0] == null) { filteredIndex = -1; return; }
         medianTimer.begin();
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -1585,49 +1337,11 @@ public class FrameSynthesizer implements FramePacer.Target {
             filteredIndex = destination;
         }
 
-        // **One pass back the other way.** See GuardMaterial: ten passes of
-        // agree-with-your-neighbours erase a small object that genuinely moves
-        // differently from its surroundings, because it is outnumbered eight to
-        // one and each pass strips the outermost ring of it. This hands a block
-        // its own measurement back where that measurement explains its own
-        // pixels enormously better than what the neighbourhood overwrote it
-        // with. It touches about two blocks in three and a half thousand.
-        if (luma[0] != null && filteredIndex >= 0) {
-            final int guarded = 1 - filteredIndex;
-            guardMaterial.use();
-            renderer.quadVertices.bind(guardMaterial.programId);
-            guardMaterial.setUniformBool(guardMaterial.uniforms.flipY, false);
-            guardMaterial.setUniformVec2(guardMaterial.guardUniforms.motionScale,
-                                         1f / Math.max(1, luma[0].width),
-                                         1f / Math.max(1, luma[0].height));
-            // The same sign the interpolation will use; scoring under a
-            // different convention would answer a different question.
-            guardMaterial.setUniformFloat(guardMaterial.guardUniforms.fieldSign,
-                                          fieldSign != 0f ? fieldSign : 1f);
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[guarded].framebuffer);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered[filteredIndex].texture);
-            guardMaterial.setUniformInt(guardMaterial.uniforms.screenTexture, 0);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
-            guardMaterial.setUniformInt(guardMaterial.guardUniforms.originalTexture, 1);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-            guardMaterial.setUniformInt(guardMaterial.guardUniforms.lumaNewerTexture, 2);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-            guardMaterial.setUniformInt(guardMaterial.guardUniforms.lumaOlderTexture, 3);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-            filteredIndex = guarded;
-            fieldGuarded = true;
-        }
-
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 3; unit >= 0; unit--) {
+        for (int unit = 1; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
-        renderer.invalidateBoundWindowMaterial();
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
         medianTimer.end();
@@ -1900,17 +1614,6 @@ public class FrameSynthesizer implements FramePacer.Target {
                 presentGapTotal / (float)presentGaps / 1e6f,
                 presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps,
                 collisions));
-            // Which path collided, so the repair has a target rather than a
-            // hypothesis. See presentingSource.
-            Log.i(TAG, String.format(
-                "fg collisions: arrival %d/%d, paced %d/%d, real %d/%d, tier0 %d/%d"
-                    + " (collided/presented)",
-                collisionsBySource[SRC_ARRIVAL], presentsBySource[SRC_ARRIVAL],
-                collisionsBySource[SRC_PACED], presentsBySource[SRC_PACED],
-                collisionsBySource[SRC_REAL], presentsBySource[SRC_REAL],
-                collisionsBySource[SRC_TIER0], presentsBySource[SRC_TIER0]));
-            java.util.Arrays.fill(collisionsBySource, 0);
-            java.util.Arrays.fill(presentsBySource, 0);
             collisions = 0;
             presentGapMin = Long.MAX_VALUE;
             presentGapMax = 0;
@@ -1935,15 +1638,14 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " %s, matcher refusals %d, moved %.0f px mean"
-                    + " (window about %d)",
+                    + " %s, matcher refusals %d",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
                 filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
-                estimateFailures, fieldMagnitude, SEARCH_WINDOW_PX));
+                estimateFailures));
         }
 
         if (wants("layers")) {
@@ -1968,16 +1670,12 @@ public class FrameSynthesizer implements FramePacer.Target {
             final float moving = measuredShadow;
             final float harmedShare = moving > 0.001f ? measuredConfidence / moving : 0f;
             Log.i(TAG, String.format(
-                // **Harm and displacement on one line, from one pass, one
-                // frame.** The pair is the whole point: the question is at what
-                // speed motion compensation stops paying, and it cannot be
-                // answered from two numbers measured a second apart.
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
                     + " frame than doing nothing, %.3f%% invented content,"
-                    + " %.0f%% of frame moving, moved %.0f px here,"
-                    + " phase %.0f%%",
+                    + " %.0f%% of frame moving, sits %.0f%% of the way between"
+                    + " the endpoints (50%% is correct)",
                 harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredMoved * 255f, measuredPhase * 100f));
+                moving * 100f, measuredSpeed * 200f));
         }
 
         tier0Frames = 0;
