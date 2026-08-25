@@ -178,11 +178,66 @@ def main():
               % (name, int(m.sum()), np.median(lag[m]), np.median(ink[m]),
                  np.median(spread[m])))
     print()
+    backtracking(sys.argv[1], bg)
     print("  Lag is measured along the direction of travel, so positive is behind")
     print("  where it should be. Ink above 1.0 is more than one pointer's worth of")
     print("  substance on screen. A direction that differs from its opposite is not")
     print("  a tuning matter -- both axes go through the same code.")
 
+
+
+def backtracking(path, bg):
+    """Does the pointer ever move BACKWARDS between consecutive frames?
+
+    **One cursor per frame and a trail on screen are not contradictory.** spread
+    says each frame holds a single compact pointer; if its position is not
+    monotonic across frames the eye integrates the jumps into several. That is a
+    temporal artefact and no per-frame measurement can see it, which is the same
+    blind spot that let two bad changes through this session.
+    """
+    every = [r for r in measure(path, bg) if r[2] is not None]
+    # **The control this test needed and did not have.** A hand does not move
+    # in a straight line, so some backward projection is the user, not the
+    # pipeline. The guest's own frames carry the true pointer position, so
+    # whatever rate they show is the floor -- only the excess above it is ours.
+    for label, rows in (("all frames", every),
+                        ("the guest's own frames only",
+                         [r for r in every if not r[1]])):
+        _backtrack(label, rows)
+
+
+def _backtrack(label, rows):
+    back, fwd, jumps = 0, 0, []
+    for k in range(2, len(rows)):
+        a, b, c = rows[k - 2], rows[k - 1], rows[k]
+        vx, vy = c[2][0] - a[2][0], c[2][1] - a[2][1]
+        d = float(np.hypot(vx, vy))
+        # **Well above hand tremor.** At a 3 px span and a 1 px step this
+        # counted the shake in a held finger as a backward jump, which is not
+        # what is being asked about. Fifteen pixels of span and two of reversal
+        # are far outside what a hand does by accident and far inside what a
+        # dropped interval looks like.
+        if d < 15.0:
+            continue
+        # Step from a to b, projected on the a->c direction.
+        step = ((b[2][0] - a[2][0]) * vx + (b[2][1] - a[2][1]) * vy) / d
+        if step < -2.0:
+            back += 1
+            jumps.append(-step)
+        else:
+            fwd += 1
+    total = back + fwd
+    if not total:
+        print("  %-30s no usable steps" % label)
+        return
+    j = np.array(jumps) if jumps else np.zeros(1)
+    print("  %-30s %6d fwd %5d back (%4.1f%%)  median back %5.1f px (p90 %.1f)"
+          % (label, fwd, back, 100.0 * back / total,
+             np.median(j), np.percentile(j, 90)))
+    print()
+    print("  A pointer drawn at its true position every present cannot step")
+    print("  backwards. Any measurable rate here means some frames are still")
+    print("  showing an inferred position rather than the real one.")
 
 if __name__ == "__main__":
     main()

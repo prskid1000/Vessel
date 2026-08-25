@@ -370,7 +370,14 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             final long synthesized = frameSynthesizer.consumePending();
 
             if (!haveReal && synthesized > 0) {
-                frameSynthesizer.presentSynthesized(synthesized);
+                // **A declined frame still swaps, so it still has to be
+                // written.** See FrameSynthesizer.repeatLastPresent: the buffer
+                // about to be published is two or three presents old rather than
+                // the one on screen, so returning without drawing publishes an
+                // old frame instead of leaving the picture alone.
+                if (!frameSynthesizer.presentSynthesized(synthesized)) {
+                    frameSynthesizer.repeatLastPresent();
+                }
                 if (listener != null) listener.onFrameEnd();
                 return;
             }

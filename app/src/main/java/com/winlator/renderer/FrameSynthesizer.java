@@ -1105,8 +1105,8 @@ public class FrameSynthesizer implements FramePacer.Target {
      *
      * @param index which of the N-1 frames this is; t is index/N
      */
-    public void presentSynthesized(long vsyncNanos) {
-        if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return;
+    public boolean presentSynthesized(long vsyncNanos) {
+        if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return false;
 
         final float phase = phaseFor(vsyncNanos);
 
@@ -1119,7 +1119,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // fallback for when there is no field rather than the preferred answer.
         if (motionValid) {
             // The real frame is never withheld; an interpolated one yields.
-            if (phase < 1f && !clearOfLastPresent()) return;
+            if (phase < 1f && !clearOfLastPresent()) return false;
             presentingSource = SRC_PACED;
             presentPhase(phase);
             // **Phase 1 is the real frame**, presented through presentLatest by
@@ -1129,7 +1129,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             // real one. It is the number the whole feature was being judged by.
             if (phase < 1f) tier1Frames++;
             lastPhase = phase;
-            return;
+            return true;
         }
 
         // No field: re-composite at carried positions, which is exact for a
@@ -1149,7 +1149,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             tier0Frames++;
             lastPhase = phase;
             if (phase >= 1f) realPresented = true;
-            return;
+            return true;
         }
 
         // **Nothing to show, so show nothing.** This used to re-present the
@@ -1159,7 +1159,43 @@ public class FrameSynthesizer implements FramePacer.Target {
         // frame is already there; the honest response to having nothing to add
         // is to add nothing.
         skipped++;
+        return false;
     }
+
+    /**
+     * VESSEL: put the frame that is already on screen back into the buffer.
+     *
+     * <p><b>A draw that declines to draw does not leave the screen alone.</b>
+     * {@code GLSurfaceView} swaps whether or not anything was rendered, and the
+     * buffer it swaps in is not the one being displayed -- it is the one from two
+     * or three presents ago. Every path above that returns without drawing
+     * therefore publishes an old frame, and at 120 presents a second that is an
+     * old frame several times a second, interleaved with correct ones.
+     *
+     * <p>Measured on the desktop by tracking the pointer through a recording: the
+     * position sequence is not monotonic, and the values that repeat do so
+     * EXACTLY -- 383.0 three times, 388.1 four times -- interleaved with a
+     * sequence advancing normally. Exact repetition is not a cursor drawn late,
+     * it is the same image shown again. 16.2% of frames step backwards against a
+     * 1.3% floor measured on the guest's own frames, which is the hand changing
+     * direction.
+     *
+     * <p>The {@code skipped} comment above argued that "the frame is already
+     * there; the honest response to having nothing to add is to add nothing".
+     * The premise is wrong. The frame is already on the SCREEN; this is about the
+     * BUFFER, which holds something else.
+     *
+     * <p>Repeating costs one upscale and is deliberately not counted as a
+     * present: nothing new was shown, and the cadence statistics describe new
+     * content. What it buys is that the picture cannot go backwards.
+     */
+    public void repeatLastPresent() {
+        if (repeatTexture == 0) return;
+        renderer.presentGuestFrame(repeatTexture, true);
+    }
+
+    /** The texture last put on screen. See {@link #repeatLastPresent}. */
+    private int repeatTexture = 0;
 
     /**
      * VESSEL: which moment to show, taken from the clock rather than from a slot.
@@ -1242,6 +1278,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, output.framebuffer);
         interpolate(phase);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        repeatTexture = output.texture;
         renderer.presentGuestFrame(output.texture, true);
         notePresented();
         interpolateTimer.end();
@@ -1284,6 +1321,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private void presentLatest() {
         presentingSource = SRC_REAL;
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        repeatTexture = latestColour().texture;
         // Upscaled once, here, rather than before any of the work. See
         // GLRenderer.presentGuestFrame.
         renderer.presentGuestFrame(latestColour().texture, true);
