@@ -641,6 +641,13 @@ public class FrameSynthesizer implements FramePacer.Target {
     /**
      * How far past its own habit a guest may drift before it counts as stopped.
      *
+     * <p>Normalised at 4x and scaled inversely with the multiple by {@link
+     * #worthInterpolating}, because how stale a pair may be depends on how many
+     * frames are built from it. At a 66 ms habit that lands the gate at 198 ms
+     * for 4x, 250 for 2x (the ceiling), and 100 for 8x -- which recovers the
+     * original hand-picked constant at exactly the configuration it was picked
+     * against, Requiem at 8x with a 137 ms interval.
+     *
      * <p>Three rather than two, widened after the two-times gate still cut RE9
      * off during ordinary play. Its habit is about 66 ms and its intervals reach
      * 140, so a gate at 132 sat inside the range the game actually occupies and
@@ -703,7 +710,13 @@ public class FrameSynthesizer implements FramePacer.Target {
     private long worthInterpolating() {
         final long base = baselineInterval();
         if (base <= 0) return WORTH_INTERPOLATING_NANOS;
-        return Math.min(Math.max(base * GATE_MULTIPLE, WORTH_INTERPOLATING_NANOS),
+        // **Tighter the more frames are invented from the pair.** How stale a
+        // pair may be depends on how much is built from it: one interpolation
+        // from a 200 ms pair is a compromise, seven from the same pair is the
+        // Requiem case this gate exists for. So the allowance scales inversely
+        // with the multiple, normalised at 4x.
+        final long allowed = base * GATE_MULTIPLE * 4L / Math.max(2, multiple);
+        return Math.min(Math.max(allowed, WORTH_INTERPOLATING_NANOS),
                         WORTH_INTERPOLATING_CEILING_NANOS);
     }
 
