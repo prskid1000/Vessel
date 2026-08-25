@@ -746,8 +746,27 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private int saturatedMultiple(int asked) {
         if (!saturationGuard || asked < 4 || fieldMagnitude <= 0f) return asked;
-        return fieldMagnitude >= SEARCH_WINDOW_PX ? Math.max(2, asked / 2) : asked;
+        // **Two thresholds, because one would pulse.** Metro runs at 129 to 151
+        // px against a window of 112, which is to say it sits ON the trigger.
+        // A single threshold sampled once a second would engage and release
+        // repeatedly, and each change moves the presented rate between about 57
+        // frames a second and about 30 -- smoothness visibly pumping in and out,
+        // which is a worse artefact than the one being traded away.
+        //
+        // So it engages at the window and releases only well under it. Unlike
+        // the cost ratio GuardMaterial keys on, camera speed varies smoothly, so
+        // a Schmitt trigger on it actually holds: getting from 112 back down to
+        // 78 means the camera genuinely slowed rather than the number wobbling.
+        if (saturationEngaged) {
+            if (fieldMagnitude <= SEARCH_WINDOW_PX * 0.7f) saturationEngaged = false;
+        } else if (fieldMagnitude >= SEARCH_WINDOW_PX) {
+            saturationEngaged = true;
+        }
+        return saturationEngaged ? Math.max(2, asked / 2) : asked;
     }
+
+    /** Whether the guard is currently holding the multiple down. Hysteretic. */
+    private boolean saturationEngaged = false;
 
     /** VESSEL: whether FG_LOG asked for the saturation guard. See {@link #saturatedMultiple}. */
     private boolean saturationGuard = false;
@@ -1980,6 +1999,12 @@ public class FrameSynthesizer implements FramePacer.Target {
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
+            if (saturationGuard) {
+                Log.i(TAG, String.format(
+                    "fg saturation: %s -- field %.0f px, engages at %d, releases at %.0f",
+                    saturationEngaged ? "HOLDING the multiple down" : "not engaged",
+                    fieldMagnitude, SEARCH_WINDOW_PX, SEARCH_WINDOW_PX * 0.7f));
+            }
         }
 
         if (wants("field")) {
