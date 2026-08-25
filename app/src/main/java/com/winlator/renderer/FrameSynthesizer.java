@@ -639,6 +639,45 @@ public class FrameSynthesizer implements FramePacer.Target {
     private static final long WORTH_INTERPOLATING_CEILING_NANOS = 250_000_000L;
 
     /**
+     * How far past its own habit a guest may drift before it counts as stopped.
+     *
+     * <p>Three rather than two, widened after the two-times gate still cut RE9
+     * off during ordinary play. Its habit is about 66 ms and its intervals reach
+     * 140, so a gate at 132 sat inside the range the game actually occupies and
+     * fired five times in sixty-one seconds -- each one a drop from about sixty
+     * presented frames a second to about seven. At three the gate lands near 198
+     * and the whole of RE9's ordinary variation falls inside it, leaving the
+     * ceiling to catch a guest that has genuinely stopped.
+     *
+     * <p>The ramp between the two was tried and taken out: grading the multiple
+     * from the habit to the gate bought a gentler last transition and paid for
+     * it with fewer frames through the middle of the range, where the guest
+     * spends most of its time. Widening costs nothing in that range at all.
+     *
+     * <p>What it costs instead is at the far end: frames interpolated from a
+     * pair up to 198 ms apart, which the original 100 ms constant existed to
+     * forbid. That constant was chosen against Requiem at 8x, and two of its
+     * premises did not survive this session -- the matcher turns out to be
+     * accurate at 150 px rather than saturating at 112, and harm is flat against
+     * displacement from 20 px to 200. Neither says a 198 ms pair is fine; both
+     * say the reasoning that produced 100 ms was built on measurements that have
+     * since been corrected.
+     */
+    private static final long GATE_MULTIPLE = 3L;
+
+    /**
+     * How the multiple gives ground between the guest's habit and the gate.
+     *
+     * <p>One would be a straight line, and a straight line was measured worse
+     * than the cliff it replaced: it drops to 3x the moment the interval passes
+     * the habit, so it spends the busiest part of the range showing fewer frames
+     * than doing nothing would have. Below one the curve stays near what was
+     * asked for and then turns down sharply, so the top multiple keeps the
+     * widest band of interval and each step below it a narrower one.
+     */
+    private static final double GATE_CURVE = 0.35;
+
+    /**
      * A long-horizon view of the guest's interval, for {@link #worthInterpolating}.
      *
      * <p>Separate from {@link #recent} on purpose. That one holds nine samples so
@@ -664,7 +703,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private long worthInterpolating() {
         final long base = baselineInterval();
         if (base <= 0) return WORTH_INTERPOLATING_NANOS;
-        return Math.min(Math.max(base * 2, WORTH_INTERPOLATING_NANOS),
+        return Math.min(Math.max(base * GATE_MULTIPLE, WORTH_INTERPOLATING_NANOS),
                         WORTH_INTERPOLATING_CEILING_NANOS);
     }
 
@@ -690,11 +729,44 @@ public class FrameSynthesizer implements FramePacer.Target {
         // wide to interpolate across, and an interval that cannot carry the
         // frames. See WORTH_INTERPOLATING_NANOS for the first.
         if (multiple < 2) return 1;
-        if (smoothedInterval > worthInterpolating()) return 1;
+
+        // **Steps, but with the widest band first.**
+        //
+        // A linear ramp was tried and taken out: it fell from 4x to 3x as soon
+        // as the interval passed the guest's habit, which spends most of the
+        // range showing fewer frames than the plain cliff did, and on screen
+        // that is a loss. A cliff is worse at one end; a linear ramp is worse
+        // through the middle.
+        //
+        // The curve holds what was asked for across most of the range and
+        // gives ground quickly near the gate, so each lower multiple occupies a
+        // narrower band of interval than the one above it. With RE9's habit of
+        // about 66 ms and a gate near 198:
+        //
+        //     up to ~120 ms   4x     the band the guest actually lives in
+        //     120 to 170      3x
+        //     170 to 197      2x
+        //     beyond 198      1x     the guest has stopped
+        //
+        // The exponent is what makes the bands unequal. At 1.0 this is the
+        // linear ramp that lost; below 1 the curve stays high and then turns
+        // down, which is the shape asked for -- the gap for each step decreasing
+        // progressively.
+        final long gate = worthInterpolating();
+        if (smoothedInterval > gate) return 1;
+        int asked = multiple;
+        final long habit = baselineInterval();
+        if (habit > 0 && gate > habit && smoothedInterval > habit) {
+            final double headroom = Math.max(0.0, Math.min(1.0,
+                (double)(gate - smoothedInterval) / (double)(gate - habit)));
+            asked = (int)Math.round(1.0 + (multiple - 1)
+                * Math.pow(headroom, GATE_CURVE));
+            asked = Math.max(1, Math.min(multiple, asked));
+        }
         final long period = vsyncPeriodNanos();
-        if (period <= 0 || smoothedInterval <= 0) return multiple;
+        if (period <= 0 || smoothedInterval <= 0) return asked;
         final int refreshes = (int)(smoothedInterval / period);
-        return Math.min(multiple, Math.max(1, refreshes));
+        return Math.min(asked, Math.max(1, refreshes));
     }
 
     /**
