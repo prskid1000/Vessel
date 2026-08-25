@@ -158,8 +158,6 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform mark = new Uniform("mark");
         /** VESSEL: which way the field points, settled once. See SignMaterial. */
         public final Uniform fieldSign = new Uniform("fieldSign");
-        /** VESSEL: 1 when the field came through GuardMaterial. */
-        public final Uniform guarded = new Uniform("guarded");
     }
 
     @Override
@@ -220,9 +218,6 @@ public class InterpolateMaterial extends ScreenMaterial {
             // which is hard-edged black speckle through every detailed region of
             // every synthesised frame.
             "uniform float fieldSign;",
-            // VESSEL: 1 when GuardMaterial has written this field, so its blue
-            // channel means something. See `proven` below.
-            "uniform float guarded;",
 
             "varying vec2 vUV;",
 
@@ -308,26 +303,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                               "(1.0 - pw.x) * pw.y,",
                               "pw.x * pw.y);",
 
-                "vec4 f0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel);",
-                "vec4 f1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel);",
-                "vec4 f2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel);",
-                "vec4 f3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel);",
-                "m0 = f0.rg * scale;",
-                "m1 = f1.rg * scale;",
-                "m2 = f2.rg * scale;",
-                "m3 = f3.rg * scale;",
-                // **Motion proven, so do not argue with it below.** GuardMaterial
-                // sets this where a block's own vector explained its own pixels
-                // twenty times better than what the median passes overwrote it
-                // with. Read from the same four fetches the vectors come from,
-                // so it costs a swizzle rather than a tap.
-                //
-                // **Gated on the guard having run**, because when it has not the
-                // field is the matcher's own texture and nothing owns its blue
-                // channel. MedianMaterial writes zero there, so a filtered field
-                // is safe either way; the raw one is not, and a stray value would
-                // silently disable the overlay fix across the whole frame.
-                "float proven = guarded * max(max(f0.b, f1.b), max(f2.b, f3.b));",
+                "m0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel).rg * scale;",
+                "m1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel).rg * scale;",
+                "m2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel).rg * scale;",
+                "m3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel).rg * scale;",
 
                 // ---- a pixel that did not change did not move ----------------
                 //
@@ -384,13 +363,6 @@ public class InterpolateMaterial extends ScreenMaterial {
                                     "- texture2D(lumaOlderTexture, mo).r);",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
-                // The pull towards a stationary reading exists for screen-space
-                // overlays, which the block matcher cannot know about. It must
-                // not fire on an object the guard has just measured to be
-                // moving: on the cursor scene it takes a corrected field from
-                // 0.76 of trailing ink back to 64.67, which is most of the way
-                // back to no compensation at all.
-                "carry = max(carry, proven);",
 
                 // How still the content is at each of the two places this pixel
                 // reads from. Computed on the mean vector rather than per block:

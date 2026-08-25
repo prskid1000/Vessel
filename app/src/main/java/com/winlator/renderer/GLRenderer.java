@@ -717,8 +717,10 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         // through the block matcher like scenery -- and the matcher is the wrong
         // instrument for it twice over. A cursor is about sixteen 8x8 blocks on a
         // desktop where every neighbour correctly reports zero, so the median
-        // filter that exists to reject lone dissenters deletes its motion
-        // (GuardMaterial); and a quick flick moves it further in one interval
+        // filter that exists to reject lone dissenters deletes its motion --
+        // measured at exactly zero, with the result identical to the digit to
+        // doing no compensation at all; and a quick flick moves it further in
+        // one interval
         // than the 112 px search window can see at all, so there is no vector to
         // find. Measured on ninety seconds of real pointer movement, 9 to 16% of
         // synthesised frames lost the motion entirely and fell back to a
