@@ -354,6 +354,17 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private static final int MEDIAN_PASSES = 10;
 
+    /**
+     * Roughly how far {@code GL_QCOM_motion_estimation} can see, in luma pixels.
+     *
+     * <p>Not reported by the extension, so this is measured rather than declared:
+     * vectors reached 113 px in the first survey of this driver and the field
+     * stops rising at about 120. Printed beside the mean displacement only so a
+     * log line says whether the scene is moving further than the matcher can
+     * follow -- nothing branches on it.
+     */
+    private static final int SEARCH_WINDOW_PX = 112;
+
     private int blockX = 8, blockY = 8;
 
     /**
@@ -380,6 +391,19 @@ public class FrameSynthesizer implements FramePacer.Target {
     /** Frame-wide measurements, most recently read back. See {@link #measure}. */
     private float measuredConfidence, measuredDark, measuredShadow, measuredSpeed;
     private long measuredAt = 0;
+    /**
+     * The phase the measured frame was actually drawn at.
+     *
+     * <p><b>Because the alternative was a constant, and the constant was wrong.</b>
+     * {@link #measure} samples ONE frame, whichever happens to fall on the
+     * once-a-second boundary, and that frame is drawn at 1/K, 2/K ... (K-1)/K --
+     * never reliably at a half. The line reported "(50% is correct)" regardless,
+     * so at 4x it compared a frame legitimately drawn at 0.25 or 0.75 against
+     * 0.5 and called the difference an error. Readings of 55-83% were taken as
+     * evidence of a systematic phase bias in the pipeline; they were evidence of
+     * this string.
+     */
+    private float measuredPhase = 0f;
 
     private int allocWidth = 0;
     private int allocHeight = 0;
@@ -403,6 +427,18 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float pendingSign = 0f;
 
     /**
+     * Mean length of the motion field, in luma pixels. See {@link #probeFieldSign}.
+     *
+     * <p>Reported so that harm and displacement can be read off the same log and
+     * plotted against each other. Every estimate of "how fast is too fast" so
+     * far has come from a stand-in block matcher on the laptop, and that matcher
+     * behaves nothing like the hardware one at low speed -- it put 19% of blocks
+     * past 100 pixels on a nearly-static scene, where the device reports 0.0%
+     * harm. This is the field the driver actually produced.
+     */
+    private float fieldMagnitude = 0f;
+
+    /**
      * Vote on the field's sign, and latch the answer once it is decisive.
      *
      * <p>Runs at most once a second and stops entirely once latched, so the
@@ -412,7 +448,15 @@ public class FrameSynthesizer implements FramePacer.Target {
      * pixel is precisely the thing that was wrong.
      */
     private void probeFieldSign() {
-        if (fieldSign != 0f) return;
+        // **Two reasons to run, and the sign is only one of them.**
+        //
+        // The same reduction that votes on the sign also carries how far the
+        // scene moved, in luma pixels, which is the number every attempt to
+        // bound motion compensation has been missing. It has to keep coming
+        // after the sign has latched, so the probe now runs while `field` is
+        // asked for even though it has nothing left to decide.
+        final boolean needSign = fieldSign == 0f;
+        if (!needSign && !wants("field")) return;
         final long now = SystemClock.uptimeMillis();
         if (signProbedAt != 0 && now - signProbedAt < 1000) return;
         signProbedAt = now;
@@ -464,6 +508,13 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         final float positive = (pixel.get(0) & 0xff) / 255f;
         signVotes = (pixel.get(1) & 0xff) / 255f;
+        // Mean vector length over the whole field, back in luma pixels. See
+        // SignMaterial's blue channel for why this is worth a readback.
+        fieldMagnitude = (pixel.get(2) & 0xff);
+
+        // Nothing left to decide once the sign is latched; the magnitude above
+        // is the only reason this still runs.
+        if (!needSign) return;
 
         // A still frame has no opinion: both signs fetch the same content, so the
         // vote is a tie whatever the truth is. Wait for real motion rather than
@@ -1171,6 +1222,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.diagnostic,
                                             measuring ? 1f : 0f);
+        // **Restored: the one line that made recordings analysable.**
+        //
+        // The shader has always painted this corner; `5010b3e` dropped the line
+        // that switched it on, and the loss was silent. Every ground-truth tool
+        // in tools/frame-bench separates real frames from synthesised ones by
+        // looking for these pixels, so without it a recording is a wall of
+        // frames with no labels: a scan of 5,139 RE9 frames reported "0
+        // synthesised, 5,139 real" and could not say whether a broken frame was
+        // the pipeline or a muzzle flash.
+        //
+        // Never while measuring -- the diagnostic pass writes four measurements
+        // into the same pixels, and stamping them would corrupt the readback.
+        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.mark,
+                                            !measuring && wants("mark") ? 1f : 0f);
         // The vectors are in luma pixels, and the luma is the block-rounded frame,
         // so dividing by its size is what puts them in texture space.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
@@ -1264,6 +1329,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         measuredDark = (pixel.get(1) & 0xff) / 255f;
         measuredShadow = (pixel.get(2) & 0xff) / 255f;
         measuredSpeed = (pixel.get(3) & 0xff) / 255f;
+        measuredPhase = phase;
         measuredAt = SystemClock.uptimeMillis();
 
         renderer.viewportNeedsUpdate = true;
@@ -1638,14 +1704,15 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("field")) {
             Log.i(TAG, String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " %s, matcher refusals %d",
+                    + " %s, matcher refusals %d, moved %.0f px mean"
+                    + " (window about %d)",
                 blockX, blockY,
                 vectors != null ? vectors.width : 0,
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
                 filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
-                estimateFailures));
+                estimateFailures, fieldMagnitude, SEARCH_WINDOW_PX));
         }
 
         if (wants("layers")) {
@@ -1673,9 +1740,9 @@ public class FrameSynthesizer implements FramePacer.Target {
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
                     + " frame than doing nothing, %.3f%% invented content,"
                     + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints (50%% is correct)",
+                    + " the endpoints (%.0f%% was asked for)",
                 harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredSpeed * 200f));
+                moving * 100f, measuredSpeed * 200f, measuredPhase * 100f));
         }
 
         tier0Frames = 0;

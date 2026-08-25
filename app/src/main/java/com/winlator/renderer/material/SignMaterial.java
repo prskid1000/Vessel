@@ -88,7 +88,13 @@ public class SignMaterial extends ScreenMaterial {
             "}",
 
             "void main() {",
-                "vec2 v = texture2D(screenTexture, vUV).rg * motionScale;",
+                // Kept unscaled as well, because the caller wants it in luma
+                // pixels: how far the scene moved is the quantity that decides
+                // whether motion compensation can be trusted at all, and it has
+                // to be comparable against the matcher's search window, which is
+                // quoted in pixels and not in texture coordinates.
+                "vec2 raw = texture2D(screenTexture, vUV).rg;",
+                "vec2 v = raw * motionScale;",
 
                 // Only pixels that are actually moving get a vote. Below about
                 // five luma pixels the two signs fetch nearly the same content,
@@ -103,7 +109,28 @@ public class SignMaterial extends ScreenMaterial {
                     // G: votes cast, so the caller can form a fraction rather
                     // than a share of the whole frame.
                     "moving,",
-                    "0.0, 1.0);",
+                    // **B: how far the scene moved, in luma pixels over 255.**
+                    //
+                    // The channel was spare and the number was missing. Every
+                    // attempt to find the displacement at which motion
+                    // compensation stops paying has had to estimate it on the
+                    // laptop with a stand-in block matcher, and that matcher is
+                    // not the one that ships: on a nearly-static scene it
+                    // reported 19% of blocks at 100 pixels or more -- tie-breaks
+                    // in flat regions, resolved as far-away matches -- and so
+                    // scored the warp as four times worse than a blend at two
+                    // pixels of motion, on frames where the device's own
+                    // `fg truth` reads exactly 0.0% harm.
+                    //
+                    // This is the same quantity read from the field the hardware
+                    // matcher actually produced, so the two can finally be
+                    // plotted against each other.
+                    //
+                    // Divided by 255 because the probe averages into eight bits;
+                    // that puts the readback's resolution at one luma pixel,
+                    // which is finer than any decision would use.
+                    "length(raw) / 255.0,",
+                    "1.0);",
             "}"
         );
     }
