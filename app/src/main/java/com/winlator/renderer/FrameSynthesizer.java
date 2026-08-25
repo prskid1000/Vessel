@@ -690,47 +690,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         // wide to interpolate across, and an interval that cannot carry the
         // frames. See WORTH_INTERPOLATING_NANOS for the first.
         if (multiple < 2) return 1;
-
-        // **A ramp rather than a cliff, because the damage is continuous.**
-        //
-        // The gate expresses one true thing -- every part of this pipeline
-        // degrades with the distance between the two real frames it reads -- and
-        // then applies it as a step: 4x on one side, 1x on the other. Nothing
-        // about the degradation is stepped. A pair 130 ms apart is worse than
-        // one 70 ms apart and better than one 250 ms apart, and the number of
-        // frames invented from it should say so.
-        //
-        // So the multiple falls linearly from what was asked, at the interval
-        // this guest habitually keeps, to 1 at the gate. The integer steps are
-        // unavoidable -- a multiple is a count of frames -- but they are spread
-        // across the range instead of stacked at the end. On RE9, whose habit is
-        // about 66 ms and whose gate lands near 132:
-        //
-        //     interval   step gate      ramp
-        //      66 ms     4x, 60/s     4x, 60/s
-        //      88 ms     4x, 45/s     3x, 34/s
-        //     110 ms     4x, 36/s     2x, 18/s
-        //     133 ms     1x, 7.5/s    1x, 7.6/s
-        //
-        // The ramp shows fewer frames through the middle and that is the cost.
-        // What it buys is that the last transition is one step rather than a
-        // fall from 36 presented frames a second to seven, which is the drop
-        // reported as the rate hovering between 30 and 90.
-        final long gate = worthInterpolating();
-        if (smoothedInterval > gate) return 1;
-        int asked = multiple;
-        final long habit = baselineInterval();
-        if (habit > 0 && gate > habit && smoothedInterval > habit) {
-            final float headroom =
-                (float)(gate - smoothedInterval) / (float)(gate - habit);
-            asked = Math.round(1f + (multiple - 1)
-                * Math.max(0f, Math.min(1f, headroom)));
-            asked = Math.max(1, Math.min(multiple, asked));
-        }
+        if (smoothedInterval > worthInterpolating()) return 1;
         final long period = vsyncPeriodNanos();
-        if (period <= 0 || smoothedInterval <= 0) return asked;
+        if (period <= 0 || smoothedInterval <= 0) return multiple;
         final int refreshes = (int)(smoothedInterval / period);
-        return Math.min(asked, Math.max(1, refreshes));
+        return Math.min(multiple, Math.max(1, refreshes));
     }
 
     /**
