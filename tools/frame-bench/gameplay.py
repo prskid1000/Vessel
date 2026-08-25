@@ -55,11 +55,35 @@ def stamped(a):
     return ((r > 150) & (b > 150) & (g < 90)).sum(axis=(1, 2)) > 4
 
 
-def triples(path, limit=40, min_motion=1.5):
+def triples(path, limit=40, min_motion=1.5, with_phase=False):
     """Consecutive real frames, three at a time, with the middle as the truth.
 
     Only triples that actually move are kept: a still triple is trivially
     interpolated by any algorithm and would flatter all of them equally.
+
+    **B is not at the midpoint, and assuming it is invalidated four measurements.**
+    This filter accepts any run of three real frames whose gaps are each under
+    twelve recorded frames; it has never required the two gaps to be EQUAL, and
+    on real footage they usually are not:
+
+        true phase of B between A and C -- mean 0.495, sd 0.276
+        within 0.45-0.55   31.1% of triples
+        beyond 0.35-0.65   57.1% of triples
+
+    The mean is 0.495, which is why nothing caught it: the error cancels
+    perfectly in aggregate and is large in every individual frame. Scoring an
+    interpolation at t=0.5 against a truth at t=0.11 displaces every moving
+    object by four fifths of an interval, and it does so ASYMMETRICALLY -- a warp
+    commits each object to a position and is punished for the phase being wrong,
+    while a blend commits to no position and barely notices. That difference is
+    enough on its own to make motion compensation look worse than averaging, a
+    wide search window look worse than a narrow one, and the residual land on
+    the fastest-moving pixels in the frame.
+
+    The device does not make this mistake; it computes phase = 1/K +
+    elapsed/interval and warps there. Only the bench did. `with_phase` returns
+    the real one, from the recorded frame indices, so a test can score where the
+    truth actually is.
     """
     a = frames(path)
     mark = stamped(a)
@@ -81,7 +105,8 @@ def triples(path, limit=40, min_motion=1.5):
         moved = np.abs(C - A).mean() * 255.0
         if moved < min_motion:
             continue
-        out.append((A, B, C, moved))
+        out.append((A, B, C, moved, (y - x) / float(z - x)) if with_phase
+                   else (A, B, C, moved))
         if len(out) >= limit:
             break
     if not out:

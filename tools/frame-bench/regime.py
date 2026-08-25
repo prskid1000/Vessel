@@ -1,17 +1,20 @@
 """At what speed does motion compensation stop being worth doing?
 
-THE PATTERN THAT PRODUCED THIS FILE. Every measurement on real gameplay says the
-same thing, and it is not the thing the pipeline was built on:
+THE PATTERN THAT PRODUCED THIS FILE. On a rolled photograph at the right phase,
+motion compensation is worth roughly a factor of two -- warp 8.16 rms against
+blend 14.99. On real gameplay it loses, and it loses to answers that do no work
+at all (phase.py, at the true phase, 24 triples):
 
-    blend the two frames, no motion at all      11.89 rms   (locate.py)
-    warp with the shipped 112 px field          17.57
-    warp with an unbounded 224 px field         19.65       (reach.py)
+    blend the two frames, no motion at all      15.91 rms      72.99 worst 1%
+    hold the older frame                        17.44          80.33
+    warp with the shipped 112 px field          18.51          93.99
+    warp with an unbounded 224 px field         19.65          87.00   (reach.py)
 
-Monotonic. The more the matcher is allowed to do, the worse the picture. Reach
-is not the artefact -- widening the window made it worse, and the bounded window
-turns out to be a regulariser rather than a limitation, because a matcher given
-more range finds more distant wrong matches. Occlusion could not even be tested
-until that was known, because the detector for it was reading saturation.
+Reach is not the artefact: widening the window made it worse, so the bound is a
+regulariser rather than a limitation -- a matcher given more range finds more
+distant wrong matches. Occlusion is not the artefact either; once its detector
+was given a window wide enough not to pin, it scored 0.14-0.27x against chance
+on the worst pixels, tracking texturelessness rather than anything geometric.
 
 So the question is no longer which mechanism to add. It is whether motion
 compensation is helping AT ALL at the speeds this game actually runs at, and if
@@ -47,7 +50,10 @@ above X px" is a shippable rule costing one comparison, not a new pass. If the
 crossover sits below what the game does during play, then frame generation is
 degrading the picture most of the time and the fix is to know when to stop.
 
-    python regime.py recording.mp4 [--triples 24]
+Several recordings can be given at once, and should be: one session of one game
+is one camera style, and the slow end of the range may simply not be in it.
+
+    python regime.py rec1.mp4 rec2.mp4 ... [--triples 24]
 """
 import sys
 
@@ -69,7 +75,15 @@ RULER = 4
 # Two guest intervals per triple, so device-side displacement is about half.
 INTERVALS = 2
 
-BUCKETS = (40, 80, 120, 160, 1e9)
+# Fine at the slow end, because that is where the question lives. The first run
+# put twelve triples in one bucket and two in another, and those two were the
+# only evidence about slow motion -- which is the regime the pipeline spends most
+# of its time in and the one the two-interval doubling distorts most.
+BUCKETS = (20, 40, 60, 80, 120, 160, 1e9)
+
+# How many triples to score per bucket. The fine match is ~35 s each, so this is
+# the whole runtime budget; five per bucket over seven buckets is half an hour.
+PER_BUCKET = 5
 
 
 def displacement(A, C):
@@ -83,16 +97,23 @@ def displacement(A, C):
     return float(np.median(np.linalg.norm(field, axis=-1)))
 
 
-def answers(A, C):
-    """The three things that could be shown, given the two real frames."""
+def answers(A, C, t):
+    """The three things that could be shown, given the two real frames.
+
+    Warped at the TRUE phase, not at 0.5. The first run of this file assumed the
+    midpoint, which is right for only 31% of triples and costs the warp column
+    about 15% of its error while leaving the other two untouched -- see phase.py
+    and gameplay.triples. It did not change this file's conclusion, but it
+    changed every number in it.
+    """
     fine = bench.estimate(C, A, radius=P.WINDOW)
     field = consensus.vector_median(fine, fine, passes=MEDIAN_PASSES)
-    older, newer = O.warp_parts(A, C, field)
+    older, newer = O.warp_parts(A, C, field, t=t)
     pinned = (np.linalg.norm(fine, axis=-1) >= P.LIMIT).mean() * 100
     return {
         "hold the older frame": A,
         "blend, no motion": (A + C) * 0.5,
-        "warp (what ships)": (older + newer) * 0.5,
+        "warp (what ships)": older * (1.0 - t) + newer * t,
     }, pinned
 
 
@@ -119,19 +140,53 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     limit = 24
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if "--triples" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--triples") + 1])
+        args = [a for a in args if a != str(limit)]
 
     verify()
     # min_motion low, because the whole point is to see the slow end too.
-    got = gameplay.triples(sys.argv[1], limit, min_motion=0.4)
-    print("%d triples of consecutive real frames\n" % len(got))
+    got = []
+    for path in args:
+        try:
+            got += gameplay.triples(path, limit, min_motion=0.4, with_phase=True)
+        except SystemExit as e:
+            print("  skipped %s: %s"
+                  % (path.replace("\\", "/").rsplit("/", 1)[-1], str(e)[:48]))
+    if not got:
+        sys.exit("no usable triples in any recording given")
+    print("%d triples of consecutive real frames from %d recording(s)\n"
+          % (len(got), len(args)))
 
     names = ("hold the older frame", "blend, no motion", "warp (what ships)")
+
+    # **Measure first, score second.** The ruler is a quarter-resolution match
+    # and costs a sixteenth of the fine one, so every triple can be measured
+    # cheaply and only a BALANCED sample scored. Without this the sample is
+    # whatever the footage happened to contain: the first run scored twelve fast
+    # triples and two slow ones, and the slow end -- the part of the range the
+    # answer turns on -- rested on two frames.
+    measured = sorted((displacement(r[0], r[2]), i) for i, r in enumerate(got))
+    print("  displacement spans %.0f to %.0f px over %d triples; sampling up to"
+          " %d per bucket\n" % (measured[0][0], measured[-1][0], len(measured),
+                                PER_BUCKET))
+
+    chosen, lo = [], 0
+    for hi in BUCKETS:
+        here = [m for m in measured if lo <= m[0] < hi]
+        # Spread across the bucket rather than taking the first few, which would
+        # all come from one recording and one moment of one session.
+        if len(here) > PER_BUCKET:
+            idx = np.linspace(0, len(here) - 1, PER_BUCKET).round().astype(int)
+            here = [here[i] for i in idx]
+        chosen += here
+        lo = hi
+
     rows = []
-    for A, B, C, _ in got:
-        d = displacement(A, C)
-        imgs, pinned = answers(A, C)
+    for d, i in chosen:
+        A, B, C, _, t = got[i]
+        imgs, pinned = answers(A, C, float(t))
         rows.append((d, pinned, {k: score(v, B) for k, v in imgs.items()}))
 
     rows.sort(key=lambda r: r[0])
@@ -164,7 +219,7 @@ def main():
     print("  on the device, which is one interval rather than two.")
     print()
     print("  If warp loses in every row, motion compensation is not paying for")
-    print("  itself at any speed this footage contains, and the ~15%% of GPU it")
+    print("  itself at any speed this footage contains, and the ~15% of GPU it")
     print("  costs is buying a worse picture than averaging two frames.")
 
 
