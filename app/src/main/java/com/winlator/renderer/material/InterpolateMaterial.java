@@ -542,26 +542,53 @@ public class InterpolateMaterial extends ScreenMaterial {
                       "+ step(outOlder.y, 0.0) + step(1.0, outOlder.y));",
                     "float escaped = phase * escNewer + (1.0 - phase) * escOlder;",
 
+                    // **This counted pixels and it should have measured
+                    // distances, and the difference made it useless.**
+                    //
+                    // What was here was `step(dBase, dSynth)`: a sign test, one
+                    // vote per pixel, unweighted. A pixel that moved 0.009 and
+                    // landed 0.010 away counted exactly as much as one that
+                    // moved 0.01 and landed 0.8 away. Since most pixels sit
+                    // just above the 0.008 floor, where every answer is a coin
+                    // flip, the result was dominated by ties.
+                    //
+                    // Scored on a capture, a plain BLEND -- which applies no
+                    // motion and therefore cannot be wrong about motion -- is
+                    // charged with harming 30.8% of barely-moved pixels and
+                    // 2.6% of decisively-moved ones, while holding the older
+                    // frame and showing the real middle frame both read exactly
+                    // 0.0 in every band. That is a metric measuring the shape of
+                    // its own threshold.
+                    //
+                    // It reported 10 to 28% for a month and refused to move
+                    // under displacement, motion diversity, contrast,
+                    // brightness, search reach, occlusion, phase and field
+                    // sign. Every one of those was read as a negative result.
+                    // None of them was: the number was never responding to any
+                    // condition, because it was not measuring one.
+                    //
+                    // So the two distances are accumulated directly and the
+                    // ratio is taken afterwards. Mean distance is what "how
+                    // wrong is the picture" means, it has no threshold to be
+                    // dominated by, and a blend now scores as a blend.
                     "gl_FragColor = vec4(",
-                        // R: **the number that matters.** Pixels where the
-                        // synthesised frame is further from frame N than frame
-                        // N-1 already was -- worse than having done nothing at
-                        // all. Counted only where something actually changed.
-                        "changed * step(dBase, dSynth),",
+                        // R: how far the synthesised pixel landed from the
+                        // truth, where anything moved at all.
+                        "changed * min(dSynth, 1.0),",
                         // G: pixels whose fetch left the frame and was clamped
                         // to its edge. See above for what this replaced and why
                         // that could not have worked.
                         "escaped,",
-                        // B: how much of the frame changed at all, which is the
-                        // denominator R has to be read against. Without it a
-                        // small R could mean "almost nothing was harmed" or
-                        // "almost nothing was moving".
-                        "changed,",
-                        // A: how far the synthesis sits between the endpoints, on
-                        // average. Half is what a correct interpolation at the
-                        // midpoint looks like; approaching one means it is barely
-                        // better than the old frame, and beyond one it is worse.
-                        "clamp(dSynth / max(dBase, 0.008) * 0.5, 0.0, 1.0));",
+                        // B: how far the OLD frame already was, over the same
+                        // pixels. R over B is the whole answer -- below one the
+                        // synthesis is closer to the truth than doing nothing,
+                        // above one it is further, and unlike the count it
+                        // replaces it says by how much.
+                        "changed * min(dBase, 1.0),",
+                        // A: how much of the frame changed at all. Both sums
+                        // above are taken over these pixels, so this is what
+                        // turns either of them back into a mean distance.
+                        "changed);",
                     "return;",
                 "}",
 

@@ -424,7 +424,14 @@ public class FrameSynthesizer implements FramePacer.Target {
     private boolean announced = false;
 
     /** Frame-wide measurements, most recently read back. See {@link #measure}. */
-    private float measuredConfidence, measuredDark, measuredShadow, measuredSpeed;
+    private float measuredDark, measuredShadow;
+    /**
+     * Mean distance from the truth, synthesised and held, over moving pixels.
+     *
+     * <p>Their ratio replaces a count of pixels that was dominated by ties and
+     * measured nothing for a month. See {@link InterpolateMaterial}.
+     */
+    private float measuredSynthDistance, measuredBaseDistance;
     private long measuredAt = 0;
     /**
      * The phase the measured frame was actually drawn at.
@@ -1602,10 +1609,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
 
-        measuredConfidence = (pixel.get(0) & 0xff) / 255f;
+        // R and B are sums of distances over the pixels that moved; A is how
+        // many of them there were. See InterpolateMaterial for why this is two
+        // distances rather than the count of pixels it replaced.
+        measuredSynthDistance = (pixel.get(0) & 0xff) / 255f;
         measuredDark = (pixel.get(1) & 0xff) / 255f;
-        measuredShadow = (pixel.get(2) & 0xff) / 255f;
-        measuredSpeed = (pixel.get(3) & 0xff) / 255f;
+        measuredBaseDistance = (pixel.get(2) & 0xff) / 255f;
+        measuredShadow = (pixel.get(3) & 0xff) / 255f;
         measuredPhase = phase;
         measuredAt = SystemClock.uptimeMillis();
 
@@ -2083,14 +2093,18 @@ public class FrameSynthesizer implements FramePacer.Target {
             // old frame up. Anything above a per cent or two means the synthesis
             // is actively damaging, however healthy it looks from the inside.
             final float moving = measuredShadow;
-            final float harmedShare = moving > 0.001f ? measuredConfidence / moving : 0f;
+            // Both sums are over the moving pixels, so the ratio needs no
+            // denominator -- it cancels. Below 100% the synthesised frame is
+            // closer to the real one than leaving the old frame up would be.
+            final float closeness = measuredBaseDistance > 0.0001f
+                ? measuredSynthDistance / measuredBaseDistance : 0f;
             Log.i(TAG, String.format(
-                "fg truth: %.1f%% of the moving frame is FURTHER from the real"
-                    + " frame than doing nothing, %.3f%% fetched off the frame,"
-                    + " %.0f%% of frame moving, sits %.0f%% of the way between"
-                    + " the endpoints (%.0f%% was asked for)",
-                harmedShare * 100f, measuredDark * 100f,
-                moving * 100f, measuredSpeed * 200f, measuredPhase * 100f));
+                "fg truth: the synthesised frame sits at %.0f%% of the distance"
+                    + " that holding the old one would leave (under 100%% is"
+                    + " better than doing nothing), %.3f%% fetched off the"
+                    + " frame, %.0f%% of frame moving, drawn at %.0f%%",
+                closeness * 100f, measuredDark * 100f,
+                moving * 100f, measuredPhase * 100f));
 
             // **On its own line, because it is the one that would have caught
             // the change that broke the screen and the line above would not.**
