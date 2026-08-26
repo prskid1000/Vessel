@@ -114,7 +114,9 @@ def run(path, limit):
              if PA.X.rms(t[0], t[2]) > 0.05][:limit]
     names = ["baseline (shipped OBMC)", "hard pick", "soft pick", "soft + dominant",
              "soft + dominant, block-smoothed", "per-block fit (implementable)",
-             "per-block fit, 3x3 on the field"]
+             "per-block fit, 3x3 on the field",
+             "inverse-SAD weights (literature)",
+             "coarse hypothesis, not global"]
     acc = {n: {"all": [], "hot": [], "spk": []} for n in names}
 
     for A, B, C in trips:
@@ -252,6 +254,52 @@ def run(path, limit):
         tot5 = sum(sw5) + 1e-9
         outs["per-block fit, 3x3 on the field"] = sum(
             (s / tot5)[..., None] * p for s, p in zip(sw5, preds + [dpred]))
+
+        # ---- what the literature actually prescribes --------------------
+        #
+        # Orchard and Sullivan's estimation-theoretic OBMC (IEEE TIP, 1994)
+        # says the window is not the answer: the neighbouring block vectors
+        # are "different plausible hypotheses for true motion", and their
+        # weights should minimise mean squared prediction error subject to a
+        # unit-gain constraint. A fixed bilinear window is the degenerate case
+        # where every hypothesis is assumed equally likely -- which is exactly
+        # the assumption that fails on a block spanning two depths.
+        #
+        # The standard reliability measure in the multi-hypothesis MCFI
+        # literature is inverse SAD, not the exponential used above. Worth
+        # scoring on its own: the exponential has a temperature that had to be
+        # chosen, and inverse SAD has nothing to tune.
+        eps = 2.0 / 255.0
+        iw = [w[..., 0] / (f[..., 0] + eps) for w, f in zip(ws, fvs3)]
+        iw = iw + [0.25 / (fdom + eps)]
+        itot = sum(iw) + 1e-9
+        outs["inverse-SAD weights (literature)"] = sum(
+            (s / itot)[..., None] * p for s, p in zip(iw, preds + [dpred]))
+
+        # **A coarse field instead of one global vector.** The fifth
+        # hypothesis above is the frame's dominant motion, which during a yaw
+        # is roughly the far surface -- but only roughly, and only if the far
+        # surface happens to dominate. The literature's answer is a set of
+        # fields at progressively larger matching blocks, and a global vector
+        # is that idea collapsed to a single number. A field at 4x the block
+        # size keeps the far surface's motion LOCAL, which is what a scene
+        # with more than two depths needs. On the device this is the same
+        # hardware matcher run once more against a quarter-size luma, which is
+        # a sixteenth of the work.
+        cf = blocks(np.stack([np.repeat(np.repeat(fld[..., 0], BLOCK, 0), BLOCK, 1),
+                              np.repeat(np.repeat(fld[..., 1], BLOCK, 0), BLOCK, 1)],
+                             axis=-1)[:H, :W])
+        coarse = box(cf[..., 0], 4), box(cf[..., 1], 4)
+        cvp = np.stack([np.repeat(np.repeat(coarse[0], BLOCK, 0), BLOCK, 1)[:H, :W],
+                        np.repeat(np.repeat(coarse[1], BLOCK, 0), BLOCK, 1)[:H, :W]],
+                       axis=-1)
+        ccost = box(cost_of(cvp, ln, lo, grid), BLOCK)
+        cpred = predict(cvp, A, C, grid)
+        cw = [w[..., 0] / (f[..., 0] + eps) for w, f in zip(ws, fvs3)]
+        cw = cw + [0.25 / (ccost + eps)]
+        ctot = sum(cw) + 1e-9
+        outs["coarse hypothesis, not global"] = sum(
+            (s / ctot)[..., None] * p for s, p in zip(cw, preds + [cpred]))
 
         for n in names:
             err = np.sqrt(((outs[n] - B) ** 2).mean(axis=2))
