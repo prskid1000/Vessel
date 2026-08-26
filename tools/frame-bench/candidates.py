@@ -116,6 +116,7 @@ def run(path, limit):
              "soft + dominant, block-smoothed", "per-block fit (implementable)",
              "per-block fit, 3x3 on the field",
              "inverse-SAD weights (literature)",
+             "inverse-SAD^1.5", "inverse-SAD^2.0", "inverse-SAD^3.0",
              "coarse hypothesis, not global",
              "inverse-SAD, four only (no global)",
              "ORACLE pick of these five",
@@ -308,6 +309,22 @@ def run(path, limit):
         itot = sum(iw) + 1e-9
         outs["inverse-SAD weights (literature)"] = sum(
             (s / itot)[..., None] * p for s, p in zip(iw, preds + [dpred]))
+
+        # **One exponent between the two forms, because they split by clip.**
+        # Inverse SAD wins the 4x capture on every column and loses the 2x one;
+        # the tuned exponential does the reverse. They differ only in how
+        # sharply a bad fit is punished -- 1/f falls off slowly, exp(-f/T)
+        # falls off fast -- so 1/f^p sweeps the space between them and can be
+        # asked whether any single setting wins both. A weighting that needs a
+        # different answer per capture is fitted to the capture, which is how
+        # two changes already came back worse from the device this session.
+        for power in (1.5, 2.0, 3.0):
+            pw = [w[..., 0] / np.power(f[..., 0] + eps, power)
+                  for w, f in zip(ws, fvs3)]
+            pw = pw + [0.25 / np.power(fdom + eps, power)]
+            pt = sum(pw) + 1e-9
+            outs["inverse-SAD^%.1f" % power] = sum(
+                (s / pt)[..., None] * p for s, p in zip(pw, preds + [dpred]))
 
         # **A coarse field instead of one global vector.** The fifth
         # hypothesis above is the frame's dominant motion, which during a yaw

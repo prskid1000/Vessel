@@ -447,8 +447,28 @@ public class InterpolateMaterial extends ScreenMaterial {
                     // without a floor a block that happens to fit perfectly
                     // would take the entire weight from four that fit well.
                     "const float FLOOR = 2.0 / 255.0;",
-                    "vec4 trust = weight / (vec4(f0.r, f1.r, f2.r, f3.r) + FLOOR);",
-                    "float trustDominant = 0.25 / (f0.g + FLOOR);",
+
+                    // **Squared, and the square is not a tuning constant.**
+                    //
+                    // Combining independent estimates at minimum variance
+                    // weights each by one over its variance, not by one over
+                    // its error. SAD is a proxy for the error, so 1/SAD^2 is
+                    // inverse-variance weighting -- which is what Orchard and
+                    // Sullivan's minimum-MSE formulation of OBMC asks for in
+                    // the first place.
+                    //
+                    // Found by sweeping the exponent rather than by deriving
+                    // it, which is the better order: 1 and 3 were measured
+                    // either side and 2 beat both, on both captures, on every
+                    // column including speckle. An exponential with a fitted
+                    // temperature was also measured and split by capture --
+                    // better on one, worse on the other -- which is the
+                    // signature of a constant belonging to a clip rather than
+                    // to the problem.
+                    "vec4 f = vec4(f0.r, f1.r, f2.r, f3.r) + FLOOR;",
+                    "float fd = f0.g + FLOOR;",
+                    "vec4 trust = weight / (f * f);",
+                    "float trustDominant = 0.25 / (fd * fd);",
 
                     "vec3 q4 = predict(f0.ba, wOlder, wNewer);",
                     "float total = trust.x + trust.y + trust.z + trust.w",
