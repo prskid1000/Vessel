@@ -187,6 +187,24 @@ public class FrameSynthesizer implements FramePacer.Target {
          */
         int topFramebuffer;
         int levels = 1;
+        /**
+         * VESSEL: a framebuffer on the mip level whose texels are about 32px.
+         *
+         * <p><b>Because the 1x1 top cannot tell a patch from a sprinkle.</b> The
+         * whole-frame mean of invented content read 1.5% while the screen had
+         * black holes in it, and it would read the same for 1.5% of pixels
+         * scattered evenly -- which is invisible. The eye responds to connected
+         * area, and a mean over 900,000 pixels is constructed to destroy exactly
+         * that information.
+         *
+         * <p>One level up from nothing costs nothing: 40x22 texels is 3.5 KB,
+         * and a readback stalls on the round trip rather than on the bytes, so
+         * it is the same stall the 1x1 already pays. Each texel is then the
+         * invented fraction of its own 32x32 cell, and counting the cells above
+         * a half is the patch metric that a mean cannot express.
+         */
+        int cellFramebuffer;
+        int cellWidth, cellHeight;
 
         void allocateAveraging(int width, int height) {
             this.width = width;
@@ -217,11 +235,28 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, topFramebuffer);
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
                                           GLES20.GL_TEXTURE_2D, texture, count - 1);
+
+            // Level 5 is a 32x32 reduction, so each texel is one cell. Clamped
+            // to what the chain actually has, and skipped for a target too
+            // small to have that many levels -- the sign probe is 64x36.
+            final int cellLevel = Math.min(5, count - 1);
+            cellWidth = Math.max(1, width >> cellLevel);
+            cellHeight = Math.max(1, height >> cellLevel);
+            GLES20.glGenFramebuffers(1, names, 0);
+            cellFramebuffer = names[0];
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, cellFramebuffer);
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+                                          GLES20.GL_TEXTURE_2D, texture, cellLevel);
+
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
 
         void release() {
+            if (cellFramebuffer != 0) {
+                GLES20.glDeleteFramebuffers(1, new int[] {cellFramebuffer}, 0);
+                cellFramebuffer = 0;
+            }
             if (topFramebuffer != 0) {
                 GLES20.glDeleteFramebuffers(1, new int[] {topFramebuffer}, 0);
                 topFramebuffer = 0;
@@ -404,6 +439,17 @@ public class FrameSynthesizer implements FramePacer.Target {
      * this string.
      */
     private float measuredPhase = 0f;
+    /**
+     * How many 32x32 cells are more than half invented, and the worst one.
+     *
+     * <p>The whole-frame mean beside them cannot distinguish a hole from a
+     * sprinkle, and the difference is the difference between a broken screen
+     * and an invisible one. See {@link #measure}.
+     */
+    private int measuredPatchCells = 0, measuredCellTotal = 0;
+    private float measuredWorstCell = 0f;
+    /** Reused across readbacks; see {@link #measure}. */
+    private java.nio.ByteBuffer cells;
 
     private int allocWidth = 0;
     private int allocHeight = 0;
@@ -1563,6 +1609,42 @@ public class FrameSynthesizer implements FramePacer.Target {
         measuredPhase = phase;
         measuredAt = SystemClock.uptimeMillis();
 
+        // **And the same channel again, resolved into cells, because the mean
+        // above could not see what broke the screen.**
+        //
+        // A hypothesis-weighting change scored better than the shipped path on
+        // mean error, on error over the blocks that move differently from the
+        // frame, and on speckle, was installed, and put black patches on the
+        // display within minutes. Every one of those numbers is an average or a
+        // high-frequency statistic; a patch is neither. `measuredDark` read
+        // 1.5%, which is exactly what it reads for 1.5% of pixels scattered
+        // evenly across the frame -- and that is invisible.
+        //
+        // Reading one level of the same mip chain costs one more round trip on
+        // a pass that already stalls once a second, and turns the same data
+        // into the thing the eye actually responds to: how many 32x32 cells are
+        // more than half invented, and how bad the worst one is.
+        measuredPatchCells = 0;
+        measuredWorstCell = 0f;
+        if (probe.cellFramebuffer != 0) {
+            final int count = probe.cellWidth * probe.cellHeight;
+            if (cells == null || cells.capacity() < count * 4) {
+                cells = java.nio.ByteBuffer.allocateDirect(count * 4)
+                    .order(java.nio.ByteOrder.nativeOrder());
+            }
+            cells.position(0);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.cellFramebuffer);
+            GLES20.glReadPixels(0, 0, probe.cellWidth, probe.cellHeight,
+                                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, cells);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            for (int i = 0; i < count; i++) {
+                final float invented = (cells.get(i * 4 + 1) & 0xff) / 255f;
+                if (invented > 0.5f) measuredPatchCells++;
+                if (invented > measuredWorstCell) measuredWorstCell = invented;
+            }
+            measuredCellTotal = count;
+        }
+
         renderer.viewportNeedsUpdate = true;
     }
 
@@ -1983,6 +2065,21 @@ public class FrameSynthesizer implements FramePacer.Target {
                     + " the endpoints (%.0f%% was asked for)",
                 harmedShare * 100f, measuredDark * 100f,
                 moving * 100f, measuredSpeed * 200f, measuredPhase * 100f));
+
+            // **On its own line, because it is the one that would have caught
+            // the change that broke the screen and the line above would not.**
+            //
+            // Every figure above is a mean or a ratio of means. Black patches
+            // are a connected area, and the invented-content mean read 1.5%
+            // while the display had holes in it -- the same 1.5% it reads for a
+            // scatter nobody can see. These two say how concentrated it is: how
+            // many 32x32 cells are more than half invented, and how bad the
+            // single worst cell is. A frame with zero cells and a mean of 1.5%
+            // is fine. One cell is visible. Twenty is what was reverted.
+            Log.i(TAG, String.format(
+                "fg patches: %d of %d cells over half invented, worst cell %.0f%%"
+                    + " -- a cell is 32x32 px, and a mean cannot see any of this",
+                measuredPatchCells, measuredCellTotal, measuredWorstCell * 100f));
         }
 
         tier0Frames = 0;
