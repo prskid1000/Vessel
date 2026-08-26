@@ -2098,13 +2098,28 @@ public class FrameSynthesizer implements FramePacer.Target {
             // closer to the real one than leaving the old frame up would be.
             final float closeness = measuredBaseDistance > 0.0001f
                 ? measuredSynthDistance / measuredBaseDistance : 0f;
+            // **Subtract what the phase alone accounts for, because it is
+            // almost all of it.** The distances are measured against frame N,
+            // so a frame drawn at phase p and interpolated PERFECTLY sits at
+            // exactly (1-p) of the old frame's distance -- that is geometry,
+            // not quality. Measured over a capture the raw ratio correlates
+            // with (1-phase) at +0.93, so a reading of 80% against one of 21%
+            // looks like a large difference in quality and is mostly a
+            // difference in when the frame was drawn.
+            //
+            // What is left is the part the pipeline is responsible for: how
+            // much further from the real frame it landed than a perfect
+            // interpolation at that same phase would have. Zero is perfect and
+            // it means the same thing at every phase, which the ratio does not.
+            final float excess = moving > 0.001f
+                ? closeness - (1f - measuredPhase) : 0f;
             Log.i(TAG, String.format(
-                "fg truth: the synthesised frame sits at %.0f%% of the distance"
-                    + " that holding the old one would leave (under 100%% is"
-                    + " better than doing nothing), %.3f%% fetched off the"
-                    + " frame, %.0f%% of frame moving, drawn at %.0f%%",
-                closeness * 100f, measuredDark * 100f,
-                moving * 100f, measuredPhase * 100f));
+                "fg truth: %+.0f%% further from the real frame than a perfect"
+                    + " interpolation at this phase (0%% is perfect), sits at"
+                    + " %.0f%% where phase alone gives %.0f%%, %.3f%% fetched"
+                    + " off the frame, %.0f%% of frame moving, drawn at %.0f%%",
+                excess * 100f, closeness * 100f, (1f - measuredPhase) * 100f,
+                measuredDark * 100f, moving * 100f, measuredPhase * 100f));
 
             // **On its own line, because it is the one that would have caught
             // the change that broke the screen and the line above would not.**
