@@ -146,7 +146,26 @@ def run(path, limit):
         # anchored median passes the field carries no outliers left for a mean
         # to be dragged by, so the two should agree; this asserts that rather
         # than assuming it.
-        dom = np.array([np.mean(fld[..., 0]), np.mean(fld[..., 1])], dtype=np.float32)
+        # **Estimated from a sparse grid, not reduced over the field.**
+        # The exact mean is the top mip level of the field texture, but the
+        # field is RGBA16F and generating a mip chain on a half-float render
+        # target mid-pipeline needs two extensions and a texture-state dance
+        # every real frame. Twenty-five bilinear samples spread over 160x90 is
+        # 25 fetches in a pass that already runs at that resolution, needs no
+        # extension, no extra target and no state change. It is only worth it
+        # if the estimate is as good as the reduction, which is what this
+        # measures -- swap SPARSE to False to score the exact mean instead.
+        SPARSE = True
+        if SPARSE:
+            gy, gx = fld.shape[0], fld.shape[1]
+            iy = np.linspace(0, gy - 1, 5).astype(int)
+            ix = np.linspace(0, gx - 1, 5).astype(int)
+            grid25 = fld[np.ix_(iy, ix)]
+            dom = np.array([np.mean(grid25[..., 0]), np.mean(grid25[..., 1])],
+                           dtype=np.float32)
+        else:
+            dom = np.array([np.mean(fld[..., 0]), np.mean(fld[..., 1])],
+                           dtype=np.float32)
         rb = np.linalg.norm(fld - dom, axis=-1)
         resid = np.repeat(np.repeat(rb, BLOCK, 0), BLOCK, 1)[:H, :W]
         hot = resid > np.percentile(resid, 85)

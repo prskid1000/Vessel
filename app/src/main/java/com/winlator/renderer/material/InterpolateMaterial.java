@@ -158,6 +158,18 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform mark = new Uniform("mark");
         /** VESSEL: which way the field points, settled once. See SignMaterial. */
         public final Uniform fieldSign = new Uniform("fieldSign");
+        /**
+         * VESSEL: per block, how well its own vector explains its own pixels.
+         *
+         * <p>RG carry the SAD of the block's vector and of the frame's dominant
+         * vector; BA carry that dominant vector itself, so it costs no extra
+         * fetch here. See {@link FitMaterial}. Zero when the pass has not run,
+         * which the shader reads as every hypothesis being equally good -- the
+         * fixed window this replaces.
+         */
+        public final Uniform fitTexture = new Uniform("fitTexture");
+        /** VESSEL: 1 when {@link #fitTexture} holds a real measurement. */
+        public final Uniform fitValid = new Uniform("fitValid");
     }
 
     @Override
@@ -191,6 +203,11 @@ public class InterpolateMaterial extends ScreenMaterial {
             // not declare is a compile error, which is how this surfaced.
             "uniform sampler2D lumaNewerTexture;",
             "uniform sampler2D lumaOlderTexture;",
+            // **How much each hypothesis is worth, per block.** See
+            // FitMaterial: RG are the SADs of this block's own vector and of the
+            // frame's dominant vector, BA are that dominant vector.
+            "uniform sampler2D fitTexture;",
+            "uniform float fitValid;",
 
             // VESSEL: when 1, write four measurements instead of a picture.
             "uniform float diagnostic;",
@@ -395,6 +412,50 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "vec3 q3 = predict(m3, wOlder, wNewer);",
                 "vec3 shown = weight.x * q0 + weight.y * q1",
                             "+ weight.z * q2 + weight.w * q3;",
+
+                // ---- and how much each of them is actually worth -------------
+                //
+                // **The window above says only where the pixel sits; it says
+                // nothing about whether the block is right.** Orchard and
+                // Sullivan's estimation-theoretic OBMC treats these four as
+                // competing hypotheses whose weights should minimise prediction
+                // error, and a fixed window is the case where all four are
+                // assumed equally likely. On a block spanning near geometry and
+                // a far wall during a rotation, they are not.
+                //
+                // The reliability measure is inverse SAD, per the
+                // multi-hypothesis interpolation literature, read from a pass
+                // that computed it at block resolution -- see FitMaterial for
+                // why deciding this per pixel raises speckle by 9 to 15% and
+                // deciding it per block does not.
+                //
+                // A fifth hypothesis joins them: the frame's dominant motion,
+                // which during a yaw is roughly the far surface and is the only
+                // candidate here that is not a neighbour of the other four.
+                // Reweighting the four alone is worth 0.1%; this carries the
+                // whole gain. Its window weight is a quarter -- it competes with
+                // the four rather than replacing them, and only wins where all
+                // four fit badly.
+                "if (fitValid > 0.5) {",
+                    "vec4 f0 = texture2D(fitTexture, (base + vec2(0.5, 0.5)) * texel);",
+                    "vec4 f1 = texture2D(fitTexture, (base + vec2(1.5, 0.5)) * texel);",
+                    "vec4 f2 = texture2D(fitTexture, (base + vec2(0.5, 1.5)) * texel);",
+                    "vec4 f3 = texture2D(fitTexture, (base + vec2(1.5, 1.5)) * texel);",
+
+                    // The floor is the source's own 8-bit quantisation, twice
+                    // over: below two levels a difference is rounding, and
+                    // without a floor a block that happens to fit perfectly
+                    // would take the entire weight from four that fit well.
+                    "const float FLOOR = 2.0 / 255.0;",
+                    "vec4 trust = weight / (vec4(f0.r, f1.r, f2.r, f3.r) + FLOOR);",
+                    "float trustDominant = 0.25 / (f0.g + FLOOR);",
+
+                    "vec3 q4 = predict(f0.ba, wOlder, wNewer);",
+                    "float total = trust.x + trust.y + trust.z + trust.w",
+                                "+ trustDominant;",
+                    "shown = (trust.x * q0 + trust.y * q1 + trust.z * q2",
+                           "+ trust.w * q3 + trustDominant * q4) / max(total, 1.0e-5);",
+                "}",
 
                 // ---- did this pixel move, or is it painted on the screen? ----
                 //
