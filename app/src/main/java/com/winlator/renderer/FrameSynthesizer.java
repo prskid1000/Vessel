@@ -5,7 +5,6 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
-import com.winlator.renderer.material.FitMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.SignMaterial;
@@ -240,7 +239,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
-    private final FitMaterial fitMaterial = new FitMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -320,23 +318,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final Target[] filtered = new Target[2];
     /** Which of {@link #filtered} the interpolation should read, or -1 for none. */
     private int filteredIndex = -1;
-
-    /**
-     * VESSEL: how well each block's own vector explains its own pixels.
-     *
-     * <p>Two targets because the second pass is a 3x3 blur of the first and a
-     * pass cannot be its own destination -- the same reason {@link #filtered}
-     * has two. See {@link FitMaterial} for what is in the channels, why the
-     * blur is not optional, and why this is measured at the field's resolution
-     * rather than the frame's.
-     *
-     * <p>The same size and format as the field: 160x90 on a 720p guest, RGBA16F
-     * because BA carry a motion vector in luma pixels, which does not fit in
-     * eight bits.
-     */
-    private final Target[] fit = new Target[2];
-    /** Which of {@link #fit} holds the blurred result, or -1 if it has not run. */
-    private int fitIndex = -1;
     /**
      * <b>Ten, measured on four scenes, and the reason it is not six is that the
      * objection to ten was tested and failed.</b>
@@ -1522,21 +1503,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.lumaOlderTexture, 4);
-        // How much each of the four blocks is worth, and the fifth hypothesis
-        // riding in its spare channels. See FitMaterial. Bound whether or not it
-        // ran, because a sampler a shader declares must have something in it;
-        // `fitValid` is what decides whether the shader reads it.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE5);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
-                             fitIndex >= 0 ? fit[fitIndex].texture : fieldTexture());
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.fitTexture, 5);
-        interpolateMaterial.setUniformFloat(
-            interpolateMaterial.interpolateUniforms.fitValid, fitIndex >= 0 ? 1f : 0f);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
 
-        for (int unit = 5; unit >= 0; unit--) {
+        for (int unit = 4; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -1623,9 +1593,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         // Filtered before anything reads it, so every pass downstream sees the
         // same field. See MedianMaterial and the `filtered` pair.
         filterField();
-        // And scored, so the interpolation knows which of the four blocks it
-        // blends is worth listening to. See FitMaterial.
-        measureFit();
         return true;
     }
 
@@ -1675,69 +1642,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
         medianTimer.end();
-    }
-
-    /**
-     * VESSEL: score every block's own vector against its own pixels.
-     *
-     * <p>Two draws at the field's resolution -- measure, then a 3x3 mean of the
-     * result. See {@link FitMaterial} for what each channel holds, why the blur
-     * is not optional, and what the whole thing is worth.
-     *
-     * <p>Runs once per real frame, immediately after the field is filtered,
-     * because that is when the field changes. Every synthesised frame in the
-     * interval then reads the same answer. The fit is scored at the midpoint
-     * while the frames it informs are drawn at 1/K, 2/K and so on; the two
-     * fetches are separated by exactly the vector at every phase, so what moves
-     * with the phase is where that pair sits rather than how far apart it is.
-     */
-    private void measureFit() {
-        fitIndex = -1;
-        if (fit[0] == null || filteredIndex < 0 || vectors == null) return;
-        if (fieldSign == 0f) return;
-
-        GLES20.glDisable(GLES20.GL_BLEND);
-        fitMaterial.use();
-        renderer.quadVertices.bind(fitMaterial.programId);
-        fitMaterial.setUniformBool(fitMaterial.uniforms.flipY, false);
-        fitMaterial.setUniformVec2(fitMaterial.fitUniforms.motionScale,
-                                   1f / Math.max(1, luma[0].width),
-                                   1f / Math.max(1, luma[0].height));
-        fitMaterial.setUniformVec2(fitMaterial.fitUniforms.texelSize,
-                                   1f / Math.max(1, vectors.width),
-                                   1f / Math.max(1, vectors.height));
-        fitMaterial.setUniformFloat(fitMaterial.fitUniforms.fieldSign, fieldSign);
-        GLES20.glViewport(0, 0, vectors.width, vectors.height);
-        renderer.viewportNeedsUpdate = true;
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fit[0].framebuffer);
-        fitMaterial.setUniformFloat(fitMaterial.fitUniforms.blurring, 0f);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered[filteredIndex].texture);
-        fitMaterial.setUniformInt(fitMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-        fitMaterial.setUniformInt(fitMaterial.fitUniforms.lumaNewerTexture, 1);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-        fitMaterial.setUniformInt(fitMaterial.fitUniforms.lumaOlderTexture, 2);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fit[1].framebuffer);
-        fitMaterial.setUniformFloat(fitMaterial.fitUniforms.blurring, 1f);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fit[0].texture);
-        fitMaterial.setUniformInt(fitMaterial.uniforms.screenTexture, 0);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-        fitIndex = 1;
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 2; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
     }
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
@@ -1882,22 +1786,6 @@ public class FrameSynthesizer implements FramePacer.Target {
                     filtered[1].release();
                     filtered[0] = filtered[1] = null;
                 }
-
-                // **Same format, same completeness check, same fallback.** The
-                // fit map carries a motion vector in two of its channels, so it
-                // needs the range the field needs; and if RGBA16F could not be
-                // rendered to above it cannot be rendered to here either, in
-                // which case the interpolation keeps the fixed window it has
-                // always used. Filtered NEAREST for the same reason the field
-                // is: the four blocks are wanted as the four answers they are,
-                // and the window does the spatial blending.
-                if (filtered[0] != null) {
-                    for (int i = 0; i < 2; i++) {
-                        fit[i] = new Target();
-                        fit[i].allocate(lumaW / blockX, lumaH / blockY,
-                                        GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    }
-                }
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -1923,7 +1811,6 @@ public class FrameSynthesizer implements FramePacer.Target {
             }
             if (vectors != null) vectors.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
-            for (int i = 0; i < 2; i++) if (fit[i] != null) fit[i].release();
             if (signProbe != null) signProbe.release();
             if (output != null) output.release();
             if (probe != null) probe.release();
@@ -1932,8 +1819,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         vectors = null;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
-        fit[0] = fit[1] = null;
-        fitIndex = -1;
         output = null;
         signProbe = null;
         fieldSign = 0f;
