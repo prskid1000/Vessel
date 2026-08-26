@@ -2060,7 +2060,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             final float harmedShare = moving > 0.001f ? measuredConfidence / moving : 0f;
             Log.i(TAG, String.format(
                 "fg truth: %.1f%% of the moving frame is FURTHER from the real"
-                    + " frame than doing nothing, %.3f%% invented content,"
+                    + " frame than doing nothing, %.3f%% fetched off the frame,"
                     + " %.0f%% of frame moving, sits %.0f%% of the way between"
                     + " the endpoints (%.0f%% was asked for)",
                 harmedShare * 100f, measuredDark * 100f,
@@ -2077,8 +2077,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             // single worst cell is. A frame with zero cells and a mean of 1.5%
             // is fine. One cell is visible. Twenty is what was reverted.
             Log.i(TAG, String.format(
-                "fg patches: %d of %d cells over half invented, worst cell %.0f%%"
-                    + " -- a cell is 32x32 px, and a mean cannot see any of this",
+                "fg patches: %d of %d cells where over half the fetches left the"
+                    + " frame, worst cell %.0f%% -- a cell is 32x32 px, and a"
+                    + " frame-wide mean cannot see any of this",
                 measuredPatchCells, measuredCellTotal, measuredWorstCell * 100f));
         }
 

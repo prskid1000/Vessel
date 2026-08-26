@@ -221,8 +221,6 @@ public class InterpolateMaterial extends ScreenMaterial {
 
             "varying vec2 vUV;",
 
-            "float max3(vec3 c) { return max(max(c.r, c.g), c.b); }",
-
             // One bilateral prediction: both endpoints displaced symmetrically
             // about this pixel and blended by phase, so each is trusted most
             // where it is most likely to be right. Clamped rather than wrapped: a
@@ -491,20 +489,41 @@ public class InterpolateMaterial extends ScreenMaterial {
                     // distances are zero and the ratio is noise over noise.
                     "float changed = step(0.008, dBase);",
 
-                    // Content that is in neither endpoint. The output should not
-                    // be darker than everything real nearby -- there is nowhere
-                    // for such a pixel to have come from. Expressed as a
-                    // *difference* from the local floor rather than as an
-                    // absolute level, so it works identically in a black tunnel
-                    // and in daylight; the previous version used a fixed floor
-                    // and was blind in precisely the scene that needed it.
-                    "vec2 rx = vec2(6.0 * motionScale.x, 0.0);",
-                    "vec2 ry = vec2(0.0, 6.0 * motionScale.y);",
-                    "float floorLuma = min(min(max3(here), max3(there)),",
-                        "min(min(max3(texture2D(screenTexture, clamp(vUV + rx, 0.0, 1.0)).rgb),",
-                                "max3(texture2D(screenTexture, clamp(vUV - rx, 0.0, 1.0)).rgb)),",
-                            "min(max3(texture2D(screenTexture, clamp(vUV + ry, 0.0, 1.0)).rgb),",
-                                "max3(texture2D(screenTexture, clamp(vUV - ry, 0.0, 1.0)).rgb))));",
+                    // **Fetches that left the frame, and this replaces a test
+                    // that could not have worked.**
+                    //
+                    // What was here asked whether the output was darker than
+                    // anything real within six pixels of either endpoint, on
+                    // the reasoning that such a pixel came from nowhere. Two
+                    // things are wrong with it, and a control on a recording
+                    // showed both.
+                    //
+                    // It cannot fire for the reason it claims. Every output
+                    // pixel is a convex combination of two FETCHED pixels, so
+                    // it can never be darker than the darker of the two.
+                    // Content from nowhere is not a thing this shader can
+                    // produce.
+                    //
+                    // And what it does fire on is correct behaviour. A dark
+                    // beam at the right of frame N-1 and the left of frame N
+                    // belongs, at the midpoint, exactly where both real frames
+                    // show bright wall. Scored on a capture, the guest's OWN
+                    // middle frames trip this test in 32% of frames against the
+                    // synthesised frames' 23% -- a perfect answer accused more
+                    // often than the pipeline's.
+                    //
+                    // A black patch is real, but its cause is a fetch landing
+                    // where there is nothing: outside the frame, clamped to the
+                    // edge, which on a letterboxed guest is the black bar. That
+                    // is exact, needs no threshold, and cannot be tripped by
+                    // legitimate motion of anything.
+                    "vec2 outNewer = vUV - mean * (1.0 - phase);",
+                    "vec2 outOlder = vUV + mean * phase;",
+                    "float escaped = min(1.0,",
+                        "step(outNewer.x, 0.0) + step(1.0, outNewer.x)",
+                      "+ step(outNewer.y, 0.0) + step(1.0, outNewer.y)",
+                      "+ step(outOlder.x, 0.0) + step(1.0, outOlder.x)",
+                      "+ step(outOlder.y, 0.0) + step(1.0, outOlder.y));",
 
                     "gl_FragColor = vec4(",
                         // R: **the number that matters.** Pixels where the
@@ -512,10 +531,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                         // N-1 already was -- worse than having done nothing at
                         // all. Counted only where something actually changed.
                         "changed * step(dBase, dSynth),",
-                        // G: pixels darker than anything real in the
-                        // neighbourhood of either endpoint. Invented content, of
-                        // the kind a wrong displacement fetches out of shadow.
-                        "step(0.02, floorLuma - max3(shown)),",
+                        // G: pixels whose fetch left the frame and was clamped
+                        // to its edge. See above for what this replaced and why
+                        // that could not have worked.
+                        "escaped,",
                         // B: how much of the frame changed at all, which is the
                         // denominator R has to be read against. Without it a
                         // small R could mean "almost nothing was harmed" or
