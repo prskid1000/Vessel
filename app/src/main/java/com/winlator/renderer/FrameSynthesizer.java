@@ -446,7 +446,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * sprinkle, and the difference is the difference between a broken screen
      * and an invisible one. See {@link #measure}.
      */
-    private int measuredPatchCells = 0, measuredCellTotal = 0;
+    private int measuredPatchCells = 0, measuredCellTotal = 0, measuredEdgeCells = 0;
     private float measuredWorstCell = 0f;
     /** Reused across readbacks; see {@link #measure}. */
     private java.nio.ByteBuffer cells;
@@ -1625,6 +1625,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // into the thing the eye actually responds to: how many 32x32 cells are
         // more than half invented, and how bad the worst one is.
         measuredPatchCells = 0;
+        measuredEdgeCells = 0;
         measuredWorstCell = 0f;
         if (probe.cellFramebuffer != 0) {
             final int count = probe.cellWidth * probe.cellHeight;
@@ -1637,10 +1638,35 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glReadPixels(0, 0, probe.cellWidth, probe.cellHeight,
                                 GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, cells);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            // **Split border from interior, because only one of them is a bug.**
+            //
+            // During a pan the leading edge of the frame fetches content that
+            // genuinely was not rendered -- it was off-screen in both real
+            // frames -- so those cells MUST clamp, and a reading that counts
+            // them is reporting camera motion. The first version of this did
+            // exactly that and made a still scene read 0 and a pan read 94 of
+            // 880, which looks alarming and is unavoidable physics.
+            //
+            // A cell two or more cells in from every edge has no such excuse.
+            // Nothing there should ever need content from outside the frame,
+            // because the displacement required to reach it is larger than the
+            // matcher's own search window. Interior escapes are the number to
+            // watch, and the border count is kept only so the two can be told
+            // apart in a log rather than argued about.
+            measuredEdgeCells = 0;
             for (int i = 0; i < count; i++) {
-                final float invented = (cells.get(i * 4 + 1) & 0xff) / 255f;
-                if (invented > 0.5f) measuredPatchCells++;
-                if (invented > measuredWorstCell) measuredWorstCell = invented;
+                final float escaped = (cells.get(i * 4 + 1) & 0xff) / 255f;
+                final int cx = i % probe.cellWidth;
+                final int cy = i / probe.cellWidth;
+                final boolean edge = cx < 2 || cy < 2
+                    || cx >= probe.cellWidth - 2 || cy >= probe.cellHeight - 2;
+                // The worst cell is reported for the INTERIOR only. Taken over
+                // the whole frame it read 100% in every sample of a moving
+                // scene, because a border cell during a pan always does -- so
+                // it said nothing at all.
+                if (!edge && escaped > measuredWorstCell) measuredWorstCell = escaped;
+                if (escaped <= 0.5f) continue;
+                if (edge) measuredEdgeCells++; else measuredPatchCells++;
             }
             measuredCellTotal = count;
         }
@@ -2077,10 +2103,11 @@ public class FrameSynthesizer implements FramePacer.Target {
             // single worst cell is. A frame with zero cells and a mean of 1.5%
             // is fine. One cell is visible. Twenty is what was reverted.
             Log.i(TAG, String.format(
-                "fg patches: %d of %d cells where over half the fetches left the"
-                    + " frame, worst cell %.0f%% -- a cell is 32x32 px, and a"
-                    + " frame-wide mean cannot see any of this",
-                measuredPatchCells, measuredCellTotal, measuredWorstCell * 100f));
+                "fg patches: %d interior cells of %d take over half their"
+                    + " content from off the frame (%d more at the border,"
+                    + " which a pan cannot avoid), worst interior cell %.0f%%",
+                measuredPatchCells, measuredCellTotal, measuredEdgeCells,
+                measuredWorstCell * 100f));
         }
 
         tier0Frames = 0;

@@ -517,13 +517,30 @@ public class InterpolateMaterial extends ScreenMaterial {
                     // edge, which on a letterboxed guest is the black bar. That
                     // is exact, needs no threshold, and cannot be tripped by
                     // legitimate motion of anything.
+                    // **Weighted by how much that fetch actually contributes,
+                    // because a binary count overstates it and the first
+                    // version of this was binary.**
+                    //
+                    // At 4x the phases are 0.25, 0.5 and 0.75, and the newer
+                    // fetch reaches 1-phase of the vector while carrying only
+                    // `phase` of the result. So an escape at phase 0.25 travels
+                    // furthest and matters least: it darkens the pixel by a
+                    // quarter, not to black. Counting it the same as a
+                    // fully-weighted escape is what made a legitimate fast pan
+                    // read 51 interior cells.
+                    //
+                    // Weighted, this is literally the share of the output that
+                    // came from outside the frame -- which is the quantity that
+                    // darkens the picture, and the only one worth a threshold.
                     "vec2 outNewer = vUV - mean * (1.0 - phase);",
                     "vec2 outOlder = vUV + mean * phase;",
-                    "float escaped = min(1.0,",
+                    "float escNewer = min(1.0,",
                         "step(outNewer.x, 0.0) + step(1.0, outNewer.x)",
-                      "+ step(outNewer.y, 0.0) + step(1.0, outNewer.y)",
-                      "+ step(outOlder.x, 0.0) + step(1.0, outOlder.x)",
+                      "+ step(outNewer.y, 0.0) + step(1.0, outNewer.y));",
+                    "float escOlder = min(1.0,",
+                        "step(outOlder.x, 0.0) + step(1.0, outOlder.x)",
                       "+ step(outOlder.y, 0.0) + step(1.0, outOlder.y));",
+                    "float escaped = phase * escNewer + (1.0 - phase) * escOlder;",
 
                     "gl_FragColor = vec4(",
                         // R: **the number that matters.** Pixels where the
