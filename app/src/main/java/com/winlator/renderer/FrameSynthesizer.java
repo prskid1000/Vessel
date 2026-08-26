@@ -5,6 +5,7 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.winlator.renderer.material.FieldProbeMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.SignMaterial;
@@ -274,6 +275,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
+    private final FieldProbeMaterial fieldProbeMaterial = new FieldProbeMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -316,6 +318,15 @@ public class FrameSynthesizer implements FramePacer.Target {
      * mip reduction is far below the frame it protects.
      */
     private Target signProbe;
+    /**
+     * VESSEL: where {@link FieldProbeMaterial} reports on the real field.
+     *
+     * <p>Diagnostics only, and nothing reads what it writes. See that class for
+     * the hypothesis it exists to test and why a laptop cannot test it.
+     */
+    private Target fieldProbe;
+    private float probeFit, probeAtFloor, probeLonely, probeDominantGap;
+    private long fieldProbedAt = 0;
 
     /**
      * VESSEL: where the field is filtered, ping-ponged across the passes.
@@ -1711,6 +1722,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         // Filtered before anything reads it, so every pass downstream sees the
         // same field. See MedianMaterial and the `filtered` pair.
         filterField();
+        // Diagnostics only; nothing downstream reads it. See FieldProbeMaterial.
+        probeField();
         return true;
     }
 
@@ -1760,6 +1773,92 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
         medianTimer.end();
+    }
+
+    /**
+     * VESSEL: report on the field the hardware actually produced.
+     *
+     * <p>Nothing downstream reads this. It exists because a change was scored
+     * on a laptop against a field built from dense optical flow -- coherent,
+     * outlier-free -- approved on every column, installed, and put black
+     * patches on the display. Rebuilt offline against the same recordings it
+     * scores <em>cleaner</em> than the baseline, so the model cannot reproduce
+     * the fault and the difference has to be the field itself.
+     *
+     * <p>Once a second, like the sign probe, and only when asked for.
+     */
+    private void probeField() {
+        if (!wants("probe") && !wants("all")) return;
+        if (vectors == null || luma[0] == null || filteredIndex < 0) return;
+        if (fieldSign == 0f) return;
+        final long now = SystemClock.uptimeMillis();
+        if (fieldProbedAt != 0 && now - fieldProbedAt < 1000) return;
+        fieldProbedAt = now;
+
+        if (fieldProbe == null) {
+            fieldProbe = new Target();
+            fieldProbe.allocateAveraging(vectors.width, vectors.height);
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fieldProbe.framebuffer);
+        GLES20.glViewport(0, 0, fieldProbe.width, fieldProbe.height);
+        renderer.viewportNeedsUpdate = true;
+        GLES20.glDisable(GLES20.GL_BLEND);
+
+        fieldProbeMaterial.use();
+        renderer.quadVertices.bind(fieldProbeMaterial.programId);
+        fieldProbeMaterial.setUniformBool(fieldProbeMaterial.uniforms.flipY, false);
+        fieldProbeMaterial.setUniformVec2(fieldProbeMaterial.probeUniforms.motionScale,
+                                          1f / Math.max(1, luma[0].width),
+                                          1f / Math.max(1, luma[0].height));
+        fieldProbeMaterial.setUniformVec2(fieldProbeMaterial.probeUniforms.texelSize,
+                                          1f / Math.max(1, vectors.width),
+                                          1f / Math.max(1, vectors.height));
+        fieldProbeMaterial.setUniformFloat(fieldProbeMaterial.probeUniforms.fieldSign,
+                                           fieldSign);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered[filteredIndex].texture);
+        fieldProbeMaterial.setUniformInt(fieldProbeMaterial.uniforms.screenTexture, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
+        fieldProbeMaterial.setUniformInt(
+            fieldProbeMaterial.probeUniforms.lumaNewerTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
+        fieldProbeMaterial.setUniformInt(
+            fieldProbeMaterial.probeUniforms.lumaOlderTexture, 2);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+
+        for (int unit = 2; unit >= 0; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        GLES20.glEnable(GLES20.GL_BLEND);
+        renderer.invalidateBoundWindowMaterial();
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldProbe.texture);
+        GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+
+        final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fieldProbe.topFramebuffer);
+        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.viewportNeedsUpdate = true;
+
+        probeFit = (pixel.get(0) & 0xff) / 255f / 4f;
+        probeAtFloor = (pixel.get(1) & 0xff) / 255f;
+        probeLonely = (pixel.get(2) & 0xff) / 255f;
+        probeDominantGap = (pixel.get(3) & 0xff) / 255f * 112f;
+
+        Log.i(TAG, String.format(
+            "fg probe: mean block fit %.4f, %.1f%% of blocks fit at the noise"
+                + " floor, %.2f%% of blocks BOTH fit at the floor and disagree"
+                + " with every neighbour by 2+ blocks, dominant vector sits"
+                + " %.0f px from the average block",
+            probeFit, probeAtFloor * 100f, probeLonely * 100f, probeDominantGap));
     }
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
@@ -1930,6 +2029,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (vectors != null) vectors.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
             if (signProbe != null) signProbe.release();
+            if (fieldProbe != null) fieldProbe.release();
             if (output != null) output.release();
             if (probe != null) probe.release();
         }
@@ -1939,6 +2039,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         filteredIndex = -1;
         output = null;
         signProbe = null;
+        fieldProbe = null;
+        fieldProbedAt = 0;
         fieldSign = 0f;
         pendingSign = 0f;
         signVotes = 0f;
