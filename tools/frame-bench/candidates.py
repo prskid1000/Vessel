@@ -116,8 +116,13 @@ def run(path, limit):
              "soft + dominant, block-smoothed", "per-block fit (implementable)",
              "per-block fit, 3x3 on the field",
              "inverse-SAD weights (literature)",
-             "coarse hypothesis, not global"]
+             "coarse hypothesis, not global",
+             "inverse-SAD, four only (no global)",
+             "ORACLE pick of these five",
+             "ORACLE with dense flow, no blocks",
+             "ORACLE, best of both"]
     acc = {n: {"all": [], "hot": [], "spk": []} for n in names}
+    agree = []
 
     for A, B, C in trips:
         f = K.flow(A, C)
@@ -132,7 +137,16 @@ def run(path, limit):
                 best, v = e, cand
 
         fld = blocks(v).astype(np.float32)
-        dom = np.array([np.median(fld[..., 0]), np.median(fld[..., 1])], dtype=np.float32)
+        # **The MEAN, not the median, because the mean is free on the device.**
+        # A reduction over the frame would need a readback and a stall. But the
+        # dominant vector is a reduction over the FIELD -- 160x90 -- and the
+        # mean of a texture is exactly what its top mip level holds, so the
+        # shader can have it for one fetch of motionTexture at maximum lod and
+        # no CPU involvement at all. The median has no such shortcut. After ten
+        # anchored median passes the field carries no outliers left for a mean
+        # to be dragged by, so the two should agree; this asserts that rather
+        # than assuming it.
+        dom = np.array([np.mean(fld[..., 0]), np.mean(fld[..., 1])], dtype=np.float32)
         rb = np.linalg.norm(fld - dom, axis=-1)
         resid = np.repeat(np.repeat(rb, BLOCK, 0), BLOCK, 1)[:H, :W]
         hot = resid > np.percentile(resid, 85)
@@ -301,12 +315,66 @@ def run(path, limit):
         outs["coarse hypothesis, not global"] = sum(
             (s / ctot)[..., None] * p for s, p in zip(cw, preds + [cpred]))
 
+        # **The same weighting with the fifth hypothesis dropped, because it
+        # is the expensive half of the change.** The four block vectors are
+        # already fetched and their fits come from one pass at field
+        # resolution. The frame's dominant vector is not: it needs a
+        # whole-frame reduction every frame, and the only frame-wide readback
+        # in the pipeline runs once a second on the diagnostic path. If the
+        # four carry most of the gain, this ships as a fragment-shader change
+        # plus two tiny passes and nothing else.
+        fw = [w[..., 0] / (f[..., 0] + eps) for w, f in zip(ws, fvs3)]
+        ftot = sum(fw) + 1e-9
+        outs["inverse-SAD, four only (no global)"] = sum(
+            (s / ftot)[..., None] * p for s, p in zip(fw, preds))
+
+        # ---- ceilings: how far can this class of method go at all? -------
+        #
+        # **These cheat, on purpose.** Each looks at the frame the guest drew
+        # and picks, per pixel, whichever answer lands closest to it. No
+        # shipping code can do that -- the truth is exactly what is missing at
+        # synthesis time. What they bound is the headroom: no weighting of
+        # these hypotheses, however clever, can beat an oracle that chooses
+        # among them perfectly.
+        #
+        # Two ceilings, because they answer different questions. The first
+        # keeps the 8x8 block field and asks what a perfect CHOICE among its
+        # hypotheses would buy. The second discards blocks entirely and warps
+        # with the full-resolution flow, which is the best field obtainable on
+        # this footage by any estimator -- so the gap between them is what the
+        # block quantisation costs, and whatever the second one still cannot
+        # fix is irreducible: content visible in neither source frame, which
+        # no interpolation can invent because it was never rendered.
+        cands5 = preds + [dpred]
+        stack = np.stack(cands5, axis=0)
+        d5 = np.linalg.norm(stack - B[None], axis=-1)
+        best5 = np.argmin(d5, axis=0)
+        outs["ORACLE pick of these five"] = np.take_along_axis(
+            stack, best5[None, ..., None], axis=0)[0]
+
+        dense = predict(v, A, C, grid)
+        outs["ORACLE with dense flow, no blocks"] = dense
+
+        both = np.stack(cands5 + [dense], axis=0)
+        db = np.linalg.norm(both - B[None], axis=-1)
+        outs["ORACLE, best of both"] = np.take_along_axis(
+            both, np.argmin(db, axis=0)[None, ..., None], axis=0)[0]
+
+        # **How often does the reliability measure agree with the truth?**
+        # This is the gap between what is achieved and what the oracle shows
+        # is available. SAD is a PROXY for which hypothesis is right; if it
+        # rarely picks what the oracle picks, then the headroom is real but
+        # unreachable through this signal, and a better reliability measure is
+        # where the next gain lives rather than a better weighting of this one.
+        sadpick = np.argmin(np.stack([f[..., 0] for f in fvs3] + [fdom], axis=0), axis=0)
+        agree.append(float((sadpick == best5).mean() * 100.0))
+
         for n in names:
             err = np.sqrt(((outs[n] - B) ** 2).mean(axis=2))
             acc[n]["all"].append(float(err.mean()))
             acc[n]["hot"].append(float(err[hot].mean()))
             acc[n]["spk"].append(speckle(err))
-    return trips, acc, names
+    return trips, acc, names, agree
 
 
 def main():
@@ -318,7 +386,7 @@ def main():
         sys.exit(__doc__)
 
     for path in paths:
-        trips, acc, names = run(path, limit)
+        trips, acc, names, agree = run(path, limit)
         base = np.mean(acc[names[0]]["all"])
         bhot = np.mean(acc[names[0]]["hot"])
         print("\n=== %s (%d triples) ===" % (path, len(trips)))
@@ -331,6 +399,8 @@ def main():
             print("  %-26s %9.5f %8.1f%% %9.5f %8.1f%% %9.5f"
                   % (n, a, 100.0 * (a / base - 1.0), h, 100.0 * (h / bhot - 1.0),
                      np.mean(acc[n]["spk"])))
+        print("  %-26s %9.0f%%   (chance is 20%%)"
+              % ("SAD agrees with the oracle", np.mean(agree)))
     print()
     print("  `parallax` is the top 15% of blocks by how differently they move")
     print("  from the frame -- the case this is for. `speckle` is the check")
