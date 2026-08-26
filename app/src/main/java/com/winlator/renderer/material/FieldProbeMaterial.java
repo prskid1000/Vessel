@@ -134,15 +134,42 @@ public class FieldProbeMaterial extends ScreenMaterial {
                 // Two 8-bit levels: below this a difference is rounding, and it
                 // is the floor the weighting adds before squaring.
                 "float atFloor = 1.0 - step(2.0 / 255.0, fit);",
-                // Two blocks. A vector this far from all four neighbours is not
-                // a surface moving coherently, it is a block on its own.
-                "float lonely = step(16.0, length(own - around));",
 
+                // **Measured, not thresholded, because the threshold was the
+                // whole problem.** This began as step(16.0, ...) -- "disagrees
+                // with its neighbours by two blocks or more" -- and read 0.00%
+                // in every sample, which proves nothing at all: a test that
+                // cannot fire and a test that fires and finds nothing look
+                // identical in a log.
+                //
+                // Sixteen pixels was a guess, and it was a bad one for a field
+                // that has been through ten anchored median passes whose entire
+                // purpose is to delete blocks disagreeing with their
+                // neighbours. Of course none are left.
+                //
+                // That is worth more than the failed test. A wrong vector that
+                // SURVIVES the filter is not an isolated block -- it cannot be,
+                // by construction -- it is one a whole neighbourhood shares. So
+                // the quantity is reported rather than a verdict on it, and the
+                // scale it comes back at says what a threshold should have
+                // been, instead of a guess deciding whether anything is seen.
+                "float disagree = length(own - around);",
+
+                // B is the same quantity restricted to the blocks that would
+                // take maximal weight, so B against A says whether a bad fit
+                // and a locally-odd vector go together -- which is the
+                // inversion inverse-variance weighting cannot survive -- or
+                // whether they are unrelated.
+                //
+                // Both are scaled by 32 px, which is four blocks and comfortably
+                // above anything a filtered field should contain, so the mean
+                // arrives with room rather than clipped against a ceiling.
+                "float scaled = min(disagree / 32.0, 1.0);",
                 "gl_FragColor = vec4(",
                     "min(fit * 4.0, 1.0),",
                     "atFloor,",
-                    "atFloor * lonely,",
-                    "min(length(own - dominant) / 112.0, 1.0));",
+                    "atFloor * scaled,",
+                    "scaled);",
             "}"
         );
     }

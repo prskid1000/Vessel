@@ -325,7 +325,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * the hypothesis it exists to test and why a laptop cannot test it.
      */
     private Target fieldProbe;
-    private float probeFit, probeAtFloor, probeLonely, probeDominantGap;
+    private float probeFit, probeAtFloor, probeLonely, probeLonelyAlone;
     private long fieldProbedAt = 0;
 
     /**
@@ -1850,15 +1850,16 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         probeFit = (pixel.get(0) & 0xff) / 255f / 4f;
         probeAtFloor = (pixel.get(1) & 0xff) / 255f;
-        probeLonely = (pixel.get(2) & 0xff) / 255f;
-        probeDominantGap = (pixel.get(3) & 0xff) / 255f * 112f;
+        probeLonely = (pixel.get(2) & 0xff) / 255f * 32f;
+        probeLonelyAlone = (pixel.get(3) & 0xff) / 255f * 32f;
 
         Log.i(TAG, String.format(
             "fg probe: mean block fit %.4f, %.1f%% of blocks fit at the noise"
-                + " floor, %.2f%% of blocks BOTH fit at the floor and disagree"
-                + " with every neighbour by 2+ blocks, dominant vector sits"
-                + " %.0f px from the average block",
-            probeFit, probeAtFloor * 100f, probeLonely * 100f, probeDominantGap));
+                + " floor, blocks sit %.1f px from their neighbours on average"
+                + " (%.1f px among the floor-fit ones, and if that is the"
+                + " larger number a bad fit and an odd vector go together)",
+            probeFit, probeAtFloor * 100f, probeLonelyAlone,
+            probeAtFloor > 0.001f ? probeLonely / probeAtFloor : 0f));
     }
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
