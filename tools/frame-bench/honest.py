@@ -60,7 +60,7 @@ def main():
                  if PA.X.rms(t[0], t[2]) > 0.05][:limit]
         rows = {"shipped OBMC": [], "per-pixel oracle": [],
                 "per-block oracle": [], "decoy oracle (pure luck)": [],
-                "spread between hypotheses": []}
+                "decoy oracle, per block": [], "spread between hypotheses": []}
         for A, B, C in trips:
             f = K.flow(A, C)
             H, W = f.shape[:2]
@@ -131,6 +131,24 @@ def main():
             rows["decoy oracle (pure luck)"].append(
                 float(np.sqrt(((dchosen - B) ** 2).mean())))
 
+            # **The same decoys, chosen once per block, because subtracting the
+            # per-pixel floor from the per-block row was wrong.**
+            #
+            # A per-pixel minimum exploits per-pixel noise. A per-block one
+            # cannot: averaging 64 pixels before choosing shrinks the spread
+            # being exploited by sqrt(64), so the luck available collapses. The
+            # earlier reading took 6 points off the per-block oracle on the
+            # strength of a control measured per pixel, which understated the
+            # real headroom. This is the control that belongs to that row.
+            ddb = dd[:, :gh * CD.BLOCK, :gw * CD.BLOCK].reshape(
+                5, gh, CD.BLOCK, gw, CD.BLOCK).mean(axis=(2, 4))
+            dchoice = np.argmin(ddb, axis=0)
+            dbig = np.repeat(np.repeat(dchoice, CD.BLOCK, 0), CD.BLOCK, 1)
+            dbig = np.pad(dbig, ((0, H - dbig.shape[0]), (0, W - dbig.shape[1])), "edge")
+            dblocked = np.take_along_axis(decoy, dbig[None, ..., None], axis=0)[0]
+            rows["decoy oracle, per block"].append(
+                float(np.sqrt(((dblocked - B) ** 2).mean())))
+
             rows["spread between hypotheses"].append(
                 float(np.linalg.norm(preds - preds.mean(axis=0, keepdims=True),
                                      axis=-1).mean()))
@@ -139,7 +157,7 @@ def main():
         print("\n=== %s (%d triples) ===" % (path, len(trips)))
         print("  %-32s %10s %10s" % ("", "error", "vs shipped"))
         for n in ("shipped OBMC", "per-pixel oracle", "per-block oracle",
-                  "decoy oracle (pure luck)"):
+                  "decoy oracle (pure luck)", "decoy oracle, per block"):
             e = np.mean(rows[n])
             print("  %-32s %10.5f %9.1f%%" % (n, e, 100.0 * (e / b - 1.0)))
         print("  %-32s %10.5f" % ("(how far the five hypotheses differ)",
