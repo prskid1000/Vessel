@@ -5,9 +5,12 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.winlator.renderer.material.DownsampleLumaMaterial;
 import com.winlator.renderer.material.FieldProbeMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
+import com.winlator.renderer.material.MergeFieldMaterial;
+import com.winlator.renderer.material.WarpLumaMaterial;
 import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
 
@@ -276,6 +279,9 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
     private final FieldProbeMaterial fieldProbeMaterial = new FieldProbeMaterial();
+    private final DownsampleLumaMaterial downsampleMaterial = new DownsampleLumaMaterial();
+    private final WarpLumaMaterial warpMaterial = new WarpLumaMaterial();
+    private final MergeFieldMaterial mergeMaterial = new MergeFieldMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -364,6 +370,50 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final Target[] filtered = new Target[2];
     /** Which of {@link #filtered} the interpolation should read, or -1 for none. */
     private int filteredIndex = -1;
+
+    /**
+     * VESSEL: how much smaller the coarse pass is than the full one.
+     *
+     * <p>Four, because the number to beat is measured. The matcher's window is
+     * about 112 luma pixels and Requiem moves 122 between real frames, so the
+     * full-resolution pass is searching for something outside its own window and
+     * cannot report it. At a quarter size that motion is 30 pixels and the window
+     * covers 448, which leaves room for scenes faster than the one that exposed
+     * the problem. Halving would only reach 224 and put the measured case at
+     * 61 -- inside, but with no margin.
+     */
+    private static final int COARSE_DIVISOR = 4;
+
+    /** The luma pair at {@link #COARSE_DIVISOR}, for the in-range first pass. */
+    private final Target[] lumaCoarse = new Target[2];
+    /** The coarse field: the prior both warps are built from. */
+    private Target coarseVectors;
+    /** One frame moved most of the way onto the other. See {@link WarpLumaMaterial}. */
+    private Target warpedLuma;
+    /** The backward residual, as {@link #vectors} is the forward one. */
+    private Target backVectors;
+    /** Coarse plus residual: the forward and backward fields as used. */
+    private Target merged, mergedBack;
+    /** The backward field's own median chain. See {@link #filtered}. */
+    private final Target[] filteredBack = new Target[2];
+    private int filteredBackIndex = -1;
+
+    /**
+     * Which target holds the unfiltered forward field this frame.
+     *
+     * <p>{@link #vectors} when the matcher ran once, {@link #merged} when it ran
+     * coarse-then-fine. Everything that reads the field goes through {@link
+     * #fieldTexture()} so there is no path where one pass reads the residual and
+     * another the whole motion -- which is precisely the mistake available here,
+     * and it would have made the sign probe latch on a field near zero.
+     */
+    private Target forwardField;
+    private Target backwardField;
+
+    /** Whether the two-stage search ran this frame. See {@link #COARSE_DIVISOR}. */
+    private boolean pyramidRan = false;
+    /** Whether a backward field exists to check the forward one against. */
+    private boolean backwardValid = false;
     /**
      * <b>Ten, measured on four scenes, and the reason it is not six is that the
      * objection to ten was tested and failed.</b>
@@ -542,7 +592,12 @@ public class FrameSynthesizer implements FramePacer.Target {
                                     1f / Math.max(1, luma[0].width),
                                     1f / Math.max(1, luma[0].height));
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+        // The whole motion, not the leftovers. After the two-stage search
+        // `vectors` holds the residual the warp did not account for, which is
+        // near zero by construction -- reading that here would report a still
+        // scene and, before the sign latched, would have nothing to vote with.
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
+                             forwardField != null ? forwardField.texture : vectors.texture);
         signMaterial.setUniformInt(signMaterial.uniforms.screenTexture, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
@@ -864,7 +919,26 @@ public class FrameSynthesizer implements FramePacer.Target {
      * where one pass reads the filtered field and another reads the matcher's.
      */
     private int fieldTexture() {
-        return filteredIndex >= 0 ? filtered[filteredIndex].texture : vectors.texture;
+        final Target raw = forwardField != null ? forwardField : vectors;
+        return filteredIndex >= 0 ? filtered[filteredIndex].texture : raw.texture;
+    }
+
+    /**
+     * The same field measured with the frames swapped, or the forward one.
+     *
+     * <p>**The fallback is what switches the consistency test off rather than
+     * feeding it something wrong.** Handing back the forward field makes every
+     * comparison in the shader read {@code mean} against {@code mean}, so the
+     * disagreement is zero everywhere and the term contributes nothing -- but the
+     * shader's own {@code consistency} uniform is set to zero alongside it, so
+     * this is a second line of defence rather than the mechanism. A sampler left
+     * bound to nothing reads black, and black is a vector of zero, which would
+     * read as total disagreement and distrust the whole frame.
+     */
+    private int backFieldTexture() {
+        if (!backwardValid) return fieldTexture();
+        return filteredBackIndex >= 0 ? filteredBack[filteredBackIndex].texture
+                                      : mergedBack.texture;
     }
 
     /** Whether the field estimated at the last real frame is usable. */
@@ -1567,10 +1641,19 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.lumaOlderTexture, 4);
+        // The field measured the other way round, and the one bit of geometry
+        // this compositor has ever had. See InterpolateMaterial's consistency
+        // block, and backFieldTexture for what is bound when there is none.
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE5);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, backFieldTexture());
+        interpolateMaterial.setUniformInt(
+            interpolateMaterial.interpolateUniforms.backMotionTexture, 5);
+        interpolateMaterial.setUniformFloat(
+            interpolateMaterial.interpolateUniforms.consistency, backwardValid ? 1f : 0f);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
 
-        for (int unit = 4; unit >= 0; unit--) {
+        for (int unit = 5; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -1707,24 +1790,180 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        texEstimateMotion(previousLuma().texture, latestLuma().texture, vectors.texture);
-        final int error = GLES20.glGetError();
+
+        pyramidRan = false;
+        backwardValid = false;
+        forwardField = vectors;
+        backwardField = null;
+
+        // **Not until the sign has latched, and that ordering is load-bearing.**
+        //
+        // Every warp below displaces a frame by the coarse field, and which way
+        // to displace it is what SignMaterial exists to decide. Warping by a
+        // sign that has not been settled would move the older frame twice as far
+        // the wrong way, leaving a residual larger than the motion it replaced --
+        // and the probe would then latch on a field built from that. So the first
+        // frames run the plain single-pass search the probe was written for, and
+        // the two-stage one starts once there is an answer to steer it.
+        final boolean ready = coarseVectors != null && fieldSign != 0f;
+
+        final boolean ok = ready ? estimateTwoStage()
+                                 : estimateOnce(previousLuma().texture,
+                                                latestLuma().texture, vectors.texture);
         estimateTimer.end();
+        if (!ok) return false;
+
+        // One bit about the whole field, settled once. See SignMaterial. Reads
+        // the merged field rather than the matcher's last output: after the two
+        // -stage search that output is a residual near zero, which has no opinion
+        // about anything and would report the scene as motionless.
+        probeFieldSign();
+
+        // Filtered before anything reads it, so every pass downstream sees the
+        // same field. See MedianMaterial and the `filtered` pair.
+        filteredIndex = filterField(forwardField, filtered);
+        if (backwardField != null) {
+            // The backward field is filtered on the same terms as the forward
+            // one, because the two are subtracted from each other. An outlier
+            // left in only one of them reads as a disagreement between the
+            // frames, which is exactly the signal being measured, and the shader
+            // would answer it by distrusting a source that was fine.
+            filteredBackIndex = filterField(backwardField, filteredBack);
+            backwardValid = true;
+        }
+        else filteredBackIndex = -1;
+        // Diagnostics only; nothing downstream reads it. See FieldProbeMaterial.
+        // After the filters, so it measures the field the shader will actually
+        // build frames from rather than the matcher's raw output -- which, after
+        // a two-stage search, is a residual near zero and describes nothing.
+        probeField();
+        return true;
+    }
+
+    /**
+     * One call to the matcher, with the error check the extension needs.
+     *
+     * <p>{@code glGetError} rather than a return value: the entry point has none,
+     * and a failure writes nothing, so an unchecked call leaves the previous
+     * frame's field in place and every pixel is displaced by motion that is one
+     * frame stale.
+     */
+    private boolean estimateOnce(int ref, int target, int out) {
+        texEstimateMotion(ref, target, out);
+        final int error = GLES20.glGetError();
         if (error != GLES20.GL_NO_ERROR) {
             estimateFailures++;
             Log.e(TAG, "glTexEstimateMotionQCOM failed 0x" + Integer.toHexString(error));
             return false;
         }
-
-        // One bit about the whole field, settled once. See SignMaterial.
-        probeFieldSign();
-
-        // Filtered before anything reads it, so every pass downstream sees the
-        // same field. See MedianMaterial and the `filtered` pair.
-        filterField();
-        // Diagnostics only; nothing downstream reads it. See FieldProbeMaterial.
-        probeField();
         return true;
+    }
+
+    /**
+     * Search coarse, warp, then search what is left -- in both directions.
+     *
+     * <p><b>Why the first pass is not enough on its own.</b> The matcher searches
+     * a fixed window of about {@link #SEARCH_WINDOW_PX} luma pixels and takes no
+     * hint about where to look. Requiem moves 122 pixels between real frames.
+     * A matcher whose answer lies outside its own window does not return a poor
+     * vector -- it returns whichever position inside the window correlated best,
+     * which is an answer to a different question, and no amount of filtering
+     * downstream can recover from it. Running the same matcher on a quarter-size
+     * copy puts that motion at 30 pixels, well inside the window.
+     *
+     * <p>The coarse answer is then spent rather than used: {@link
+     * WarpLumaMaterial} moves the older frame by it, the full-resolution matcher
+     * measures only what the coarse pass got wrong, and {@link MergeFieldMaterial}
+     * adds the two back together. The result is a field at full block resolution
+     * that can describe motion four times larger than the window.
+     *
+     * <p><b>And the same trick, run backwards, is what tells the shader which
+     * frame to believe.</b> Warping the newer frame back by the same prior and
+     * matching it against the older one gives an independent field in the other
+     * direction. Where both fields agree -- one the inverse of the other -- both
+     * frames can see the surface. Where they do not, one of them is looking at
+     * something the other cannot, which is a disocclusion, and it is the largest
+     * error term in this pipeline. See InterpolateMaterial's consistency block.
+     *
+     * <p>One warp target serves both directions: the second warp overwrites the
+     * first, and the matcher between them has already consumed it. GL orders
+     * writes to a texture before reads of it within a single context, which is
+     * the same guarantee every render-to-texture pass in this file relies on.
+     */
+    private boolean estimateTwoStage() {
+        final float sign = fieldSign != 0f ? fieldSign : 1f;
+        final float ratioX = (float)luma[0].width / coarseVectors.width / blockX;
+        final float ratioY = (float)luma[0].height / coarseVectors.height / blockY;
+
+        // The pair, a quarter the size, box-filtered rather than point-sampled.
+        renderToTarget(downsampleFor(previousLuma()), previousLuma().texture, lumaCoarse[0]);
+        renderToTarget(downsampleFor(latestLuma()), latestLuma().texture, lumaCoarse[1]);
+        if (!estimateOnce(lumaCoarse[0].texture, lumaCoarse[1].texture, coarseVectors.texture)) {
+            return false;
+        }
+
+        // Forward: the older frame moved onto the newer, then the leftovers.
+        warpLuma(previousLuma().texture, sign, +1f);
+        if (!estimateOnce(warpedLuma.texture, latestLuma().texture, vectors.texture)) return false;
+        mergeField(vectors, +ratioX, +ratioY, merged);
+        forwardField = merged;
+
+        // Backward: the newer frame moved onto the older, by the same prior
+        // negated, then the leftovers. The prior does not have to be right in
+        // this direction -- a prior only has to be close, and whatever it gets
+        // wrong is what the residual pass measures.
+        warpLuma(latestLuma().texture, sign, -1f);
+        if (!estimateOnce(warpedLuma.texture, previousLuma().texture, backVectors.texture)) {
+            return false;
+        }
+        mergeField(backVectors, -ratioX, -ratioY, mergedBack);
+        backwardField = mergedBack;
+
+        pyramidRan = true;
+        return true;
+    }
+
+    /** The downsampler with its source's texel size set. See {@link DownsampleLumaMaterial}. */
+    private DownsampleLumaMaterial downsampleFor(Target source) {
+        downsampleMaterial.use();
+        downsampleMaterial.setUniformVec2(downsampleMaterial.downsampleUniforms.texelSize,
+                                          1f / Math.max(1, source.width),
+                                          1f / Math.max(1, source.height));
+        return downsampleMaterial;
+    }
+
+    /** Move one luma frame by the coarse field. See {@link WarpLumaMaterial}. */
+    private void warpLuma(int source, float sign, float direction) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, warpedLuma.framebuffer);
+        warpMaterial.use();
+        // The field is in coarse luma pixels, so the coarse size is what puts it
+        // in texture space -- and the sign is the extension's convention, the one
+        // thing about the field that had to be measured rather than read.
+        warpMaterial.setUniformVec2(warpMaterial.warpUniforms.warpScale,
+                                    sign / Math.max(1, lumaCoarse[0].width),
+                                    sign / Math.max(1, lumaCoarse[0].height));
+        warpMaterial.setUniformFloat(warpMaterial.warpUniforms.direction, direction);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, coarseVectors.texture);
+        warpMaterial.setUniformInt(warpMaterial.warpUniforms.motionTexture, 1);
+        blit(warpMaterial, source, warpedLuma.width, warpedLuma.height);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
+
+    /** Coarse plus residual. See {@link MergeFieldMaterial}. */
+    private void mergeField(Target residual, float factorX, float factorY, Target destination) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
+        mergeMaterial.use();
+        mergeMaterial.setUniformVec2(mergeMaterial.mergeUniforms.coarseFactor, factorX, factorY);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, coarseVectors.texture);
+        mergeMaterial.setUniformInt(mergeMaterial.mergeUniforms.coarseTexture, 1);
+        blit(mergeMaterial, residual.texture, destination.width, destination.height);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
 
     /**
@@ -1735,8 +1974,8 @@ public class FrameSynthesizer implements FramePacer.Target {
      * always one of the nine inputs rather than an average of them, and
      * {@link #filtered} for why there are two passes.
      */
-    private void filterField() {
-        if (filtered[0] == null) { filteredIndex = -1; return; }
+    private int filterField(Target source, Target[] destinations) {
+        if (destinations[0] == null || source == null) return -1;
         medianTimer.begin();
         GLES20.glDisable(GLES20.GL_BLEND);
 
@@ -1744,25 +1983,30 @@ public class FrameSynthesizer implements FramePacer.Target {
         renderer.quadVertices.bind(medianMaterial.programId);
         medianMaterial.setUniformBool(medianMaterial.uniforms.flipY, false);
         medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
-                                      1f / Math.max(1, vectors.width),
-                                      1f / Math.max(1, vectors.height));
-        GLES20.glViewport(0, 0, vectors.width, vectors.height);
+                                      1f / Math.max(1, source.width),
+                                      1f / Math.max(1, source.height));
+        GLES20.glViewport(0, 0, source.width, source.height);
         renderer.viewportNeedsUpdate = true;
 
-        int source = vectors.texture;
+        int chain = source.texture;
+        int index = -1;
         for (int pass = 0; pass < MEDIAN_PASSES; pass++) {
             final int destination = pass % 2;
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[destination].framebuffer);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destinations[destination].framebuffer);
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, chain);
             medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
-            // The matcher's own field, on offer every pass. See MedianMaterial.
+            // The measurement, on offer every pass. See MedianMaterial. After the
+            // two-stage search this is the merged field rather than the matcher's
+            // last output, which is the residual and describes almost no motion at
+            // all -- offering that as a candidate would pull every block towards
+            // zero, which is the one direction a filter here must never invent.
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, vectors.texture);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
             medianMaterial.setUniformInt(medianMaterial.medianUniforms.originalTexture, 1);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-            source = filtered[destination].texture;
-            filteredIndex = destination;
+            chain = destinations[destination].texture;
+            index = destination;
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
@@ -1773,6 +2017,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
         medianTimer.end();
+        return index;
     }
 
     /**
@@ -2004,6 +2249,57 @@ public class FrameSynthesizer implements FramePacer.Target {
                     filtered[1].release();
                     filtered[0] = filtered[1] = null;
                 }
+
+                // **The coarse pass and the backward pass, allocated together**
+                // because neither is useful without the other: the backward field
+                // exists to be compared with the forward one, and a comparison
+                // between two fields that could not reach their own answers
+                // compares two errors. See COARSE_DIVISOR and estimateMotion.
+                //
+                // Both grids are rounded down to a whole number of search blocks,
+                // which the extension requires, and the two ratios that come out
+                // of that need not be equal -- 720 rounds differently from 1280.
+                // MergeFieldMaterial takes them as a vec2 for exactly that reason.
+                final int coarseW = Math.max(blockX, (lumaW / COARSE_DIVISOR / blockX) * blockX);
+                final int coarseH = Math.max(blockY, (lumaH / COARSE_DIVISOR / blockY) * blockY);
+                if (complete == GLES20.GL_FRAMEBUFFER_COMPLETE
+                        && coarseW >= blockX * 2 && coarseH >= blockY * 2) {
+                    for (int i = 0; i < 2; i++) {
+                        lumaCoarse[i] = new Target();
+                        lumaCoarse[i].allocate(coarseW, coarseH, GLES30.GL_R8, GLES20.GL_LINEAR);
+                    }
+                    // **LINEAR, against the rule the rest of this file follows.**
+                    // Nearest is right for a field that will be read as four block
+                    // answers, because a blend between two blocks is a vector no
+                    // block voted for. This field is never read that way: it is a
+                    // prior for a warp and an addend in a merge, and one coarse
+                    // block covers 32 source pixels, so nearest would step the
+                    // warped picture in 32-pixel terraces that the residual pass
+                    // would then have to explain away.
+                    coarseVectors = new Target();
+                    coarseVectors.allocate(coarseW / blockX, coarseH / blockY,
+                                           GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
+                    warpedLuma = new Target();
+                    warpedLuma.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
+                    backVectors = new Target();
+                    backVectors.allocate(lumaW / blockX, lumaH / blockY,
+                                         GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    merged = new Target();
+                    merged.allocate(lumaW / blockX, lumaH / blockY,
+                                    GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    mergedBack = new Target();
+                    mergedBack.allocate(lumaW / blockX, lumaH / blockY,
+                                        GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    for (int i = 0; i < 2; i++) {
+                        filteredBack[i] = new Target();
+                        filteredBack[i].allocate(lumaW / blockX, lumaH / blockY,
+                                                 GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    }
+                    Log.i(TAG, "two-stage search ready: coarse luma " + coarseW + "x" + coarseH
+                        + ", coarse vectors " + (coarseW / blockX) + "x" + (coarseH / blockY)
+                        + ", window about " + SEARCH_WINDOW_PX + " px becomes about "
+                        + (SEARCH_WINDOW_PX * lumaW / coarseW) + " px of scene");
+                }
                 Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
@@ -2029,6 +2325,15 @@ public class FrameSynthesizer implements FramePacer.Target {
             }
             if (vectors != null) vectors.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
+            for (int i = 0; i < 2; i++) {
+                if (lumaCoarse[i] != null) lumaCoarse[i].release();
+                if (filteredBack[i] != null) filteredBack[i].release();
+            }
+            if (coarseVectors != null) coarseVectors.release();
+            if (warpedLuma != null) warpedLuma.release();
+            if (backVectors != null) backVectors.release();
+            if (merged != null) merged.release();
+            if (mergedBack != null) mergedBack.release();
             if (signProbe != null) signProbe.release();
             if (fieldProbe != null) fieldProbe.release();
             if (output != null) output.release();
@@ -2038,6 +2343,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         vectors = null;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
+        lumaCoarse[0] = lumaCoarse[1] = null;
+        filteredBack[0] = filteredBack[1] = null;
+        filteredBackIndex = -1;
+        coarseVectors = warpedLuma = backVectors = merged = mergedBack = null;
+        forwardField = backwardField = null;
+        pyramidRan = false;
+        backwardValid = false;
         output = null;
         signProbe = null;
         fieldProbe = null;
@@ -2174,6 +2486,20 @@ public class FrameSynthesizer implements FramePacer.Target {
                 luma[0] != null ? luma[0].height : 0,
                 filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
                 estimateFailures, fieldMagnitude, SEARCH_WINDOW_PX));
+            // **Read the two together.** The window figure above is what one pass
+            // of the matcher can reach; a mean displacement at or past it used to
+            // mean the field was describing something other than the scene. With
+            // the two-stage search running, motion larger than the window is
+            // representable, so `moved` climbing above it is the fix working
+            // rather than the failure it used to be.
+            Log.i(TAG, "fg search: " + (pyramidRan
+                    ? "two-stage, coarse " + coarseVectors.width + "x" + coarseVectors.height
+                        + " then full " + vectors.width + "x" + vectors.height
+                    : (coarseVectors == null ? "single-pass (no coarse targets)"
+                                             : "single-pass until the field sign latches"))
+                + ", source selection " + (backwardValid
+                    ? "on -- backward field checked against forward"
+                    : "OFF -- no backward field, photometric weighting alone"));
         }
 
         if (wants("layers")) {
