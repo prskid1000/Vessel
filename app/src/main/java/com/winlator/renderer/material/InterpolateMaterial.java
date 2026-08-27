@@ -370,8 +370,12 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // weights decide which of the two frames is worth reading at all.
                 "float fitStill = abs(texture2D(lumaNewerTexture, vUV).r",
                                    "- texture2D(lumaOlderTexture, vUV).r);",
-                "vec2 mn = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
-                "vec2 mo = clamp(vUV + mean * phase, 0.0, 1.0);",
+                // **Kept unclamped as well, because the clamp is a lie the
+                // consistency test below must not be told.** See the gate there.
+                "vec2 mnRaw = vUV - mean * (1.0 - phase);",
+                "vec2 moRaw = vUV + mean * phase;",
+                "vec2 mn = clamp(mnRaw, 0.0, 1.0);",
+                "vec2 mo = clamp(moRaw, 0.0, 1.0);",
                 "float fitMoving = abs(texture2D(lumaNewerTexture, mn).r",
                                     "- texture2D(lumaOlderTexture, mo).r);",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
@@ -427,19 +431,82 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // instead of 254, because the channel it travelled in was two
                 // bits wide. The flow already crossing this shader answers the
                 // same question without leaving the host.
-                "vec2 fAtNewer = texture2D(motionTexture, mn).rg * scale;",
+                // **Read under the same window `mean` was built with, and
+                // this is the shimmer along a moving silhouette.**
+                //
+                // `mean` is the blend of four blocks under the raised
+                // cosine. A NEAREST sample of one block subtracted from it
+                // leaves half the local block-to-block disagreement in the
+                // answer with nothing occluded -- and at a silhouette the
+                // neighbouring blocks disagree by definition, because one
+                // holds the object and the next holds the background. So
+                // the mask stepped at the 8-pixel grid, and as the object
+                // drifted across that grid the step swept along its edge,
+                // frame by frame. The decision was never wrong; it was
+                // taken on a quantity that was never zero.
+                //
+                // It costs nothing to fix. `weight` and `m0`..`m3` were
+                // re-read at `p` further up, and `p` is this same `mn` by
+                // the identical expression, so the blend the four
+                // predictions are about to use is the blend this test
+                // wants and it is already in registers. This removes a
+                // texture fetch rather than adding one.
+                "vec2 fAtNewer = weight.x * m0 + weight.y * m1",
+                              "+ weight.z * m2 + weight.w * m3;",
                 "vec2 bAtOlder = texture2D(backMotionTexture, mo).rg * scale;",
                 // Back into luma pixels, so the thresholds mean the same thing at
                 // every resolution. Dividing by motionScale is exactly
                 // multiplying by the luma size.
                 "float eNewer = length((fAtNewer - mean) / motionScale);",
                 "float eOlder = length((bAtOlder + mean) / motionScale);",
+                // **Off the frame there is no evidence, and a clamp manufactures
+                // some. This is the shimmer at the borders.**
+                //
+                // Both fetch sites are clamped, so a pixel whose trajectory
+                // leaves the frame reads the border texel instead -- a vector
+                // describing whatever sits at the edge, not the content this
+                // pixel would have fetched. Subtract `mean` from that and the
+                // disagreement is large with nothing occluded, so the mask fires
+                // across a band `mean * phase` wide: about seventy pixels while
+                // the scene is moving at a hundred and fifty. The band's width is
+                // the pan speed, which changes every frame, so the mask sweeps in
+                // and out along the edge and the border shimmers.
+                //
+                // The honest reading of a fetch that left the frame is not
+                // "these surfaces disagree", it is "there is nothing here to
+                // compare". So the test fades out as its own fetch site
+                // approaches the edge, and the two sides fade independently --
+                // during a pan one of them is off the frame long before the
+                // other. Faded rather than switched, over about twenty-five
+                // pixels, because a hard gate would only move the shimmer to
+                // wherever the gate turned on.
+                "vec2 edgeNewer = min(mnRaw, 1.0 - mnRaw);",
+                "vec2 edgeOlder = min(moRaw, 1.0 - moRaw);",
+                "float onNewer = smoothstep(0.0, 0.02, min(edgeNewer.x, edgeNewer.y));",
+                "float onOlder = smoothstep(0.0, 0.02, min(edgeOlder.x, edgeOlder.y));",
+
                 // A dead zone first: the matcher quantises to whole pixels and
                 // the two passes are independent, so a couple of pixels of
                 // disagreement is the instrument, not the scene. Past six pixels
                 // the two fields are describing different surfaces.
+                //
+                // **Deliberately NOT the 1.0..10.0 ramp that shipped alongside
+                // this gate, nor the 0.9 cap beside it.** Both came from 11a535e,
+                // which stretched the ramp to damp a flicker -- and most of what
+                // was flickering was this same clamped fetch, and the NEAREST
+                // -against-blended comparison above, both of which are fixed
+                // here directly. With the causes gone the ramp does not have to
+                // be long enough to hide them, and a long ramp is a volume
+                // control on the largest lever in this shader: at a silhouette,
+                // half-strength correction leaves half the wrong frame in the
+                // blend. The cap was backwards for the same reason -- it took the
+                // same tenth off a twelve-pixel disagreement, where the other
+                // frame demonstrably cannot see the surface, as off a two-pixel
+                // one where the mask is guessing.
                 "float occNewer = consistency * smoothstep(1.5, 6.0, eNewer);",
                 "float occOlder = consistency * smoothstep(1.5, 6.0, eOlder);",
+                "occNewer *= onNewer;",
+                "occOlder *= onOlder;",
 
                 // Both terms multiply, and they are asking different questions:
                 // the photometric one whether this fetch site holds moving
