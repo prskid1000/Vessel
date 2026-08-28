@@ -573,6 +573,50 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float signVotes = 0f;
     /** When the sign was last probed, so a still scene retries rather than sticks. */
     private long signProbedAt = 0;
+
+    /**
+     * VESSEL: how often the sign may be probed while it is still unknown.
+     *
+     * <p><b>This was a second, and a second is the diagnostic reporting rate --
+     * a number that has nothing to do with the decision it was gating.</b> The
+     * cost of latching is three seconds of a session running without the
+     * two-stage search, and it was three rather than one for two compounding
+     * reasons, both of them in the gate rather than in the vote:
+     *
+     * <ul>
+     * <li>The answer needs two decisive probes that AGREE, so the floor was
+     *     already two probes -- one second -- before anything went wrong.
+     * <li>{@code signProbedAt} is stamped before the probe is known to be
+     *     worth anything, so a probe that returns nothing costs a full second
+     *     as surely as one that votes. Both ways of returning nothing are
+     *     ordinary: a scene below the five per cent motion floor (measured on
+     *     this device at 0 to 1 px mean displacement for seconds at a time)
+     *     and a share landing between 0.2 and 0.8. Two such probes and the
+     *     latch is at three seconds.
+     * </ul>
+     *
+     * <p>The safety argument for the second probe is that it must come from a
+     * <em>different moment of the scene</em>, which is what stops one unlucky
+     * frame inverting the field for the life of the context. A quarter second
+     * is four real frames at fifteen a second, so it satisfies that argument
+     * exactly as well as a second did -- the second was never load-bearing.
+     *
+     * <p>Now the best case is a quarter second and three wasted probes still
+     * land inside one. Nothing about the vote is relaxed: it is still two
+     * decisive probes at eighty per cent that have to agree, and an undecided
+     * probe still clears the pending answer.
+     */
+    private static final long SIGN_PROBE_MS = 250;
+
+    /**
+     * How often the same reduction runs once there is nothing left to decide.
+     *
+     * <p>After the latch this pass survives only to report the field's mean
+     * displacement for {@code fg field}, which is a log line once a second, so
+     * it keeps the rate the rest of the diagnostics use and stops paying for a
+     * readback four times a second for a number nothing reads that often.
+     */
+    private static final long FIELD_REPORT_MS = 1000;
     /** A decisive vote awaiting a second, agreeing one. See {@link #probeFieldSign}. */
     private float pendingSign = 0f;
 
@@ -608,7 +652,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         final boolean needSign = fieldSign == 0f;
         if (!needSign && !wants("field")) return;
         final long now = SystemClock.uptimeMillis();
-        if (signProbedAt != 0 && now - signProbedAt < 1000) return;
+        // Fast while there is an answer to find, slow once there is not. See
+        // SIGN_PROBE_MS: the two were the same number, and the one that
+        // mattered had been set by the one that did not.
+        final long interval = needSign ? SIGN_PROBE_MS : FIELD_REPORT_MS;
+        if (signProbedAt != 0 && now - signProbedAt < interval) return;
         signProbedAt = now;
 
         if (signProbe == null) {
