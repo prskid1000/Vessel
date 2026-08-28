@@ -10,6 +10,7 @@ import com.winlator.renderer.material.FieldProbeMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.MergeFieldMaterial;
+import com.winlator.renderer.material.RefineFieldMaterial;
 import com.winlator.renderer.material.WarpLumaMaterial;
 import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
@@ -303,11 +304,13 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final DownsampleLumaMaterial downsampleMaterial = new DownsampleLumaMaterial();
     private final WarpLumaMaterial warpMaterial = new WarpLumaMaterial();
     private final MergeFieldMaterial mergeMaterial = new MergeFieldMaterial();
+    private final RefineFieldMaterial refineMaterial = new RefineFieldMaterial();
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
     private final GpuTimer lumaTimer = new GpuTimer("tier1 luma");
     private final GpuTimer estimateTimer = new GpuTimer("tier1 estimate");
+    private final GpuTimer refineTimer = new GpuTimer("tier1 refine");
     private final GpuTimer medianTimer = new GpuTimer("tier1 median");
     private final GpuTimer interpolateTimer = new GpuTimer("tier1 interpolate");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
@@ -415,6 +418,18 @@ public class FrameSynthesizer implements FramePacer.Target {
     private Target backVectors;
     /** Coarse plus residual: the forward and backward fields as used. */
     private Target merged, mergedBack;
+    /**
+     * VESSEL: where the sub-pixel step is written, one per direction.
+     *
+     * <p>A pass reads the whole field and writes the whole field, so it cannot
+     * be its own destination. See {@link RefineFieldMaterial} for why an
+     * integer field is a four-frame wobble on flat, coherent surfaces, and why
+     * this runs before the median rather than after it.
+     */
+    private Target refined, refinedBack;
+    /** Whether the sub-pixel step ran this frame, for the log line. */
+    private boolean refinedRan = false;
+
     /** The backward field's own median chain. See {@link #filtered}. */
     private final Target[] filteredBack = new Target[2];
     private int filteredBackIndex = -1;
@@ -1849,6 +1864,25 @@ public class FrameSynthesizer implements FramePacer.Target {
         // about anything and would report the scene as motionless.
         probeFieldSign();
 
+        // **The sub-pixel step, before the filter and after the sign.**
+        //
+        // After the sign, because the residual is scored along the vector and
+        // which way the vector points is what SignMaterial settles. Before the
+        // filter, because the median's spatial candidates, its anchor and its
+        // temporal history should all be the same field -- refining afterwards
+        // would leave the history half a pixel from every candidate it is
+        // offered against, so it would lose every vote it exists to win.
+        refinedRan = false;
+        if (fieldSign != 0f && refined != null) {
+            refineTimer.begin();
+            forwardField = refineField(forwardField, refined, true);
+            if (backwardField != null) {
+                backwardField = refineField(backwardField, refinedBack, false);
+            }
+            refineTimer.end();
+            refinedRan = true;
+        }
+
         // Filtered before anything reads it, so every pass downstream sees the
         // same field. See MedianMaterial and the `filtered` pair.
         filteredIndex = filterField(forwardField, filtered, 0);
@@ -1951,6 +1985,60 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         pyramidRan = true;
         return true;
+    }
+
+    /**
+     * One Lucas-Kanade step per block. See {@link RefineFieldMaterial}.
+     *
+     * <p>{@code forward} says which image the vector is based at, and the two
+     * luma textures are bound swapped for the backward field -- the same
+     * measurement with the frames exchanged, and nothing else about it differs.
+     *
+     * @return the refined field, or the source unchanged if there is nowhere to
+     *     write it.
+     */
+    private Target refineField(Target source, Target destination, boolean forward) {
+        if (source == null || destination == null || luma[0] == null) return source;
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
+        GLES20.glViewport(0, 0, destination.width, destination.height);
+        renderer.viewportNeedsUpdate = true;
+        GLES20.glDisable(GLES20.GL_BLEND);
+
+        refineMaterial.use();
+        renderer.quadVertices.bind(refineMaterial.programId);
+        refineMaterial.setUniformBool(refineMaterial.uniforms.flipY, false);
+        refineMaterial.setUniformVec2(refineMaterial.refineUniforms.motionScale,
+                                      1f / Math.max(1, luma[0].width),
+                                      1f / Math.max(1, luma[0].height));
+        // One texel of the field is one search block, and the field grid covers
+        // the luma rectangle exactly, so this is the block in luma UV.
+        refineMaterial.setUniformVec2(refineMaterial.refineUniforms.blockUV,
+                                      1f / Math.max(1, source.width),
+                                      1f / Math.max(1, source.height));
+        refineMaterial.setUniformFloat(refineMaterial.refineUniforms.fieldSign, fieldSign);
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
+        refineMaterial.setUniformInt(refineMaterial.uniforms.screenTexture, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
+                             (forward ? latestLuma() : previousLuma()).texture);
+        refineMaterial.setUniformInt(refineMaterial.refineUniforms.lumaFirstTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
+                             (forward ? previousLuma() : latestLuma()).texture);
+        refineMaterial.setUniformInt(refineMaterial.refineUniforms.lumaSecondTexture, 2);
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+
+        for (int unit = 2; unit >= 0; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        renderer.invalidateBoundWindowMaterial();
+        return destination;
     }
 
     /** The downsampler with its source's texel size set. See {@link DownsampleLumaMaterial}. */
@@ -2312,6 +2400,14 @@ public class FrameSynthesizer implements FramePacer.Target {
                                              GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
                     historyValid[i] = false;
                 }
+                // The sub-pixel step's two destinations, on the same gate as
+                // the filter: both are ordinary render-to-RGBA16F.
+                refined = new Target();
+                refined.allocate(lumaW / blockX, lumaH / blockY,
+                                 GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                refinedBack = new Target();
+                refinedBack.allocate(lumaW / blockX, lumaH / blockY,
+                                     GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[0].framebuffer);
                 final int complete = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
@@ -2321,6 +2417,9 @@ public class FrameSynthesizer implements FramePacer.Target {
                     filtered[0].release();
                     filtered[1].release();
                     filtered[0] = filtered[1] = null;
+                    refined.release();
+                    refinedBack.release();
+                    refined = refinedBack = null;
                 }
 
                 // **The coarse pass and the backward pass, allocated together**
@@ -2398,6 +2497,8 @@ public class FrameSynthesizer implements FramePacer.Target {
             }
             if (vectors != null) vectors.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
+            if (refined != null) refined.release();
+            if (refinedBack != null) refinedBack.release();
             for (int i = 0; i < 2; i++) {
                 if (fieldHistory[i] != null) fieldHistory[i].release();
             }
@@ -2419,6 +2520,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         vectors = null;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
+        refined = refinedBack = null;
+        refinedRan = false;
         // The names went with the context; a surviving reference here would hand
         // the median a dead texture as its temporal candidate.
         fieldHistory[0] = fieldHistory[1] = null;
@@ -2485,6 +2588,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             captureTimer.report(now);
             lumaTimer.report(now);
             estimateTimer.report(now);
+            refineTimer.report(now);
             medianTimer.report(now);
             interpolateTimer.report(now);
             tier0Timer.report(now);
@@ -2564,7 +2668,8 @@ public class FrameSynthesizer implements FramePacer.Target {
                 vectors != null ? vectors.height : 0,
                 luma[0] != null ? luma[0].width : 0,
                 luma[0] != null ? luma[0].height : 0,
-                filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
+                (refinedRan ? "sub-pixel, " : "whole-pixel, ")
+                    + (filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw"),
                 estimateFailures, fieldMagnitude, SEARCH_WINDOW_PX));
             // **Read the two together.** The window figure above is what one pass
             // of the matcher can reach; a mean displacement at or past it used to
