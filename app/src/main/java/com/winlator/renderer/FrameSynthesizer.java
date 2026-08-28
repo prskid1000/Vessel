@@ -275,6 +275,27 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GLRenderer renderer;
     private final FramePacer pacer;
     private final ScreenMaterial blitMaterial = new ScreenMaterial();
+    /**
+     * A copy that keeps the field's precision.
+     *
+     * <p>{@link ScreenMaterial} is {@code mediump}, which on this GPU is fp16:
+     * a 120 px vector survives a copy through it to the nearest sixteenth of a
+     * pixel. The history copy in {@link #filterField} is the median's temporal
+     * candidate, and a candidate that is not exactly what the block said last
+     * frame is a slightly different vector that no block voted for.
+     */
+    private static final class FieldCopyMaterial extends ScreenMaterial {
+        @Override
+        protected String getFragmentShader() {
+            return String.join("\n",
+                "precision highp float;",
+                "uniform sampler2D screenTexture;",
+                "varying vec2 vUV;",
+                "void main() { gl_FragColor = texture2D(screenTexture, vUV); }"
+            );
+        }
+    }
+    private final FieldCopyMaterial fieldCopyMaterial = new FieldCopyMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
     private final SignMaterial signMaterial = new SignMaterial();
     private final MedianMaterial medianMaterial = new MedianMaterial();
@@ -1605,11 +1626,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         // into the same pixels, and stamping them would corrupt the readback.
         interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.mark,
                                             !measuring && wants("mark") ? 1f : 0f);
-        // The vectors are in luma pixels, and the luma is the block-rounded frame,
-        // so dividing by its size is what puts them in texture space.
+        // The vectors are in luma pixels, and a luma pixel is a colour pixel --
+        // the luma is the block-rounded TOP-LEFT of the colour frame, not a
+        // rescaled copy -- so one vector unit is one colour texel. Every luma
+        // and field read in the shader then goes through lumaScale, which maps
+        // the colour UV onto the smaller texture. Dividing by the luma size
+        // here, as this used to, put the vectors in luma UV while the fetch
+        // sites were colour UV: right for 1280x720, six pixels off at the right
+        // edge of 1366x768.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
-                                           1f / Math.max(1, luma[0].width),
-                                           1f / Math.max(1, luma[0].height));
+                                           1f / Math.max(1, colour[0].width),
+                                           1f / Math.max(1, colour[0].height));
+        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.lumaScale,
+                                           colour[0].width / (float)Math.max(1, luma[0].width),
+                                           colour[0].height / (float)Math.max(1, luma[0].height));
         // The block grid, so a single block can be addressed rather than only the
         // filtered average of four. See InterpolateMaterial's third point.
         interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.vectorSize,
@@ -2033,7 +2063,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // nothing else, and having them share this would make each direction's
         // temporal candidate the other direction's field.
         if (past != null && index >= 0) {
-            renderToTarget(blitMaterial, destinations[index].texture, past);
+            renderToTarget(fieldCopyMaterial, destinations[index].texture, past);
             historyValid[history] = true;
         }
         medianTimer.end();

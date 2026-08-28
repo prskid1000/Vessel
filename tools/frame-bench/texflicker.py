@@ -97,8 +97,7 @@ def interpolate(newer, older, field, phase=PHASE,
         iy = np.clip(by.astype(int) + oy, 0, gh - 1)
         return field[iy, ix]
 
-    def sample(img, sx, sy):
-        return img[np.round(sy).astype(int) % h, np.round(sx).astype(int) % w]
+    sample = P.sample
 
     vecs = [block_vec(ox, oy) for ox, oy in corners]
     mean = sum(w_[..., None] * v for w_, v in zip(weights, vecs))
@@ -164,8 +163,75 @@ def flicker(frames, outs, step, share=0.25):
     return float(sd[keep].mean() * 255)
 
 
+def fshift(img, dx, dy):
+    """Move an image by a fractional amount with no resampling blur at all.
+
+    A phase ramp in the Fourier domain is an exact translation of a periodic
+    image, and the scene is periodic by construction (it is built with roll).
+    Registering with this rather than with any sampler is what keeps the
+    measurement about the pipeline's sampler and not the bench's.
+    """
+    h, w = img.shape[:2]
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.fftfreq(w)[None, :]
+    ramp = np.exp(-2j * np.pi * (fx * dx + fy * dy))
+    if img.ndim == 3:
+        ramp = ramp[..., None]
+    return np.real(np.fft.ifft2(np.fft.fft2(img, axes=(0, 1)) * ramp,
+                                axes=(0, 1))).astype(np.float32)
+
+
+def sampler_flicker(step, phases=(0.25, 0.5, 0.75), share=0.25):
+    """The alternation between synthesised and real frames, per sampler.
+
+    THE TABLES BELOW CANNOT SEE THE SAMPLER. At phase 0.5 with an even step
+    every fetch offset is a whole pixel, so linear and nearest return the same
+    texel and the bench's rounding was harmless. The device runs 4x, whose
+    phases put the same vector on three different fractions, and a step that
+    is not a multiple of four puts every one of them between texels.
+
+    So: 4x phases, an odd step, the TRUE field (so the field's own noise is
+    not in the number), and a stack holding the real frames as well as the
+    synthesised ones -- because the fault is the difference between them.
+    Each is registered by its exact fractional position with fshift, and the
+    temporal spread over textured pixels is the flicker.
+    """
+    frames = sequence(step)
+    truth = np.zeros((frames[0].shape[0] // BLOCK, frames[0].shape[1] // BLOCK, 2),
+                     dtype=np.float32)
+    truth[...] = (-step[0], -step[1])
+    base = bench.luma(frames[0])
+    gy, gx = np.gradient(base)
+    grad = np.hypot(gx, gy)
+    keep = grad >= np.quantile(grad, 1.0 - share)
+
+    result = {}
+    for mode in ("linear", "nearest", "cubic"):
+        P.SAMPLING = mode
+        stack = []
+        for i in range(1, N):
+            stack.append(fshift(frames[i - 1], -step[0] * (i - 1), -step[1] * (i - 1)))
+            for t in phases:
+                out, _, _ = interpolate(frames[i], frames[i - 1], truth, phase=t)
+                stack.append(fshift(out, -(step[0] * (i - 1 + t)),
+                                    -(step[1] * (i - 1 + t))))
+        sd = np.array(stack).std(axis=0).mean(axis=-1)
+        result[mode] = float(sd[keep].mean() * 255)
+    P.SAMPLING = "nearest"
+    return result
+
+
 def main():
     print(__doc__.split("\n\n")[0])
+    print()
+    print("THE SAMPLER, which none of the tables below can see: 4x phases, the true")
+    print("field, real frames in the stack, registered exactly. linear is the device")
+    print("as it shipped; nearest is the device with whole-texel fetches.")
+    print("  %-22s %10s %10s %10s" % ("step", "linear", "nearest", "cubic"))
+    for step in ((15, 5), (30, 10), (17, 7)):
+        r = sampler_flicker(step)
+        print("  %-22s %10.2f %10.2f %10.2f"
+              % (step, r["linear"], r["nearest"], r["cubic"]))
     print()
     for step in ((16, 6), (30, 10)):
         frames = sequence(step)

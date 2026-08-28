@@ -86,8 +86,7 @@ def obmc(newer, older, field, phase=0.5):
         iy = np.clip(by.astype(int) + oy, 0, gh - 1)
         return field[iy, ix]
 
-    def sample(img, sx, sy):
-        return img[np.round(sy).astype(int) % h, np.round(sx).astype(int) % w]
+    sample = P.sample
 
     out = np.zeros_like(newer, dtype=np.float32)
     for weight, (ox, oy) in zip(weights, ((0, 0), (1, 0), (0, 1), (1, 1))):

@@ -75,6 +75,72 @@ def roll(img, sx, sy):
     return np.roll(np.roll(img, sx, axis=1), sy, axis=0)
 
 
+# How a colour fetch lands between texels. Every warp in this bench goes
+# through sample(), and this is the one thing about the device it did not
+# model: the colour targets there are GL_LINEAR, so a fetch displaced by a
+# fraction of a texel is a box blur of that fraction's width, and the fraction
+# changes with the phase -- soft, softer, soft, then a sharp real frame. The
+# bench rounded every position to a texel, which is the device AFTER
+# InterpolateMaterial.predict() started snapping its displacements, and never
+# the device before. "linear" is what shipped; "nearest" is what ships now.
+SAMPLING = "nearest"
+
+
+def _catmull_rom(img, sx, sy):
+    """Sixteen-tap Catmull-Rom: sharp, position-exact, and the filter a shader
+    can approximate with a handful of bilinear taps."""
+    h, w = img.shape[:2]
+    x0 = np.floor(sx)
+    y0 = np.floor(sy)
+    fx = (sx - x0).astype(np.float32)
+    fy = (sy - y0).astype(np.float32)
+
+    def weights(f):
+        f2, f3 = f * f, f * f * f
+        return (-0.5 * f3 + f2 - 0.5 * f,
+                1.5 * f3 - 2.5 * f2 + 1.0,
+                -1.5 * f3 + 2.0 * f2 + 0.5 * f,
+                0.5 * f3 - 0.5 * f2)
+
+    wx = weights(fx)
+    wy = weights(fy)
+    xi = [(x0.astype(int) + k - 1) % w for k in range(4)]
+    yi = [(y0.astype(int) + k - 1) % h for k in range(4)]
+    out = np.zeros(sx.shape + img.shape[2:], dtype=np.float32)
+    for j in range(4):
+        row = np.zeros_like(out)
+        for i in range(4):
+            wgt = wx[i] if img.ndim == 2 else wx[i][..., None]
+            row += img[yi[j], xi[i]] * wgt
+        out += row * (wy[j] if img.ndim == 2 else wy[j][..., None])
+    return out
+
+
+def sample(img, sx, sy, mode=None):
+    """Read `img` at float positions, wrapped, with the device's filter."""
+    mode = mode or SAMPLING
+    h, w = img.shape[:2]
+    if mode == "nearest":
+        return img[np.round(sy).astype(int) % h, np.round(sx).astype(int) % w]
+    if mode == "cubic":
+        return _catmull_rom(img, sx, sy)
+    if mode != "linear":
+        raise ValueError(mode)
+    x0 = np.floor(sx)
+    y0 = np.floor(sy)
+    fx = (sx - x0).astype(np.float32)
+    fy = (sy - y0).astype(np.float32)
+    if img.ndim == 3:
+        fx, fy = fx[..., None], fy[..., None]
+    x0 = x0.astype(int) % w
+    y0 = y0.astype(int) % h
+    x1 = (x0 + 1) % w
+    y1 = (y0 + 1) % h
+    top = img[y0, x0] * (1 - fx) + img[y0, x1] * fx
+    bottom = img[y1, x0] * (1 - fx) + img[y1, x1] * fx
+    return top * (1 - fy) + bottom * fy
+
+
 def scene(shift):
     """The pair and the frame that belongs exactly between them.
 
@@ -247,11 +313,6 @@ def warp(newer, older, field, t=0.5):
 
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
     fx, fy = full[..., 0], full[..., 1]
-
-    def sample(img, sx, sy):
-        xi = np.round(sx).astype(int) % w
-        yi = np.round(sy).astype(int) % h
-        return img[yi, xi]
 
     a = sample(older, xs + fx * t, ys + fy * t)
     b = sample(newer, xs - fx * (1.0 - t), ys - fy * (1.0 - t))
