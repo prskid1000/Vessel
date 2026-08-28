@@ -221,9 +221,134 @@ def sampler_flicker(step, phases=(0.25, 0.5, 0.75), share=0.25):
     return result
 
 
+def fractional_sequence(step, n, seed=5):
+    """A textured plane translating by a FRACTIONAL amount each frame.
+
+    P.roll cannot express this and sequence() therefore cannot either: every
+    scene in this file so far has moved a whole number of pixels, which is the
+    one case where an integer field is exactly right. Real motion is not
+    integer, and the question below is what an integer field does to it.
+    """
+    rng = np.random.default_rng(seed)
+    bg = P.background()
+    return [np.clip(fshift(bg, step[0] * i, step[1] * i)
+                    + rng.normal(0, NOISE, bg.shape), 0, 1).astype(np.float32)
+            for i in range(n)]
+
+
+def quantisation(step=(30.5, 10.5), phases=(0.25, 0.5, 0.75), n=7,
+                 sigma=0.35, share=0.25, seed=11):
+    """Is the flicker the field's PRECISION or the field's NOISE? Both.
+
+    The hardware matcher quantises to whole pixels, and both stages of the
+    two-stage search do, so the field that reaches the shader is integer. A
+    surface truly moving 30.5 px/frame can only be described as 30 or 31.
+
+    THE PREDICTION THAT WAS WRONG. The reasoning that motivated this test was
+    that rounding ALONE could not flicker -- a constant integer field is
+    consistently wrong, every frame is displaced by the same amount, and a
+    consistent error registers away. Only a field flipping between 30 and 31
+    frame to frame would show. That is false, and the table says so:
+
+        step (30.5, 10.5), field wobble sigma 0.35 px
+          true                1.30
+          rounded             1.92     <- constant field, no noise at all
+          noisy               1.56
+          noisy + rounded     1.75
+
+        step (30, 10) -- integer truth, so rounding is a no-op. The control.
+          true                1.23
+          rounded             1.23     <- identical, as it must be
+          noisy               1.51
+          noisy + rounded     1.53
+
+    A CONSTANT integer field is the largest single term here, worth more than
+    a third of a pixel of field noise. The mechanism is the phase, which the
+    prediction forgot: the shader displaces by `v * phase`, so half a pixel of
+    field error becomes 0.125, 0.25 and 0.375 px of position error at the
+    three 4x phases and exactly 0 on the real frame that follows. One wrong
+    vector therefore misplaces each frame of the cadence by a DIFFERENT
+    sub-pixel amount. It does not register away, because there is nothing
+    constant about it.
+
+    That is also why this could only be seen here. Every other scene in this
+    file moves a whole number of pixels, which is the one case where an
+    integer field is exactly right, and the control row above is that case:
+    rounding changes nothing, 1.23 against 1.23.
+
+    NOISE DITHERS THE ROUNDING. `noisy + rounded` (1.75) sits BELOW `rounded`
+    (1.92): sub-pixel noise either side of a rounding boundary decorrelates
+    the error across blocks, which is dithering, and it is why the fault is
+    milder on a real noisy field than this bench's cleanest row suggests.
+
+    WHAT IT DECIDES. Sub-pixel refinement of the field is worth roughly
+    1.92 -> 1.30 where the field is otherwise clean and 1.75 -> 1.56 where it
+    is not, so it is the fix for the precision half and does nothing for the
+    noise half. Both halves are real and the noise half is not small.
+
+    Run with the device's sampler. Under `nearest` every fetch position is
+    re-rounded and the difference being measured here is destroyed.
+    """
+    was = P.SAMPLING
+    P.SAMPLING = "linear"
+    try:
+        frames = fractional_sequence(step, n)
+        h, w = frames[0].shape[:2]
+        shape = (h // BLOCK, w // BLOCK, 2)
+        truth = np.zeros(shape, dtype=np.float32)
+        truth[...] = (-step[0], -step[1])
+
+        base = bench.luma(frames[0])
+        gy, gx = np.gradient(base)
+        grad = np.hypot(gx, gy)
+        keep = grad >= np.quantile(grad, 1.0 - share)
+
+        rng = np.random.default_rng(seed)
+        # One wobble per real frame, shared by the variants so that the only
+        # difference between the last two rows is the rounding itself.
+        wobble = [rng.normal(0, sigma, shape).astype(np.float32)
+                  for _ in range(n - 1)]
+
+        def field_for(kind, i):
+            if kind == "true":
+                return truth
+            if kind == "rounded":
+                return np.round(truth)
+            if kind == "noisy":
+                return truth + wobble[i]
+            if kind == "noisy+rounded":
+                return np.round(truth + wobble[i])
+            raise ValueError(kind)
+
+        out = {}
+        for kind in ("true", "rounded", "noisy", "noisy+rounded"):
+            stack = []
+            for i in range(1, n):
+                stack.append(fshift(frames[i - 1],
+                                    -step[0] * (i - 1), -step[1] * (i - 1)))
+                for t in phases:
+                    img, _, _ = interpolate(frames[i], frames[i - 1],
+                                            field_for(kind, i - 1), phase=t)
+                    stack.append(fshift(img, -(step[0] * (i - 1 + t)),
+                                        -(step[1] * (i - 1 + t))))
+            sd = np.array(stack).std(axis=0).mean(axis=-1)
+            out[kind] = float(sd[keep].mean() * 255)
+        return out
+    finally:
+        P.SAMPLING = was
+
+
 def main():
     print(__doc__.split("\n\n")[0])
     print()
+    print("PRECISION OR NOISE: a plane moving 30.5 px a frame, so the true field is")
+    print("not an integer and the matcher's whole-pixel field cannot be right. Same")
+    print("wobble in the last two rows -- the only difference is the rounding.")
+    q = quantisation()
+    for kind in ("true", "rounded", "noisy", "noisy+rounded"):
+        print("  %-22s %10.2f" % (kind, q[kind]))
+    print()
+
     print("THE SAMPLER, which none of the tables below can see: 4x phases, the true")
     print("field, real frames in the stack, registered exactly. linear is the device")
     print("as it shipped; nearest is the device with whole-texel fetches.")
