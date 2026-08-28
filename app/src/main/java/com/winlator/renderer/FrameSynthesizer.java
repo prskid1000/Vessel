@@ -1821,14 +1821,14 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         // Filtered before anything reads it, so every pass downstream sees the
         // same field. See MedianMaterial and the `filtered` pair.
-        filteredIndex = filterField(forwardField, filtered);
+        filteredIndex = filterField(forwardField, filtered, 0);
         if (backwardField != null) {
             // The backward field is filtered on the same terms as the forward
             // one, because the two are subtracted from each other. An outlier
             // left in only one of them reads as a disagreement between the
             // frames, which is exactly the signal being measured, and the shader
             // would answer it by distrusting a source that was fine.
-            filteredBackIndex = filterField(backwardField, filteredBack);
+            filteredBackIndex = filterField(backwardField, filteredBack, 1);
             backwardValid = true;
         }
         else filteredBackIndex = -1;
@@ -1974,7 +1974,7 @@ public class FrameSynthesizer implements FramePacer.Target {
      * always one of the nine inputs rather than an average of them, and
      * {@link #filtered} for why there are two passes.
      */
-    private int filterField(Target source, Target[] destinations) {
+    private int filterField(Target source, Target[] destinations, int history) {
         if (destinations[0] == null || source == null) return -1;
         medianTimer.begin();
         GLES20.glDisable(GLES20.GL_BLEND);
@@ -1985,6 +1985,16 @@ public class FrameSynthesizer implements FramePacer.Target {
         medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
                                       1f / Math.max(1, source.width),
                                       1f / Math.max(1, source.height));
+        // The temporal candidate. Bound once for the whole chain: it is what the
+        // block said at the PREVIOUS real frame, so it does not change between
+        // passes of this one. See MedianMaterial.
+        final Target past = fieldHistory[history];
+        final boolean haveHistory = past != null && historyValid[history];
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, haveHistory ? past.texture : 0);
+        medianMaterial.setUniformInt(medianMaterial.medianUniforms.previousTexture, 2);
+        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.temporalValid,
+                                       haveHistory ? 1f : 0f);
         GLES20.glViewport(0, 0, source.width, source.height);
         renderer.viewportNeedsUpdate = true;
 
@@ -2010,12 +2020,22 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 1; unit >= 0; unit--) {
+        for (int unit = 2; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
+
+        // Kept for the next real frame. A copy rather than another ping-pong
+        // slot, because `destinations` is reused by the other direction's filter
+        // before this frame is over -- the forward and backward chains share
+        // nothing else, and having them share this would make each direction's
+        // temporal candidate the other direction's field.
+        if (past != null && index >= 0) {
+            renderToTarget(blitMaterial, destinations[index].texture, past);
+            historyValid[history] = true;
+        }
         medianTimer.end();
         return index;
     }
@@ -2169,6 +2189,25 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private Target previousLuma() { return luma[oldest()]; }
 
+    /**
+     * Last real frame's filtered field, forward at 0 and backward at 1.
+     *
+     * <p>3DRS's temporal candidate. See {@link MedianMaterial}: the field is
+     * re-estimated from nothing every real frame, so a block whose two best
+     * matches are a near-tie picks one this frame and the other the next, and the
+     * region under it changes fifteen times a second while the scene does not.
+     * Offering what the block said last frame lets the filter break that tie
+     * towards continuity.
+     *
+     * <p>Both directions, because the consistency test subtracts one field from
+     * the other. Steadying only the forward one would make them disagree for a
+     * reason that is in the filter rather than in the scene, which is exactly the
+     * signal that test exists to measure.
+     */
+    private final Target[] fieldHistory = new Target[2];
+    /** False until each history has been written once. See {@link #fieldHistory}. */
+    private final boolean[] historyValid = new boolean[2];
+
     private final Target[] colour = new Target[2];
     private final Target[] luma = new Target[2];
 
@@ -2238,6 +2277,10 @@ public class FrameSynthesizer implements FramePacer.Target {
                     filtered[i] = new Target();
                     filtered[i].allocate(lumaW / blockX, lumaH / blockY,
                                          GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    fieldHistory[i] = new Target();
+                    fieldHistory[i].allocate(lumaW / blockX, lumaH / blockY,
+                                             GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    historyValid[i] = false;
                 }
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[0].framebuffer);
                 final int complete = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
@@ -2326,6 +2369,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (vectors != null) vectors.release();
             for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
             for (int i = 0; i < 2; i++) {
+                if (fieldHistory[i] != null) fieldHistory[i].release();
+            }
+            for (int i = 0; i < 2; i++) {
                 if (lumaCoarse[i] != null) lumaCoarse[i].release();
                 if (filteredBack[i] != null) filteredBack[i].release();
             }
@@ -2343,6 +2389,10 @@ public class FrameSynthesizer implements FramePacer.Target {
         vectors = null;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
+        // The names went with the context; a surviving reference here would hand
+        // the median a dead texture as its temporal candidate.
+        fieldHistory[0] = fieldHistory[1] = null;
+        historyValid[0] = historyValid[1] = false;
         lumaCoarse[0] = lumaCoarse[1] = null;
         filteredBack[0] = filteredBack[1] = null;
         filteredBackIndex = -1;
