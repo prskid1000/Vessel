@@ -111,6 +111,112 @@ public class FrameSynthesizer implements FramePacer.Target {
     private static boolean motionSupported = false;
 
     /**
+     * VESSEL: a textured square that travels, over a background that does not.
+     *
+     * <p>The input to {@link #probeBasepoint()}: two of these, differing only in
+     * where the square sits, are a motion whose answer is known exactly.
+     *
+     * <p><b>Both halves are noise, and the background being noise is the part
+     * that took two runs to get right.</b> The square is hashed on its OWN
+     * coordinates so the pattern travels with it -- hashed on screen position it
+     * would sit still while its window moved over it, nothing would have
+     * translated, and the matcher would rightly report nothing. That much was
+     * always here.
+     *
+     * <p>What was wrong was the surround. It was flat, on the reasoning that the
+     * spec says a block with no match returns zero, so only the square would
+     * answer. Measured, that is not what this hardware does: with a flat
+     * background the response came back 22 blocks over the square's ref position
+     * and 22 over its target position, both carrying the SAME sign, mean
+     * {@code (+52.6, -2.9)} for a true {@code +64}. Opposite signs would have
+     * meant the square leaving one place and arriving at the other; the same
+     * sign means the vector was propagated outward into blocks that had no
+     * texture to contradict it. A matcher with a spatial predictor fills flat
+     * regions from their neighbours, and a flat region is therefore the one
+     * background that cannot serve as a control.
+     *
+     * <p>So the background is noise too, keyed on screen position, identical in
+     * both frames. Every block then carries texture, zero is the only correct
+     * answer over the surround, and there is nothing for a predictor to fill in.
+     * The square's own noise is offset in the hash so it cannot coincide with
+     * the background it replaces.
+     */
+    private static final class SquareMaterial extends ScreenMaterial {
+        final Uniform origin = new Uniform("origin");
+        final Uniform size = new Uniform("size");
+        final Uniform extent = new Uniform("extent");
+
+        @Override
+        protected String getFragmentShader() {
+            return String.join("\n",
+                "precision highp float;",
+                "uniform vec2 origin;",
+                "uniform vec2 size;",
+                "uniform float extent;",
+                "varying vec2 vUV;",
+                // **The sin argument is wrapped, and not wrapping it is why the
+                // first run could not be read.**
+                //
+                // `fract(sin(dot(v, k)) * 43758.5453)` is the standard GLSL hash
+                // and it is only a hash for small `v`. Here v runs to 256, so
+                // the argument reaches ~23000 radians, where a highp sin has
+                // lost most of its significant bits and the output stops being
+                // white noise and becomes banded. A matcher fed a banded pattern
+                // finds it in several places at once.
+                "float hash(vec2 v) {",
+                    "float a = mod(dot(v, vec2(12.9898, 78.233)), 6.2831853);",
+                    "return fract(sin(a) * 43758.5453);",
+                "}",
+                "void main() {",
+                    // **Four-pixel cells, not per-pixel noise, and per-pixel was
+                    // why the second run came back empty.**
+                    //
+                    // White noise at the sampling limit is the worst possible
+                    // input to a hardware block matcher: these units work on a
+                    // lowpassed copy, and noise that alternates every pixel
+                    // averages to flat grey before the search ever sees it. With
+                    // per-pixel noise on both the square and the background the
+                    // field came back entirely zero -- not one block responding
+                    // to a 64 px translation it could not miss. Cells of four
+                    // survive the filter and still give every 8x8 block a
+                    // pattern that appears nowhere else.
+                    "vec2 p = floor(vUV * size / 4.0) * 4.0;",
+                    "vec2 q = p - origin;",
+                    // A full-height stripe, not a square, and that is the third
+                    // thing this probe got wrong. A 32x32 patch moving against a
+                    // static textured background produced 57 responding blocks
+                    // of 14400 with a largest vector of 2.2 px, against a true
+                    // 64. This matcher does not report a small object moving
+                    // over a still background -- see probeBasepoint. It answers
+                    // a large region, so the region is large and the question
+                    // moves from "which band responded" to "where is its edge".
+                    "float inside = step(0.0, q.x) * step(q.x, extent - 1.0);",
+                    // **The two have to differ in CONTRAST, not just in phase,
+                    // and making them the same kind of texture is why the third
+                    // run found nothing.**
+                    //
+                    // With both halves 4-pixel noise of the same amplitude, only
+                    // 24 of 1024 blocks held any vector at all and the largest
+                    // was 1.4 px against a true 64. The flat-background run had
+                    // recovered about +52 over the same step, so the
+                    // displacement is well inside the search window and the
+                    // failure is not reach -- it is that a patch of noise
+                    // sitting on a field of statistically identical noise is not
+                    // a distinctive thing to look for.
+                    //
+                    // So the background is textured but quiet, enough to anchor
+                    // zero and leave a predictor nothing to invent, and the
+                    // square is a hard-edged 8-pixel checker at full contrast.
+                    // It cannot be confused with its surroundings at any offset.
+                    "float background = hash(floor(p / 16.0));",
+                    "float square = hash(floor(q / 16.0) + vec2(37.0, 17.0));",
+                    "gl_FragColor = vec4(mix(background, square, inside), 0.0, 0.0, 1.0);",
+                "}"
+            );
+        }
+    }
+
+    /**
      * Luma, because the extension requires it.
      *
      * <p>Reference and target must be {@code GL_R8}, and the spec says outright
@@ -614,6 +720,225 @@ public class FrameSynthesizer implements FramePacer.Target {
     private float measuredWorstCell = 0f;
     /** Reused across readbacks; see {@link #measure}. */
     private java.nio.ByteBuffer cells;
+
+    /** Whether {@link #probeBasepoint()} has run for this allocation. */
+    private boolean basepointProbed = false;
+    private final SquareMaterial squareMaterial = new SquareMaterial();
+
+    /**
+     * VESSEL: ask the driver, on an input whose answer is already known, where
+     * it puts its vectors and which way they point.
+     *
+     * <p><b>Two questions this pipeline has been guessing at, and the spec
+     * settles neither.</b> {@code QCOM_motion_estimation} says a texel holds
+     * "the estimated motion in pixels ... from the &lt;ref&gt; texture to the
+     * &lt;target&gt; texture" and separately that the mask "only controls the
+     * vector basepoint", so a vector departs from a block and can land in
+     * another. It never says which of the two images that basepoint is in, and
+     * it does not say the direction unambiguously either.
+     *
+     * <p><b>{@link SignMaterial} answers the smaller half of that and its class
+     * comment misstates the rest.</b> It says the two readings "differ by a
+     * sign". They do not: under a rigid translation by {@code d} a field indexed
+     * at ref and a field indexed at target both hold {@code +d} everywhere, so
+     * the basepoint is invisible in exactly the case the sign probe votes on --
+     * a camera pan. The two questions are independent, and only one of them has
+     * ever been measured.
+     *
+     * <p>The basepoint is not cosmetic. {@link InterpolateMaterial} projects the
+     * field to the interpolated instant with {@code p = q - b(1 - t)}, which
+     * assumes the vector at {@code q} describes what is at {@code q} in the
+     * NEWER frame. If the driver indexes at ref, the field is offset by a whole
+     * displacement from where it is being read, and that step corrects the wrong
+     * way -- at 120 px the difference between the projection helping and
+     * hurting.
+     *
+     * <p><b>So it is asked rather than reasoned about.</b> A textured square on
+     * a flat field, at {@code SQUARE_FROM} in one frame and {@code SQUARE_TO} in
+     * the other: a translation of {@code SQUARE_STEP} px that no matcher can
+     * misread, well inside the search window, and far enough that the square's
+     * two positions share no block. Then the blocks that come back non-zero sit
+     * over one position or the other, and that is the basepoint; and their sign
+     * is the sign. One draw pair, one call, one readback, once per allocation,
+     * behind its own {@code FG_LOG} category.
+     */
+    /**
+     * Wide enough that the matcher will answer it at all.
+     *
+     * <p><b>Three narrower versions of this measured nothing, and what they
+     * measured instead is worth more than the constant.</b> A 32x32 textured
+     * patch translating 64 px over a static textured background produced 57
+     * responding blocks of 14400, largest vector 2.2 px. The same patch over a
+     * FLAT background produced a broad response of about +52 -- so the
+     * displacement is well inside the search window, and the difference is
+     * entirely in what surrounds the moving thing.
+     *
+     * <p>Which says something about this hardware that nothing in this file
+     * knew: it does not report a small object moving against a still background.
+     * Where the surround is flat it propagates a vector outward into blocks that
+     * have no texture to contradict it; where the surround is textured and
+     * static, zero wins nearly everywhere and the patch does not pull it. That
+     * is a global estimator with a spatial predictor, not an independent search
+     * per block -- and it means the field this pipeline reads is close to a
+     * camera-motion field, with independently moving objects underrepresented.
+     *
+     * <p>512 is 64 block columns, which it does answer.
+     */
+    private static final int SQUARE_EXTENT = 512;
+    private static final int SQUARE_FROM = 256;
+    private static final int SQUARE_STEP = 64;
+    private static final int SQUARE_TOP = 0;
+
+    private void probeBasepoint() {
+        if (basepointProbed || !wants("basepoint")) return;
+        if (!motionEstimationSupported()) return;
+        basepointProbed = true;
+
+        // **The real luma's size, so the search runs under the conditions it
+        // runs under in production.** The probe started at a 256x256 scratch
+        // pair, on the reasoning that the answer is geometric and the size
+        // cannot matter. It may: the ~112 px window is a figure measured on
+        // 1280x720, nothing in the spec says the reach is independent of the
+        // input, and a probe that disagrees with the pipeline about the frame
+        // size is answering a question about a configuration nothing else uses.
+        final int side = luma[0].width;
+        final int tall = luma[0].height;
+        if (side < blockX * 8 || tall < blockY * 8) return;
+
+        final Target ref = new Target();
+        final Target target = new Target();
+        final Target field = new Target();
+        ref.allocate(side, tall, GLES30.GL_R8, GLES20.GL_NEAREST);
+        target.allocate(side, tall, GLES30.GL_R8, GLES20.GL_NEAREST);
+        field.allocate(side / blockX, tall / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+        try {
+            paintSquare(ref, SQUARE_FROM, side, tall);
+            paintSquare(target, SQUARE_FROM + SQUARE_STEP, side, tall);
+
+            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
+            texEstimateMotion(ref.texture, target.texture, field.texture);
+            final int error = GLES20.glGetError();
+            if (error != GLES20.GL_NO_ERROR) {
+                say("fg basepoint: the matcher refused the probe (0x"
+                    + Integer.toHexString(error) + ") -- nothing measured");
+                return;
+            }
+
+            final int gw = field.width, gh = field.height;
+            final java.nio.FloatBuffer out = java.nio.ByteBuffer
+                .allocateDirect(gw * gh * 4 * 4)
+                .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer();
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, field.framebuffer);
+            GLES20.glReadPixels(0, 0, gw, gh, GLES20.GL_RGBA, GLES20.GL_FLOAT, out);
+            final int readError = GLES20.glGetError();
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            renderer.viewportNeedsUpdate = true;
+            if (readError != GLES20.GL_NO_ERROR) {
+                say("fg basepoint: cannot read RGBA16F back (0x"
+                    + Integer.toHexString(readError) + ") -- nothing measured");
+                return;
+            }
+
+            // **The moving region's EDGE, because with a region this wide the
+            // two hypotheses overlap everywhere except there.**
+            //
+            // The stripe occupies [FROM, FROM+EXTENT) in ref and the same shifted
+            // by STEP in target. Indexed at ref the responding blocks run from
+            // FROM; indexed at target they run from FROM+STEP. The interiors are
+            // identical under both readings and say nothing; the left edge is
+            // the whole measurement, and the two predictions are STEP apart.
+            final int leftIfRef = SQUARE_FROM;
+            final int leftIfTarget = SQUARE_FROM + SQUARE_STEP;
+            final int strong = SQUARE_STEP / 2;
+
+            // Per block column: does most of this column carry the motion? A
+            // column rather than a block, because the stripe is full height, so
+            // a column is 90 independent votes on the same answer and one noisy
+            // block cannot move an edge.
+            int leftEdge = -1, rightEdge = -1, columns = 0;
+            double vx = 0, vy = 0;
+            int responded = 0, anyMotion = 0;
+            double strongest = 0;
+            for (int x = 0; x < gw; x++) {
+                int hits = 0;
+                for (int y = 0; y < gh; y++) {
+                    final float mx = out.get((y * gw + x) * 4);
+                    final float my = out.get((y * gw + x) * 4 + 1);
+                    final double magnitude = Math.hypot(mx, my);
+                    if (magnitude > 0.5) anyMotion++;
+                    strongest = Math.max(strongest, magnitude);
+                    if (magnitude < strong) continue;
+                    hits++;
+                    responded++;
+                    vx += mx; vy += my;
+                }
+                if (hits * 2 <= gh) continue;
+                columns++;
+                if (leftEdge < 0) leftEdge = x * blockX;
+                rightEdge = x * blockX + blockX;
+            }
+            if (responded == 0) {
+                say(String.format(
+                    "fg basepoint: nothing cleared %d px over a %+d px translation"
+                        + " -- %d of %d blocks held any vector at all, the largest"
+                        + " %.1f px. %s",
+                    strong, SQUARE_STEP, anyMotion, gw * gh, strongest,
+                    anyMotion == 0
+                        ? "The matcher declined the whole frame."
+                        : "It answered below the bar; the translation is not being"
+                            + " recovered at full magnitude."));
+                return;
+            }
+            vx /= responded; vy /= responded;
+
+            say(String.format(
+                "fg basepoint: a %d px stripe moved %+d px -- %d block columns"
+                    + " carry it, x from %d to %d, mean vector (%+.1f, %+.1f)."
+                    + " Indexed at ref the left edge is %d; at target it is %d",
+                SQUARE_EXTENT, SQUARE_STEP, columns, leftEdge, rightEdge,
+                vx, vy, leftIfRef, leftIfTarget));
+
+            final int missRef = Math.abs(leftEdge - leftIfRef);
+            final int missTarget = Math.abs(leftEdge - leftIfTarget);
+            // Half the step is the midpoint between the two predictions; an edge
+            // landing there discriminates nothing and is reported as such rather
+            // than rounded to whichever side is nearer.
+            if (Math.abs(missRef - missTarget) < SQUARE_STEP / 2
+                    || columns < SQUARE_EXTENT / blockX / 2) {
+                say("fg basepoint: NOT DECISIVE -- the edge sits between the two"
+                    + " predictions, or too little of the stripe answered."
+                    + " Nothing is concluded and the projection step is unchanged.");
+                return;
+            }
+            final boolean indexedAtRef = missRef < missTarget;
+            say(String.format(
+                "fg basepoint: vectors are indexed in the %s and point %s, so"
+                    + " InterpolateMaterial's projection step is %s",
+                indexedAtRef ? "REF image -- the OLDER frame"
+                             : "TARGET image -- the NEWER frame",
+                vx > 0 ? "ref -> target as written" : "target -> ref, inverted",
+                indexedAtRef
+                    ? "CORRECTING THE WRONG WAY: it assumes the vector at q"
+                        + " describes what is at q in the NEWER frame"
+                    : "correct as written"));
+        } finally {
+            ref.release();
+            target.release();
+            field.release();
+            renderer.invalidateBoundWindowMaterial();
+        }
+    }
+
+    /** One frame of the probe pair: the square at {@code originX}. */
+    private void paintSquare(Target destination, int originX, int side, int tall) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
+        squareMaterial.use();
+        squareMaterial.setUniformVec2(squareMaterial.origin, originX, SQUARE_TOP);
+        squareMaterial.setUniformVec2(squareMaterial.size, side, tall);
+        squareMaterial.setUniformFloat(squareMaterial.extent, SQUARE_EXTENT);
+        blit(squareMaterial, 0, destination.width, destination.height);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
 
     private int allocWidth = 0;
     private int allocHeight = 0;
@@ -1964,6 +2289,11 @@ public class FrameSynthesizer implements FramePacer.Target {
      */
     private boolean estimateMotion() {
         if (luma[0] == null || vectors == null || output == null) return false;
+        // Once per allocation, on a synthetic pair, before the real one. It
+        // needs nothing from the guest -- only a current context and the block
+        // size -- so the answer arrives on the first real frame of any session
+        // rather than waiting for the scene to move. See probeBasepoint.
+        probeBasepoint();
         estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
@@ -2625,6 +2955,9 @@ public class FrameSynthesizer implements FramePacer.Target {
         fieldSign = 0f;
         pendingSign = 0f;
         signVotes = 0f;
+        // The block size can change with the context, and the probe's whole
+        // point is that it is asked of THIS driver state.
+        basepointProbed = false;
         probe = null;
         announced = false;
     }
