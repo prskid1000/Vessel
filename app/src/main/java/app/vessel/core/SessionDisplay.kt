@@ -486,6 +486,21 @@ interface SessionDisplayServer {
     val frameHints: StateFlow<String?>
 
     /**
+     * What frame generation has reported since this was last called.
+     *
+     * On this seam for the same reason [frameHints] is, and against the same
+     * three-minute logcat eviction — but a drain rather than a flow, because
+     * this is a stream of about ten lines a second at `FG_LOG=all` rather than
+     * one answer decided at the first frame. A flow would publish only whichever
+     * line happened to be last when the reader looked.
+     *
+     * Empty for every container that has not switched frame generation on, and
+     * empty between reports. Safe to call from any thread; the compositor hands
+     * over through a concurrent queue and never waits on the reader.
+     */
+    fun drainFrameGenerationLog(): List<String>
+
+    /**
      * Raise a window and give it the input focus.
      *
      * A no-op for an id the server does not have. A taskbar button pressed while
@@ -643,6 +658,11 @@ interface SessionDisplayServer {
         // Headless: nothing composites, so no hint session is ever opened and
         // there is nothing to report. Null is that, and is not a failure.
         override val frameHints: StateFlow<String?> = MutableStateFlow<String?>(null).asStateFlow()
+
+        // Headless: nothing composites, so frame generation never runs and has
+        // nothing to say. Empty forever, which is the honest answer rather than
+        // a silence that could be mistaken for a drained queue.
+        override fun drainFrameGenerationLog(): List<String> = emptyList()
 
         override fun focusWindow(id: Int) = Unit
 

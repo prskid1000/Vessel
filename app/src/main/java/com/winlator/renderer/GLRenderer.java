@@ -278,8 +278,14 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
      * <p>Null until switched on, because the three render targets it allocates
      * are the size of the surface and a container that will never use them
      * should not be paying for them.
+     *
+     * <p>Volatile because {@link #drainFrameGenerationLog()} reads it from the
+     * recorder's coroutine while {@link #extrapolating()} may be assigning it on
+     * the GL thread. The object it points at is safe to touch from either -- the
+     * drain goes through a concurrent queue -- but the reference itself has to
+     * be published, or the other thread may never see it become non-null.
      */
-    private FrameSynthesizer frameSynthesizer;
+    private volatile FrameSynthesizer frameSynthesizer;
 
     /** Presented frames per real frame. Below 2 means off. */
     private int frameGenerationMultiplier = 0;
@@ -299,6 +305,25 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
         this.frameGenerationLog = categories == null
             ? java.util.Collections.emptySet() : categories;
         if (frameSynthesizer != null) frameSynthesizer.setDiagnostics(this.frameGenerationLog);
+    }
+
+    /**
+     * VESSEL: what frame generation has said since this was last asked.
+     *
+     * <p>For the session log, which outlives the run; see {@link
+     * FrameSynthesizer#drainDiagnostics()} for why logcat could not hold it.
+     * Empty whenever the synthesiser does not exist, which is every container
+     * that has not switched frame generation on.
+     *
+     * <p>Called off the GL thread, and safe there: the synthesiser hands over
+     * through a concurrent queue rather than through this reference. The field
+     * is read once into a local because {@link #extrapolating()} can assign it
+     * on the GL thread while this runs.
+     */
+    public java.util.List<String> drainFrameGenerationLog() {
+        final FrameSynthesizer synthesizer = frameSynthesizer;
+        return synthesizer == null ? java.util.Collections.emptyList()
+                                   : synthesizer.drainDiagnostics();
     }
 
     /** VESSEL: see {@link FrameSynthesizer}. Below 2 switches it off. */

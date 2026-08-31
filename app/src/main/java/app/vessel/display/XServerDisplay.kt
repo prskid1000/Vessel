@@ -271,6 +271,21 @@ class XServerDisplay @Inject constructor(
     private val _frameHints = MutableStateFlow<String?>(null)
     override val frameHints: StateFlow<String?> = _frameHints.asStateFlow()
 
+    /**
+     * Frame generation's own account of itself, on its way to the session log.
+     *
+     * A drain and not a flow: see [SessionDisplay.drainFrameGenerationLog]. The
+     * compositor fills a bounded queue from the GL thread and this empties it
+     * from wherever the recorder ticks, so neither waits for the other and a
+     * session with no reader simply drops its oldest lines and says how many.
+     *
+     * `session` is read once into a local because teardown can null it between
+     * the check and the call, and a torn-down session's renderer answers empty
+     * rather than throwing.
+     */
+    override fun drainFrameGenerationLog(): List<String> =
+        session?.view?.renderer?.drainFrameGenerationLog().orEmpty()
+
     private val _guestViewport = MutableStateFlow(GuestViewport())
     override val guestViewport: StateFlow<GuestViewport> = _guestViewport.asStateFlow()
 
@@ -2896,7 +2911,16 @@ private class PacedXServerView(
                 // has to be created from the thread it is about to describe.
                 if (!hintsTried) {
                     hintsTried = true
-                    val opened = FrameHints.create(context, fpsLimit)
+                    // **The presented rate, for the third time in this file.**
+                    // `fpsLimit` is what the *guest* is capped at; this thread
+                    // composites once per presented frame, which in `smoothness`
+                    // is the limit times the frame generation multiple. Passing
+                    // the limit tells ADPF the deadline is 33 ms for work that
+                    // has 8.3 at 4x -- four times the slack it actually has, on
+                    // the one API whose whole purpose is to say how little there
+                    // is. applyFrameRate and applyPreferredDisplayMode already
+                    // carry the same correction; this call was missed.
+                    val opened = FrameHints.create(context, presentedFps ?: fpsLimit)
                     hints = opened
                     // Reported up as well as logged: logcat's main buffer holds
                     // under three minutes on this device, so the line that says

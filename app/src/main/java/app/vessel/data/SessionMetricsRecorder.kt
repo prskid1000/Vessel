@@ -214,6 +214,17 @@ class SessionMetricsRecorder @Inject constructor(
                         runtime.note(LogLevel.INFO, it)
                     }
                 }
+                // And the rest of what frame generation said, for the same
+                // reason and into the same place. `FG_LOG` has always written to
+                // logcat only, so a container could be configured for it, run
+                // for ten minutes, and end with the entire account already
+                // evicted — a diagnostic that needed adb attached while it
+                // happened, which is what a session log exists to avoid.
+                //
+                // Every tick, not once: this is a stream rather than a verdict.
+                // Empty for every container with frame generation off, so the
+                // call costs a null check and nothing reaches the log.
+                display.drainFrameGenerationLog().forEach { runtime.note(LogLevel.INFO, it) }
                 summary.add(sample)
                 // The device's own story, kept beside the guest's. Separate call
                 // because it survives a session that never drew: an installer has
