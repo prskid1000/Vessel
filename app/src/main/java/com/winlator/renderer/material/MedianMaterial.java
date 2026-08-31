@@ -56,6 +56,15 @@ public class MedianMaterial extends ScreenMaterial {
         public final Uniform previousTexture = new Uniform("previousTexture");
         /** 0 on the first frame after allocation, when there is no history yet. */
         public final Uniform temporalValid = new Uniform("temporalValid");
+        /**
+         * One field unit in texture space: 1 / luma size.
+         *
+         * <p>Needed to read the previous field where this block's content
+         * actually was, rather than where the block sits. See the shader.
+         */
+        public final Uniform motionScale = new Uniform("motionScale");
+        /** Which way the field points. See {@link SignMaterial}. */
+        public final Uniform fieldSign = new Uniform("fieldSign");
     }
 
     @Override
@@ -120,6 +129,8 @@ public class MedianMaterial extends ScreenMaterial {
             // loses the vote, which is the safe failure rather than a wrong one.
             "uniform sampler2D previousTexture;",
             "uniform float temporalValid;",
+            "uniform vec2 motionScale;",
+            "uniform float fieldSign;",
             "uniform vec2 texelSize;",
             "varying vec2 vUV;",
 
@@ -143,7 +154,29 @@ public class MedianMaterial extends ScreenMaterial {
                 // back onto the centre when there is no history, so it costs a
                 // duplicated candidate rather than a branch and cannot pull the
                 // score anywhere on the first frame.
-                "c[10] = mix(c[4], texture2D(previousTexture, vUV).rg, temporalValid);",
+                // **Read where this block's content WAS, which is the half of
+                // 3DRS that was missing.**
+                //
+                // The note above defended reading at vUV: a pan makes the field
+                // nearly uniform, so a neighbouring position held the same
+                // vector, and where an object moves independently the stale
+                // candidate simply loses the vote. Both halves are true and
+                // together they are the fault. A pan is the case that was never
+                // unstable. An independently moving object is exactly what this
+                // candidate exists to steady -- and there, reading at vUV takes
+                // the vector of whatever the object has moved ACROSS, so it
+                // disagrees with its neighbours and loses every vote, precisely
+                // where it was needed.
+                //
+                // de Haan's temporal candidate is the previous field at the
+                // position the content came from. The content now at p sat at
+                // p + b one real frame ago, and b is this block's own vector,
+                // so this costs one multiply and no extra fetch. Clamped, so
+                // off the edge it folds back onto the centre and contributes
+                // nothing -- the same as having no history. Zero before the
+                // sign latches, which reads at vUV exactly as it used to.
+                "vec2 came = clamp(vUV + c[4] * fieldSign * motionScale, 0.0, 1.0);",
+                "c[10] = mix(c[4], texture2D(previousTexture, came).rg, temporalValid);",
 
                 // **Each distance once.** The score of a candidate is its total
                 // distance to the set, and distance is symmetric, so the 121

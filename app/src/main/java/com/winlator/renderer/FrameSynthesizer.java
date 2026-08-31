@@ -2073,6 +2073,13 @@ public class FrameSynthesizer implements FramePacer.Target {
         medianMaterial.setUniformInt(medianMaterial.medianUniforms.previousTexture, 2);
         medianMaterial.setUniformFloat(medianMaterial.medianUniforms.temporalValid,
                                        haveHistory ? 1f : 0f);
+        // So the temporal candidate is read where the content came from rather
+        // than where the block sits. See MedianMaterial. Zero before the sign
+        // latches, which reads at vUV exactly as it used to.
+        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.motionScale,
+                                      1f / Math.max(1, luma[0].width),
+                                      1f / Math.max(1, luma[0].height));
+        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.fieldSign, fieldSign);
         GLES20.glViewport(0, 0, source.width, source.height);
         renderer.viewportNeedsUpdate = true;
 
