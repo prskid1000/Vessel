@@ -144,10 +144,15 @@ class TouchLatchTest {
     }
 
     @Test
-    fun `the boundary is exactly three seconds`() {
-        val below = translator(l3).also { tap(it, l3, at = 0L, heldFor = 2_999L) }
+    fun `the boundary is strict below the threshold and inclusive at it`() {
+        // Against LATCH_HOLD_MS itself rather than a literal. This test used to
+        // hard-code 2_999 and 3_000, so shortening the hold read as a failing
+        // test about a number nobody meant to pin -- what is worth pinning is
+        // the shape of the comparison, not the value it compares against.
+        val hold = TouchControlTranslator.LATCH_HOLD_MS
+        val below = translator(l3).also { tap(it, l3, at = 0L, heldFor = hold - 1) }
         assertTrue(below.latchedIds.isEmpty())
-        val at = translator(l3).also { tap(it, l3, at = 0L, heldFor = 3_000L) }
+        val at = translator(l3).also { tap(it, l3, at = 0L, heldFor = hold) }
         assertEquals(setOf("l3"), at.latchedIds)
     }
     @Test
