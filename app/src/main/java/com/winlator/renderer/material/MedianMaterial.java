@@ -57,10 +57,20 @@ public class MedianMaterial extends ScreenMaterial {
         /** 0 on the first frame after allocation, when there is no history yet. */
         public final Uniform temporalValid = new Uniform("temporalValid");
         /**
-         * One field unit in texture space: 1 / luma size.
+         * One field unit in texture space: 1 / luma size, <b>signed by which
+         * direction this chain is filtering</b>.
          *
          * <p>Needed to read the previous field where this block's content
          * actually was, rather than where the block sits. See the shader.
+         *
+         * <p>The sign is not decoration. A forward field already points
+         * backwards in time -- its vector at p is the offset to where that
+         * content sat in the older frame -- so the step towards last frame's
+         * vector is a plus. A backward field points forwards, so the same step
+         * is a minus. Passing the positive scale to both chains reads the
+         * backward history twice the displacement away on the wrong side, which
+         * makes the candidate lose every vote in precisely the case it exists
+         * for. See {@code FrameSynthesizer.filterField}.
          */
         public final Uniform motionScale = new Uniform("motionScale");
         /** Which way the field points. See {@link SignMaterial}. */
@@ -177,6 +187,35 @@ public class MedianMaterial extends ScreenMaterial {
                 // sign latches, which reads at vUV exactly as it used to.
                 "vec2 came = clamp(vUV + c[4] * fieldSign * motionScale, 0.0, 1.0);",
                 "c[10] = mix(c[4], texture2D(previousTexture, came).rg, temporalValid);",
+
+                // **Where the set already agrees there is nothing to sort, and
+                // the comment below says that is most of the field most of the
+                // time -- so it is worth asking before paying for the sort
+                // rather than after.**
+                //
+                // If all eleven candidates are the same vector every score is
+                // zero, and `best` is seeded with c[4] and beaten only strictly,
+                // so c[4] is the answer. Ten subtract-and-adds establish that,
+                // against 55 square roots to reach it the long way. This is the
+                // same early-out, and the same 1e-7, that InterpolateMaterial
+                // uses to skip its OBMC blend when the four blocks coincide, and
+                // the branch is coherent for the same reason: agreement is a
+                // property of a region, not of a texel.
+                //
+                // The threshold cannot cost accuracy. The field is RGBA16F, so
+                // at the magnitudes it carries -- pixel counts reaching 150 --
+                // one ULP is about 0.06, and even near zero it is 1e-5. Nothing
+                // can differ by less than 1e-7 without being bit-identical, so
+                // this fires exactly when the long path would have returned
+                // c[4] anyway.
+                "vec2 agree = abs(c[0] - c[4]) + abs(c[1] - c[4]) + abs(c[2] - c[4])",
+                           "+ abs(c[3] - c[4]) + abs(c[5] - c[4]) + abs(c[6] - c[4])",
+                           "+ abs(c[7] - c[4]) + abs(c[8] - c[4]) + abs(c[9] - c[4])",
+                           "+ abs(c[10] - c[4]);",
+                "if (agree.x + agree.y < 1.0e-7) {",
+                    "gl_FragColor = vec4(c[4], 0.0, 1.0);",
+                    "return;",
+                "}",
 
                 // **Each distance once.** The score of a candidate is its total
                 // distance to the set, and distance is symmetric, so the 121

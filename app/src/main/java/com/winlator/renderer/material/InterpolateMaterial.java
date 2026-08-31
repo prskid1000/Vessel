@@ -203,7 +203,15 @@ public class InterpolateMaterial extends ScreenMaterial {
             // fact that the photometric test underneath it can only guess at.
             "uniform sampler2D backMotionTexture;",
             "uniform float consistency;",
-            // One field unit in texture space: 1 / luma size.
+            // One field unit in texture space: 1 / **colour** size, not luma.
+            //
+            // The vectors are in luma pixels and a luma pixel is a colour pixel
+            // -- the luma is the block-rounded top-left of the colour frame, not
+            // a rescaled copy -- so one field unit is one colour texel, and the
+            // fetch sites in predict() are colour UV. Reading "1 / luma size"
+            // here and believing it is how a `motionScale` division ends up in
+            // the wrong space; the value the caller sets has been right since
+            // the lumaScale fix, and only this line said otherwise.
             "uniform vec2 motionScale;",
             // Dimensions of the vector texture, which is the block grid.
             "uniform vec2 vectorSize;",
@@ -283,9 +291,37 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "readField(uv, w, a, b, c, d);",
                 "return w.x * a + w.y * b + w.z * c + w.w * d;",
             "}",
-            // The backward field, read NEAREST at the older frame's site.
+            // The backward field at the older frame's site, **under the same
+            // window the forward one is read with.**
+            //
+            // This was a single NEAREST fetch, and the consistency block below
+            // subtracts it from a four-block blend. That difference is half the
+            // local block-to-block disagreement whether or not anything is
+            // occluded, and at a silhouette the neighbouring blocks disagree by
+            // definition -- one holding the object, the next the background --
+            // so it is the one place in the frame where the error is guaranteed
+            // large. The mask stepped at the 8-pixel grid and the step swept
+            // along every moving edge.
+            //
+            // 73f5455 fixed exactly this on the forward side and said so, then
+            // deferred the backward side because four more fetches "was bundled
+            // into a build that took the GPU down". A later revert kept that
+            // commit's comment and dropped its caveat, so the block below has
+            // been claiming a symmetry the code did not have. The four taps land
+            // in a 160x90 texture that the forward read has already pulled into
+            // cache, which is not what took the GPU down.
             "vec2 backAt(vec2 uv) {",
-                "return texture2D(backMotionTexture, lumaUV(uv)).rg * motionScale * fieldSign;",
+                "vec2 texel = 1.0 / vectorSize;",
+                "vec2 grid = uv * lumaScale * vectorSize - 0.5;",
+                "vec2 base = floor(grid);",
+                "vec2 f = 0.5 - 0.5 * cos(PI * (grid - base));",
+                "vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),",
+                              "(1.0 - f.x) * f.y, f.x * f.y);",
+                "return (w.x * texture2D(backMotionTexture, (base + vec2(0.5, 0.5)) * texel).rg",
+                      "+ w.y * texture2D(backMotionTexture, (base + vec2(1.5, 0.5)) * texel).rg",
+                      "+ w.z * texture2D(backMotionTexture, (base + vec2(0.5, 1.5)) * texel).rg",
+                      "+ w.w * texture2D(backMotionTexture, (base + vec2(1.5, 1.5)) * texel).rg)",
+                      "* motionScale * fieldSign;",
             "}",
 
             // One bilateral prediction: both endpoints displaced symmetrically
@@ -545,8 +581,50 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // same tenth off a twelve-pixel disagreement, where the other
                 // frame demonstrably cannot see the surface, as off a two-pixel
                 // one where the mask is guessing.
-                "float occNewer = consistency * smoothstep(1.5, 6.0, eNewer);",
-                "float occOlder = consistency * smoothstep(1.5, 6.0, eOlder);",
+                //
+                // **The dead zone is right and a FIXED dead zone is not, and
+                // that is why this kept having to be stretched.** Six pixels of
+                // round-trip disagreement is a lot at rest and is nothing at
+                // 150, which is where this pipeline actually runs -- the field
+                // is quantised to whole pixels and the two directions are
+                // estimated through separate warp-plus-residual chains, so at
+                // that speed ordinary estimation error clears six on its own and
+                // the mask fires with nothing occluded. That is the same failure
+                // already measured on the old newer-side term, which "fired on
+                // 27.7% of the frame to cover 1.1% of true disocclusion", and
+                // the reason 11a535e had to stretch the ramp to 1.0..10.0 to
+                // damp a flicker rather than remove its cause.
+                //
+                // The published criterion is proportional. Sundaram, Brox and
+                // Keutzer call a pixel occluded when the forward-backward round
+                // trip fails
+                //
+                //     |w_w + w_b|^2 > 0.01(|w_w|^2 + |w_b|^2) + 0.5
+                //
+                // -- a tolerance that grows with the flow being judged, over a
+                // small absolute floor. Their floor is half a square pixel
+                // because their flow is subpixel-dense; ours is a whole-pixel
+                // block matcher, and 1.5 px is the instrument floor the fixed
+                // ramp had already measured. So the floor is kept and the
+                // proportional term is added to it.
+                //
+                // This is the identity at rest -- sqrt(2.25) is 1.5, so a still
+                // scene gets exactly the 1.5..6.0 ramp that ships today -- and
+                // only diverges where the fixed number was wrong: at 150 px in
+                // both directions the tolerance opens to 21 px, which is what
+                // the criterion asks for and roughly what two independent
+                // whole-pixel fields disagree by at that speed.
+                "float magBack  = length(bAtOlder / motionScale);",
+                "float magOlder = length(mean / motionScale);",
+                "float magNewer = length(fRound / motionScale);",
+                "float tolOlder = sqrt(0.01 * (magOlder * magOlder",
+                                            "+ magBack * magBack) + 2.25);",
+                "float tolNewer = sqrt(0.01 * (magNewer * magNewer",
+                                            "+ magBack * magBack) + 2.25);",
+                // The 4x span is the shipped ramp's own, so the softening either
+                // side of the criterion is unchanged; only where it sits moves.
+                "float occNewer = consistency * smoothstep(tolNewer, tolNewer * 4.0, eNewer);",
+                "float occOlder = consistency * smoothstep(tolOlder, tolOlder * 4.0, eOlder);",
                 "occNewer *= onNewer;",
                 "occOlder *= onOlder;",
 

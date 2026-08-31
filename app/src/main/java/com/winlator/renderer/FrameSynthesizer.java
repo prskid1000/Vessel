@@ -313,19 +313,11 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
     private Target vectors;
-    /**
-     * **A median filter used to sit between the matcher and the interpolation,
-     * and it was removed unmeasured.**
-     *
-     * <p>It is the filtering pass FSR3 runs between every level of its pyramid,
-     * and the motion vector smoothing step the frame-rate-up-conversion
-     * literature puts between estimation and compensation. At 14,400 pixels it
-     * cost nothing. But unlike the overlapped blending, its benefit here was
-     * never demonstrated in isolation, and cheap and standard is not evidence.
-     * The field now reaches the interpolation as the matcher produced it; if
-     * what it was suppressing comes back, that is the measurement that was
-     * missing all along.
-     */
+    // The Javadoc that sat here announced that the median filter had been
+    // removed unmeasured and that its return would be the missing measurement.
+    // It did return, ten passes of it, and the measurement is in `filtered`
+    // below. Two consecutive Javadoc blocks bind only the second, so this one
+    // documented nothing and contradicted the field two declarations down.
     /**
      * Where an interpolated frame is built, at the guest's resolution.
      *
@@ -504,6 +496,89 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     /** Whether the one-time setup line has been printed for this allocation. */
     private boolean announced = false;
+
+    /**
+     * VESSEL: the same lines again, for somewhere they survive the session.
+     *
+     * <p><b>Every number this class has ever produced went to logcat, and
+     * logcat on this device holds under three minutes.</b> That is not a
+     * limitation of the diagnostics, it is a limitation of where they were put:
+     * a container can be configured with {@code FG_LOG=all}, run for ten
+     * minutes, and end with the whole of frame generation's account of itself
+     * already evicted. Checking a finished run meant having had adb attached
+     * while it happened, which is the opposite of what a session log is for.
+     *
+     * <p>{@code FrameHints} hit this first and solved it for one line, by
+     * publishing it up to the display and letting {@code SessionMetricsRecorder}
+     * note it into the session log. That comment says outright: "Not logcat: its
+     * main buffer holds under three minutes here." The same is true of every
+     * line in {@link #report()}, which is roughly ten a second at {@code all},
+     * and none of them took the same route.
+     *
+     * <p>A queue rather than a callback, because the producer is the GL thread
+     * inside a composite and the consumer is a coroutine ticking at one or ten
+     * seconds. Neither may wait for the other: the drain must never block a
+     * frame, and a frame must never block on a file write.
+     */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> sessionLines =
+        new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final java.util.concurrent.atomic.AtomicInteger sessionQueued =
+        new java.util.concurrent.atomic.AtomicInteger();
+    /**
+     * How many lines may wait to be drained.
+     *
+     * <p>Ten a second at {@code all}, against a consumer that ticks every ten
+     * seconds when nothing is watching the metrics panel, so a hundred is one
+     * tick's worth and 512 is five of them. Past that the session has stopped
+     * draining -- the recorder is gone, or the log is closed -- and the honest
+     * response is to drop the oldest and say how many, which is what the session
+     * log itself does with its own overflow rather than growing without bound
+     * inside a compositor.
+     */
+    private static final int SESSION_LINE_LIMIT = 512;
+    private int sessionDropped = 0;
+
+    /**
+     * Log a line, and keep a copy for the session log.
+     *
+     * <p>Every {@code Log.i} in {@link #report()} goes through here so the two
+     * cannot drift: a line that reaches logcat and not the file is exactly the
+     * bug this exists to close.
+     */
+    private void say(String line) {
+        Log.i(TAG, line);
+        if (sessionQueued.get() >= SESSION_LINE_LIMIT) {
+            if (sessionLines.poll() != null) {
+                sessionQueued.decrementAndGet();
+                sessionDropped++;
+            }
+        }
+        sessionLines.add(line);
+        sessionQueued.incrementAndGet();
+    }
+
+    /**
+     * Take everything said since the last call. Empty is the normal answer.
+     *
+     * <p>Called off the GL thread. The queue is the handover, so this neither
+     * blocks a composite nor is blocked by one.
+     */
+    public java.util.List<String> drainDiagnostics() {
+        if (sessionLines.isEmpty() && sessionDropped == 0) {
+            return java.util.Collections.emptyList();
+        }
+        final java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String line = sessionLines.poll(); line != null; line = sessionLines.poll()) {
+            sessionQueued.decrementAndGet();
+            out.add(line);
+        }
+        if (sessionDropped > 0) {
+            out.add("fg log: " + sessionDropped + " lines dropped before this one --"
+                + " nothing was draining the queue");
+            sessionDropped = 0;
+        }
+        return out;
+    }
 
     /** Frame-wide measurements, most recently read back. See {@link #measure}. */
     private float measuredDark, measuredShadow;
@@ -720,20 +795,37 @@ public class FrameSynthesizer implements FramePacer.Target {
         // way. That is the failure mode this same value already caused once,
         // when it was decided per pixel.
         //
-        // Eighty per cent, and the same answer from two probes at least a second
-        // apart -- which is two different moments of the scene. An undecided
-        // probe clears the pending answer rather than leaving it to pair up with
-        // a vote from some unrelated moment.
+        // Eighty per cent, and the same answer from two probes at least
+        // SIGN_PROBE_MS apart -- a quarter second, which at fifteen real frames
+        // a second is four of them, so two different moments of the scene. An
+        // undecided probe clears the pending answer rather than leaving it to
+        // pair up with a vote from some unrelated moment.
+        //
+        // This said "a second" until the gate was separated from the diagnostic
+        // reporting rate; see SIGN_PROBE_MS, which argues at length that the
+        // second was never load-bearing and then left the claim standing here.
         final float share = positive / signVotes;
         final float vote = share > 0.8f ? 1f : (share < 0.2f ? -1f : 0f);
         if (vote == 0f) { pendingSign = 0f; return; }
         if (pendingSign != vote) { pendingSign = vote; return; }
         fieldSign = vote;
 
-        Log.i(TAG, String.format(
+        // **The share that agrees with the answer, not the share that agrees
+        // with `positive`.**
+        //
+        // `share` is always the fraction preferring the POSITIVE sign, and this
+        // printed it whichever way the latch went -- so a decisive backward
+        // latch, which is what this device produces, reported the 15% that
+        // disagreed with it. Three sessions latched at 15%, 19% and 18%: all
+        // three are 85, 81 and 82 per cent majorities, and all three read like
+        // coin flips in the log. The number that has to be legible here is the
+        // confidence in the decision, because this latches for the life of the
+        // context and a wrong latch inverts every vector in it.
+        final float agreed = fieldSign > 0 ? share : 1f - share;
+        say(String.format(
             "fg sign: field points %s (%.0f%% of moving pixels agree, %.0f%% of the"
                 + " frame moving) -- latched",
-            fieldSign > 0 ? "forward" : "backward", share * 100f, signVotes * 100f));
+            fieldSign > 0 ? "forward" : "backward", agreed * 100f, signVotes * 100f));
     }
 
     /**
@@ -1190,7 +1282,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private void announce() {
         if (announced || diagnostics.isEmpty()) return;
         announced = true;
-        Log.i(TAG, "fg setup: asked for " + diagnostics
+        say("fg setup: asked for " + diagnostics
             + ", " + multiple + "x, guest " + renderer.guestWidth()
             + "x" + renderer.guestHeight()
             + " presented into " + renderer.viewTransformation.viewWidth
@@ -1591,8 +1683,16 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         // Once a second, and only if something asked. Deliberately after the
         // frame the user sees, so a measurement can never delay one.
-        if ((wants("quality") || wants("field"))
-                && SystemClock.uptimeMillis() - measuredAt >= 1000) {
+        //
+        // **`field` used to be on this gate and read nothing it produced.**
+        // Every consumer of the nine `measured*` values sits inside report()'s
+        // `quality` block; `fg field`'s own numbers come from probeFieldSign,
+        // which is a different pass with a different target. So asking for
+        // `field` alone bought a second full-resolution interpolation pass plus
+        // two blocking glReadPixels round trips every second, for a readback
+        // nothing printed. That is the most expensive diagnostic in the file
+        // charged to the one category that had no use for it.
+        if (wants("quality") && SystemClock.uptimeMillis() - measuredAt >= 1000) {
             measure(phase);
         }
     }
@@ -1974,8 +2074,11 @@ public class FrameSynthesizer implements FramePacer.Target {
         final float ratioY = (float)luma[0].height / coarseVectors.height / blockY;
 
         // The pair, a quarter the size, box-filtered rather than point-sampled.
-        renderToTarget(downsampleFor(previousLuma()), previousLuma().texture, lumaCoarse[0]);
-        renderToTarget(downsampleFor(latestLuma()), latestLuma().texture, lumaCoarse[1]);
+        // Keyed on the DESTINATION, not the source: the tap offset is a quarter
+        // of a target texel, and the two grids are not in an exact 4:1 ratio.
+        // See DownsampleLumaMaterial.
+        renderToTarget(downsampleFor(lumaCoarse[0]), previousLuma().texture, lumaCoarse[0]);
+        renderToTarget(downsampleFor(lumaCoarse[1]), latestLuma().texture, lumaCoarse[1]);
         if (!estimateOnce(lumaCoarse[0].texture, lumaCoarse[1].texture, coarseVectors.texture)) {
             return false;
         }
@@ -2001,12 +2104,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         return true;
     }
 
-    /** The downsampler with its source's texel size set. See {@link DownsampleLumaMaterial}. */
-    private DownsampleLumaMaterial downsampleFor(Target source) {
+    /**
+     * The downsampler with its tap offset set. See {@link DownsampleLumaMaterial}.
+     *
+     * <p>A quarter of one DESTINATION texel, which is where a bilinear tap
+     * averages a quadrant of the source region for free. This read the source's
+     * texel size, which is the same number only when the reduction is exactly
+     * 4:1 -- true in x on a 1280-wide luma and false in y, where 720 rounds to a
+     * 176-tall coarse target and the ratio is 4.091.
+     */
+    private DownsampleLumaMaterial downsampleFor(Target destination) {
         downsampleMaterial.use();
         downsampleMaterial.setUniformVec2(downsampleMaterial.downsampleUniforms.texelSize,
-                                          1f / Math.max(1, source.width),
-                                          1f / Math.max(1, source.height));
+                                          0.25f / Math.max(1, destination.width),
+                                          0.25f / Math.max(1, destination.height));
         return downsampleMaterial;
     }
 
@@ -2076,9 +2187,21 @@ public class FrameSynthesizer implements FramePacer.Target {
         // So the temporal candidate is read where the content came from rather
         // than where the block sits. See MedianMaterial. Zero before the sign
         // latches, which reads at vUV exactly as it used to.
+        //
+        // **And the two chains need opposite signs, because the two fields
+        // point opposite ways in time.** The forward field at p, for p in N, is
+        // already the offset to where that content sat in N-1, so the content's
+        // previous vector is at p + b and the step is a plus. The backward field
+        // at x, for x in N-1, is the offset to where that content is in N -- so
+        // a frame ago it was at x - b, and the same plus reads the far side,
+        // twice the displacement from the right block. At the 120-150 px this
+        // pipeline runs at that is 240-300 px away: the candidate then disagrees
+        // with all nine neighbours and loses every vote, which is exactly the
+        // inertness 686975c removed from the forward chain and left here.
+        final float temporal = history == 0 ? 1f : -1f;
         medianMaterial.setUniformVec2(medianMaterial.medianUniforms.motionScale,
-                                      1f / Math.max(1, luma[0].width),
-                                      1f / Math.max(1, luma[0].height));
+                                      temporal / Math.max(1, luma[0].width),
+                                      temporal / Math.max(1, luma[0].height));
         medianMaterial.setUniformFloat(medianMaterial.medianUniforms.fieldSign, fieldSign);
         GLES20.glViewport(0, 0, source.width, source.height);
         renderer.viewportNeedsUpdate = true;
@@ -2203,7 +2326,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         probeLonely = (pixel.get(2) & 0xff) / 255f * 32f;
         probeLonelyAlone = (pixel.get(3) & 0xff) / 255f * 32f;
 
-        Log.i(TAG, String.format(
+        say(String.format(
             "fg probe: mean block fit %.4f, %.1f%% of blocks fit at the noise"
                 + " floor, blocks sit %.1f px from their neighbours on average"
                 + " (%.1f px among the floor-fit ones, and if that is the"
@@ -2423,12 +2546,12 @@ public class FrameSynthesizer implements FramePacer.Target {
                         filteredBack[i].allocate(lumaW / blockX, lumaH / blockY,
                                                  GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
                     }
-                    Log.i(TAG, "two-stage search ready: coarse luma " + coarseW + "x" + coarseH
+                    say("two-stage search ready: coarse luma " + coarseW + "x" + coarseH
                         + ", coarse vectors " + (coarseW / blockX) + "x" + (coarseH / blockY)
                         + ", window about " + SEARCH_WINDOW_PX + " px becomes about "
                         + (SEARCH_WINDOW_PX * lumaW / coarseW) + " px of scene");
                 }
-                Log.i(TAG, "tier 1 ready: block " + blockX + "x" + blockY
+                say("tier 1 ready: block " + blockX + "x" + blockY
                     + ", luma " + lumaW + "x" + lumaH
                     + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
             }
@@ -2471,6 +2594,16 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (probe != null) probe.release();
         }
         colour[0] = colour[1] = luma[0] = luma[1] = null;
+        // **The one texture name that is held outside a Target, and it outlived
+        // the object it names.** Every other reference here is nulled; this was
+        // a bare int, and repeatLastPresent guards only on it being non-zero.
+        // A synthesised frame pending across a resolution change reaches
+        // presentSynthesized, which calls ensureTargets -- releasing these and
+        // resetting realFrames to 0 -- and then declines on `realFrames < 2`,
+        // at which point GLRenderer repeats a name that was deleted moments
+        // earlier. Black if the name is merely dead; a full-screen present of
+        // some window's texture if the generation changed and it was recycled.
+        repeatTexture = 0;
         vectors = null;
         filtered[0] = filtered[1] = null;
         filteredIndex = -1;
@@ -2553,7 +2686,7 @@ public class FrameSynthesizer implements FramePacer.Target {
 
         // The one line that is always printed, because a container with frame
         // generation on and nothing to say about it is itself the answer.
-        Log.i(TAG, "real " + realFrames + ", tier0 " + tier0Frames
+        say("real " + realFrames + ", tier0 " + tier0Frames
             + ", tier1 " + tier1Frames + ", skipped " + skipped
             + ", " + multiple + "x");
 
@@ -2561,9 +2694,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             // **The only line here that describes the display rather than this
             // thread.** Where it disagrees with `fg cadence` below, this one is
             // right and that one is measuring the queue.
-            Log.i(TAG, timestamps.describe(vsyncPeriodNanos()));
+            say(timestamps.describe(vsyncPeriodNanos()));
         } else if (wants("pacing") && timestamps.unavailable()) {
-            Log.i(TAG, "fg presented: this surface answers none of the frame"
+            say("fg presented: this surface answers none of the frame"
                 + " timestamps -- not scanout, not composition, not latch. Every"
                 + " cadence figure below is a draw schedule.");
         }
@@ -2572,7 +2705,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             // Even spacing is what smooth motion is, not the count. A mean of
             // 33 ms with a spread from 0.2 to 56 is two frames inside one
             // refresh -- the first never scanned out -- and then a long wait.
-            Log.i(TAG, String.format(
+            say(String.format(
                 "fg cadence: presented every %.1f ms mean, %.1f shortest,"
                     + " %.1f longest, over %d gaps; %d shared a refresh with"
                     + " the present before them and were never shown",
@@ -2587,7 +2720,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
         if (wants("pacing")) {
             final float perSecond = realThisSecond * 1000f / elapsed;
-            Log.i(TAG, String.format(
+            say(String.format(
                 "fg pacing: %.1f real/s, %.1f synthesised/s, %.1f presented/s,"
                     + " %d skipped, interval %.1f ms (%.1f fps),"
                     + " %dx asked / %dx fitted into a %.2f ms refresh, %s",
@@ -2600,7 +2733,7 @@ public class FrameSynthesizer implements FramePacer.Target {
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
             // Where the gate currently sits and what it was derived from, so a
             // 4x-to-1x drop can be read rather than guessed at.
-            Log.i(TAG, String.format(
+            say(String.format(
                 "fg gate: interpolating up to %.0f ms (guest habit %.0f ms),"
                     + " interval now %.0f ms -- %s",
                 worthInterpolating() / 1e6f, baselineInterval() / 1e6f,
@@ -2610,7 +2743,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         if (wants("field")) {
-            Log.i(TAG, String.format(
+            say(String.format(
                 "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
                     + " %s, matcher refusals %d, moved %.0f px mean"
                     + " (window about %d)",
@@ -2627,7 +2760,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             // the two-stage search running, motion larger than the window is
             // representable, so `moved` climbing above it is the fix working
             // rather than the failure it used to be.
-            Log.i(TAG, "fg search: " + (pyramidRan
+            say("fg search: " + (pyramidRan
                     ? "two-stage, coarse " + coarseVectors.width + "x" + coarseVectors.height
                         + " then full " + vectors.width + "x" + vectors.height
                     : (coarseVectors == null ? "single-pass (no coarse targets)"
@@ -2640,7 +2773,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (wants("layers")) {
             // What went into the flattened frame everything downstream works on.
             // See GLRenderer.describeLayers.
-            Log.i(TAG, "fg layers: " + renderer.describeLayers());
+            say("fg layers: " + renderer.describeLayers());
         }
 
         if (wants("quality")) {
@@ -2677,7 +2810,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             // it means the same thing at every phase, which the ratio does not.
             final float excess = moving > 0.001f
                 ? closeness - (1f - measuredPhase) : 0f;
-            Log.i(TAG, String.format(
+            say(String.format(
                 "fg truth: %+.0f%% further from the real frame than a perfect"
                     + " interpolation at this phase (0%% is perfect), sits at"
                     + " %.0f%% where phase alone gives %.0f%%, %.3f%% fetched"
@@ -2695,7 +2828,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             // many 32x32 cells are more than half invented, and how bad the
             // single worst cell is. A frame with zero cells and a mean of 1.5%
             // is fine. One cell is visible. Twenty is what was reverted.
-            Log.i(TAG, String.format(
+            say(String.format(
                 "fg patches: %d interior cells of %d take over half their"
                     + " content from off the frame (%d more at the border,"
                     + " which a pan cannot avoid), worst interior cell %.0f%%",

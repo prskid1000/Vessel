@@ -20,16 +20,35 @@ package com.winlator.renderer.material;
  * together.
  *
  * <p>Four taps rather than sixteen. With {@code GL_LINEAR} on the source, a tap
- * placed one source texel diagonally from the centre of each 4x4 region averages
- * a 2x2 for free, so four of them cover the sixteen texels exactly and evenly.
- * Averaging matters here: a point sample of every fourth pixel would alias, and a
- * matcher fed aliased detail matches the aliasing rather than the scene.
+ * placed a quarter of a <em>target</em> texel diagonally from the centre of the
+ * region averages that quadrant for free, so four of them cover the region
+ * exactly and evenly. Averaging matters here: a point sample of every fourth
+ * pixel would alias, and a matcher fed aliased detail matches the aliasing
+ * rather than the scene.
+ *
+ * <p><b>A quarter of the target texel, not one source texel, and the two are
+ * only the same when the ratio is exactly four.</b> It is not. Both grids are
+ * rounded down to a whole number of search blocks, so a 1280x720 luma pair
+ * gives a 320x176 coarse pair -- 4.000 in x and 4.091 in y. Offsetting by one
+ * source texel then puts the y taps inside the quadrant rather than at its
+ * bilinear midpoint, and the "free 2x2 average" silently stops being one: the
+ * weights drift off 0.25 and the result is a partly point-sampled reduction.
+ * Aliasing is the one thing this pass exists to prevent, and it was leaking in
+ * on the axis nobody checked. {@code MergeFieldMaterial} already takes the two
+ * ratios as a vec2 for exactly this reason; this is the same fact, one pass
+ * earlier.
  */
 public class DownsampleLumaMaterial extends ScreenMaterial {
     public final DownsampleUniforms downsampleUniforms = new DownsampleUniforms();
 
     public static class DownsampleUniforms {
-        /** One texel of the <em>source</em>, which is four times this target. */
+        /**
+         * A quarter of one <em>target</em> texel, in the shared UV space.
+         *
+         * <p>{@code 1 / (4 * target)}, which reduces to one source texel only
+         * when the source is exactly four times the target. See the class
+         * comment for why it is not.
+         */
         public final Uniform texelSize = new Uniform("texelSize");
     }
 
