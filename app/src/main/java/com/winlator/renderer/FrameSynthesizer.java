@@ -911,16 +911,23 @@ public class FrameSynthesizer implements FramePacer.Target {
                 return;
             }
             final boolean indexedAtRef = missRef < missTarget;
+            // **This verdict is against the projection as it now stands, not as
+            // it stood when the probe was written.** InterpolateMaterial used to
+            // project onto the newer site; this probe is what moved it onto the
+            // older one, so ref-indexing is now the case the shader is built
+            // for and target-indexing is the one that would be wrong. A line
+            // that still said "correcting the wrong way" after the correction
+            // landed would be read as a live fault every session.
             say(String.format(
                 "fg basepoint: vectors are indexed in the %s and point %s, so"
-                    + " InterpolateMaterial's projection step is %s",
+                    + " InterpolateMaterial's projection onto the older site is %s",
                 indexedAtRef ? "REF image -- the OLDER frame"
                              : "TARGET image -- the NEWER frame",
                 vx > 0 ? "ref -> target as written" : "target -> ref, inverted",
                 indexedAtRef
-                    ? "CORRECTING THE WRONG WAY: it assumes the vector at q"
-                        + " describes what is at q in the NEWER frame"
-                    : "correct as written"));
+                    ? "correct"
+                    : "WRONG: the field is indexed on the newer frame, so the"
+                        + " step should go to fromNewer instead"));
         } finally {
             ref.release();
             target.release();

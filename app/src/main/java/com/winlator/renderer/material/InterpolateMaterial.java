@@ -20,12 +20,25 @@ package com.winlator.renderer.material;
  *
  * <h2>The geometry</h2>
  *
- * <p>Write {@code b} for the backward field measured on N: for a point at
- * {@code p} in N, the offset to where that same content sat in N-1. Travelling
- * linearly, at phase {@code t} it is at {@code p + b(1 - t)}. So whatever the
- * interpolated frame shows at {@code q} came from {@code q - b(1 - t)} in N and
- * {@code q + bt} in N-1. That is the same derivation FidelityFX uses, sampling
- * the previous backbuffer at {@code uv + mv} and the current at {@code uv - mv}.
+ * <p>Write {@code b} for the field as this shader uses it: for content sitting
+ * at {@code x} in N-1, {@code -b} is the offset to where it is in N. Travelling
+ * linearly, at phase {@code t} it is at {@code x - bt}. So whatever the
+ * interpolated frame shows at {@code q} came from {@code q + bt} in N-1 and
+ * {@code q - b(1 - t)} in N. That is the same derivation FidelityFX uses,
+ * sampling the previous backbuffer at {@code uv + mv} and the current at
+ * {@code uv - mv}.
+ *
+ * <p><b>{@code b} is indexed on N-1, and this said "measured on N" until the
+ * driver was asked.</b> The distinction is invisible in the fetch sites above --
+ * they are the same two expressions either way -- and decisive for anything that
+ * SAMPLES the field, because the two indexings are a whole displacement apart.
+ * {@code QCOM_motion_estimation} does not say which of its two inputs the vector
+ * is based at, and {@link SignMaterial}'s claim that the two readings "differ by
+ * a sign" is not right: under a rigid translation both hold the same vector
+ * everywhere, so the question is invisible in exactly the camera pan that probe
+ * votes on. {@code FrameSynthesizer.probeBasepoint} settles it on a synthetic
+ * translation whose answer is known -- the field is indexed in the matcher's
+ * {@code ref}, which here is N-1.
  *
  * <p>Sampling symmetrically about the output pixel like this is bilateral motion
  * compensation, and it is what makes holes and overlaps impossible: every output
@@ -379,18 +392,52 @@ public class InterpolateMaterial extends ScreenMaterial {
 
             "void main() {",
                 // ---- the field, projected to this instant --------------------
-                // See the class comment: sampling at vUV asks about whatever sits
-                // there in frame N, which near a moving edge is the wrong object.
-                // One fixed-point step moves the read to where this instant's
-                // content came from, and everything below -- the fetch sites,
-                // the photometric tests, the consistency test and the four
-                // predictions -- uses the field read THERE. It used to use the
-                // projected blocks for the predictions and the unprojected mean
-                // for every decision about them, so at exactly the edges the
-                // projection exists for, the trust weights were describing
-                // pixels the predictions did not read.
+                //
+                // Sampling at vUV asks about whatever sits there in the frame
+                // the field is indexed in, which near a moving edge is the wrong
+                // object. One fixed-point step moves the read to where this
+                // instant's content came from, and everything below -- the fetch
+                // sites, the photometric tests, the consistency test and the
+                // four predictions -- uses the field read THERE.
+                //
+                // **The step used to go the other way, and the driver settled
+                // it.** This projected onto `fromNewer`, on the belief stated
+                // throughout this file that the field is measured ON frame N:
+                // that the vector at q describes what is at q in the newer
+                // frame. FrameSynthesizer.probeBasepoint asked the hardware
+                // directly -- a 512 px textured stripe translated a known 64 px,
+                // through the real matcher at the real luma size -- and the
+                // responding block columns began at the stripe's position in the
+                // REF image, 256, against 320 for the alternative, with a
+                // recovered vector of (+63.2, +0.0) out of +64. Identical across
+                // three sessions.
+                //
+                // Ref is `previousLuma`, so the field is indexed on frame N-1,
+                // and the N-1 site for this pixel is `fromOlder`, not
+                // `fromNewer`. The two are a whole displacement apart: at the
+                // 120-150 px this pipeline runs at, the old step moved the read
+                // that far in the wrong direction, so near every motion boundary
+                // the vector applied to a pixel belonged to content on the far
+                // side of it.
+                //
+                // Nothing else moves. `mean` is still -r and predict() still
+                // fetches at q + r(1-t) and q - r*t, which is the same geometry
+                // written in the same units; the sign SignMaterial latched is
+                // still the sign. Only the coordinate the field is read AT
+                // changes, from the newer site to the older one.
+                //
+                // It also lands `mean` and `bAtOlder` on the same point for the
+                // first time. The consistency test below subtracts one from the
+                // other, and the backward field is indexed on the warped newer
+                // frame -- N-1's geometry -- and read at `mo`. With the forward
+                // field read at `p` = `mo`, eOlder is finally two fields sampled
+                // at one position. eNewer is not: it reads the forward field at
+                // an N coordinate, which this correction does not fix and which
+                // is left alone deliberately rather than rewritten in the same
+                // change that moved the projection.
                 "vec2 mean = fieldAt(vUV);",
-                "vec2 p = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
+                // The N-1 site, which is `fromOlder` in predict(). See above.
+                "vec2 p = clamp(vUV + mean * phase, 0.0, 1.0);",
                 "vec4 weight; vec2 m0, m1, m2, m3;",
                 "readField(p, weight, m0, m1, m2, m3);",
                 "mean = weight.x * m0 + weight.y * m1 + weight.z * m2 + weight.w * m3;",
