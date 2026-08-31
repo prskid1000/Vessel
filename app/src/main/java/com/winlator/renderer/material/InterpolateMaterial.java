@@ -168,17 +168,6 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform mark = new Uniform("mark");
         /** VESSEL: which way the field points, settled once. See SignMaterial. */
         public final Uniform fieldSign = new Uniform("fieldSign");
-        /**
-         * Colour size over luma size, per axis: 1 when the guest is a whole
-         * number of search blocks, slightly above 1 when it is not.
-         *
-         * <p>The luma pair and the field cover only the block-rounded top-left
-         * of the frame, so reading them at the colour target's UV stretched
-         * them over the whole of it -- six pixels of misregistration at the
-         * right edge of a 1366-wide guest, and every photometric test in this
-         * shader was comparing luma from the wrong pixel there.
-         */
-        public final Uniform lumaScale = new Uniform("lumaScale");
     }
 
     @Override
@@ -244,49 +233,8 @@ public class InterpolateMaterial extends ScreenMaterial {
             // which is hard-edged black speckle through every detailed region of
             // every synthesised frame.
             "uniform float fieldSign;",
-            // Colour UV to luma/field UV. See the Uniform's comment.
-            "uniform vec2 lumaScale;",
 
             "varying vec2 vUV;",
-
-            // Every luma and field read goes through here, in colour UV. The
-            // luma covers the block-rounded top-left of the colour frame, so
-            // its UV is the colour UV scaled up.
-            "vec2 lumaUV(vec2 uv) { return clamp(uv * lumaScale, 0.0, 1.0); }",
-            "float lumaN(vec2 uv) { return texture2D(lumaNewerTexture, lumaUV(uv)).r; }",
-            "float lumaO(vec2 uv) { return texture2D(lumaOlderTexture, lumaUV(uv)).r; }",
-
-            // The four blocks around a colour-space position and their
-            // raised-cosine window. `base` is the block up-and-left of the
-            // position and the fraction runs 0..1 from that block's centre to
-            // the next one's. The four weights sum to one everywhere, so the
-            // blend is a partition of unity and cannot brighten or darken the
-            // picture; and because the window flattens at both ends, two blocks
-            // that disagree hand over to each other smoothly instead of at a
-            // seam -- which is what turns a wrong block into a soft ghost
-            // rather than a hard displacement.
-            "void readField(vec2 uv, out vec4 w, out vec2 a, out vec2 b, out vec2 c, out vec2 d) {",
-                "vec2 texel = 1.0 / vectorSize;",
-                "vec2 grid = uv * lumaScale * vectorSize - 0.5;",
-                "vec2 base = floor(grid);",
-                "vec2 f = 0.5 - 0.5 * cos(PI * (grid - base));",
-                "w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),",
-                         "(1.0 - f.x) * f.y, f.x * f.y);",
-                "vec2 scale = motionScale * fieldSign;",
-                "a = texture2D(motionTexture, (base + vec2(0.5, 0.5)) * texel).rg * scale;",
-                "b = texture2D(motionTexture, (base + vec2(1.5, 0.5)) * texel).rg * scale;",
-                "c = texture2D(motionTexture, (base + vec2(0.5, 1.5)) * texel).rg * scale;",
-                "d = texture2D(motionTexture, (base + vec2(1.5, 1.5)) * texel).rg * scale;",
-            "}",
-            "vec2 fieldAt(vec2 uv) {",
-                "vec4 w; vec2 a, b, c, d;",
-                "readField(uv, w, a, b, c, d);",
-                "return w.x * a + w.y * b + w.z * c + w.w * d;",
-            "}",
-            // The backward field, read NEAREST at the older frame's site.
-            "vec2 backAt(vec2 uv) {",
-                "return texture2D(backMotionTexture, lumaUV(uv)).rg * motionScale * fieldSign;",
-            "}",
 
             // One bilateral prediction: both endpoints displaced symmetrically
             // about this pixel and blended by phase, so each is trusted most
@@ -316,23 +264,6 @@ public class InterpolateMaterial extends ScreenMaterial {
             // So the two endpoints carry weights instead of a straight phase mix.
             // Where neither is contaminated the weights are (1-phase) and phase
             // and nothing changes at all.
-            // **Bilinear, fractional, and measured to stay that way.**
-            //
-            // The colour targets are GL_LINEAR, so a fetch displaced by a
-            // fraction of a texel is a box blur of that fraction's width, and
-            // at 4x the three phases put the same vector on three different
-            // fractions while the real frame that follows has none. That is a
-            // sharpness pulse on fine texture, and snapping the displacement
-            // to whole texels was tried against it. The bench -- once it
-            // could see the sampler at all; see texflicker.sampler_flicker --
-            // measured it as worse, 2.00 against 1.03 over textured pixels:
-            // a half-texel of position is a larger change to fine texture
-            // than a half-texel of blur. A Catmull-Rom fetch, which keeps the
-            // position and most of the sharpness, read 1.10 -- no better, at
-            // four to nine times the fetches. So the fetch is a plain
-            // bilinear one, and the texture flicker that remains is the
-            // field's (1.80 estimated against 0.87 true on the same bench),
-            // not the sampler's.
             "vec3 predict(vec2 v, float wOlder, float wNewer) {",
                 "vec2 fromNewer = clamp(vUV - v * (1.0 - phase), 0.0, 1.0);",
                 "vec2 fromOlder = clamp(vUV + v * phase, 0.0, 1.0);",
@@ -342,22 +273,53 @@ public class InterpolateMaterial extends ScreenMaterial {
             "}",
 
             "void main() {",
-                // ---- the field, projected to this instant --------------------
+                // ---- the block grid this pixel sits in -----------------------
+                // Half a texel back, so `base` is the block up-and-left of the
+                // pixel and the fraction runs 0..1 from that block's centre to
+                // the next one's.
+                "vec2 texel = 1.0 / vectorSize;",
+                "vec2 grid = vUV * vectorSize - 0.5;",
+                "vec2 base = floor(grid);",
+
+                // **The overlapped window.** A raised cosine of the position
+                // between block centres. The four weights sum to one everywhere,
+                // so this is a partition of unity and cannot brighten or darken
+                // the picture; and because the window flattens at both ends, two
+                // blocks that disagree hand over to each other smoothly instead
+                // of at a seam. That smooth hand-over is the whole mechanism --
+                // it is what turns a wrong block into a soft ghost rather than a
+                // hard displacement.
+                "vec2 w = 0.5 - 0.5 * cos(PI * (grid - base));",
+                "vec4 weight = vec4((1.0 - w.x) * (1.0 - w.y),",
+                                   "w.x * (1.0 - w.y),",
+                                   "(1.0 - w.x) * w.y,",
+                                   "w.x * w.y);",
+
+                "vec2 scale = motionScale * fieldSign;",
+                "vec2 m0 = texture2D(motionTexture, (base + vec2(0.5, 0.5)) * texel).rg * scale;",
+                "vec2 m1 = texture2D(motionTexture, (base + vec2(1.5, 0.5)) * texel).rg * scale;",
+                "vec2 m2 = texture2D(motionTexture, (base + vec2(0.5, 1.5)) * texel).rg * scale;",
+                "vec2 m3 = texture2D(motionTexture, (base + vec2(1.5, 1.5)) * texel).rg * scale;",
+
+                "vec2 mean = weight.x * m0 + weight.y * m1",
+                          "+ weight.z * m2 + weight.w * m3;",
+
+                // ---- read the field where this instant's content is ----------
                 // See the class comment: sampling at vUV asks about whatever sits
                 // there in frame N, which near a moving edge is the wrong object.
-                // One fixed-point step moves the read to where this instant's
-                // content came from, and everything below -- the fetch sites,
-                // the photometric tests, the consistency test and the four
-                // predictions -- uses the field read THERE. It used to use the
-                // projected blocks for the predictions and the unprojected mean
-                // for every decision about them, so at exactly the edges the
-                // projection exists for, the trust weights were describing
-                // pixels the predictions did not read.
-                "vec2 mean = fieldAt(vUV);",
                 "vec2 p = clamp(vUV - mean * (1.0 - phase), 0.0, 1.0);",
-                "vec4 weight; vec2 m0, m1, m2, m3;",
-                "readField(p, weight, m0, m1, m2, m3);",
-                "mean = weight.x * m0 + weight.y * m1 + weight.z * m2 + weight.w * m3;",
+                "vec2 pgrid = p * vectorSize - 0.5;",
+                "vec2 pbase = floor(pgrid);",
+                "vec2 pw = 0.5 - 0.5 * cos(PI * (pgrid - pbase));",
+                "weight = vec4((1.0 - pw.x) * (1.0 - pw.y),",
+                              "pw.x * (1.0 - pw.y),",
+                              "(1.0 - pw.x) * pw.y,",
+                              "pw.x * pw.y);",
+
+                "m0 = texture2D(motionTexture, (pbase + vec2(0.5, 0.5)) * texel).rg * scale;",
+                "m1 = texture2D(motionTexture, (pbase + vec2(1.5, 0.5)) * texel).rg * scale;",
+                "m2 = texture2D(motionTexture, (pbase + vec2(0.5, 1.5)) * texel).rg * scale;",
+                "m3 = texture2D(motionTexture, (pbase + vec2(1.5, 1.5)) * texel).rg * scale;",
 
                 // ---- a pixel that did not change did not move ----------------
                 //
@@ -406,16 +368,16 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // because both feed them: `carry` decides how far the result is
                 // pulled back towards a stationary reading, and the two endpoint
                 // weights decide which of the two frames is worth reading at all.
-                "float fitStill = abs(lumaN(vUV)",
-                                   "- lumaO(vUV));",
+                "float fitStill = abs(texture2D(lumaNewerTexture, vUV).r",
+                                   "- texture2D(lumaOlderTexture, vUV).r);",
                 // **Kept unclamped as well, because the clamp is a lie the
                 // consistency test below must not be told.** See the gate there.
                 "vec2 mnRaw = vUV - mean * (1.0 - phase);",
                 "vec2 moRaw = vUV + mean * phase;",
                 "vec2 mn = clamp(mnRaw, 0.0, 1.0);",
                 "vec2 mo = clamp(moRaw, 0.0, 1.0);",
-                "float fitMoving = abs(lumaN(mn)",
-                                    "- lumaO(mo));",
+                "float fitMoving = abs(texture2D(lumaNewerTexture, mn).r",
+                                    "- texture2D(lumaOlderTexture, mo).r);",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
 
@@ -425,11 +387,11 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // one answer describes all of them and costs two fetches instead
                 // of eight. See predict().
                 "float stillAtNewer = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                    "abs(lumaN(mn)",
-                      "- lumaO(mn)));",
+                    "abs(texture2D(lumaNewerTexture, mn).r",
+                      "- texture2D(lumaOlderTexture, mn).r));",
                 "float stillAtOlder = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                    "abs(lumaN(mo)",
-                      "- lumaO(mo)));",
+                    "abs(texture2D(lumaNewerTexture, mo).r",
+                      "- texture2D(lumaOlderTexture, mo).r));",
                 // And whether this pixel is one that moved at all. A still pixel
                 // reading still content is a subtitle reading itself, which is
                 // correct and must not be disturbed.
@@ -469,38 +431,34 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // instead of 254, because the channel it travelled in was two
                 // bits wide. The flow already crossing this shader answers the
                 // same question without leaving the host.
-                // **Both sides are round trips now, and the newer side never
-                // was.** What shipped as `eNewer` compared the forward field
-                // with ITSELF at two positions -- projected against unprojected
-                // -- so it fired on any spatial gradient in the field, which is
-                // every motion boundary whether or not anything was occluded.
-                // Measured on the bench that is what it did: the mask fired on
-                // 27.7% of the frame to cover 1.1% of true disocclusion, and
-                // the picture scored better with the term switched off.
+                // **Read under the same window `mean` was built with, and
+                // this is the shimmer along a moving silhouette.**
                 //
-                // The forward field at the newer site says mn corresponds to
-                // mo. The backward field at mo, measured independently with the
-                // frames swapped, says mo corresponds to mo + b. If the older
-                // frame can see this surface those cancel: b = -mean, and
-                // `eOlder` is zero. If the newer frame can see it, the forward
-                // field at the site the backward one claims, mo + b, points
-                // back by -b, and `eNewer` is zero. Where a surface is covered
-                // in one frame, the field measured ON that frame is describing
-                // something else there, and it is that frame's own round trip
-                // that fails -- so the failing side is the one to drop.
+                // `mean` is the blend of four blocks under the raised
+                // cosine. A NEAREST sample of one block subtracted from it
+                // leaves half the local block-to-block disagreement in the
+                // answer with nothing occluded -- and at a silhouette the
+                // neighbouring blocks disagree by definition, because one
+                // holds the object and the next holds the background. So
+                // the mask stepped at the 8-pixel grid, and as the object
+                // drifted across that grid the step swept along its edge,
+                // frame by frame. The decision was never wrong; it was
+                // taken on a quantity that was never zero.
                 //
-                // Read under the same window `mean` was built with. A NEAREST
-                // sample subtracted from a blended one leaves half the local
-                // block-to-block disagreement in the answer with nothing
-                // occluded, and at a silhouette the neighbouring blocks
-                // disagree by definition. That was a mask stepping at the
-                // 8-pixel grid, sweeping along every moving edge.
-                "vec2 bAtOlder = backAt(mo);",
-                "vec2 fRound = fieldAt(clamp(moRaw + bAtOlder, 0.0, 1.0));",
-                // Back into pixels, so the thresholds mean the same thing at
-                // every resolution.
+                // It costs nothing to fix. `weight` and `m0`..`m3` were
+                // re-read at `p` further up, and `p` is this same `mn` by
+                // the identical expression, so the blend the four
+                // predictions are about to use is the blend this test
+                // wants and it is already in registers. This removes a
+                // texture fetch rather than adding one.
+                "vec2 fAtNewer = weight.x * m0 + weight.y * m1",
+                              "+ weight.z * m2 + weight.w * m3;",
+                "vec2 bAtOlder = texture2D(backMotionTexture, mo).rg * scale;",
+                // Back into luma pixels, so the thresholds mean the same thing at
+                // every resolution. Dividing by motionScale is exactly
+                // multiplying by the luma size.
+                "float eNewer = length((fAtNewer - mean) / motionScale);",
                 "float eOlder = length((bAtOlder + mean) / motionScale);",
-                "float eNewer = length((fRound + bAtOlder) / motionScale);",
                 // **Off the frame there is no evidence, and a clamp manufactures
                 // some. This is the shimmer at the borders.**
                 //
@@ -569,24 +527,12 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // ---- overlapped block motion compensation --------------------
                 // Four predictions, one per block, combined under the window.
                 // Nothing is discarded and nothing is chosen.
-                //
-                // Where the four blocks agree -- most of the frame, after ten
-                // anchored median passes -- the four predictions are the same
-                // fetch and the window sums to one, so one prediction is the
-                // exact answer for six fewer colour fetches. The branch is
-                // coherent: it takes the same side across a whole block.
-                "vec3 shown;",
-                "vec2 spread = abs(m1 - m0) + abs(m2 - m0) + abs(m3 - m0);",
-                "if (spread.x + spread.y < 1.0e-7) {",
-                    "shown = predict(m0, wOlder, wNewer);",
-                "} else {",
-                    "vec3 q0 = predict(m0, wOlder, wNewer);",
-                    "vec3 q1 = predict(m1, wOlder, wNewer);",
-                    "vec3 q2 = predict(m2, wOlder, wNewer);",
-                    "vec3 q3 = predict(m3, wOlder, wNewer);",
-                    "shown = weight.x * q0 + weight.y * q1",
-                          "+ weight.z * q2 + weight.w * q3;",
-                "}",
+                "vec3 q0 = predict(m0, wOlder, wNewer);",
+                "vec3 q1 = predict(m1, wOlder, wNewer);",
+                "vec3 q2 = predict(m2, wOlder, wNewer);",
+                "vec3 q3 = predict(m3, wOlder, wNewer);",
+                "vec3 shown = weight.x * q0 + weight.y * q1",
+                            "+ weight.z * q2 + weight.w * q3;",
 
                 // ---- did this pixel move, or is it painted on the screen? ----
                 //

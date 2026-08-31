@@ -123,53 +123,64 @@ public class MedianMaterial extends ScreenMaterial {
             "uniform vec2 texelSize;",
             "varying vec2 vUV;",
 
+            // How far one candidate sits from the whole neighbourhood.
+            "float spread(vec2 v, vec2 a, vec2 b, vec2 c, vec2 d, vec2 e,",
+                         "vec2 f, vec2 g, vec2 h, vec2 i, vec2 j, vec2 k) {",
+                "return length(v - a) + length(v - b) + length(v - c)",
+                     "+ length(v - d) + length(v - e) + length(v - f)",
+                     "+ length(v - g) + length(v - h) + length(v - i)",
+                     "+ length(v - j) + length(v - k);",
+            "}",
+
             "void main() {",
-                // The nine neighbours, the matcher's own answer, and last
-                // frame's. Indexed by loop counters only, which is the one form
-                // of array indexing GLSL ES 1.00 guarantees.
-                "vec2 c[11];",
-                "c[0] = texture2D(screenTexture, vUV + vec2(-texelSize.x, -texelSize.y)).rg;",
-                "c[1] = texture2D(screenTexture, vUV + vec2( 0.0,         -texelSize.y)).rg;",
-                "c[2] = texture2D(screenTexture, vUV + vec2( texelSize.x, -texelSize.y)).rg;",
-                "c[3] = texture2D(screenTexture, vUV + vec2(-texelSize.x,  0.0)).rg;",
-                "c[4] = texture2D(screenTexture, vUV).rg;",
-                "c[5] = texture2D(screenTexture, vUV + vec2( texelSize.x,  0.0)).rg;",
-                "c[6] = texture2D(screenTexture, vUV + vec2(-texelSize.x,  texelSize.y)).rg;",
-                "c[7] = texture2D(screenTexture, vUV + vec2( 0.0,          texelSize.y)).rg;",
-                "c[8] = texture2D(screenTexture, vUV + vec2( texelSize.x,  texelSize.y)).rg;",
+                // The nine candidates, named rather than looped: GLSL ES 1.00
+                // cannot index an array by anything but a constant expression
+                // unless the loop unrolls, and being explicit is cheaper to read
+                // than arranging for that.
+                "vec2 c0 = texture2D(screenTexture, vUV + vec2(-texelSize.x, -texelSize.y)).rg;",
+                "vec2 c1 = texture2D(screenTexture, vUV + vec2( 0.0,         -texelSize.y)).rg;",
+                "vec2 c2 = texture2D(screenTexture, vUV + vec2( texelSize.x, -texelSize.y)).rg;",
+                "vec2 c3 = texture2D(screenTexture, vUV + vec2(-texelSize.x,  0.0)).rg;",
+                "vec2 c4 = texture2D(screenTexture, vUV).rg;",
+                "vec2 c5 = texture2D(screenTexture, vUV + vec2( texelSize.x,  0.0)).rg;",
+                "vec2 c6 = texture2D(screenTexture, vUV + vec2(-texelSize.x,  texelSize.y)).rg;",
+                "vec2 c7 = texture2D(screenTexture, vUV + vec2( 0.0,          texelSize.y)).rg;",
+                "vec2 c8 = texture2D(screenTexture, vUV + vec2( texelSize.x,  texelSize.y)).rg;",
                 // The tenth: what the matcher said here, before any pass ran.
-                "c[9] = texture2D(originalTexture, vUV).rg;",
+                "vec2 c9 = texture2D(originalTexture, vUV).rg;",
                 // The eleventh: what this block said one real frame ago. Folded
                 // back onto the centre when there is no history, so it costs a
                 // duplicated candidate rather than a branch and cannot pull the
                 // score anywhere on the first frame.
-                "c[10] = mix(c[4], texture2D(previousTexture, vUV).rg, temporalValid);",
+                "vec2 c10 = mix(c4, texture2D(previousTexture, vUV).rg, temporalValid);",
 
-                // **Each distance once.** The score of a candidate is its total
-                // distance to the set, and distance is symmetric, so the 121
-                // lengths the unrolled version took are 55: every pair is
-                // measured once and credited to both ends.
-                "float score[11];",
-                "for (int i = 0; i < 11; i++) score[i] = 0.0;",
-                "for (int i = 0; i < 11; i++) {",
-                    "for (int j = 0; j < 11; j++) {",
-                        "if (j > i) {",
-                            "float d = length(c[i] - c[j]);",
-                            "score[i] += d;",
-                            "score[j] += d;",
-                        "}",
-                    "}",
-                "}",
+                // Seeded with the centre, so the pass is a no-op wherever the
+                // nine already agree -- which is most of the field, most of the
+                // time.
+                "vec2 best = c4;",
+                "float bestScore = spread(c4, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "float score;",
 
-                // Seeded with the centre and beaten only strictly, so the pass
-                // is a no-op wherever the neighbourhood already agrees -- which
-                // is most of the field, most of the time -- and ties fall to
-                // what the block already said.
-                "vec2 best = c[4];",
-                "float bestScore = score[4];",
-                "for (int i = 0; i < 11; i++) {",
-                    "if (score[i] < bestScore) { bestScore = score[i]; best = c[i]; }",
-                "}",
+                "score = spread(c0, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c0; }",
+                "score = spread(c1, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c1; }",
+                "score = spread(c2, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c2; }",
+                "score = spread(c3, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c3; }",
+                "score = spread(c5, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c5; }",
+                "score = spread(c6, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c6; }",
+                "score = spread(c7, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c7; }",
+                "score = spread(c8, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c8; }",
+                "score = spread(c9, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c9; }",
+                "score = spread(c10, c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);",
+                "if (score < bestScore) { bestScore = score; best = c10; }",
 
                 "gl_FragColor = vec4(best, 0.0, 1.0);",
             "}"
