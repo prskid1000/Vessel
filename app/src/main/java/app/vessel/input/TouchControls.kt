@@ -571,10 +571,20 @@ object TouchLayouts {
 
             // Along the top edge, which is where an index finger reaches on a
             // phone held in two hands.
-            padButton("btn-l1", GamepadControl.L1, 0.055f, 0.09f, 0.048f, latching = true),
-            padButton("btn-l2", GamepadControl.L2, 0.140f, 0.09f, 0.048f, latching = true),
-            padButton("btn-r2", GamepadControl.R2, 0.860f, 0.09f, 0.048f),
-            padButton("btn-r1", GamepadControl.R1, 0.945f, 0.09f, 0.048f),
+            //
+            // **Triggers outboard, shoulders inboard**, which is the way round a
+            // hand actually meets them. On a real pad the trigger is the one the
+            // index finger curls onto first and the shoulder sits behind it;
+            // held flat against glass, the outer position is what the finger
+            // reaches without the hand giving up its grip on the end of the
+            // phone. This was the other way round -- L1 and R1 outermost -- so
+            // the two that get held down through a whole fight, and the two
+            // marked latching for exactly that reason, were the ones furthest
+            // from where the finger rests.
+            padButton("btn-l2", GamepadControl.L2, 0.055f, 0.09f, 0.048f, latching = true),
+            padButton("btn-l1", GamepadControl.L1, 0.140f, 0.09f, 0.048f, latching = true),
+            padButton("btn-r1", GamepadControl.R1, 0.860f, 0.09f, 0.048f),
+            padButton("btn-r2", GamepadControl.R2, 0.945f, 0.09f, 0.048f),
 
             padButton("btn-select", GamepadControl.SELECT, 0.460f, 0.09f, 0.040f),
             padButton("btn-start", GamepadControl.START, 0.540f, 0.09f, 0.040f),
