@@ -236,8 +236,84 @@ def fractional_sequence(step, n, seed=5):
             for i in range(n)]
 
 
+def refine(field, newer, older, samples=3, damp=0.02, limit=0.5):
+    """RefineFieldMaterial: one damped Lucas-Kanade step per block.
+
+    The shader, in numpy. The residual is scored at the midpoint --
+    r = N(p - f/2) - O(p + f/2), the quantity SignMaterial scores -- and a
+    displacement d changes it by -g.d with g the mean of the two images'
+    gradients, so the d that cancels it over the block solves
+
+        (sum g g^T) d = sum g r
+
+    Damped in proportion to the block's own gradient energy, which is what
+    keeps a flat or one-directional block (the aperture problem) from
+    returning an arbitrary large number.
+
+    THE DEFAULTS ARE THE SHIPPED ONES, and they were measured here. Mean field
+    error against a truth of 30.5 px, one iteration:
+
+        clamp 1.0, damp 0.05      0.473        clamp 0.5, damp 0.05    0.359
+        clamp 1.0, damp 0.10      0.459        clamp 0.5, damp 0.02    0.345
+        clamp 1.0, damp 0.02      0.493        clamp 0.5, damp 0.10    0.381
+        no refinement             0.707        5x5 samples, 0.5/0.02   0.240
+
+    The clamp does more than the damping. Half a pixel is the largest error
+    rounding can produce, so a correction beyond it is not undoing
+    quantisation, and it bounds the worst block at 1.414 px by construction.
+    A second iteration is worse than one (0.502 against 0.459): the
+    linearisation holds for about half a pixel, which is the whole distance
+    one step is asked to travel.
+    """
+    gh, gw = field.shape[:2]
+    ln, lo = bench.luma(newer), bench.luma(older)
+    by, bx = np.mgrid[0:gh, 0:gw].astype(np.float32)
+    cx = (bx + 0.5) * BLOCK
+    cy = (by + 0.5) * BLOCK
+    fx, fy = field[..., 0], field[..., 1]
+
+    a11 = np.zeros((gh, gw), np.float32)
+    a12 = np.zeros((gh, gw), np.float32)
+    a22 = np.zeros((gh, gw), np.float32)
+    r1 = np.zeros((gh, gw), np.float32)
+    r2 = np.zeros((gh, gw), np.float32)
+
+    half = (samples - 1) / 2.0
+    for j in range(samples):
+        for i in range(samples):
+            ax = cx + (i - half) * BLOCK / samples
+            ay = cy + (j - half) * BLOCK / samples
+            nx, ny = ax - fx * 0.5, ay - fy * 0.5
+            ox, oy = ax + fx * 0.5, ay + fy * 0.5
+            res = P.sample(ln, nx, ny, "linear") - P.sample(lo, ox, oy, "linear")
+            gx = 0.25 * ((P.sample(ln, nx + 1, ny, "linear")
+                          - P.sample(ln, nx - 1, ny, "linear"))
+                         + (P.sample(lo, ox + 1, oy, "linear")
+                            - P.sample(lo, ox - 1, oy, "linear")))
+            gy = 0.25 * ((P.sample(ln, nx, ny + 1, "linear")
+                          - P.sample(ln, nx, ny - 1, "linear"))
+                         + (P.sample(lo, ox, oy + 1, "linear")
+                            - P.sample(lo, ox, oy - 1, "linear")))
+            a11 += gx * gx
+            a12 += gx * gy
+            a22 += gy * gy
+            r1 += gx * res
+            r2 += gy * res
+
+    lam = damp * (a11 + a22) + 1e-6
+    d11, d22 = a11 + lam, a22 + lam
+    det = np.maximum(d11 * d22 - a12 * a12, 1e-12)
+    dx = np.clip((d22 * r1 - a12 * r2) / det, -limit, limit)
+    dy = np.clip((d11 * r2 - a12 * r1) / det, -limit, limit)
+    return field + np.stack([dx, dy], axis=-1).astype(np.float32)
+
+
+KINDS = ("true", "rounded", "rounded+refined",
+         "noisy", "noisy+rounded", "noisy+rounded+refined")
+
+
 def quantisation(step=(30.5, 10.5), phases=(0.25, 0.5, 0.75), n=7,
-                 sigma=0.35, share=0.25, seed=11):
+                 sigma=0.35, share=0.25, seed=11, kinds=KINDS):
     """Is the flicker the field's PRECISION or the field's NOISE? Both.
 
     The hardware matcher quantises to whole pixels, and both stages of the
@@ -318,10 +394,16 @@ def quantisation(step=(30.5, 10.5), phases=(0.25, 0.5, 0.75), n=7,
                 return truth + wobble[i]
             if kind == "noisy+rounded":
                 return np.round(truth + wobble[i])
+            # The two the shader actually produces: an integer field with one
+            # Lucas-Kanade step applied. See refine() and RefineFieldMaterial.
+            if kind == "rounded+refined":
+                return refine(np.round(truth), frames[i + 1], frames[i])
+            if kind == "noisy+rounded+refined":
+                return refine(np.round(truth + wobble[i]), frames[i + 1], frames[i])
             raise ValueError(kind)
 
         out = {}
-        for kind in ("true", "rounded", "noisy", "noisy+rounded"):
+        for kind in kinds:
             stack = []
             for i in range(1, n):
                 stack.append(fshift(frames[i - 1],
@@ -345,7 +427,7 @@ def main():
     print("not an integer and the matcher's whole-pixel field cannot be right. Same")
     print("wobble in the last two rows -- the only difference is the rounding.")
     q = quantisation()
-    for kind in ("true", "rounded", "noisy", "noisy+rounded"):
+    for kind in KINDS:
         print("  %-22s %10.2f" % (kind, q[kind]))
     print()
 
