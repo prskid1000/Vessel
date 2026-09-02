@@ -28,14 +28,15 @@ import bench, consensus, interp
 import zigzag as Z
 
 older, truth, newer = Z.compose(0.0), Z.compose(0.5), Z.compose(1.0)
-raw = bench.estimate(newer, older)
+# Indexed on the older frame with the device's sign; see interp.py.
+raw = bench.estimate(older, newer)
 ref, _ = Z.waviness(truth, Z.EDGE_X)
 
 print("ground truth waviness: %.3f px\n" % ref)
 print("  %-16s %12s %12s" % ("median passes", "waviness px", "rms levels"))
 for passes in (0, 1, 2, 6, 10):
     field = raw if passes == 0 else consensus.vector_median(raw, raw, passes=passes)
-    out = interp.interpolate(newer, older, field, 0.5, 1.0, static_mode="fit")
+    out = interp.interpolate(newer, older, field, None, 0.5, -1.0)
     wav, _ = Z.waviness(out, Z.EDGE_X)
     rms = float(np.sqrt(((out - truth) ** 2).mean()) * 255)
     print("  %-16d %12.3f %12.2f" % (passes, wav, rms))
