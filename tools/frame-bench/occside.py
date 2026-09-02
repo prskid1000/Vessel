@@ -147,8 +147,8 @@ VARIANTS = [
     ("newer-side round trip off", dict(newer_side=False)),
     ("luma photometry", dict(photometry="luma")),
     ("border gate off", dict(border_gate=False)),
-    ("fit floor 1 step", dict(obmc_floor=1.0 / 255.0)),
-    ("fit floor 12 steps", dict(obmc_floor=12.0 / 255.0)),
+    ("3x3 blocks, fit-weighted", dict(obmc="fit9")),
+    ("3x3 blocks, fit floor 1 step", dict(obmc="fit9", obmc_floor=1.0 / 255.0)),
 ]
 
 
@@ -175,6 +175,8 @@ def main():
     # cabinet and a far wall both moving the camera's way, the near one faster.
     o, n, t, masks = occluder_scene(bg_shift=(-40, 0), obj_shift=(-64, 0))
     run("parallax: background -40 px, object -64 px, phase 0.5", o, n, t, masks)
+    o, n, t, masks = occluder_scene(bg_shift=(-8, 0), obj_shift=(-56, 0))
+    run("parallax: background -8 px, object -56 px (48 px apart), phase 0.5", o, n, t, masks)
     o, n, t, masks = border_scene()
     run("border: content entering from the right at 48 px", o, n, t, masks)
 

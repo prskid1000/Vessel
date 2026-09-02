@@ -1437,7 +1437,7 @@ public class FrameSynthesizer implements FramePacer.Target {
     private int backFieldTexture() {
         if (!backwardValid) return fieldTexture();
         return filteredBackIndex >= 0 ? filteredBack[filteredBackIndex].texture
-                                      : mergedBack.texture;
+                                      : backwardField.texture;
     }
 
     /** Whether the field estimated at the last real frame is usable. */
@@ -2018,6 +2018,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         renderer.presentGuestFrame(output.texture, true);
         notePresented();
         interpolateTimer.end();
+        if (wants("dump")) maybeDump(phase);
 
         // Once a second, and only if something asked. Deliberately after the
         // frame the user sees, so a measurement can never delay one.
@@ -2169,6 +2170,130 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
         GLES20.glEnable(GLES20.GL_BLEND);
         renderer.invalidateBoundWindowMaterial();
+    }
+
+    /**
+     * VESSEL: the shader's inputs and its output, written to app storage.
+     *
+     * <p><b>The bench had no way to see the device's field, and every one of
+     * its numbers was about a field it built itself.</b> {@code
+     * tools/frame-bench/interp.py} is a port of InterpolateMaterial, and its
+     * {@code load()} has read a {@code dump/} folder since it was written --
+     * a folder nothing ever produced. So the port was only ever run on the
+     * bench's own block matcher, whose fields are clean, coherent and in range,
+     * and the object-border error it reported sat at three or four levels while
+     * the device's own {@code fg truth} line read synthesised frames 14 to 33%
+     * further from the real frame than a perfect interpolation. The gap is the
+     * field, and the field could not be examined.
+     *
+     * <p>Under {@code FG_LOG=dump} this writes, a few times per session and
+     * never twice within {@link #DUMP_INTERVAL_MS}: the two real frames, the
+     * forward and backward fields as the shader reads them (filtered, merged),
+     * the synthesised frame just presented, and a JSON of the numbers the
+     * shader needs to reproduce it. {@code tools/frame-bench/dump.py} pulls
+     * the folder, replays the port on the same inputs and reports how far it
+     * lands from the device's own output -- the fidelity check the README's
+     * contract asks for and never had -- and then any change can be scored on
+     * the real field rather than on an easy one.
+     *
+     * <p>It stalls. Four full-resolution readbacks and two small ones, on the
+     * render thread, cost a few frames each time -- which is why it is gated,
+     * spaced, counted and off by default.
+     */
+    private static final long DUMP_INTERVAL_MS = 4000;
+    private static final int DUMP_LIMIT = 6;
+    private long dumpedAt = 0;
+    private int dumpsWritten = 0;
+
+    private void maybeDump(float phase) {
+        if (dumpsWritten >= DUMP_LIMIT) return;
+        final long now = SystemClock.uptimeMillis();
+        if (dumpedAt != 0 && now - dumpedAt < DUMP_INTERVAL_MS) return;
+        // Only frames near the middle are worth a stall: that is where the
+        // synthesis is furthest from both real frames and a fault is largest.
+        if (Math.abs(phase - 0.5f) > 0.13f) return;
+        // **And only the pipeline as it actually runs.** The first six dumps
+        // ever taken were all from the opening seconds of a session: sign not
+        // yet latched, so the single-pass search with no backward field, on a
+        // loading screen with nothing moving. Nothing about the fault under
+        // study was in them. The sign has to have settled, the two-stage search
+        // has to have produced its backward field, and the scene has to be
+        // moving by more than the matcher's own noise -- `fieldMagnitude` is
+        // in luma pixels and needs the `field` category to be kept current.
+        if (fieldSign == 0f || !backwardValid || fieldMagnitude < 24f) return;
+        dumpedAt = now;
+
+        final java.io.File dir = new java.io.File(
+            renderer.xServerView.getContext().getFilesDir(),
+            "fgdump/" + String.format(java.util.Locale.US, "%02d", dumpsWritten));
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            say("fg dump: cannot create " + dir);
+            dumpsWritten = DUMP_LIMIT;
+            return;
+        }
+        try {
+            readTarget(colour[oldest()], GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "older.rgba"));
+            readTarget(latestColour(), GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "newer.rgba"));
+            readTarget(output, GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "shown.rgba"));
+            final Target forward = fieldTarget();
+            readTarget(forward, GLES20.GL_FLOAT, 16, new java.io.File(dir, "field.f32"));
+            final Target back = backFieldTarget();
+            if (back != null) readTarget(back, GLES20.GL_FLOAT, 16, new java.io.File(dir, "back.f32"));
+
+            final String json = String.format(java.util.Locale.US,
+                "{\"width\": %d, \"height\": %d, \"lumaWidth\": %d, \"lumaHeight\": %d,"
+                    + " \"gridWidth\": %d, \"gridHeight\": %d, \"blockX\": %d, \"blockY\": %d,"
+                    + " \"phase\": %.4f, \"fieldSign\": %.0f, \"consistency\": %d,"
+                    + " \"fieldMagnitude\": %.0f, \"interval\": %d, \"multiple\": %d,"
+                    + " \"realFrames\": %d}\n",
+                colour[0].width, colour[0].height, luma[0].width, luma[0].height,
+                forward.width, forward.height, blockX, blockY,
+                phase, fieldSign != 0f ? fieldSign : 1f, backwardValid ? 1 : 0,
+                fieldMagnitude, smoothedInterval / 1000000L, activeMultiple, realFrames);
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, "meta.json"))) {
+                out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            dumpsWritten++;
+            say("fg dump: wrote " + dir + " at phase " + phase);
+        } catch (java.io.IOException e) {
+            say("fg dump: " + e);
+            dumpsWritten = DUMP_LIMIT;
+        } finally {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            renderer.viewportNeedsUpdate = true;
+        }
+    }
+
+    /** One glReadPixels of a whole target, straight to a file. */
+    private void readTarget(Target target, int type, int bytesPerTexel, java.io.File file)
+            throws java.io.IOException {
+        final java.nio.ByteBuffer buffer = java.nio.ByteBuffer
+            .allocateDirect(target.width * target.height * bytesPerTexel)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer);
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
+        GLES20.glReadPixels(0, 0, target.width, target.height, GLES20.GL_RGBA, type, buffer);
+        final int error = GLES20.glGetError();
+        if (error != GLES20.GL_NO_ERROR) {
+            throw new java.io.IOException("glReadPixels 0x" + Integer.toHexString(error)
+                + " for " + file.getName());
+        }
+        buffer.rewind();
+        try (java.nio.channels.FileChannel channel = new java.io.FileOutputStream(file).getChannel()) {
+            while (buffer.hasRemaining()) channel.write(buffer);
+        }
+    }
+
+    /** The Target behind {@link #fieldTexture()}. */
+    private Target fieldTarget() {
+        final Target raw = forwardField != null ? forwardField : vectors;
+        return filteredIndex >= 0 ? filtered[filteredIndex] : raw;
+    }
+
+    /** The Target behind {@link #backFieldTexture()}, or null when there is none. */
+    private Target backFieldTarget() {
+        if (!backwardValid) return null;
+        return filteredBackIndex >= 0 ? filteredBack[filteredBackIndex] : backwardField;
     }
 
     /**

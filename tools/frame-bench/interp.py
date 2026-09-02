@@ -201,6 +201,41 @@ def interpolate(newer, older, field, back, phase, sign=-1.0, *,
                  / np.maximum(w_older + w_newer, 1.0e-4)[..., None])
         return blend, max_diff(a, b)
 
+    if obmc == "fit9":
+        # **Nine blocks, not four, and the fit picks among them.** A block that
+        # straddles a silhouette carries one vector for all 64 of its pixels,
+        # so the background inside it is dragged by the foreground's motion --
+        # by the whole parallax difference, not by a block. The four nearest
+        # blocks can all be that block's kind. One ring further out is where
+        # the background's own vector still lives, and the endpoint fit is
+        # what lets a pixel borrow it: the wrong vector disagrees with itself
+        # by the contrast of the edge, the right one does not.
+        grid = p * vector_size - 0.5
+        centre = np.round(grid)
+        wsum = None
+        shown = 0.0
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                b = centre + np.array([dx, dy], dtype=np.float32)
+                dist = grid - b
+                r = np.clip(np.abs(dist) / 1.5, 0.0, 1.0)
+                win = np.prod(0.5 + 0.5 * np.cos(np.pi * r), axis=-1)
+                bx = np.clip(b[..., 0].astype(np.int32), 0, gw - 1)
+                by = np.clip(b[..., 1].astype(np.int32), 0, gh - 1)
+                v = field[by, bx] * scale
+                pred, fit = predict(v)
+                wf = win / (fit + obmc_floor)
+                shown = shown + pred * wf[..., None]
+                wsum = wf if wsum is None else wsum + wf
+        shown = shown / np.maximum(wsum, 1e-6)[..., None]
+        still = older * (1.0 - phase) + newer * phase
+        shown = still + (shown - still) * carry[..., None]
+        if diagnostics is not None:
+            diagnostics.update(carry=carry, occ_older=occ_older, occ_newer=occ_newer,
+                               w_older=w_older, w_newer=w_newer, mean=mean,
+                               on_older=on_o, on_newer=on_n)
+        return np.clip(shown, 0.0, 1.0)
+
     preds = [predict(m[i]) for i in range(4)]
     if obmc == "window":
         shown = sum(weight[..., i:i + 1] * preds[i][0] for i in range(4))
