@@ -462,10 +462,15 @@ public class SGSRMaterial extends ShaderMaterial {
         "\t\t{",
         "\t\t\tcoord.x += ViewportInfo[0].x;",
         "",
-        "\t\t\tvec4 right = textureGather(ps0,coord + highp vec2(ViewportInfo[0].x, 0.0), OperationMode);",
+        // VESSEL: the three `highp vec2(...)` constructors below lost their
+        // precision qualifier. A qualifier on a constructor is not GLSL ES
+        // grammar -- glslangValidator rejects it, and only Adreno's leniency
+        // let it compile -- and it changed nothing: a constructor takes the
+        // highest precision of its arguments, and ViewportInfo is highp.
+        "\t\t\tvec4 right = textureGather(ps0,coord + vec2(ViewportInfo[0].x, 0.0), OperationMode);",
         "\t\t\tvec4 upDown;",
-        "\t\t\tupDown.xy = textureGather(ps0,coord + highp vec2(0.0, -ViewportInfo[0].y),OperationMode).wz;",
-        "\t\t\tupDown.zw  = textureGather(ps0,coord+ highp vec2(0.0, ViewportInfo[0].y), OperationMode).yx;",
+        "\t\t\tupDown.xy = textureGather(ps0,coord + vec2(0.0, -ViewportInfo[0].y),OperationMode).wz;",
+        "\t\t\tupDown.zw  = textureGather(ps0,coord+ vec2(0.0, ViewportInfo[0].y), OperationMode).yx;",
         "",
         "\t\t\tfloat mean = (left.y+left.z+right.x+right.w)*0.25;",
         "\t\t\tleft = left - vec4(mean);",

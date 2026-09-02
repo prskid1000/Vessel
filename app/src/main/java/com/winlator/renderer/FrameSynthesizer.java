@@ -434,8 +434,6 @@ public class FrameSynthesizer implements FramePacer.Target {
     private static final float MIN_AGREEMENT = 0.20f;
     private static final float MAX_FRAME_DIFF = 40f / 255f;
     private Target confidence;
-    private final java.nio.ByteBuffer confidencePixel = java.nio.ByteBuffer
-        .allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
     private float lastAgreement = 1f, lastFrameDiff = 0f, lastDominantPx = 0f;
     private long lowConfidenceIntervals = 0;
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
@@ -2505,6 +2503,14 @@ public class FrameSynthesizer implements FramePacer.Target {
         // build frames from rather than the matcher's raw output -- which, after
         // a two-stage search, is a residual near zero and describes nothing.
         probeField();
+        // Last, so the guard's texel has had all of the above to arrive
+        // behind and the map does not wait. See issueConfidence. A `false`
+        // here is the same `false` a refused matcher returns: the interval
+        // shows real frames only.
+        if (!confident()) {
+            lowConfidenceIntervals++;
+            return false;
+        }
         return true;
     }
 
@@ -2576,10 +2582,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         // level, before any full-resolution work is spent on it. A `false`
         // here is the same `false` a refused matcher returns: the interval
         // shows real frames only.
-        if (confidence != null && !confident(ratioX, ratioY)) {
-            lowConfidenceIntervals++;
-            return false;
-        }
+        if (confidence != null) issueConfidence(ratioX, ratioY);
 
         // Forward: the older frame moved onto the newer, then the leftovers.
         warpLuma(previousLuma().texture, sign, +1f);
@@ -2648,7 +2651,34 @@ public class FrameSynthesizer implements FramePacer.Target {
      * than four times a second. A failed read counts as confident: a broken
      * diagnostic must not switch the feature off.
      */
-    private boolean confident(float ratioX, float ratioY) {
+    /**
+     * VESSEL: the guard's one texel travels through a pixel buffer, so the
+     * render thread never waits for it.
+     *
+     * <p>A plain {@code glReadPixels} blocks until the GPU has produced the
+     * texel, and the texel comes right after the coarse estimate -- the first
+     * work of the interval -- so the thread sat idle while the GPU caught up,
+     * once per real frame. Read into a buffer instead, the call returns at
+     * once; the warps, the full-resolution estimate, the merges and ten median
+     * passes are issued behind it, and only THEN is the buffer mapped. By that
+     * time the texel is long finished and the map does not wait. The decision
+     * lands at the end of {@link #estimateMotion} rather than before the
+     * full-resolution work: on the rare declined interval that work was
+     * issued for nothing, which is cheaper than stalling on every interval.
+     */
+    private int confidenceBuffer = 0;
+    private boolean confidencePending = false;
+
+    private void issueConfidence(float ratioX, float ratioY) {
+        confidencePending = false;
+        if (confidenceBuffer == 0) {
+            final int[] names = new int[1];
+            GLES20.glGenBuffers(1, names, 0);
+            confidenceBuffer = names[0];
+            GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, confidenceBuffer);
+            GLES20.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, 4, null, GLES30.GL_STREAM_READ);
+            GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
+        }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, confidence.framebuffer);
         confidenceMaterial.use();
         confidenceMaterial.setUniformVec2(confidenceMaterial.confidenceUniforms.coarseSize,
@@ -2667,17 +2697,40 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
 
-        confidencePixel.clear();
+        // Into the pixel buffer, asynchronously: offset 0, no client pointer.
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, confidencePixel);
+        GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, confidenceBuffer);
+        GLES30.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0);
         final int error = GLES20.glGetError();
+        GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         renderer.viewportNeedsUpdate = true;
-        if (error != GLES20.GL_NO_ERROR) return true;
+        confidencePending = error == GLES20.GL_NO_ERROR;
+    }
 
-        lastAgreement = (confidencePixel.get(0) & 0xff) / 255f;
-        lastDominantPx = (confidencePixel.get(1) & 0xff) / 255f * 1024f;
-        lastFrameDiff = (confidencePixel.get(2) & 0xff) / 255f;
+    /**
+     * The decision, once the texel has had the whole interval's work to
+     * arrive behind. A failed map counts as confident: a broken diagnostic
+     * must not switch the feature off.
+     */
+    private boolean confident() {
+        if (!confidencePending) return true;
+        confidencePending = false;
+        GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, confidenceBuffer);
+        final java.nio.Buffer mapped = GLES30.glMapBufferRange(
+            GLES30.GL_PIXEL_PACK_BUFFER, 0, 4, GLES30.GL_MAP_READ_BIT);
+        if (!(mapped instanceof java.nio.ByteBuffer)) {
+            GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
+            return true;
+        }
+        final java.nio.ByteBuffer pixel = (java.nio.ByteBuffer)mapped;
+        final int r = pixel.get(0) & 0xff, g = pixel.get(1) & 0xff, b = pixel.get(2) & 0xff;
+        GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER);
+        GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0);
+
+        lastAgreement = r / 255f;
+        lastDominantPx = g / 255f * 1024f;
+        lastFrameDiff = b / 255f;
 
         // **With hysteresis, because the first build without it flickered
         // between modes.** On the ceiling the agreement sat around the floor
@@ -3161,6 +3214,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (merged != null) merged.release();
             if (mergedBack != null) mergedBack.release();
             if (confidence != null) confidence.release();
+            if (confidenceBuffer != 0) GLES20.glDeleteBuffers(1, new int[] {confidenceBuffer}, 0);
             if (signProbe != null) signProbe.release();
             if (fieldProbe != null) fieldProbe.release();
             if (output != null) output.release();
@@ -3188,6 +3242,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         filteredBack[0] = filteredBack[1] = null;
         filteredBackIndex = -1;
         confidence = null;
+        confidenceBuffer = 0;
+        confidencePending = false;
         coarseVectors = warpedLuma = backVectors = merged = mergedBack = null;
         forwardField = backwardField = null;
         pyramidRan = false;

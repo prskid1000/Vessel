@@ -87,6 +87,36 @@ JAVA_REFERENCE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 JOIN_NOISE = {"return", "String", "join", "n"}
 
 
+# SGSRMaterial composes its shaders from two methods and two constants. The
+# methods are mirrored here at their defaults; the constants are String.join
+# blocks in the same file and are read out of it.
+KNOWN_METHODS = {
+    "versionDirective": "#version 310 es",
+    "tuningDefines": "#define OperationMode 1\n#define UseEdgeDirection\n"
+                     "#define EdgeThreshold 0.03137255\n#define EdgeSharpness 2.0\n"
+                     "#define MaxDelta 0.09019608",
+}
+
+
+def resolve(text, word):
+    """The GLSL a Java identifier stands for, or None."""
+    if word in KNOWN_METHODS:
+        return KNOWN_METHODS[word]
+    marker = "String %s = String.join(" % word
+    if marker not in text:
+        return None
+    block = text[text.index(marker):]
+    block = block[:block.index("\n    );")]
+    literals = []
+    for line in block.split("\n")[1:]:
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            continue
+        for literal in LITERAL.findall(stripped):
+            literals.append(literal.encode().decode("unicode_escape"))
+    return "\n".join(literals)
+
+
 def shaders(java):
     """Every (kind, source, skip_reason) this file builds."""
     text = java.read_text(encoding="utf-8")
@@ -99,27 +129,38 @@ def shaders(java):
         # The method ends at the first closing brace in column four.
         body = body[:body.index("\n    }")]
         lines = []
-        referenced = set()
+        unresolved = set()
         for line in body.split("\n"):
             stripped = line.strip()
             if stripped.startswith("//") or stripped.startswith(marker):
                 continue
-            for literal in LITERAL.findall(stripped):
-                lines.append(literal.encode().decode("unicode_escape"))
-            # Whatever is left once the literals are gone is Java.
+            literals = LITERAL.findall(stripped)
+            # Whatever is left once the literals are gone is Java. A join
+            # argument that is one of this file's own String.join constants,
+            # or one of the two methods SGSRMaterial composes its header from,
+            # is resolved in place; anything else is genuinely not
+            # reconstructible from the file alone.
             residue = LITERAL.sub("", stripped)
-            for word in JAVA_REFERENCE.findall(residue):
-                if word not in JOIN_NOISE:
-                    referenced.add(word)
+            words = [w for w in JAVA_REFERENCE.findall(residue) if w not in JOIN_NOISE]
+            if words and not literals:
+                for word in words:
+                    value = resolve(text, word)
+                    if value is None:
+                        unresolved.add(word)
+                    else:
+                        lines.append(value)
+                continue
+            for literal in literals:
+                lines.append(literal.encode().decode("unicode_escape"))
 
         source = "\n".join(lines).strip()
         # A material that inherits its shader contributes no literals.
         if not source:
             continue
         kind = method.replace("get", "").replace("Shader", "")
-        if referenced:
+        if unresolved:
             out.append((kind, source,
-                        "composed from Java (%s)" % ", ".join(sorted(referenced))))
+                        "composed from Java (%s)" % ", ".join(sorted(unresolved))))
             continue
         if kind == "Vertex" and "void main() {" in source:
             head, tail = source.split("void main() {", 1)
