@@ -140,12 +140,15 @@ def score(out, truth, masks):
 
 
 VARIANTS = [
-    ("shipped: drop older, newer-side off", dict(drop="older")),
+    ("shipped: fit-weighted OBMC, drop older", dict(drop="older")),
+    ("plain window OBMC", dict(obmc="window")),
     ("drop NEWER instead", dict(drop="newer")),
     ("consistency off", dict(drop="none")),
-    ("before: newer-side round trip on", dict(drop="older", newer_side=True)),
-    ("shipped, luma photometry", dict(drop="older", photometry="luma")),
-    ("shipped, border gate off", dict(drop="older", border_gate=False)),
+    ("newer-side round trip off", dict(newer_side=False)),
+    ("luma photometry", dict(photometry="luma")),
+    ("border gate off", dict(border_gate=False)),
+    ("fit floor 1 step", dict(obmc_floor=1.0 / 255.0)),
+    ("fit floor 12 steps", dict(obmc_floor=12.0 / 255.0)),
 ]
 
 
@@ -168,6 +171,10 @@ def main():
     np.set_printoptions(precision=2)
     o, n, t, masks = occluder_scene()
     run("occluder: background -24 px, object +48 px, phase 0.5", o, n, t, masks)
+    # Parallax during a pan, which is what the device recordings show: a near
+    # cabinet and a far wall both moving the camera's way, the near one faster.
+    o, n, t, masks = occluder_scene(bg_shift=(-40, 0), obj_shift=(-64, 0))
+    run("parallax: background -40 px, object -64 px, phase 0.5", o, n, t, masks)
     o, n, t, masks = border_scene()
     run("border: content entering from the right at 48 px", o, n, t, masks)
 

@@ -75,7 +75,8 @@ def max_diff(a, b):
 
 def interpolate(newer, older, field, back, phase, sign=-1.0, *,
                 newer_side=True, drop="older", border_gate=True,
-                photometry="colour", consistency=True, diagnostics=None):
+                photometry="colour", consistency=True, diagnostics=None,
+                obmc="fit", obmc_floor=4.0 / 255.0):
     """The shader's main().
 
     newer, older : (h, w, 3) float32 in [0, 1]
@@ -196,10 +197,28 @@ def interpolate(newer, older, field, back, phase, sign=-1.0, *,
         from_older = np.clip(uv + v * phase, 0.0, 1.0)
         a = sample(older, from_older[..., 0], from_older[..., 1])
         b = sample(newer, from_newer[..., 0], from_newer[..., 1])
-        return ((a * w_older[..., None] + b * w_newer[..., None])
-                / np.maximum(w_older + w_newer, 1.0e-4)[..., None])
+        blend = ((a * w_older[..., None] + b * w_newer[..., None])
+                 / np.maximum(w_older + w_newer, 1.0e-4)[..., None])
+        return blend, max_diff(a, b)
 
-    shown = sum(weight[..., i:i + 1] * predict(m[i]) for i in range(4))
+    preds = [predict(m[i]) for i in range(4)]
+    if obmc == "window":
+        shown = sum(weight[..., i:i + 1] * preds[i][0] for i in range(4))
+    elif obmc == "fit":
+        # **The window says where the pixel sits; the fit says which block is
+        # telling the truth about it.** At a silhouette between two depths the
+        # four blocks hold two different motions, and a plain window blends
+        # them across a 16 px band -- the smear on every object border. Each
+        # prediction already fetched both of its endpoints, so how well they
+        # agree costs nothing, and a vector that fetched the wall for a pixel on
+        # the cabinet disagrees with itself by the whole contrast of the edge.
+        # Where the four blocks agree the fits are equal and this is the window.
+        fits = np.stack([1.0 / (preds[i][1] + obmc_floor) for i in range(4)], axis=-1)
+        wf = weight * fits
+        wf = wf / wf.sum(axis=-1, keepdims=True)
+        shown = sum(wf[..., i:i + 1] * preds[i][0] for i in range(4))
+    else:
+        raise ValueError(obmc)
 
     # ---- did this pixel move, or is it painted on the screen? --------------
     still = older * (1.0 - phase) + newer * phase
