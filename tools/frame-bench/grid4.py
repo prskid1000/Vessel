@@ -22,6 +22,19 @@ import interp
 import occside
 from consensus import vector_median
 
+
+def block_sad(lo, ln, field):
+    """Per block: mean |older(block) - newer(block + d)|, d in raw units."""
+    gh, gw = field.shape[:2]
+    h, w = lo.shape
+    ys, xs = np.mgrid[0:gh * BLOCK, 0:gw * BLOCK].astype(np.float32)
+    full = np.repeat(np.repeat(field, BLOCK, axis=0), BLOCK, axis=1)
+    u = (xs + full[..., 0] + 0.5) / w
+    v = (ys + full[..., 1] + 0.5) / h
+    moved = interp.sample(ln[..., None], u, v)[..., 0]
+    diff = np.abs(lo[:gh * BLOCK, :gw * BLOCK] - moved)
+    return diff.reshape(gh, BLOCK, gw, BLOCK).mean(axis=(1, 3))
+
 BLOCK = 8
 
 

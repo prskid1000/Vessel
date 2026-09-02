@@ -130,7 +130,7 @@ def replay(folder):
         print("  global motion (%+.1f, %+.1f) px, %.0f%% of the coarse field agrees" % (gx, gy, agree * 100))
     if meta.get("merged") is not None:
         out = interp.interpolate(newer, older, meta["merged"], meta["mergedBack"], phase, sign)
-        print("  %-30s %10.2f %10.3f" % ("before the gate", float(np.abs(out - shown).mean() * 255),
+        print("  %-30s %10.2f %10.3f" % ("before the median", float(np.abs(out - shown).mean() * 255),
                                         truth_metric(out, older, newer)))
     first = None
     for label, kw in VARIANTS:
