@@ -75,6 +75,11 @@ public class MedianMaterial extends ScreenMaterial {
         public final Uniform motionScale = new Uniform("motionScale");
         /** Which way the field points. See {@link SignMaterial}. */
         public final Uniform fieldSign = new Uniform("fieldSign");
+        /**
+         * How many votes the previous vector casts. One is the candidate as it
+         * was; three is a prior. See the shader's score loop.
+         */
+        public final Uniform temporalWeight = new Uniform("temporalWeight");
     }
 
     @Override
@@ -141,6 +146,7 @@ public class MedianMaterial extends ScreenMaterial {
             "uniform float temporalValid;",
             "uniform vec2 motionScale;",
             "uniform float fieldSign;",
+            "uniform float temporalWeight;",
             "uniform vec2 texelSize;",
             "varying vec2 vUV;",
 
@@ -221,14 +227,28 @@ public class MedianMaterial extends ScreenMaterial {
                 // distance to the set, and distance is symmetric, so the 121
                 // lengths the unrolled version took are 55: every pair is
                 // measured once and credited to both ends.
+                // **The previous vector votes more than once.** As one
+                // candidate among eleven it could break a tie towards
+                // continuity and nothing more: a block with two near-equal
+                // answers still picked one this frame and the other the next,
+                // and on a flat wall crossed by one object nearly every block
+                // is such a block. Counting its vote `temporalWeight` times
+                // makes a candidate that agrees with last frame cheaper, so a
+                // flip has to be paid for by the neighbours. Measured on a
+                // constant pan (tools/frame-bench/temporal2.py): at three,
+                // flicker down 6%, field error against the known motion 9.3 to
+                // 8.0 px, blocks flipping between real frames 55% to 29%. It
+                // is a weight on a vote, not a blend: the winner is still one
+                // of the eleven, and where the scene genuinely changed the old
+                // vector simply loses three times over.
                 "float score[11];",
                 "for (int i = 0; i < 11; i++) score[i] = 0.0;",
                 "for (int i = 0; i < 11; i++) {",
                     "for (int j = 0; j < 11; j++) {",
                         "if (j > i) {",
                             "float d = length(c[i] - c[j]);",
-                            "score[i] += d;",
-                            "score[j] += d;",
+                            "score[i] += d * (j == 10 ? temporalWeight : 1.0);",
+                            "score[j] += d * (i == 10 ? temporalWeight : 1.0);",
                         "}",
                     "}",
                 "}",

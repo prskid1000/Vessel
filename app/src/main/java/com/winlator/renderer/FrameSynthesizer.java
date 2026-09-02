@@ -2807,6 +2807,14 @@ public class FrameSynthesizer implements FramePacer.Target {
         medianMaterial.setUniformInt(medianMaterial.medianUniforms.previousTexture, 2);
         medianMaterial.setUniformFloat(medianMaterial.medianUniforms.temporalValid,
                                        haveHistory ? 1f : 0f);
+        // The previous vector's vote, counted three times. See MedianMaterial
+        // and tools/frame-bench/temporal2.py: at three, flicker on a constant
+        // pan falls 6%, the field's error against the known motion falls from
+        // 9.3 to 8.0 px, and the share of blocks that flip between real frames
+        // halves; at five the field is steadier still but the flicker turns
+        // back up. One while there is no history, which is the plain median.
+        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.temporalWeight,
+                                       haveHistory ? 3f : 1f);
         // So the temporal candidate is read where the content came from rather
         // than where the block sits. See MedianMaterial. Zero before the sign
         // latches, which reads at vUV exactly as it used to.
