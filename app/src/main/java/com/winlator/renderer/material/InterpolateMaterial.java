@@ -170,6 +170,8 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform backMotionTexture = new Uniform("backMotionTexture");
         /** 1 while the backward field is real, 0 to fall back to photometry alone. */
         public final Uniform consistency = new Uniform("consistency");
+        public final Uniform lumaNewerTexture = new Uniform("lumaNewerTexture");
+        public final Uniform lumaOlderTexture = new Uniform("lumaOlderTexture");
         public final Uniform motionScale = new Uniform("motionScale");
         public final Uniform vectorSize = new Uniform("vectorSize");
         public final Uniform phase = new Uniform("phase");
@@ -228,8 +230,14 @@ public class InterpolateMaterial extends ScreenMaterial {
             "uniform vec2 vectorSize;",
             // Where between the two frames this one sits: 0 is N-1, 1 is N.
             "uniform float phase;",
-            // The luma pair is no longer read here. Every photometric test
-            // scores the colour targets instead; see main().
+            // **The luma pair, for the static test only.** Both were already
+            // bound by FrameSynthesizer and both had Uniform objects here -- only
+            // the GLSL declarations were missing, deleted along with the
+            // per-pixel sign scoring that used to be the sole reader. Binding a
+            // sampler a shader does not declare is silent; reading one it does
+            // not declare is a compile error, which is how this surfaced.
+            "uniform sampler2D lumaNewerTexture;",
+            "uniform sampler2D lumaOlderTexture;",
 
             // VESSEL: when 1, write four measurements instead of a picture.
             "uniform float diagnostic;",
@@ -262,10 +270,12 @@ public class InterpolateMaterial extends ScreenMaterial {
 
             "varying vec2 vUV;",
 
-            // How far apart two colours are, as the largest channel step. See
-            // the photometric block in main() for why this is colour and not
-            // the luma the matcher sees.
-            "float maxDiff(vec3 a, vec3 b) { vec3 d = abs(a - b); return max(max(d.r, d.g), d.b); }",
+            // Every luma and field read goes through here, in colour UV. The
+            // luma covers the block-rounded top-left of the colour frame, so
+            // its UV is the colour UV scaled up.
+            "vec2 lumaUV(vec2 uv) { return clamp(uv * lumaScale, 0.0, 1.0); }",
+            "float lumaN(vec2 uv) { return texture2D(lumaNewerTexture, lumaUV(uv)).r; }",
+            "float lumaO(vec2 uv) { return texture2D(lumaOlderTexture, lumaUV(uv)).r; }",
 
             // The four blocks around a colour-space position and their
             // raised-cosine window. `base` is the block up-and-left of the
@@ -372,15 +382,11 @@ public class InterpolateMaterial extends ScreenMaterial {
             // bilinear one, and the texture flicker that remains is the
             // field's (1.80 estimated against 0.87 true on the same bench),
             // not the sampler's.
-            // `fit` is how far this prediction's two endpoints disagree: the
-            // largest channel step between what the older frame and the newer
-            // frame show along this vector. Free, since both were fetched.
-            "vec3 predict(vec2 v, float wOlder, float wNewer, out float fit) {",
+            "vec3 predict(vec2 v, float wOlder, float wNewer) {",
                 "vec2 fromNewer = clamp(vUV - v * (1.0 - phase), 0.0, 1.0);",
                 "vec2 fromOlder = clamp(vUV + v * phase, 0.0, 1.0);",
                 "vec3 older = texture2D(previousTexture, fromOlder).rgb;",
                 "vec3 newer = texture2D(screenTexture, fromNewer).rgb;",
-                "fit = maxDiff(older, newer);",
                 "return (older * wOlder + newer * wNewer) / max(wOlder + wNewer, 1.0e-4);",
             "}",
 
@@ -483,72 +489,16 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // because both feed them: `carry` decides how far the result is
                 // pulled back towards a stationary reading, and the two endpoint
                 // weights decide which of the two frames is worth reading at all.
-                // **Scored on colour, not on the luma the matcher was fed.**
-                //
-                // Every test in this block used to read the R8 luma pair. Luma
-                // is what the extension needs; it is not what the eye compares.
-                // Two surfaces of equal luma and different colour -- a red panel
-                // against a green one, a coloured light on a grey wall -- read
-                // as UNCHANGED to a luma test, so `fitStill` scored zero at a
-                // boundary that plainly moved, `carry` fell to the uncompensated
-                // cross-fade, and the chroma edge doubled: colour fringing on
-                // every synthesised frame, absent from every real one.
-                //
-                // The colour targets are already bound, and the sites these
-                // tests read are the sites predict() reads for the mean vector,
-                // so the fetches are shared rather than added: two at vUV that
-                // the `still` fallback needs anyway, two at the mean prediction
-                // that the uniform-field branch below reuses outright, and two
-                // cross-fetches for the two `stillAt` tests. Eight luma fetches
-                // gone, two colour fetches in their place, and the tests no
-                // longer go through lumaScale at all -- so the block-rounded
-                // strip along the right and bottom edges is finally tested on
-                // its own pixels rather than on the last luma column's.
-                //
-                // The distance is the largest channel difference: one 8-bit
-                // step in any channel is one step, so the 2/255 and 12/255
-                // ramps below mean exactly what they meant on luma.
-                "vec3 hereN = texture2D(screenTexture, vUV).rgb;",
-                "vec3 hereO = texture2D(previousTexture, vUV).rgb;",
-                "float fitStill = maxDiff(hereN, hereO);",
+                "float fitStill = abs(lumaN(vUV)",
+                                   "- lumaO(vUV));",
                 // **Kept unclamped as well, because the clamp is a lie the
                 // consistency test below must not be told.** See the gate there.
                 "vec2 mnRaw = vUV - mean * (1.0 - phase);",
                 "vec2 moRaw = vUV + mean * phase;",
                 "vec2 mn = clamp(mnRaw, 0.0, 1.0);",
                 "vec2 mo = clamp(moRaw, 0.0, 1.0);",
-                // The mean prediction's two endpoints, and each frame read at
-                // the OTHER endpoint for the two stillness tests.
-                "vec3 atMnN = texture2D(screenTexture, mn).rgb;",
-                "vec3 atMoO = texture2D(previousTexture, mo).rgb;",
-                "vec3 atMnO = texture2D(previousTexture, mn).rgb;",
-                "vec3 atMoN = texture2D(screenTexture, mo).rgb;",
-                // **Off the frame there is no evidence, and a clamp manufactures
-                // some.** Both fetch sites are clamped, so a pixel whose
-                // trajectory leaves the frame reads the border texel instead --
-                // whatever sits at the edge, not the content this pixel would
-                // have fetched. Every test below that compares the two frames
-                // along the vector inherits that, so each side carries how far
-                // inside the frame its own fetch landed, faded over about
-                // twenty-five pixels rather than switched: a hard gate would
-                // only move the artefact to wherever the gate turned on. The
-                // two fade independently, because during a pan one of them is
-                // off the frame long before the other.
-                "vec2 edgeNewer = min(mnRaw, 1.0 - mnRaw);",
-                "vec2 edgeOlder = min(moRaw, 1.0 - moRaw);",
-                "float onNewer = smoothstep(0.0, 0.02, min(edgeNewer.x, edgeNewer.y));",
-                "float onOlder = smoothstep(0.0, 0.02, min(edgeOlder.x, edgeOlder.y));",
-                // **Scored only where both ends exist.** With one end clamped
-                // to the border, `fitMoving` compares real content against the
-                // edge texel and loses to `fitStill` for no reason the scene
-                // gave -- so `carry` fell to the uncompensated cross-fade along
-                // the whole band the scene was entering from, a double image
-                // of the frame edge, one displacement wide, on every
-                // synthesised frame and never on a real one. A fetch that left
-                // the frame refutes nothing, so it contributes nothing: the
-                // ratio then falls to motion, which is the answer everywhere
-                // that is not an overlay.
-                "float fitMoving = maxDiff(atMnN, atMoO) * onNewer * onOlder;",
+                "float fitMoving = abs(lumaN(mn)",
+                                    "- lumaO(mo));",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
 
@@ -558,9 +508,11 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // one answer describes all of them and costs two fetches instead
                 // of eight. See predict().
                 "float stillAtNewer = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                                                      "maxDiff(atMnN, atMnO));",
+                    "abs(lumaN(mn)",
+                      "- lumaO(mn)));",
                 "float stillAtOlder = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                                                      "maxDiff(atMoN, atMoO));",
+                    "abs(lumaN(mo)",
+                      "- lumaO(mo)));",
                 // And whether this pixel is one that moved at all. A still pixel
                 // reading still content is a subtitle reading itself, which is
                 // correct and must not be disturbed.
@@ -627,23 +579,36 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // disagree by definition. That was a mask stepping at the
                 // 8-pixel grid, sweeping along every moving edge.
                 "vec2 bAtOlder = backAt(mo);",
-                // **Kept, and measured rather than argued.** This reads the
-                // forward field at the N site while the field is indexed on
-                // N-1, which on paper is the construction that "fired on 27.7%
-                // of the frame to cover 1.1%". On the bench's occluder scene
-                // (tools/frame-bench/occside.py: background -24 px, object
-                // +48 px, both fields built the device's way) it is what
-                // catches the COVERED band: error there 10.9 levels with it,
-                // 15.1 without, the rest of the frame unchanged at 0.10. The
-                // leading band of an opaque object is covered background by
-                // definition, so firing along it is the right answer there;
-                // whether it also fires on field noise in flat regions is a
-                // question for a recording, not for this scene.
                 "vec2 fRound = fieldAt(clamp(moRaw + bAtOlder, 0.0, 1.0));",
                 // Back into pixels, so the thresholds mean the same thing at
                 // every resolution.
                 "float eOlder = length((bAtOlder + mean) / motionScale);",
                 "float eNewer = length((fRound + bAtOlder) / motionScale);",
+                // **Off the frame there is no evidence, and a clamp manufactures
+                // some. This is the shimmer at the borders.**
+                //
+                // Both fetch sites are clamped, so a pixel whose trajectory
+                // leaves the frame reads the border texel instead -- a vector
+                // describing whatever sits at the edge, not the content this
+                // pixel would have fetched. Subtract `mean` from that and the
+                // disagreement is large with nothing occluded, so the mask fires
+                // across a band `mean * phase` wide: about seventy pixels while
+                // the scene is moving at a hundred and fifty. The band's width is
+                // the pan speed, which changes every frame, so the mask sweeps in
+                // and out along the edge and the border shimmers.
+                //
+                // The honest reading of a fetch that left the frame is not
+                // "these surfaces disagree", it is "there is nothing here to
+                // compare". So the test fades out as its own fetch site
+                // approaches the edge, and the two sides fade independently --
+                // during a pan one of them is off the frame long before the
+                // other. Faded rather than switched, over about twenty-five
+                // pixels, because a hard gate would only move the shimmer to
+                // wherever the gate turned on.
+                "vec2 edgeNewer = min(mnRaw, 1.0 - mnRaw);",
+                "vec2 edgeOlder = min(moRaw, 1.0 - moRaw);",
+                "float onNewer = smoothstep(0.0, 0.02, min(edgeNewer.x, edgeNewer.y));",
+                "float onOlder = smoothstep(0.0, 0.02, min(edgeOlder.x, edgeOlder.y));",
 
                 // A dead zone first: the matcher quantises to whole pixels and
                 // the two passes are independent, so a couple of pixels of
@@ -717,22 +682,8 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // weighting is already doing real work -- either source alone
                 // scores far worse than the blend -- so it is kept rather than
                 // replaced.
-                //
-                // **And a source whose fetch left the frame is not read.** The
-                // edge fade above only switched the consistency test off there,
-                // which left that source at FULL weight -- reading the border
-                // texel, clamped, for every pixel in a band `v * phase` wide
-                // along the edge the scene is entering from. At 4x the first
-                // phase carries three quarters of that band from the older
-                // frame, which has never seen it; the real frame that follows
-                // has the true content, and the band flickers between the two
-                // at the cadence. That is the border shimmer, and the honest
-                // answer is the one the edge comment already gives: no evidence
-                // there, so no weight there. The other frame can see the
-                // entering content by construction, and takes over through the
-                // same twenty-five-pixel fade.
-                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves) * (1.0 - occOlder) * onOlder;",
-                "float wNewer = phase * (1.0 - stillAtNewer * moves) * (1.0 - occNewer) * onNewer;",
+                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves) * (1.0 - occOlder);",
+                "float wNewer = phase * (1.0 - stillAtNewer * moves) * (1.0 - occNewer);",
                 // Both refused: nothing to prefer, so fall back to the plain mix
                 // rather than dividing by nothing. This is also what catches the
                 // case both consistency terms fire at once, which is a field the
@@ -752,42 +703,14 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "vec3 shown;",
                 "vec2 spread = abs(m1 - m0) + abs(m2 - m0) + abs(m3 - m0);",
                 "if (spread.x + spread.y < 1.0e-7) {",
-                    // Four identical blocks make `mean` equal to m0, so the
-                    // mean prediction's endpoints fetched above ARE this
-                    // prediction: no colour fetch at all on this path.
-                    "shown = (atMoO * wOlder + atMnN * wNewer) / max(wOlder + wNewer, 1.0e-4);",
+                    "shown = predict(m0, wOlder, wNewer);",
                 "} else {",
-                    // **The window says where the pixel sits; the fit says
-                    // which block is telling the truth about it.**
-                    //
-                    // Recorded on device during a pan: a cabinet in front of
-                    // a wall, the two at different depths and so moving by
-                    // different amounts. Along the cabinet's silhouette the
-                    // four blocks hold both motions, and a window blend alone
-                    // mixes them across a 16 px band -- the border smeared
-                    // into 8 px pieces on every synthesised frame and sharp on
-                    // every real one, which is the shimmer on object edges.
-                    //
-                    // Each prediction has already fetched both of its
-                    // endpoints, and a vector that fetched the wall for a
-                    // pixel on the cabinet disagrees with itself by the whole
-                    // contrast of that edge. So the window is scaled by the
-                    // reciprocal of that disagreement. Where the four blocks
-                    // agree the fits are equal and this IS the window; it is
-                    // not a choice, so nothing pops. Measured on the bench's
-                    // occluder and parallax scenes (occside.py): object error
-                    // 3.56 to 3.30 and 4.17 to 3.97 levels, covered background
-                    // 10.9 to 9.4, nothing worse anywhere. The floor is four
-                    // 8-bit steps: a weighting that swings on one step is the
-                    // texture-flicker pattern texflicker.py exists for.
-                    "vec4 fit;",
-                    "vec3 q0 = predict(m0, wOlder, wNewer, fit.x);",
-                    "vec3 q1 = predict(m1, wOlder, wNewer, fit.y);",
-                    "vec3 q2 = predict(m2, wOlder, wNewer, fit.z);",
-                    "vec3 q3 = predict(m3, wOlder, wNewer, fit.w);",
-                    "vec4 wf = weight / (fit + 4.0 / 255.0);",
-                    "wf /= dot(wf, vec4(1.0));",
-                    "shown = wf.x * q0 + wf.y * q1 + wf.z * q2 + wf.w * q3;",
+                    "vec3 q0 = predict(m0, wOlder, wNewer);",
+                    "vec3 q1 = predict(m1, wOlder, wNewer);",
+                    "vec3 q2 = predict(m2, wOlder, wNewer);",
+                    "vec3 q3 = predict(m3, wOlder, wNewer);",
+                    "shown = weight.x * q0 + weight.y * q1",
+                          "+ weight.z * q2 + weight.w * q3;",
                 "}",
 
                 // ---- did this pixel move, or is it painted on the screen? ----
@@ -839,7 +762,8 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // What a stationary thing looks like at this instant: the same
                 // two frames read at this exact pixel. Exact for an overlay, and
                 // what the blend falls back towards where motion is refuted.
-                "vec3 still = mix(hereO, hereN, phase);",
+                "vec3 still = mix(texture2D(previousTexture, vUV).rgb,",
+                                 "texture2D(screenTexture, vUV).rgb, phase);",
                 "shown = mix(still, shown, carry);",
 
                 "if (diagnostic > 0.5) {",
@@ -874,8 +798,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                     // old frame unchanged, frame generation is doing harm at that
                     // pixel, and no amount of internal self-consistency changes
                     // that.
-                    "float dSynth = length(shown - hereN);",
-                    "float dBase  = length(hereO - hereN);",
+                    "vec3 here  = texture2D(screenTexture,   vUV).rgb;",
+                    "vec3 there = texture2D(previousTexture, vUV).rgb;",
+                    "float dSynth = length(shown - here);",
+                    "float dBase  = length(there - here);",
 
                     // Only pixels that actually changed between the two real
                     // frames can say anything: where nothing moved, both

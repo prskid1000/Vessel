@@ -47,6 +47,3 @@ Thumbs.db
 *.jks
 keystore.properties
 signing.properties
-
-# device dumps pulled by tools/frame-bench/dump.py (raw frames, tens of MB)
-tools/frame-bench/dump/

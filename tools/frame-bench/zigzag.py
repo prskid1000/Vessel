@@ -83,11 +83,7 @@ def waviness(img, x_hint):
 
 
 older, truth, newer = compose(0.0), compose(0.5), compose(1.0)
-# The device's convention, not the bench's: the forward field indexed on the
-# OLDER frame with the sign the probe latches (-1), and the backward field
-# built the way FrameSynthesizer builds it. See occside.fields and interp.py.
-import occside
-field, back = occside.fields(newer, older)
+field = bench.estimate(newer, older)
 
 gh, gw = field.shape[:2]
 col = EDGE_X // 8
@@ -101,8 +97,8 @@ print()
 print("%-30s waviness(px)  edge error" % "")
 ref, _ = waviness(truth, EDGE_X)
 print("  %-28s %8.3f      %s" % ("ground truth", ref, "-"))
-for mode in ("fit",):
-    out = interp.interpolate(newer, older, field, back, 0.5, -1.0)
+for mode in ("off", "fit"):
+    out = interp.interpolate(newer, older, field, 0.5, 1.0, static_mode=mode)
     wav, n = waviness(out, EDGE_X)
     e = np.abs(out - truth).mean(-1) * 255
     band = np.zeros((H, W), bool)

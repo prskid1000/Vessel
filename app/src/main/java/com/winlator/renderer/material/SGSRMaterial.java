@@ -503,18 +503,9 @@ public class SGSRMaterial extends ShaderMaterial {
         "\t\t\t//smooth high contrast input",
         "\t\t\tdeltaY = clamp(deltaY, -MaxDelta, MaxDelta);",
         "",
-        // VESSEL: applied as a gain on the pixel's luma, not as an offset on
-        // each channel. Qualcomm's original adds `deltaY` -- which is derived
-        // from the green channel alone -- to R, G and B and clamps each on its
-        // own. On a grey edge that is a sharpen; on a saturated one it is a
-        // hue shift, because a channel already near 0 or 1 clamps while the
-        // others move, and the pixel turns towards or away from green by up to
-        // MaxDelta. Multiplying every channel by the same ratio keeps the
-        // colour's direction exactly and moves only its brightness, which is
-        // what the delta measured. On grey it is bit-for-bit what it was.
-        "\t\t\tfloat lum = dot(color.xyz, vec3(0.299, 0.587, 0.114));",
-        "\t\t\tfloat gain = clamp((lum + deltaY) / max(lum, 1.0 / 255.0), 0.0, 4.0);",
-        "\t\t\tcolor.xyz = clamp(color.xyz * gain, 0.0, 1.0);",
+        "\t\t\tcolor.x = clamp((color.x+deltaY),0.0,1.0);",
+        "\t\t\tcolor.y = clamp((color.y+deltaY),0.0,1.0);",
+        "\t\t\tcolor.z = clamp((color.z+deltaY),0.0,1.0);",
         "\t\t}",
         "\t}",
         "",

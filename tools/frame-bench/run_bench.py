@@ -25,17 +25,14 @@ print("field on the subtitle rows: mean %s   background rows: mean %s"
 
 mask = bench.textmask((h, w))
 
-# The device's convention, not the bench's: the forward field indexed on the
-# OLDER frame with the sign the probe latches (-1), and the backward field
-# built the way FrameSynthesizer builds it. See occside.fields and interp.py.
-import occside
-fwd, bwd = occside.fields(newer, older)
+# The shader takes the field in luma pixels and applies fieldSign. The match here
+# is measured from older to newer, which is the same convention the device's
+# probe settles on, so sign is +1.
 print("\nerror against the known-correct midpoint frame:")
 results = {}
-# The port carries the current shader and no longer offers the three rejected
-# static-suppression variants; only the shipped one is scored.
-for mode in ("fit",):
-    out = interp.interpolate(newer, older, fwd, bwd, phase=0.5, sign=-1.0)
+for mode in ("off", "scale", "blend", "fit"):
+    out = interp.interpolate(newer, older, field, phase=0.5, sign=1.0,
+                             static_mode=mode)
     results[mode] = out
     bench.report({"off": "no static suppression",
                   "scale": "carry scales the vectors",
@@ -47,7 +44,6 @@ for mode in ("fit",):
 cross = older * 0.5 + newer * 0.5
 bench.report("cross-fade, no compensation", cross, truth, mask)
 
-os.makedirs(os.path.join(bench.BENCH, "bench"), exist_ok=True)
 for name, img in list(results.items()) + [("truth", truth)]:
     crop = img[h - 140:h - 60, 60:60 + 1160]
     Image.fromarray((np.clip(crop, 0, 1) * 255).astype(np.uint8)).save(
