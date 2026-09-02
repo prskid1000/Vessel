@@ -982,6 +982,7 @@ fails the build.
 | `app/src/main/java/com/winlator/renderer/RenderableWindow.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
 | `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/material/ConfidenceMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/DownsampleLumaMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/FieldProbeMaterial.java` | 31 |
 | `app/src/main/java/com/winlator/renderer/material/InterpolateMaterial.java` | 31 |

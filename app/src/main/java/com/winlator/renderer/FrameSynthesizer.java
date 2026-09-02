@@ -5,6 +5,7 @@ import android.opengl.GLES30;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.winlator.renderer.material.ConfidenceMaterial;
 import com.winlator.renderer.material.DownsampleLumaMaterial;
 import com.winlator.renderer.material.FieldProbeMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
@@ -415,6 +416,28 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final DownsampleLumaMaterial downsampleMaterial = new DownsampleLumaMaterial();
     private final WarpLumaMaterial warpMaterial = new WarpLumaMaterial();
     private final MergeFieldMaterial mergeMaterial = new MergeFieldMaterial();
+    private final ConfidenceMaterial confidenceMaterial = new ConfidenceMaterial();
+
+    /**
+     * VESSEL: whether this interval can be interpolated at all. See
+     * {@link ConfidenceMaterial} for the two measurements and where the numbers
+     * came from; the thresholds are here because this is where they act.
+     *
+     * <p>Below {@link #MIN_AGREEMENT} the coarse field did not agree on a
+     * motion -- a cut, a menu, a flat wall with one object crossing it -- and
+     * above {@link #MAX_FRAME_DIFF} levels the two frames are not the same
+     * scene whatever the field says. Either way the interval is presented as
+     * real frames only, through the path the pipeline already takes when it
+     * has no valid field. {@link #lowConfidenceIntervals} counts how often, and
+     * the pacing line prints it, so the two numbers can be argued with.
+     */
+    private static final float MIN_AGREEMENT = 0.20f;
+    private static final float MAX_FRAME_DIFF = 40f / 255f;
+    private Target confidence;
+    private final java.nio.ByteBuffer confidencePixel = java.nio.ByteBuffer
+        .allocateDirect(4).order(java.nio.ByteOrder.nativeOrder());
+    private float lastAgreement = 1f, lastFrameDiff = 0f, lastDominantPx = 0f;
+    private long lowConfidenceIntervals = 0;
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -2254,11 +2277,13 @@ public class FrameSynthesizer implements FramePacer.Target {
                     + " \"gridWidth\": %d, \"gridHeight\": %d, \"blockX\": %d, \"blockY\": %d,"
                     + " \"phase\": %.4f, \"fieldSign\": %.0f, \"consistency\": %d,"
                     + " \"fieldMagnitude\": %.0f, \"interval\": %d, \"multiple\": %d,"
-                    + " \"realFrames\": %d}\n",
+                    + " \"realFrames\": %d, \"agreement\": %.3f, \"frameDiff\": %.4f,"
+                    + " \"dominantPx\": %.1f}\n",
                 colour[0].width, colour[0].height, luma[0].width, luma[0].height,
                 forward.width, forward.height, blockX, blockY,
                 phase, fieldSign != 0f ? fieldSign : 1f, backwardValid ? 1 : 0,
-                fieldMagnitude, smoothedInterval / 1000000L, activeMultiple, realFrames);
+                fieldMagnitude, smoothedInterval / 1000000L, activeMultiple, realFrames,
+                lastAgreement, lastFrameDiff, lastDominantPx);
             try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, "meta.json"))) {
                 out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
@@ -2553,6 +2578,14 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (!estimateOnce(lumaCoarse[0].texture, lumaCoarse[1].texture, coarseVectors.texture)) {
             return false;
         }
+        // Can this interval be interpolated at all? Decided on the coarse
+        // level, before any full-resolution work is spent on it. A `false`
+        // here is the same `false` a refused matcher returns: the interval
+        // shows real frames only.
+        if (confidence != null && !confident(ratioX, ratioY)) {
+            lowConfidenceIntervals++;
+            return false;
+        }
 
         // Forward: the older frame moved onto the newer, then the leftovers.
         warpLuma(previousLuma().texture, sign, +1f);
@@ -2610,6 +2643,48 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
+
+    /**
+     * One texel, read back. See {@link ConfidenceMaterial}.
+     *
+     * <p>The readback waits for the coarse estimate, which is the first and
+     * smallest piece of the frame's work. It is the same one-texel {@code
+     * GL_UNSIGNED_BYTE} read the sign probe does, once per real frame rather
+     * than four times a second. A failed read counts as confident: a broken
+     * diagnostic must not switch the feature off.
+     */
+    private boolean confident(float ratioX, float ratioY) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, confidence.framebuffer);
+        confidenceMaterial.use();
+        confidenceMaterial.setUniformVec2(confidenceMaterial.confidenceUniforms.coarseSize,
+                                          coarseVectors.width, coarseVectors.height);
+        confidenceMaterial.setUniformVec2(confidenceMaterial.confidenceUniforms.coarseFactor,
+                                          ratioX, ratioY);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lumaCoarse[1].texture);
+        confidenceMaterial.setUniformInt(confidenceMaterial.confidenceUniforms.lumaNewerTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lumaCoarse[0].texture);
+        confidenceMaterial.setUniformInt(confidenceMaterial.confidenceUniforms.lumaOlderTexture, 2);
+        blit(confidenceMaterial, coarseVectors.texture, 1, 1);
+        for (int unit = 2; unit >= 1; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+
+        confidencePixel.clear();
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
+        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, confidencePixel);
+        final int error = GLES20.glGetError();
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        renderer.viewportNeedsUpdate = true;
+        if (error != GLES20.GL_NO_ERROR) return true;
+
+        lastAgreement = (confidencePixel.get(0) & 0xff) / 255f;
+        lastDominantPx = (confidencePixel.get(1) & 0xff) / 255f * 1024f;
+        lastFrameDiff = (confidencePixel.get(2) & 0xff) / 255f;
+        return lastAgreement >= MIN_AGREEMENT && lastFrameDiff <= MAX_FRAME_DIFF;
     }
 
     /** Coarse plus residual. See {@link MergeFieldMaterial}. */
@@ -3012,6 +3087,8 @@ public class FrameSynthesizer implements FramePacer.Target {
                     mergedBack = new Target();
                     mergedBack.allocate(lumaW / blockX, lumaH / blockY,
                                         GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+                    confidence = new Target();
+                    confidence.allocate(1, 1, GLES30.GL_RGBA8, GLES20.GL_NEAREST);
                     for (int i = 0; i < 2; i++) {
                         filteredBack[i] = new Target();
                         filteredBack[i].allocate(lumaW / blockX, lumaH / blockY,
@@ -3059,6 +3136,7 @@ public class FrameSynthesizer implements FramePacer.Target {
             if (backVectors != null) backVectors.release();
             if (merged != null) merged.release();
             if (mergedBack != null) mergedBack.release();
+            if (confidence != null) confidence.release();
             if (signProbe != null) signProbe.release();
             if (fieldProbe != null) fieldProbe.release();
             if (output != null) output.release();
@@ -3085,6 +3163,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         lumaCoarse[0] = lumaCoarse[1] = null;
         filteredBack[0] = filteredBack[1] = null;
         filteredBackIndex = -1;
+        confidence = null;
         coarseVectors = warpedLuma = backVectors = merged = mergedBack = null;
         forwardField = backwardField = null;
         pyramidRan = false;
@@ -3205,6 +3284,14 @@ public class FrameSynthesizer implements FramePacer.Target {
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
+            // The whole-frame guard: how often it declined, and what it saw
+            // last. See ConfidenceMaterial.
+            say(String.format(
+                "fg confidence: %d intervals shown as real frames only this second;"
+                    + " last agreement %.0f%% (floor %.0f%%), frame difference %.0f levels"
+                    + " (ceiling %.0f), dominant motion %.0f px",
+                lowConfidenceIntervals, lastAgreement * 100f, MIN_AGREEMENT * 100f,
+                lastFrameDiff * 255f, MAX_FRAME_DIFF * 255f, lastDominantPx));
             // Where the gate currently sits and what it was derived from, so a
             // 4x-to-1x drop can be read rather than guessed at.
             say(String.format(
@@ -3314,6 +3401,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         tier1Frames = 0;
         skipped = 0;
         estimateFailures = 0;
+        lowConfidenceIntervals = 0;
     }
 
     private long reportedRealFrames = 0;
