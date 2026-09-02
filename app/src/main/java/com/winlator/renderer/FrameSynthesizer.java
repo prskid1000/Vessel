@@ -2171,29 +2171,23 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldTexture());
         interpolateMaterial.setUniformInt(
             interpolateMaterial.interpolateUniforms.motionTexture, 2);
-        // The search runs on these rather than on the colour: one byte a texel
-        // instead of four, for the same answer. See InterpolateMaterial.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.lumaNewerTexture, 3);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE4);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.lumaOlderTexture, 4);
+        // The luma pair is no longer bound here: every photometric test in the
+        // shader scores the colour targets, which are already on units 0 and
+        // 1. See InterpolateMaterial's photometric block.
+        //
         // The field measured the other way round, and the one bit of geometry
         // this compositor has ever had. See InterpolateMaterial's consistency
         // block, and backFieldTexture for what is bound when there is none.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE5);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, backFieldTexture());
         interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.backMotionTexture, 5);
+            interpolateMaterial.interpolateUniforms.backMotionTexture, 3);
         interpolateMaterial.setUniformFloat(
             interpolateMaterial.interpolateUniforms.consistency, backwardValid ? 1f : 0f);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
 
-        for (int unit = 5; unit >= 0; unit--) {
+        for (int unit = 3; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }

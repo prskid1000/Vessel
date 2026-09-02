@@ -170,8 +170,6 @@ public class InterpolateMaterial extends ScreenMaterial {
         public final Uniform backMotionTexture = new Uniform("backMotionTexture");
         /** 1 while the backward field is real, 0 to fall back to photometry alone. */
         public final Uniform consistency = new Uniform("consistency");
-        public final Uniform lumaNewerTexture = new Uniform("lumaNewerTexture");
-        public final Uniform lumaOlderTexture = new Uniform("lumaOlderTexture");
         public final Uniform motionScale = new Uniform("motionScale");
         public final Uniform vectorSize = new Uniform("vectorSize");
         public final Uniform phase = new Uniform("phase");
@@ -236,8 +234,8 @@ public class InterpolateMaterial extends ScreenMaterial {
             // per-pixel sign scoring that used to be the sole reader. Binding a
             // sampler a shader does not declare is silent; reading one it does
             // not declare is a compile error, which is how this surfaced.
-            "uniform sampler2D lumaNewerTexture;",
-            "uniform sampler2D lumaOlderTexture;",
+            // The luma pair is no longer read here. Every photometric test
+            // scores the colour targets instead; see main().
 
             // VESSEL: when 1, write four measurements instead of a picture.
             "uniform float diagnostic;",
@@ -273,9 +271,10 @@ public class InterpolateMaterial extends ScreenMaterial {
             // Every luma and field read goes through here, in colour UV. The
             // luma covers the block-rounded top-left of the colour frame, so
             // its UV is the colour UV scaled up.
-            "vec2 lumaUV(vec2 uv) { return clamp(uv * lumaScale, 0.0, 1.0); }",
-            "float lumaN(vec2 uv) { return texture2D(lumaNewerTexture, lumaUV(uv)).r; }",
-            "float lumaO(vec2 uv) { return texture2D(lumaOlderTexture, lumaUV(uv)).r; }",
+            // How far apart two colours are, as the largest channel step. See
+            // the photometric block in main() for why this is colour and not
+            // the luma the matcher sees.
+            "float maxDiff(vec3 a, vec3 b) { vec3 d = abs(a - b); return max(max(d.r, d.g), d.b); }",
 
             // The four blocks around a colour-space position and their
             // raised-cosine window. `base` is the block up-and-left of the
@@ -494,14 +493,40 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // because both feed them: `carry` decides how far the result is
                 // pulled back towards a stationary reading, and the two endpoint
                 // weights decide which of the two frames is worth reading at all.
-                "float fitStill = abs(lumaN(vUV)",
-                                   "- lumaO(vUV));",
+                // **Scored on colour, not on the luma the matcher was fed.**
+                //
+                // Luma is what the extension needs; it is not what the eye
+                // compares. Two surfaces of equal luma and different colour --
+                // a red panel against a green one, a coloured light on a grey
+                // wall -- read as UNCHANGED to a luma test, so `fitStill` scored
+                // zero at a boundary that plainly moved, `carry` fell to the
+                // uncompensated cross-fade, and the chroma edge doubled on
+                // every synthesised frame. The colour targets are already
+                // bound, and the sites these tests read are the sites predict()
+                // reads for the mean vector, so the fetches are shared: two at
+                // vUV that the `still` fallback needs anyway, two at the mean
+                // prediction that the uniform-field branch reuses outright, and
+                // two cross-fetches for the stillness tests. Eight luma fetches
+                // gone, two colour fetches added, and the block-rounded strip
+                // along the right and bottom edges is tested on its own pixels
+                // rather than on the last luma column's. The distance is the
+                // largest channel step, so one 8-bit step in any channel is
+                // one step and the ramps below keep their meaning.
+                "vec3 hereN = texture2D(screenTexture, vUV).rgb;",
+                "vec3 hereO = texture2D(previousTexture, vUV).rgb;",
+                "float fitStill = maxDiff(hereN, hereO);",
                 // **Kept unclamped as well, because the clamp is a lie the
                 // consistency test below must not be told.** See the gate there.
                 "vec2 mnRaw = vUV - mean * (1.0 - phase);",
                 "vec2 moRaw = vUV + mean * phase;",
                 "vec2 mn = clamp(mnRaw, 0.0, 1.0);",
                 "vec2 mo = clamp(moRaw, 0.0, 1.0);",
+                // The mean prediction's two endpoints, and each frame read at
+                // the OTHER endpoint for the two stillness tests.
+                "vec3 atMnN = texture2D(screenTexture, mn).rgb;",
+                "vec3 atMoO = texture2D(previousTexture, mo).rgb;",
+                "vec3 atMnO = texture2D(previousTexture, mn).rgb;",
+                "vec3 atMoN = texture2D(screenTexture, mo).rgb;",
                 // **Off the frame there is no evidence, and a clamp manufactures
                 // some.** Both fetch sites are clamped, so a pixel whose
                 // trajectory leaves the frame reads the border texel instead --
@@ -533,8 +558,7 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // the frame refutes nothing, so it contributes nothing, and the
                 // ratio falls to motion, which is the right answer everywhere
                 // that is not an overlay.
-                "float fitMoving = abs(lumaN(mn)",
-                                    "- lumaO(mo)) * onNewer * onOlder;",
+                "float fitMoving = maxDiff(atMnN, atMoO) * onNewer * onOlder;",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
 
@@ -544,11 +568,9 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // one answer describes all of them and costs two fetches instead
                 // of eight. See predict().
                 "float stillAtNewer = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                    "abs(lumaN(mn)",
-                      "- lumaO(mn)));",
+                                                      "maxDiff(atMnN, atMnO));",
                 "float stillAtOlder = 1.0 - smoothstep(2.0 / 255.0, 12.0 / 255.0,",
-                    "abs(lumaN(mo)",
-                      "- lumaO(mo)));",
+                                                      "maxDiff(atMoN, atMoO));",
                 // And whether this pixel is one that moved at all. A still pixel
                 // reading still content is a subtitle reading itself, which is
                 // correct and must not be disturbed.
@@ -730,7 +752,10 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "vec2 spread = abs(m1 - m0) + abs(m2 - m0) + abs(m3 - m0);",
                 "vec4 fit;",
                 "if (spread.x + spread.y < 1.0e-7) {",
-                    "shown = predict(m0, wOlder, wNewer, fit.x);",
+                    // Four identical blocks make `mean` equal to m0, so the
+                    // mean prediction's endpoints fetched above ARE this
+                    // prediction: no colour fetch at all on this path.
+                    "shown = (atMoO * wOlder + atMnN * wNewer) / max(wOlder + wNewer, 1.0e-4);",
                 "} else {",
                     // **The window says where the pixel sits; the fit says
                     // which block is telling the truth about it.**
@@ -811,8 +836,7 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // What a stationary thing looks like at this instant: the same
                 // two frames read at this exact pixel. Exact for an overlay, and
                 // what the blend falls back towards where motion is refuted.
-                "vec3 still = mix(texture2D(previousTexture, vUV).rgb,",
-                                 "texture2D(screenTexture, vUV).rgb, phase);",
+                "vec3 still = mix(hereO, hereN, phase);",
                 "shown = mix(still, shown, carry);",
 
                 "if (diagnostic > 0.5) {",
@@ -847,10 +871,8 @@ public class InterpolateMaterial extends ScreenMaterial {
                     // old frame unchanged, frame generation is doing harm at that
                     // pixel, and no amount of internal self-consistency changes
                     // that.
-                    "vec3 here  = texture2D(screenTexture,   vUV).rgb;",
-                    "vec3 there = texture2D(previousTexture, vUV).rgb;",
-                    "float dSynth = length(shown - here);",
-                    "float dBase  = length(there - here);",
+                    "float dSynth = length(shown - hereN);",
+                    "float dBase  = length(hereO - hereN);",
 
                     // Only pixels that actually changed between the two real
                     // frames can say anything: where nothing moved, both

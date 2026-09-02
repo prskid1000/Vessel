@@ -32,8 +32,8 @@ reverted commits and the code to repeat them should not have to be rewritten.
     border_gate  in-frame fades, in pixels, on the source weights and on
                  fitMoving as well as on the occlusion terms. On, as shipped
                  since the step-3 change; off is the 0.5.14 behaviour.
-    photometry   "luma" scores the R8 pair, as shipped; "colour" the RGB
-                 targets.
+    photometry   "colour" scores the RGB targets, as shipped since step 6;
+                 "luma" is the 0.5.14 test on the R8 pair.
     obmc         "fit" weights each of the four blocks' predictions by its
                  endpoint agreement under the raised-cosine window, as shipped
                  since step 4; "window" is the 0.5.14 blend; "fit9" does the
@@ -80,7 +80,7 @@ def max_diff(a, b):
 
 def interpolate(newer, older, field, back, phase, sign=-1.0, *,
                 newer_side=True, drop="older", border_gate=True,
-                photometry="luma", consistency=True, diagnostics=None,
+                photometry="colour", consistency=True, diagnostics=None,
                 obmc="fit", obmc_floor=4.0 / 255.0):
     """The shader's main().
 
