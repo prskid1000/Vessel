@@ -29,8 +29,9 @@ reverted commits and the code to repeat them should not have to be rewritten.
     newer_side   the newer-side round trip. On, as shipped.
     drop         which source the older-side disagreement removes: "older" is
                  what ships, "newer" the alternative, "none" switches it off.
-    border_gate  in-frame fades on the source weights and on fitMoving. Off
-                 as shipped: the fades apply only to the occlusion terms.
+    border_gate  in-frame fades, in pixels, on the source weights and on
+                 fitMoving as well as on the occlusion terms. On, as shipped
+                 since the step-3 change; off is the 0.5.14 behaviour.
     photometry   "luma" scores the R8 pair, as shipped; "colour" the RGB
                  targets.
     obmc         "window" is the shipped raised-cosine blend of four blocks;
@@ -77,7 +78,7 @@ def max_diff(a, b):
 
 
 def interpolate(newer, older, field, back, phase, sign=-1.0, *,
-                newer_side=True, drop="older", border_gate=False,
+                newer_side=True, drop="older", border_gate=True,
                 photometry="luma", consistency=True, diagnostics=None,
                 obmc="window", obmc_floor=4.0 / 255.0):
     """The shader's main().
@@ -147,10 +148,11 @@ def interpolate(newer, older, field, back, phase, sign=-1.0, *,
     at_mn_o = sample(older_p, mn[..., 0], mn[..., 1])
     at_mo_n = sample(newer_p, mo[..., 0], mo[..., 1])
 
-    edge_n = np.minimum(mn_raw, 1.0 - mn_raw)
-    edge_o = np.minimum(mo_raw, 1.0 - mo_raw)
-    on_n = smoothstep(0.0, 0.02, np.minimum(edge_n[..., 0], edge_n[..., 1]))
-    on_o = smoothstep(0.0, 0.02, np.minimum(edge_o[..., 0], edge_o[..., 1]))
+    # In pixels, over 24 of them, on both axes alike.
+    edge_n = np.minimum(mn_raw, 1.0 - mn_raw) / motion_scale
+    edge_o = np.minimum(mo_raw, 1.0 - mo_raw) / motion_scale
+    on_n = smoothstep(0.0, 24.0, np.minimum(edge_n[..., 0], edge_n[..., 1]))
+    on_o = smoothstep(0.0, 24.0, np.minimum(edge_o[..., 0], edge_o[..., 1]))
 
     fit_moving = diff(at_mn_n, at_mo_o)
     if border_gate:

@@ -497,8 +497,39 @@ public class InterpolateMaterial extends ScreenMaterial {
                 "vec2 moRaw = vUV + mean * phase;",
                 "vec2 mn = clamp(mnRaw, 0.0, 1.0);",
                 "vec2 mo = clamp(moRaw, 0.0, 1.0);",
+                // **Off the frame there is no evidence, and a clamp manufactures
+                // some.** Both fetch sites are clamped, so a pixel whose
+                // trajectory leaves the frame reads the border texel instead --
+                // whatever sits at the edge, not the content this pixel would
+                // have fetched. Every test below that compares the two frames
+                // along the vector inherits that, and so did the two source
+                // weights: a source whose fetch had left the frame was read at
+                // full weight from the border texel, across a band `v * phase`
+                // wide along the edge the scene enters from. So each side
+                // carries how far inside the frame its own fetch landed, in
+                // PIXELS -- the first version of this was 0.02 of the texture,
+                // which is 26 px across and 14 px down, two different fades
+                // for one idea -- over twenty-four of them, faded rather than
+                // switched because a hard gate would only move the artefact to
+                // wherever the gate turned on. The two fade independently:
+                // during a pan one of them is off the frame long before the
+                // other, and the other can see the entering content by
+                // construction.
+                "vec2 edgeNewer = min(mnRaw, 1.0 - mnRaw) / motionScale;",
+                "vec2 edgeOlder = min(moRaw, 1.0 - moRaw) / motionScale;",
+                "float onNewer = smoothstep(0.0, 24.0, min(edgeNewer.x, edgeNewer.y));",
+                "float onOlder = smoothstep(0.0, 24.0, min(edgeOlder.x, edgeOlder.y));",
+                // **Scored only where both ends exist.** With one end clamped
+                // to the border, this compared real content against the edge
+                // texel and lost to `fitStill` for no reason the scene gave, so
+                // `carry` fell to the uncompensated cross-fade along the whole
+                // entering band -- a double image of the frame edge on every
+                // synthesised frame and never on a real one. A fetch that left
+                // the frame refutes nothing, so it contributes nothing, and the
+                // ratio falls to motion, which is the right answer everywhere
+                // that is not an overlay.
                 "float fitMoving = abs(lumaN(mn)",
-                                    "- lumaO(mo));",
+                                    "- lumaO(mo)) * onNewer * onOlder;",
                 "float ratio = fitStill / (fitStill + fitMoving + 1.0 / 2550.0);",
                 "float carry = smoothstep(0.3, 0.7, ratio);",
 
@@ -584,31 +615,13 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // every resolution.
                 "float eOlder = length((bAtOlder + mean) / motionScale);",
                 "float eNewer = length((fRound + bAtOlder) / motionScale);",
-                // **Off the frame there is no evidence, and a clamp manufactures
-                // some. This is the shimmer at the borders.**
-                //
-                // Both fetch sites are clamped, so a pixel whose trajectory
-                // leaves the frame reads the border texel instead -- a vector
-                // describing whatever sits at the edge, not the content this
-                // pixel would have fetched. Subtract `mean` from that and the
-                // disagreement is large with nothing occluded, so the mask fires
-                // across a band `mean * phase` wide: about seventy pixels while
-                // the scene is moving at a hundred and fifty. The band's width is
-                // the pan speed, which changes every frame, so the mask sweeps in
-                // and out along the edge and the border shimmers.
-                //
-                // The honest reading of a fetch that left the frame is not
-                // "these surfaces disagree", it is "there is nothing here to
-                // compare". So the test fades out as its own fetch site
-                // approaches the edge, and the two sides fade independently --
-                // during a pan one of them is off the frame long before the
-                // other. Faded rather than switched, over about twenty-five
-                // pixels, because a hard gate would only move the shimmer to
-                // wherever the gate turned on.
-                "vec2 edgeNewer = min(mnRaw, 1.0 - mnRaw);",
-                "vec2 edgeOlder = min(moRaw, 1.0 - moRaw);",
-                "float onNewer = smoothstep(0.0, 0.02, min(edgeNewer.x, edgeNewer.y));",
-                "float onOlder = smoothstep(0.0, 0.02, min(edgeOlder.x, edgeOlder.y));",
+                // Off the frame there is no evidence, and a clamped fetch would
+                // manufacture some: a vector describing whatever sits at the
+                // edge, subtracted from `mean`, reads as a large disagreement
+                // with nothing occluded, across a band as wide as the pan. So
+                // both terms fade with their own fetch site's distance from
+                // the edge -- `onNewer` and `onOlder`, computed above with the
+                // photometric tests, which have the same problem.
 
                 // A dead zone first: the matcher quantises to whole pixels and
                 // the two passes are independent, so a couple of pixels of
@@ -682,8 +695,16 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // weighting is already doing real work -- either source alone
                 // scores far worse than the blend -- so it is kept rather than
                 // replaced.
-                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves) * (1.0 - occOlder);",
-                "float wNewer = phase * (1.0 - stillAtNewer * moves) * (1.0 - occNewer);",
+                //
+                // **And a source whose fetch left the frame is not read.** The
+                // edge fades used to apply only to the consistency terms,
+                // which left that source at full weight reading the border
+                // texel. At 4x the first phase carried three quarters of the
+                // entering band from the frame that had never seen it, and the
+                // real frame that followed had the true content: the band
+                // flickered at the cadence. See the fades above.
+                "float wOlder = (1.0 - phase) * (1.0 - stillAtOlder * moves) * (1.0 - occOlder) * onOlder;",
+                "float wNewer = phase * (1.0 - stillAtNewer * moves) * (1.0 - occNewer) * onNewer;",
                 // Both refused: nothing to prefer, so fall back to the plain mix
                 // rather than dividing by nothing. This is also what catches the
                 // case both consistency terms fire at once, which is a field the

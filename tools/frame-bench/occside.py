@@ -146,7 +146,7 @@ VARIANTS = [
     ("consistency off", dict(drop="none")),
     ("newer-side round trip off", dict(newer_side=False)),
     ("colour photometry", dict(photometry="colour")),
-    ("border gate on", dict(border_gate=True)),
+    ("border gate off (0.5.14)", dict(border_gate=False)),
     ("3x3 blocks, fit-weighted", dict(obmc="fit9")),
     ("3x3 blocks, fit floor 1 step", dict(obmc="fit9", obmc_floor=1.0 / 255.0)),
 ]
