@@ -34,9 +34,10 @@ reverted commits and the code to repeat them should not have to be rewritten.
                  since the step-3 change; off is the 0.5.14 behaviour.
     photometry   "luma" scores the R8 pair, as shipped; "colour" the RGB
                  targets.
-    obmc         "window" is the shipped raised-cosine blend of four blocks;
-                 "fit" weights each by its endpoint agreement; "fit9" does the
-                 same over nine blocks.
+    obmc         "fit" weights each of the four blocks' predictions by its
+                 endpoint agreement under the raised-cosine window, as shipped
+                 since step 4; "window" is the 0.5.14 blend; "fit9" does the
+                 fit weighting over nine blocks.
 
 CONVENTIONS. Fields are in raw matcher units -- pixels, ref to target, indexed
 on the ref, which is the OLDER frame for the forward field and the warped
@@ -80,7 +81,7 @@ def max_diff(a, b):
 def interpolate(newer, older, field, back, phase, sign=-1.0, *,
                 newer_side=True, drop="older", border_gate=True,
                 photometry="luma", consistency=True, diagnostics=None,
-                obmc="window", obmc_floor=4.0 / 255.0):
+                obmc="fit", obmc_floor=4.0 / 255.0):
     """The shader's main().
 
     newer, older : (h, w, 3) float32 in [0, 1]

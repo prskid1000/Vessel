@@ -2684,8 +2684,38 @@ public class FrameSynthesizer implements FramePacer.Target {
         lastAgreement = (confidencePixel.get(0) & 0xff) / 255f;
         lastDominantPx = (confidencePixel.get(1) & 0xff) / 255f * 1024f;
         lastFrameDiff = (confidencePixel.get(2) & 0xff) / 255f;
-        return lastAgreement >= MIN_AGREEMENT && lastFrameDiff <= MAX_FRAME_DIFF;
+
+        // **With hysteresis, because the first build without it flickered
+        // between modes.** On the ceiling the agreement sat around the floor
+        // and the whole frame flipped between interpolated and real every
+        // few intervals -- 7, 5, 1, 0, 2 declined per second in the log --
+        // which reads as more shimmer than the tearing it replaced. So it
+        // takes two consecutive readings below the floor to switch off and
+        // two above a higher bar to switch back on. A cut is different: the
+        // frames are not the same scene, and one reading is enough.
+        if (lastFrameDiff > MAX_FRAME_DIFF) {
+            confidentNow = false;
+            lowStreak = 2;
+            highStreak = 0;
+            return false;
+        }
+        if (lastAgreement < MIN_AGREEMENT) {
+            lowStreak++;
+            highStreak = 0;
+        } else if (lastAgreement >= MIN_AGREEMENT + 0.10f) {
+            highStreak++;
+            lowStreak = 0;
+        } else {
+            lowStreak = 0;
+            highStreak = 0;
+        }
+        if (confidentNow && lowStreak >= 2) confidentNow = false;
+        if (!confidentNow && highStreak >= 2) confidentNow = true;
+        return confidentNow;
     }
+
+    private boolean confidentNow = true;
+    private int lowStreak = 0, highStreak = 0;
 
     /** Coarse plus residual. See {@link MergeFieldMaterial}. */
     private void mergeField(Target residual, float factorX, float factorY, Target destination) {

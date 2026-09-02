@@ -382,11 +382,16 @@ public class InterpolateMaterial extends ScreenMaterial {
             // bilinear one, and the texture flicker that remains is the
             // field's (1.80 estimated against 0.87 true on the same bench),
             // not the sampler's.
-            "vec3 predict(vec2 v, float wOlder, float wNewer) {",
+            // `fit` is how far this prediction's two endpoints disagree: the
+            // largest channel step between what the older frame and the newer
+            // frame show along this vector. Free, since both were fetched.
+            "vec3 predict(vec2 v, float wOlder, float wNewer, out float fit) {",
                 "vec2 fromNewer = clamp(vUV - v * (1.0 - phase), 0.0, 1.0);",
                 "vec2 fromOlder = clamp(vUV + v * phase, 0.0, 1.0);",
                 "vec3 older = texture2D(previousTexture, fromOlder).rgb;",
                 "vec3 newer = texture2D(screenTexture, fromNewer).rgb;",
+                "vec3 d = abs(older - newer);",
+                "fit = max(max(d.r, d.g), d.b);",
                 "return (older * wOlder + newer * wNewer) / max(wOlder + wNewer, 1.0e-4);",
             "}",
 
@@ -723,15 +728,38 @@ public class InterpolateMaterial extends ScreenMaterial {
                 // coherent: it takes the same side across a whole block.
                 "vec3 shown;",
                 "vec2 spread = abs(m1 - m0) + abs(m2 - m0) + abs(m3 - m0);",
+                "vec4 fit;",
                 "if (spread.x + spread.y < 1.0e-7) {",
-                    "shown = predict(m0, wOlder, wNewer);",
+                    "shown = predict(m0, wOlder, wNewer, fit.x);",
                 "} else {",
-                    "vec3 q0 = predict(m0, wOlder, wNewer);",
-                    "vec3 q1 = predict(m1, wOlder, wNewer);",
-                    "vec3 q2 = predict(m2, wOlder, wNewer);",
-                    "vec3 q3 = predict(m3, wOlder, wNewer);",
-                    "shown = weight.x * q0 + weight.y * q1",
-                          "+ weight.z * q2 + weight.w * q3;",
+                    // **The window says where the pixel sits; the fit says
+                    // which block is telling the truth about it.**
+                    //
+                    // Recorded on device during a pan: a cabinet in front of
+                    // a wall, at different depths and so moving by different
+                    // amounts. Along the cabinet's silhouette the four blocks
+                    // hold both motions, and the window alone blends them
+                    // across a 16 px band -- the border smeared into 8 px
+                    // pieces on every synthesised frame and sharp on every
+                    // real one. Each prediction has already fetched both of
+                    // its endpoints, and a vector that fetched the wall for a
+                    // pixel on the cabinet disagrees with itself by the whole
+                    // contrast of that edge. So the window is scaled by the
+                    // reciprocal of that disagreement. Where the four blocks
+                    // agree the fits are equal and this IS the window; it is a
+                    // weighting and not a choice, so nothing pops. Bench
+                    // (occside.py): object error 3.56 to 3.30 and 4.23 to
+                    // 4.03 levels, covered background 13.2 to 11.5, nothing
+                    // worse anywhere. The floor is four 8-bit steps: a
+                    // weighting that swings on one step is the texture-flicker
+                    // pattern texflicker.py exists for.
+                    "vec3 q0 = predict(m0, wOlder, wNewer, fit.x);",
+                    "vec3 q1 = predict(m1, wOlder, wNewer, fit.y);",
+                    "vec3 q2 = predict(m2, wOlder, wNewer, fit.z);",
+                    "vec3 q3 = predict(m3, wOlder, wNewer, fit.w);",
+                    "vec4 wf = weight / (fit + 4.0 / 255.0);",
+                    "wf /= dot(wf, vec4(1.0));",
+                    "shown = wf.x * q0 + wf.y * q1 + wf.z * q2 + wf.w * q3;",
                 "}",
 
                 // ---- did this pixel move, or is it painted on the screen? ----

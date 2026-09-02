@@ -140,8 +140,8 @@ def score(out, truth, masks):
 
 
 VARIANTS = [
-    ("shipped: window OBMC, drop older", dict()),
-    ("fit-weighted OBMC", dict(obmc="fit")),
+    ("shipped: fit-weighted OBMC, drop older", dict()),
+    ("window OBMC (0.5.14)", dict(obmc="window")),
     ("drop NEWER instead", dict(drop="newer")),
     ("consistency off", dict(drop="none")),
     ("newer-side round trip off", dict(newer_side=False)),
