@@ -58,7 +58,8 @@ def pull():
     for name in listing:
         out = os.path.join(DUMP, name)
         os.makedirs(out, exist_ok=True)
-        for f in ("meta.json", "older.rgba", "newer.rgba", "shown.rgba", "field.f32", "back.f32"):
+        for f in ("meta.json", "older.rgba", "newer.rgba", "shown.rgba", "field.f32", "back.f32",
+                  "merged.f32", "mergedBack.f32", "global.f32"):
             data = subprocess.run(["adb", "exec-out", "run-as", PACKAGE, "cat",
                                    "files/fgdump/%s/%s" % (name, f)], capture_output=True).stdout
             if data:
@@ -84,6 +85,10 @@ def load(folder):
     # glReadPixels returns rows bottom-up. The shader samples every texture in
     # the orientation it was written, and all of these were written the same
     # way, so a consistent flip of everything is the identity for the port.
+    meta["merged"] = field("merged.f32")
+    meta["mergedBack"] = field("mergedBack.f32")
+    g = os.path.join(folder, "global.f32")
+    meta["global"] = np.fromfile(g, dtype=np.float32)[:3].tolist() if os.path.exists(g) and os.path.getsize(g) == 16 else None
     return meta, rgba("older.rgba"), rgba("newer.rgba"), rgba("shown.rgba"), field("field.f32"), field("back.f32")
 
 
@@ -120,6 +125,13 @@ def replay(folder):
     print("  %-30s %10s %10s" % ("variant", "fidelity", "truth"))
     print("  %-30s %10s %10.3f  (phase alone: %.3f)"
           % ("device output", "-", truth_metric(shown, older, newer), 1 - phase))
+    if meta.get("global") is not None:
+        gx, gy, agree = meta["global"]
+        print("  global motion (%+.1f, %+.1f) px, %.0f%% of the coarse field agrees" % (gx, gy, agree * 100))
+    if meta.get("merged") is not None:
+        out = interp.interpolate(newer, older, meta["merged"], meta["mergedBack"], phase, sign)
+        print("  %-30s %10.2f %10.3f" % ("before the gate", float(np.abs(out - shown).mean() * 255),
+                                        truth_metric(out, older, newer)))
     first = None
     for label, kw in VARIANTS:
         out = interp.interpolate(newer, older, field, back, phase, sign, **kw)

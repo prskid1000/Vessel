@@ -2239,6 +2239,9 @@ public class FrameSynthesizer implements FramePacer.Target {
             readTarget(forward, GLES20.GL_FLOAT, 16, new java.io.File(dir, "field.f32"));
             final Target back = backFieldTarget();
             if (back != null) readTarget(back, GLES20.GL_FLOAT, 16, new java.io.File(dir, "back.f32"));
+            // The merged fields before the median as well.
+            if (merged != null) readTarget(merged, GLES20.GL_FLOAT, 16, new java.io.File(dir, "merged.f32"));
+            if (mergedBack != null) readTarget(mergedBack, GLES20.GL_FLOAT, 16, new java.io.File(dir, "mergedBack.f32"));
 
             final String json = String.format(java.util.Locale.US,
                 "{\"width\": %d, \"height\": %d, \"lumaWidth\": %d, \"lumaHeight\": %d,"
@@ -2603,6 +2606,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
 
+ See {@link MergeFieldMaterial}. */
     /** Coarse plus residual. See {@link MergeFieldMaterial}. */
     private void mergeField(Target residual, float factorX, float factorY, Target destination) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
