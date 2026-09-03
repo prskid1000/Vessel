@@ -100,6 +100,16 @@ metrics it could not establish rather than guessing them.
 - **That perfect motion knowledge makes the background beside a subtitle four
   times worse** (25.85 against 6.25), because that background is occluded by the
   overlay in both frames and was never photographed.
+- **That prefiltering the match input does not fix the dark-region shimmer.**
+  Borrowed from the DLSS5 video path, which matches on an area-downsampled luma:
+  a box prefilter (radius 1/2/4 px) on the matcher's input only. On textured,
+  moving dumps it helped a little — agreement up several to ~13 points, endpoints
+  flat or down (step4_04 14→27%, step2_04 27→35%). On the dark, near-static
+  step5 family, where the shimmer actually lives and the field is `(0,0)` noise,
+  it *hurt* — agreement fell and endpoints rose (step5_00 21→19%, step5_04
+  21→16%). It polishes the easy cases and degrades the ones that cause the
+  artefact, because blurring cannot recover motion the pixels never held. Filed
+  and dropped, like the luma-gamma and shifted-grid experiments before it.
 
 ## What none of this can see
 
