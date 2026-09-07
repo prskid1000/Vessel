@@ -782,252 +782,84 @@ The modifications, in the order they were made:
    practice, and whether the self-write suppression matches how many callbacks
    `setPrimaryClip` really produces.
 
-31. **`FrameExtrapolator`, `frame_extrapolation.c`, and the renderer hook they
-   need — frames the guest never drew.** The temporal counterpart to
+31. **`FrameSynthesizer`, `frame_extrapolation.c`, and the renderer hook they
+   need -- frames the guest never drew.** The temporal counterpart to
    modification 22: SGSR reconstructs across space, from a frame rendered below
    the panel's resolution, and this reconstructs across time, from two frames
    rendered below its refresh rate. Both sit in the compositor and both ask the
    driver before they act.
 
-   `GL_QCOM_frame_extrapolation` is a registered Khronos extension implemented by
-   the vendor GLES driver, so `glExtrapolateTex2DQCOM(src1, src2, output,
-   scaleFactor)` predicts a third frame from two real ones and nothing here
-   implements the prediction. It has no Java binding — `android.opengl.GLES2x`
-   stops at the core API — so `frame_extrapolation.c` resolves it through
-   `eglGetProcAddress` and exposes two statics, and it is the only new file in
-   `cpp/winlator` since `xshmfence.c`.
+   **Interpolation, not extrapolation, and the driver decided that.**
+   `GL_QCOM_frame_extrapolation` is advertised on this driver and does not work:
+   `glExtrapolateTex2DQCOM` accepts the call, returns `GL_NO_ERROR`, and writes a
+   fixed eight-pixel ramp with no scene structure at any scale, proved by reading
+   the destination back. Its sibling `GL_QCOM_motion_estimation` does work -- a
+   fixed-function 8x8 block matcher over an R8 luma pair, writing one vector per
+   block into an RGBA16F texture -- and that is the only entry point
+   `frame_extrapolation.c` still resolves, through `eglGetProcAddress`, because
+   `android.opengl.GLES2x` stops at the core API.
 
-   **Extrapolation and not interpolation, which is the reason for choosing it.**
-   Interpolating between two real frames means holding the newer one back until
-   the frame after it exists, at a cost of one full frame of latency. Predicting
-   forward costs none; the price is accuracy instead, and a prediction is most
-   wrong where something occluded is being revealed. The next real frame replaces
-   it outright, so the error is bounded to one frame.
+   With a field between two real frames the frame between them is a blend of
+   two observed pictures rather than a guess past one. The price is one interval
+   of latency: frame N is presented at the end of its own interval, after the
+   frames that belong before it.
 
-   `GLRenderer.onDrawFrame` gains three things: `extrapolating()`, which gates on
-   the container's setting, the absence of effects and
-   `FrameExtrapolator.isSupported()`; a branch that composites into an offscreen
-   target instead of the screen; and `invalidateBoundWindowMaterial()`, because
-   the extrapolator's blit binds a program behind `bindWindowMaterial`'s back and
-   modification 22's one-`glUseProgram`-per-frame bookkeeping would otherwise let
-   the next window pass draw with the blit shader.
+   **The pipeline, per real frame.** The composite lands in a guest-sized RGBA8
+   target rather than the screen (`GLRenderer.capturingAtGuestScale`), so every
+   pass works on real pixels and the upscale runs once, at present. Then: luma
+   and a quarter-size luma; the matcher on the quarter pair, a coarse prior that
+   reaches four times further than the matcher's ~112 px window; a one-texel
+   confidence pass over that prior, read back through a pixel buffer at the end
+   of the frame; the older luma warped forward by the prior and matched against
+   the newer, the newer warped back and matched against the older, so both
+   residuals are inside the window by construction; one merge pass packing
+   forward (RG) and backward (BA) fields into one texture; ten anchored
+   vector-median passes over it, with the previous frame's field as a temporal
+   candidate; and the interpolation at phase 1/K. `InterpolateMaterial` does
+   overlapped block motion compensation over the four blocks around each pixel,
+   weights the two source frames photometrically and by a forward-backward
+   round trip, and keeps screen-space overlays still. Its class comment carries
+   the geometry, including why the forward field is indexed on frame N.
 
-   Effects are excluded structurally rather than by policy: `EffectComposer`
-   binds framebuffer 0 for its last pass, so the finished picture goes straight
-   to the screen and there is nothing left to capture. Targets are RGBA8 rather
-   than `Texture`'s `GL_BGRA` default, which the extension rejects outright.
+   **Pacing lives in `FramePacer`.** `postDelayed` scatters frames and scattered
+   frames are judder, so synthesised frames are aimed at Choreographer vsyncs,
+   and the moment to show is derived from the vsync timestamp rather than from
+   a slot index. Real frames are never withheld or reordered; only interpolated
+   phases may yield. `PacedXServerView` never sees these frames -- they go
+   through `XServerView.requestRenderUnpaced` -- and a pointer move goes through
+   `requestRenderCursor`, on its own clock, so neither consumes the guest's
+   frame budget.
 
-   **The multiple is the whole tunable surface.** `scaleFactor` aims at a time
-   rather than at a fixed midpoint — 1.0 is a full time-delta past `src2`, and
-   negative values aim before it — so N-1 predictions at `i/N` fill the gap
-   between two real frames evenly, and 2x, 3x and 4x are that one number. The
-   extension defines no other entry point, no new tokens and no new state, so
-   there is nothing else to expose; accuracy is what pays for the larger
-   multiples, since the last prediction at 4x aims three times as far as the
-   first on exactly the same two frames.
+   **Gates, all derived rather than chosen.** An interval wider than the guest's
+   habitual one times three (floored at 100 ms, capped at 250) is a stall, and
+   the interval it starts shows real frames only. The multiple gives ground
+   between the habit and that gate on a curve that holds the requested value
+   across most of the range, and never exceeds the refreshes the interval holds.
+   The confidence guard declines an interval whose coarse field does not agree
+   on a motion, or whose two frames differ by more than a scene change can be
+   attributed to motion, with hysteresis so the picture does not flip modes.
 
-   **What `display.fpsLimit` counts is now a container setting, because the two
+   **What `display.fpsLimit` counts is a container setting, because the two
    readings are different features.** `display.frameGenerationMode` at its
    default, `efficiency`, caps the guest at `fpsLimit / N` through
-   `dxvk.maxFrameRate` and `VKD3D_FRAME_RATE`: the limit means what the *screen*
-   shows and the game renders its fraction of it, which is where the power saving
-   comes from. `smoothness` leaves the guest at the whole limit and lets the
-   compositor present the multiple.
+   `dxvk.maxFrameRate` and `VKD3D_FRAME_RATE`: the limit means what the screen
+   shows and the game renders its fraction of it. `smoothness` leaves the guest
+   at the whole limit and lets the compositor present the multiple; it is the
+   one that looks right, because every part of the interpolation degrades with
+   the distance between the two real frames. `FrameGenerationLimits` derives
+   the ceiling for each mode from the limit and the panel.
 
-   Smoothness is the one that looks right, and the reason is the distance between
-   the two real frames. Every part of the interpolation degrades with it — the
-   block matcher's search range, the area uncovered during the interval, and the
-   assumption that anything moved in a straight line while it passed. Dividing a
-   24 fps limit by 2 leaves the guest drawing every 83 ms, and interpolating
-   across 83 ms of a moving scene is a far harder question than the same code
-   answers easily across 17 ms. The added latency is a fixed fraction of that
-   same interval, so it falls by the same factor.
+   **Effects are excluded structurally**: `EffectComposer` binds framebuffer 0
+   for its last pass, so there is nothing left to capture. Targets are sized
+   immutable storage rather than `Texture`'s `GL_BGRA` default, which the
+   extension rejects.
 
-   **`PacedXServerView` no longer sees the synthesised frames at all.** It drops
-   or re-posts through a `Handler` any `requestRender` arriving sooner than the
-   limit allows, which is right for the guest's damage and wrong for a frame
-   `FramePacer` has just aimed at a vsync — re-posting it through a delay queue
-   is exactly the scheduling the pacer exists to avoid. They go through
-   `XServerView.requestRenderUnpaced` instead. The rate is unaffected, because
-   the source rate already is.
-
-   **The idle gate was 40 ms and that switched the feature off entirely.** 40 ms
-   is 25 fps, and a container capped at 24 fps composites every 41.7 ms, so every
-   frame fell the wrong side of it and not one prediction was ever scheduled —
-   for exactly the containers frame generation exists for. 250 ms now. A slow
-   renderer is not an idle one; a genuinely idle desktop damages nothing and
-   never reaches the gate at all.
-
-   **The extension is advertised and does not work on this driver, and that was
-   proved by reading its output back rather than by guessing.** The three
-   textures were dumped mid-gameplay: both sources held a real scene, 14,577
-   unique colours at mean (46,54,56), and the output was
-   {@code 16 48 80 112 143 175 207 239} repeating every eight pixels across every
-   row -- a fixed ramp, standard deviation 2.3 and 5.2 in R and G across 8x8
-   blocks, with no scene structure at any scale. Not a frame, and not derived
-   from the inputs.
-
-   So `glExtrapolateTex2DQCOM` on Adreno 829 driver `V@0842.36` accepts the call,
-   reports `GL_NO_ERROR`, and fills the destination with a pattern. Nothing on
-   the API side can fix that, which is why five attempts at it all failed:
-
-   **The sibling extension does work, and that is the way forward.**
-   `MotionProbe` asks the same question of `GL_QCOM_motion_estimation`, with a
-   control the extrapolation work lacked: it reads a patch of both luma inputs
-   back first, because the spec says a zero vector means "no motion detected OR
-   masked" and an all-zero result from two identical frames is the extension
-   behaving perfectly. Measured on device during camera movement:
-
-       block 8x8, luma 2776x1264, vectors 347x158
-       luma inputs differ in 57013 of 65536 sampled pixels
-       vectors 54826: nonzero 44590, x [-113..90], y [-110..106], mean|v| 14.08
-
-   Real signed motion, correct block size queried from the driver, no error. An
-   earlier run of the same probe returned all zeros and would have been read as a
-   second stub -- it was a static scene, and the control is what makes the
-   difference legible. So one of the two extensions is a stub and the other is
-   not, on the same driver, which is exactly why every one of these has to be
-   measured rather than trusted.
-
-   The probe cost an ANR before it was cheap enough: two full 2776x1264 readbacks
-   and a three-million-iteration loop on the GL thread. A 256x256 patch answers
-   the same question.
-
-   **The five, kept because each was a real bug and none was the cause.** The setting is gone from the manifest, so nothing can turn
-   it on; the code is kept because the findings below are worth more than the
-   diff, and because the failure is in one call rather than in the surrounding
-   machinery.
-
-   What was tried, in order, each built and run on device, each still showing
-   dense colour speckle on the predicted frames -- reported as "dot + flicker",
-   which is exactly right, since at 4x three frames in four are predicted:
-
-   1. **Blending disabled for the blit.** The compositor leaves
-      SRC_ALPHA/ONE_MINUS_SRC_ALPHA on from context creation, so a prediction
-      carrying alpha blended with the previous screen. Real bug, not this one.
-   2. **The output target seeded** with the newest real frame before predicting,
-      so an untouched target could not present uninitialised memory. Real bug --
-      `glTexImage2D(..., null)` leaves whatever that page held -- and not this one.
-   3. **The framebuffer unbound** before the call. The target was still the colour
-      attachment of the bound FBO while the driver wrote to it by name, which is a
-      feedback loop and undefined. Real bug, and not this one either.
-   4. **Immutable sized storage**, `glTexStorage2D` with `GL_RGBA8` instead of
-      `glTexImage2D` with unsized `GL_RGBA`, since the spec names RGBA8 and a
-      driver checking for a sized format would not have got one. Still not it.
-
-   `glGetError` returns `GL_NO_ERROR` throughout, and the counters prove the call
-   runs: `scheduled 31617, cancelled 10334, presented 10788` in one session. So
-   the driver accepts the call, writes *something*, and what it writes is not a
-   frame -- 423 distinct colours across a 400x300 sample with two dominant, which
-   is a repeating pattern rather than a picture.
-
-   The spec is the problem as much as the driver: it defines one entry point, no
-   tokens, no state, and says outright that "extrapolation quality is not
-   defined". There is nothing to query, nothing to configure, and no way to ask
-   whether the output is valid. Anything further needs a working reference to
-   compare against -- Qualcomm's own sample, or a device where this is known good
-   -- rather than a fifth guess.
-
-   Everything up to the call is sound and stays: the offscreen capture, the
-   history pair, the pacing, the guest-cap division, and the counters that
-   separate "the driver did nothing" from "nothing was scheduled".
-
-   **What was true before it was withdrawn.** Measured on device with
-   Metro 2033 Redux at 4x: `scheduled 1674, cancelled 521, presented 587`, no GL
-   error, and a title screen that renders sharp. The dense colour speckle two
-   earlier builds put on screen was, first, an output target still holding
-   uninitialised GPU memory -- fixed by seeding it with the newest real frame --
-   and second, and the one that actually mattered, a feedback loop: the target
-   was still the colour attachment of the bound framebuffer while the extension
-   wrote to it by name, which the spec leaves undefined. Unbinding before the
-   call is what fixed it.
-
-   **The multiple divides an already-low cap, and 24 fps at 4x means the game
-   renders six.** The same measurement shows intervals alternating 41 ms and
-   124 ms, the latter being the guest doing as it was told. The multiple wants a
-   Frame rate limit high enough to survive the division -- 120 at 2x renders 60
-   -- and a container left at 24 gets a prediction aimed a sixth of a second past
-   anything real. Worth saying in the UI rather than leaving to arithmetic.
-
-   **Off by default.** The
-   extension is present on this one — Adreno 829, GLES 3.2, driver `V@0842.36`,
-   reporting `GL_QCOM_frame_extrapolation` and `GL_QCOM_motion_estimation` — and
-   the visible corruption an early build produced (dense colour noise, which was
-   the uninitialised output target blended over the previous frame) is gone with
-   blending disabled for the blit. But the counters in `report()` exist because
-   two guesses about why nothing was happening were both wrong: the first was the
-   idle gate, the second was that the container's setting had been reset to off.
-   Nothing here is confirmed working until that log line prints.
-
-### Every file that differs from upstream
-
-This table is the machine-checkable form of the list above — `LicensingTest`
-compares it against a grep for `VESSEL:`, so adding a marked file without adding
-a row here, or removing the last marker from a file without removing its row,
-fails the build.
-
-| File | Items |
-|---|---|
-| `app/src/main/java/com/winlator/core/AppUtils.java` | 11 |
-| `app/src/main/java/com/winlator/core/ArrayUtils.java` | 11 |
-| `app/src/main/java/com/winlator/core/FileUtils.java` | 7, 11 |
-| `app/src/main/java/com/winlator/core/ImageUtils.java` | 11 |
-| `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
-| `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
-| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22, 31 |
-| `app/src/main/java/com/winlator/renderer/FramePacer.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/FrameSynthesizer.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/FrameTimestamps.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/GpuTimer.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/RenderableWindow.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
-| `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
-| `app/src/main/java/com/winlator/renderer/material/ConfidenceMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/DownsampleLumaMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/FieldProbeMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/InterpolateMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/MedianMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/MergeFieldMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
-| `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
-| `app/src/main/java/com/winlator/renderer/material/SignMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/renderer/material/WarpLumaMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
-| `app/src/main/java/com/winlator/widget/XServerView.java` | 31 |
-| `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
-| `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
-| `app/src/main/java/com/winlator/xserver/ClientOpcodes.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/ClipboardSelection.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28, 29 |
-| `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/SelectionManager.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21, 30 |
-| `app/src/main/java/com/winlator/xserver/XClient.java` | 24 |
-| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30 |
-| `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
-| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24 |
-| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30 |
-| `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
-| `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
-| `app/src/main/java/com/winlator/xserver/events/SelectionNotify.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/events/SelectionRequest.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/requests/SelectionRequests.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/requests/WindowRequests.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
-| `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
-| `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
-| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28, 29 |
-| `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
-| `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23, 28 |
-| `app/src/main/cpp/winlator/include/copy_pool.h` | 28 |
-| `app/src/main/cpp/winlator/src/copy_pool.c` | 28 |
-| `app/src/main/cpp/winlator/src/drawable.c` | 28 |
-| `app/src/main/cpp/winlator/src/frame_extrapolation.c` | 31 |
-| `app/src/main/cpp/winlator/src/frame_timestamps.c` | 31 |
-| `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
-| `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
-| `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |
+   **Measured on a laptop before the device.** `tools/frame-bench` holds a numpy
+   port of the interpolation shader, ground-truthed scenes for each artefact
+   class, and `dump.py`, which replays the device's own dumped frames and fields
+   (`FG_LOG=dump`) through the port. The README there records which metrics are
+   blind to which artefacts; the one to distrust first is any mean over the
+   frame.
 
 ## Integration points
 

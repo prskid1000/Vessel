@@ -38,11 +38,17 @@ reverted commits and the code to repeat them should not have to be rewritten.
                  endpoint agreement under the raised-cosine window, as shipped
                  since step 4; "window" is the 0.5.14 blend; "fit9" does the
                  fit weighting over nine blocks.
+    projection   where the forward field is read: "newer" is this pixel's N
+                 site, as shipped -- the two-stage field is indexed on N;
+                 "older" is the N-1 site (f74b9bc); "none" reads at vUV.
 
 CONVENTIONS. Fields are in raw matcher units -- pixels, ref to target, indexed
-on the ref, which is the OLDER frame for the forward field and the warped
-newer frame (N-1 geometry) for the backward one -- and `sign` is what
-SignMaterial latches. The device latches -1.
+on the ref. On the device the forward field's ref is the older frame WARPED
+onto the newer one, so it is indexed on N; the backward field's ref is the
+newer frame warped onto the older, so it is indexed on N-1. `sign` is the
+extension's convention, FrameSynthesizer.FIELD_SIGN, which is -1. The bench's
+own scenes build a single-pass forward field indexed on N-1 (bench.estimate);
+indexing.py builds the device's kind.
 """
 import numpy as np
 
@@ -81,7 +87,7 @@ def max_diff(a, b):
 def interpolate(newer, older, field, back, phase, sign=-1.0, *,
                 newer_side=True, drop="older", border_gate=True,
                 photometry="colour", consistency=True, diagnostics=None,
-                obmc="fit", obmc_floor=4.0 / 255.0):
+                obmc="fit", obmc_floor=4.0 / 255.0, projection="newer"):
     """The shader's main().
 
     newer, older : (h, w, 3) float32 in [0, 1]
@@ -122,7 +128,18 @@ def interpolate(newer, older, field, back, phase, sign=-1.0, *,
 
     # ---- the field, projected to this instant (the N-1 site) ---------------
     mean = field_at(field, uv)
-    p = np.clip(uv + mean * phase, 0.0, 1.0)
+    # The forward field is indexed on N: the fine matcher's ref is the older
+    # frame warped into N's geometry. So it is read at this pixel's N site.
+    # "older" is the N-1 site f74b9bc read it at, kept so indexing.py can
+    # score the two; see that file for the device measurement.
+    if projection == "newer":
+        p = np.clip(uv - mean * (1.0 - phase), 0.0, 1.0)
+    elif projection == "older":
+        p = np.clip(uv + mean * phase, 0.0, 1.0)
+    elif projection == "none":
+        p = uv
+    else:
+        raise ValueError(projection)
     weight, m = read_field(field, p)
     mean = sum(weight[..., i:i + 1] * m[i] for i in range(4))
 

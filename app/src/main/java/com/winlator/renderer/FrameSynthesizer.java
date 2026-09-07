@@ -7,64 +7,49 @@ import android.util.Log;
 
 import com.winlator.renderer.material.ConfidenceMaterial;
 import com.winlator.renderer.material.DownsampleLumaMaterial;
-import com.winlator.renderer.material.FieldProbeMaterial;
 import com.winlator.renderer.material.InterpolateMaterial;
 import com.winlator.renderer.material.MedianMaterial;
 import com.winlator.renderer.material.MergeFieldMaterial;
-import com.winlator.renderer.material.WarpLumaMaterial;
-import com.winlator.renderer.material.SignMaterial;
 import com.winlator.renderer.material.ScreenMaterial;
+import com.winlator.renderer.material.WarpLumaMaterial;
 
 /**
- * VESSEL: frames the guest never drew, built from what the compositor knows.
+ * VESSEL: frames the guest never drew, built from the two it did.
  *
- * <p>The temporal counterpart to {@link com.winlator.renderer.material.SGSRMaterial}:
- * that reconstructs across space, from a frame rendered below the panel's
- * resolution; this reconstructs across time, from frames arriving below its
- * refresh rate.
+ * <p>Every real frame is composited at the guest's resolution into one of two
+ * colour targets, and a motion field between the two newest is estimated with
+ * {@code GL_QCOM_motion_estimation}. Between real frames, {@link FramePacer}
+ * wakes the renderer at display refreshes and {@link InterpolateMaterial}
+ * builds the frame that belongs at that moment. Frame N itself is shown at the
+ * end of its interval, which is the one interval of latency interpolation
+ * costs.
  *
- * <h2>Why this is not a call to the driver</h2>
+ * <h2>The passes, per real frame</h2>
  *
- * <p>It was, and the driver lied. {@code GL_QCOM_frame_extrapolation} is
- * advertised on this device, accepts the call, returns {@code GL_NO_ERROR} and
- * writes an eight-pixel ramp -- {@code 16 48 80 112 143 175 207 239} repeating
- * across every row, standard deviation 2.3 in R across 8x8 blocks, no scene
- * structure at any scale. Proved by reading the destination back after five
- * fixes aimed at the call were all wrong. The spec declines to define output
- * quality and there is no conformance test, so a placeholder implementation is
- * undetectable except by looking, and nobody had looked: no public code anywhere
- * calls that entry point outside Qualcomm's own sample, whose only published
- * numbers are from a 2021 Adreno 660.
+ * <ol>
+ * <li>luma of the new frame, and a quarter-size copy of it;
+ * <li>the matcher on the quarter-size pair: a coarse prior that reaches four
+ *     times further than the matcher's window;
+ * <li>a one-texel confidence pass over that prior, read back through a pixel
+ *     buffer at the end of the frame;
+ * <li>the older luma warped forward by the prior, the matcher on that against
+ *     the newer luma; the newer luma warped back, the matcher on that against
+ *     the older. Two residual fields, each within the window by construction;
+ * <li>one merge pass: prior plus residuals, forward in RG and backward in BA
+ *     of one RGBA16F texture;
+ * <li>{@link #MEDIAN_PASSES} vector-median passes over that one texture, the
+ *     last of which is kept as next frame's temporal candidate;
+ * <li>the interpolation at phase 1/K, presented.
+ * </ol>
  *
- * <h2>The two tiers, best first</h2>
+ * <p>The field's sign convention is fixed: the extension reports motion from
+ * {@code ref} to {@code target}, and the shader's vector points the other
+ * way. See {@link #FIELD_SIGN}. The forward field is indexed on frame N, the
+ * backward on N-1; see {@link InterpolateMaterial}.
  *
- * <p><b>Tier 1 -- hardware motion estimation and a bilateral interpolation.</b>
- * {@code GL_QCOM_motion_estimation} is the sibling extension, and unlike the
- * other one it works: measured on this device at 44,590 non-zero vectors across
- * a moving scene, x in [-113, 90], y in [-110, 106]. It is a fixed-function
- * block matcher, so the expensive half of frame generation is free, and what is
- * left to write is a search over what it produced. See {@link
- * com.winlator.renderer.material.InterpolateMaterial} for that, which is where
- * the picture quality actually lives.
- *
- * <p><b>Tier 0 -- window translation.</b> We are the compositor. When a window
- * moves we know the translation exactly, so a synthesised frame re-composites
- * the same window textures at interpolated positions. Not an estimate: the
- * motion, replayed part of the way. No block matching, no warping, no
- * inpainting, and therefore none of their artefacts.
- *
- * <p><b>It is the fallback, and it used to be the preference.</b> Being exact is
- * not the same as being sufficient. The block matcher measures apparent motion
- * whatever causes it, so tier 1's field already contains a window translation --
- * while a window that moves *and* whose contents move is a case tier 0 cannot
- * express at all, because it replays the translation with the contents frozen at
- * frame N. Tier 1 covers the union, so tier 0 now runs only where there is no
- * field to be had: a device without the extension, or the first frame after a
- * resolution change.
- *
- * <p>Nothing else is attempted. A tier that cannot run yields, and a frame that
- * cannot be synthesised is simply not drawn -- which costs a little smoothness
- * and never costs correctness.
+ * <p>Two tiers remain. Tier 1 is the above. Tier 0, used only where there is
+ * no field, re-composites the windows at interpolated positions when one of
+ * them moved, which is exact for a window drag and nothing else.
  */
 public class FrameSynthesizer implements FramePacer.Target {
     private static final String TAG = "FrameSynthesizer";
@@ -82,15 +67,9 @@ public class FrameSynthesizer implements FramePacer.Target {
     private static final String MOTION_EXTENSION = "GL_QCOM_motion_estimation";
 
     /**
-     * Whether tier 1 is available, asked of the driver rather than assumed.
-     *
-     * <p>Cached against {@link GLRenderer#contextGeneration()} for the reason
-     * {@code SGSRMaterial.isSupported()} is: a new EGL context is a different
-     * driver state, and an answer from the old one describes something that is no
-     * longer being drawn to. Both halves are needed -- the string says the driver
-     * claims it, the resolve says {@code eglGetProcAddress} will hand over a
-     * function, and the extrapolation work is what proved those are different
-     * questions from "does it work".
+     * Whether the matcher exists, asked of the driver once per EGL context.
+     * Both halves are needed: the extension string says the driver claims it,
+     * the resolve says {@code eglGetProcAddress} hands over a function.
      */
     public static boolean motionEstimationSupported() {
         final int generation = GLRenderer.contextGeneration();
@@ -112,120 +91,18 @@ public class FrameSynthesizer implements FramePacer.Target {
     private static boolean motionSupported = false;
 
     /**
-     * VESSEL: a textured square that travels, over a background that does not.
+     * The extension's sign convention, applied where the field is read.
      *
-     * <p>The input to {@link #probeBasepoint()}: two of these, differing only in
-     * where the square sits, are a motion whose answer is known exactly.
-     *
-     * <p><b>Both halves are noise, and the background being noise is the part
-     * that took two runs to get right.</b> The square is hashed on its OWN
-     * coordinates so the pattern travels with it -- hashed on screen position it
-     * would sit still while its window moved over it, nothing would have
-     * translated, and the matcher would rightly report nothing. That much was
-     * always here.
-     *
-     * <p>What was wrong was the surround. It was flat, on the reasoning that the
-     * spec says a block with no match returns zero, so only the square would
-     * answer. Measured, that is not what this hardware does: with a flat
-     * background the response came back 22 blocks over the square's ref position
-     * and 22 over its target position, both carrying the SAME sign, mean
-     * {@code (+52.6, -2.9)} for a true {@code +64}. Opposite signs would have
-     * meant the square leaving one place and arriving at the other; the same
-     * sign means the vector was propagated outward into blocks that had no
-     * texture to contradict it. A matcher with a spatial predictor fills flat
-     * regions from their neighbours, and a flat region is therefore the one
-     * background that cannot serve as a control.
-     *
-     * <p>So the background is noise too, keyed on screen position, identical in
-     * both frames. Every block then carries texture, zero is the only correct
-     * answer over the surround, and there is nothing for a predictor to fill in.
-     * The square's own noise is offset in the hash so it cannot coincide with
-     * the background it replaces.
+     * <p>The spec says a texel holds the motion "from the ref texture to the
+     * target texture": with the older frame as ref that is the displacement
+     * {@code d} of content from N-1 to N. The shaders use {@code v = -d}, the
+     * offset from a pixel back to where its content was, so the field is
+     * multiplied by -1 on the way in. Measured on this device by a vote over
+     * moving pixels in every session it was ever probed: -1, without exception.
      */
-    private static final class SquareMaterial extends ScreenMaterial {
-        final Uniform origin = new Uniform("origin");
-        final Uniform size = new Uniform("size");
-        final Uniform extent = new Uniform("extent");
+    static final float FIELD_SIGN = -1f;
 
-        @Override
-        protected String getFragmentShader() {
-            return String.join("\n",
-                "precision highp float;",
-                "uniform vec2 origin;",
-                "uniform vec2 size;",
-                "uniform float extent;",
-                "varying vec2 vUV;",
-                // **The sin argument is wrapped, and not wrapping it is why the
-                // first run could not be read.**
-                //
-                // `fract(sin(dot(v, k)) * 43758.5453)` is the standard GLSL hash
-                // and it is only a hash for small `v`. Here v runs to 256, so
-                // the argument reaches ~23000 radians, where a highp sin has
-                // lost most of its significant bits and the output stops being
-                // white noise and becomes banded. A matcher fed a banded pattern
-                // finds it in several places at once.
-                "float hash(vec2 v) {",
-                    "float a = mod(dot(v, vec2(12.9898, 78.233)), 6.2831853);",
-                    "return fract(sin(a) * 43758.5453);",
-                "}",
-                "void main() {",
-                    // **Four-pixel cells, not per-pixel noise, and per-pixel was
-                    // why the second run came back empty.**
-                    //
-                    // White noise at the sampling limit is the worst possible
-                    // input to a hardware block matcher: these units work on a
-                    // lowpassed copy, and noise that alternates every pixel
-                    // averages to flat grey before the search ever sees it. With
-                    // per-pixel noise on both the square and the background the
-                    // field came back entirely zero -- not one block responding
-                    // to a 64 px translation it could not miss. Cells of four
-                    // survive the filter and still give every 8x8 block a
-                    // pattern that appears nowhere else.
-                    "vec2 p = floor(vUV * size / 4.0) * 4.0;",
-                    "vec2 q = p - origin;",
-                    // A full-height stripe, not a square, and that is the third
-                    // thing this probe got wrong. A 32x32 patch moving against a
-                    // static textured background produced 57 responding blocks
-                    // of 14400 with a largest vector of 2.2 px, against a true
-                    // 64. This matcher does not report a small object moving
-                    // over a still background -- see probeBasepoint. It answers
-                    // a large region, so the region is large and the question
-                    // moves from "which band responded" to "where is its edge".
-                    "float inside = step(0.0, q.x) * step(q.x, extent - 1.0);",
-                    // **The two have to differ in CONTRAST, not just in phase,
-                    // and making them the same kind of texture is why the third
-                    // run found nothing.**
-                    //
-                    // With both halves 4-pixel noise of the same amplitude, only
-                    // 24 of 1024 blocks held any vector at all and the largest
-                    // was 1.4 px against a true 64. The flat-background run had
-                    // recovered about +52 over the same step, so the
-                    // displacement is well inside the search window and the
-                    // failure is not reach -- it is that a patch of noise
-                    // sitting on a field of statistically identical noise is not
-                    // a distinctive thing to look for.
-                    //
-                    // So the background is textured but quiet, enough to anchor
-                    // zero and leave a predictor nothing to invent, and the
-                    // square is a hard-edged 8-pixel checker at full contrast.
-                    // It cannot be confused with its surroundings at any offset.
-                    "float background = hash(floor(p / 16.0));",
-                    "float square = hash(floor(q / 16.0) + vec2(37.0, 17.0));",
-                    "gl_FragColor = vec4(mix(background, square, inside), 0.0, 0.0, 1.0);",
-                "}"
-            );
-        }
-    }
-
-    /**
-     * Luma, because the extension requires it.
-     *
-     * <p>Reference and target must be {@code GL_R8}, and the spec says outright
-     * that estimation tracks brightness. Perceptual weights rather than a plain
-     * average: matching on what the eye calls brightness makes the block
-     * differences perceptually uniform, which is the same reason FidelityFX
-     * converts to L* before its own search.
-     */
+    /** Luma, because the extension requires R8 and matches on brightness. */
     private static final class LumaMaterial extends ScreenMaterial {
         @Override
         protected String getFragmentShader() {
@@ -242,14 +119,10 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * A colour, luma or vector target with sized immutable storage.
+     * A texture with sized immutable storage and a framebuffer on it.
      *
-     * <p>Not {@link RenderTarget}: that allocates with {@code glTexImage2D} using
-     * {@link Texture#format} for both the internal and pixel format, defaulting to
-     * {@code GLES11Ext.GL_BGRA} -- right for a guest window upload and not a
-     * format any of this accepts. {@code glTexStorage2D} with a sized format is
-     * unambiguous, which matters for an extension that writes to a texture by
-     * name rather than through the pipeline.
+     * <p>Not {@link RenderTarget}, which allocates with {@code glTexImage2D}
+     * and a BGRA format the extension does not accept.
      */
     private static final class Target {
         int texture;
@@ -275,51 +148,22 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
                                           GLES20.GL_TEXTURE_2D, texture, 0);
-            // Cleared once at allocation. Nothing may ever present the contents of
-            // whatever last held this memory -- that is how the speckle got on
-            // screen while the extrapolation call was still trusted.
+            // Cleared once: nothing may ever present whatever last held this
+            // memory. The compositor's own clear colour is put back after.
             GLES20.glClearColor(0f, 0f, 0f, 1f);
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-            // And put the compositor's own clear colour back. GLRenderer sets
-            // transparent black once at context creation and never again, so
-            // the first allocation here left every later screen and capture
-            // clear opaque. Harmless today only because present disables
-            // blending; not a state this class should own.
             GLES20.glClearColor(0f, 0f, 0f, 0f);
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
 
         /**
-         * VESSEL: diagnostics only. A full mip chain, and a second framebuffer
-         * bound to the 1x1 top of it.
-         *
-         * <p>**Averaging on the GPU is what makes measuring the whole frame
-         * affordable.** Reading a full-resolution frame back is 14 MB and stalls
-         * the render thread -- a diagnostic that did exactly that caused an ANR
-         * earlier in this project. {@code glGenerateMipmap} reduces the frame to
-         * a single texel, and reading one texel costs four bytes and no stall, so
-         * a per-frame statistic over every pixel becomes something that can be
-         * left switched on.
+         * Diagnostics only: a full mip chain with framebuffers on its 1x1 top
+         * and on the level whose texels are 32 px cells, so a whole-frame
+         * measurement is a four-byte readback and a patch count is a 3.5 KB
+         * one, instead of a 14 MB stall.
          */
         int topFramebuffer;
-        int levels = 1;
-        /**
-         * VESSEL: a framebuffer on the mip level whose texels are about 32px.
-         *
-         * <p><b>Because the 1x1 top cannot tell a patch from a sprinkle.</b> The
-         * whole-frame mean of invented content read 1.5% while the screen had
-         * black holes in it, and it would read the same for 1.5% of pixels
-         * scattered evenly -- which is invisible. The eye responds to connected
-         * area, and a mean over 900,000 pixels is constructed to destroy exactly
-         * that information.
-         *
-         * <p>One level up from nothing costs nothing: 40x22 texels is 3.5 KB,
-         * and a readback stalls on the round trip rather than on the bytes, so
-         * it is the same stall the 1x1 already pays. Each texel is then the
-         * invented fraction of its own 32x32 cell, and counting the cells above
-         * a half is the patch metric that a mean cannot express.
-         */
         int cellFramebuffer;
         int cellWidth, cellHeight;
 
@@ -328,7 +172,6 @@ public class FrameSynthesizer implements FramePacer.Target {
             this.height = height;
             int count = 1;
             for (int size = Math.max(width, height); size > 1; size >>= 1) count++;
-            this.levels = count;
 
             final int[] names = new int[1];
             GLES20.glGenTextures(1, names, 0);
@@ -353,9 +196,6 @@ public class FrameSynthesizer implements FramePacer.Target {
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
                                           GLES20.GL_TEXTURE_2D, texture, count - 1);
 
-            // Level 5 is a 32x32 reduction, so each texel is one cell. Clamped
-            // to what the chain actually has, and skipped for a target too
-            // small to have that many levels -- the sign probe is 64x36.
             final int cellLevel = Math.min(5, count - 1);
             cellWidth = Math.max(1, width >> cellLevel);
             cellHeight = Math.max(1, height >> cellLevel);
@@ -370,72 +210,22 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
 
         void release() {
-            if (cellFramebuffer != 0) {
-                GLES20.glDeleteFramebuffers(1, new int[] {cellFramebuffer}, 0);
-                cellFramebuffer = 0;
-            }
-            if (topFramebuffer != 0) {
-                GLES20.glDeleteFramebuffers(1, new int[] {topFramebuffer}, 0);
-                topFramebuffer = 0;
-            }
+            if (cellFramebuffer != 0) GLES20.glDeleteFramebuffers(1, new int[] {cellFramebuffer}, 0);
+            if (topFramebuffer != 0) GLES20.glDeleteFramebuffers(1, new int[] {topFramebuffer}, 0);
             if (framebuffer != 0) GLES20.glDeleteFramebuffers(1, new int[] {framebuffer}, 0);
             if (texture != 0) GLES20.glDeleteTextures(1, new int[] {texture}, 0);
-            framebuffer = 0;
-            texture = 0;
+            cellFramebuffer = topFramebuffer = framebuffer = texture = 0;
         }
     }
 
     private final GLRenderer renderer;
     private final FramePacer pacer;
-    private final ScreenMaterial blitMaterial = new ScreenMaterial();
-    /**
-     * A copy that keeps the field's precision.
-     *
-     * <p>{@link ScreenMaterial} is {@code mediump}, which on this GPU is fp16:
-     * a 120 px vector survives a copy through it to the nearest sixteenth of a
-     * pixel. The history copy in {@link #filterField} is the median's temporal
-     * candidate, and a candidate that is not exactly what the block said last
-     * frame is a slightly different vector that no block voted for.
-     */
-    private static final class FieldCopyMaterial extends ScreenMaterial {
-        @Override
-        protected String getFragmentShader() {
-            return String.join("\n",
-                "precision highp float;",
-                "uniform sampler2D screenTexture;",
-                "varying vec2 vUV;",
-                "void main() { gl_FragColor = texture2D(screenTexture, vUV); }"
-            );
-        }
-    }
-    private final FieldCopyMaterial fieldCopyMaterial = new FieldCopyMaterial();
     private final LumaMaterial lumaMaterial = new LumaMaterial();
-    private final SignMaterial signMaterial = new SignMaterial();
-    private final MedianMaterial medianMaterial = new MedianMaterial();
-    private final FieldProbeMaterial fieldProbeMaterial = new FieldProbeMaterial();
     private final DownsampleLumaMaterial downsampleMaterial = new DownsampleLumaMaterial();
     private final WarpLumaMaterial warpMaterial = new WarpLumaMaterial();
     private final MergeFieldMaterial mergeMaterial = new MergeFieldMaterial();
+    private final MedianMaterial medianMaterial = new MedianMaterial();
     private final ConfidenceMaterial confidenceMaterial = new ConfidenceMaterial();
-
-    /**
-     * VESSEL: whether this interval can be interpolated at all. See
-     * {@link ConfidenceMaterial} for the two measurements and where the numbers
-     * came from; the thresholds are here because this is where they act.
-     *
-     * <p>Below {@link #MIN_AGREEMENT} the coarse field did not agree on a
-     * motion -- a cut, a menu, a flat wall with one object crossing it -- and
-     * above {@link #MAX_FRAME_DIFF} levels the two frames are not the same
-     * scene whatever the field says. Either way the interval is presented as
-     * real frames only, through the path the pipeline already takes when it
-     * has no valid field. {@link #lowConfidenceIntervals} counts how often, and
-     * the pacing line prints it, so the two numbers can be argued with.
-     */
-    private static final float MIN_AGREEMENT = 0.20f;
-    private static final float MAX_FRAME_DIFF = 40f / 255f;
-    private Target confidence;
-    private float lastAgreement = 1f, lastFrameDiff = 0f, lastDominantPx = 0f;
-    private long lowConfidenceIntervals = 0;
     private final InterpolateMaterial interpolateMaterial = new InterpolateMaterial();
 
     private final GpuTimer captureTimer = new GpuTimer("tier1 capture+blit");
@@ -445,181 +235,82 @@ public class FrameSynthesizer implements FramePacer.Target {
     private final GpuTimer interpolateTimer = new GpuTimer("tier1 interpolate");
     private final GpuTimer tier0Timer = new GpuTimer("tier0 recomposite");
 
-    private Target vectors;
-    // The Javadoc that sat here announced that the median filter had been
-    // removed unmeasured and that its return would be the missing measurement.
-    // It did return, ten passes of it, and the measurement is in `filtered`
-    // below. Two consecutive Javadoc blocks bind only the second, so this one
-    // documented nothing and contradicted the field two declarations down.
-    /**
-     * Where an interpolated frame is built, at the guest's resolution.
-     *
-     * <p>It needs a target of its own because the result is upscaled on the way to
-     * the screen and the two colour slots hold real frames. One more guest-sized
-     * RGBA8 buys interpolating 0.9 megapixels instead of 3.5.
-     */
+    // ---- targets -----------------------------------------------------------
+
+    /** The two real frames, at the guest's resolution. */
+    private final Target[] colour = new Target[2];
+    /** Where an interpolated frame is built, before the one upscale at present. */
     private Target output;
-    /** Diagnostics only; null unless a category that needs it was asked for. */
+    /** Their luma, block-rounded, and the quarter-size copies. */
+    private final Target[] luma = new Target[2];
+    private final Target[] lumaCoarse = new Target[2];
+    /** Which of the pairs holds the newest real frame. */
+    private int newest = 1;
+    /** The coarse prior, LINEAR because it is a warp's displacement. */
+    private Target coarseVectors;
+    /** One luma frame moved by the prior; serves both directions in turn. */
+    private Target warpedLuma;
+    /** The two residual fields the matcher writes, forward and backward. */
+    private Target residual, residualBack;
+    /** Prior plus residuals, packed: forward RG, backward BA. */
+    private Target merged;
+    /**
+     * Three packed field slots. One holds the previous frame's filtered field
+     * (the median's temporal candidate), the other two ping-pong this frame's
+     * passes, and the last pass's slot becomes the history for the next frame.
+     * No copies.
+     */
+    private final Target[] fields = new Target[3];
+    private int fieldHistory = -1;
+    private int fieldCurrent = -1;
+    /** The one-texel confidence target and the pixel buffer it is read through. */
+    private Target confidence;
+    private int confidenceBuffer = 0;
+    private boolean confidencePending = false;
+    /** Diagnostics only. */
     private Target probe;
-    /**
-     * Where {@link SignMaterial} counts its votes. Small on purpose.
-     *
-     * <p>The question is one bit about the whole field, so it does not need
-     * resolution -- it needs enough samples that a handful of ambiguous pixels
-     * cannot swing it. 64x36 is 2,304 votes, and the whole thing including the
-     * mip reduction is far below the frame it protects.
-     */
-    private Target signProbe;
-    /**
-     * VESSEL: where {@link FieldProbeMaterial} reports on the real field.
-     *
-     * <p>Diagnostics only, and nothing reads what it writes. See that class for
-     * the hypothesis it exists to test and why a laptop cannot test it.
-     */
-    private Target fieldProbe;
-    private float probeFit, probeAtFloor, probeLonely, probeLonelyAlone;
-    private long fieldProbedAt = 0;
+
+    private int blockX = 8, blockY = 8;
+    private int allocWidth = 0, allocHeight = 0, allocGeneration = -1;
 
     /**
-     * VESSEL: where the field is filtered, ping-ponged across the passes.
-     *
-     * <p><b>This existed, was removed unmeasured, and the removal was wrong.</b>
-     * The note left behind said the filter was cheap and standard but that its
-     * benefit here had never been demonstrated in isolation, and that if what it
-     * suppressed came back, that would be the measurement that was missing. It
-     * came back, and it is the waviness on straight edges.
-     *
-     * <p>Measured on a bench where the answer is known -- a beam and the wall
-     * behind it panning at different rates, as depth parallax makes them, with a
-     * straight vertical edge between. The edge's deviation from the straight line
-     * it should be, in pixels:
-     *
-     * <pre>
-     *   ground truth                0.013
-     *   unfiltered field            9.540
-     *   two passes, unanchored      2.880
-     *   three passes, unanchored    3.496   <- worse; the field had drifted
-     *   three passes, anchored      2.136
-     *   six passes, anchored        0.576
-     * </pre>
-     *
-     * <p>Ninety-four per cent of the waviness, and the error either side of the
-     * edge improves with it rather than being traded away. Unanchored the pass
-     * count was a trade -- a third pass measured worse than the second, because
-     * each pass drew its candidates only from the one before and the field drifted
-     * away from anything the matcher had observed. Keeping the original on offer
-     * removes that ceiling; see {@link MedianMaterial}.
-     *
-     * <p>Two targets because a pass reads the whole field and writes the whole
-     * field, so it cannot be its own destination.
-     */
-    private final Target[] filtered = new Target[2];
-    /** Which of {@link #filtered} the interpolation should read, or -1 for none. */
-    private int filteredIndex = -1;
-
-    /**
-     * VESSEL: how much smaller the coarse pass is than the full one.
-     *
-     * <p>Four, because the number to beat is measured. The matcher's window is
-     * about 112 luma pixels and Requiem moves 122 between real frames, so the
-     * full-resolution pass is searching for something outside its own window and
-     * cannot report it. At a quarter size that motion is 30 pixels and the window
-     * covers 448, which leaves room for scenes faster than the one that exposed
-     * the problem. Halving would only reach 224 and put the measured case at
-     * 61 -- inside, but with no margin.
+     * How much smaller the coarse pass is. The matcher's window is about 112
+     * luma pixels and a fast scene moves more than that between real frames;
+     * at a quarter size the same motion is well inside the window and the
+     * full-resolution pass only has to find the remainder.
      */
     private static final int COARSE_DIVISOR = 4;
 
-    /** The luma pair at {@link #COARSE_DIVISOR}, for the in-range first pass. */
-    private final Target[] lumaCoarse = new Target[2];
-    /** The coarse field: the prior both warps are built from. */
-    private Target coarseVectors;
-    /** One frame moved most of the way onto the other. See {@link WarpLumaMaterial}. */
-    private Target warpedLuma;
-    /** The backward residual, as {@link #vectors} is the forward one. */
-    private Target backVectors;
-    /** Coarse plus residual: the forward and backward fields as used. */
-    private Target merged, mergedBack;
-    /** The backward field's own median chain. See {@link #filtered}. */
-    private final Target[] filteredBack = new Target[2];
-    private int filteredBackIndex = -1;
-
     /**
-     * Which target holds the unfiltered forward field this frame.
-     *
-     * <p>{@link #vectors} when the matcher ran once, {@link #merged} when it ran
-     * coarse-then-fine. Everything that reads the field goes through {@link
-     * #fieldTexture()} so there is no path where one pass reads the residual and
-     * another the whole motion -- which is precisely the mistake available here,
-     * and it would have made the sign probe latch on a field near zero.
-     */
-    private Target forwardField;
-    private Target backwardField;
-
-    /** Whether the two-stage search ran this frame. See {@link #COARSE_DIVISOR}. */
-    private boolean pyramidRan = false;
-    /** Whether a backward field exists to check the forward one against. */
-    private boolean backwardValid = false;
-    /**
-     * <b>Ten, measured on four scenes, and the reason it is not six is that the
-     * objection to ten was tested and failed.</b>
-     *
-     * <p>Anchored passes keep improving the straight edge right to ten, where the
-     * waviness reaches 0.013 px -- the ground truth's own figure. That was held
-     * back to six at first on the suspicion that reaching it exactly meant the
-     * field had converged to piecewise constant, which is correct for the rigid
-     * motions both original bench scenes contain and would be wrong for real
-     * depth parallax, where motion is a smooth gradient and a locally-constant
-     * field would staircase it into block-wide steps.
-     *
-     * <p>So a third scene was built to catch exactly that: a ground plane with
-     * horizontal sweep ramping from 8 px at the horizon to 72 at the front, and a
-     * metric that reports the staircase specifically -- the second difference of
-     * the field down the rows, which is zero for any straight ramp and spikes at
-     * every step. It does not staircase. Banding *falls* with passes and settles:
-     *
-     * <pre>
-     *   passes        waviness   objEdge   gradBand   gradErr    ink
-     *   none             9.540      6.70     4.0293     1.287   0.55
-     *   six              0.576      4.92     1.1875     0.642   0.62
-     *   ten              0.013      4.87     1.1861     0.641   0.68
-     *   twenty               -         -     1.1889     0.639      -
-     * </pre>
-     *
-     * <p>The anchor is why. The matcher's original vector encodes the true ramp
-     * and stays a candidate on every pass, so the field cannot converge away from
-     * it -- the same mechanism that lets the passes repeat is the one that
-     * protects the gradient.
-     *
-     * <p>What ten costs is 0.13 levels on subtitle glyphs, against the 5.8 levels
-     * the per-pixel static test wins there, and about 0.9 ms of a 33 ms budget.
+     * Ten anchored passes, measured on a bench where the answer is known: edge
+     * waviness 9.54 px unfiltered, 0.58 at six passes, 0.013 at ten (the
+     * ground truth's own figure), with no staircasing of smooth parallax
+     * because the matcher's own vector stays a candidate on every pass.
      */
     private static final int MEDIAN_PASSES = 10;
 
     /**
-     * Roughly how far {@code GL_QCOM_motion_estimation} can see, in luma pixels.
-     *
-     * <p>Not reported by the extension, so this is measured rather than declared:
-     * vectors reached 113 px in the first survey of this driver and the field
-     * stops rising at about 120. Printed beside the mean displacement only so a
-     * log line says whether the scene is moving further than the matcher can
-     * follow -- nothing branches on it.
+     * The whole-frame guard. Below {@link #MIN_AGREEMENT} the coarse field did
+     * not agree on a motion (a cut, a menu, a flat wall with one object
+     * crossing it); above {@link #MAX_FRAME_DIFF} the two frames are not the
+     * same scene. Either way the interval shows real frames only.
      */
-    private static final int SEARCH_WINDOW_PX = 112;
+    private static final float MIN_AGREEMENT = 0.20f;
+    private static final float MAX_FRAME_DIFF = 40f / 255f;
+    private float lastAgreement = 1f, lastFrameDiff = 0f, lastDominantPx = 0f;
+    private boolean confidentNow = true;
+    private int lowStreak = 0, highStreak = 0;
+    private long lowConfidenceIntervals = 0;
 
-    private int blockX = 8, blockY = 8;
+    // ---- diagnostics -------------------------------------------------------
 
-    /**
-     * VESSEL: which categories the container's {@code FG_LOG} row asked for.
-     *
-     * <p>Empty is the normal case, and then none of this costs anything: the
-     * measurement pass is never allocated, never drawn, and never read.
-     */
     private java.util.Set<String> diagnostics = java.util.Collections.emptySet();
+    private boolean timing = false;
+    private boolean announced = false;
 
     public void setDiagnostics(java.util.Set<String> categories) {
-        this.diagnostics = categories == null
-            ? java.util.Collections.emptySet() : categories;
+        this.diagnostics = categories == null ? java.util.Collections.emptySet() : categories;
+        this.timing = wants("timing");
         this.announced = false;
     }
 
@@ -627,75 +318,29 @@ public class FrameSynthesizer implements FramePacer.Target {
         return diagnostics.contains(category) || diagnostics.contains("all");
     }
 
-    /** Whether the one-time setup line has been printed for this allocation. */
-    private boolean announced = false;
-
     /**
-     * VESSEL: the same lines again, for somewhere they survive the session.
-     *
-     * <p><b>Every number this class has ever produced went to logcat, and
-     * logcat on this device holds under three minutes.</b> That is not a
-     * limitation of the diagnostics, it is a limitation of where they were put:
-     * a container can be configured with {@code FG_LOG=all}, run for ten
-     * minutes, and end with the whole of frame generation's account of itself
-     * already evicted. Checking a finished run meant having had adb attached
-     * while it happened, which is the opposite of what a session log is for.
-     *
-     * <p>{@code FrameHints} hit this first and solved it for one line, by
-     * publishing it up to the display and letting {@code SessionMetricsRecorder}
-     * note it into the session log. That comment says outright: "Not logcat: its
-     * main buffer holds under three minutes here." The same is true of every
-     * line in {@link #report()}, which is roughly ten a second at {@code all},
-     * and none of them took the same route.
-     *
-     * <p>A queue rather than a callback, because the producer is the GL thread
-     * inside a composite and the consumer is a coroutine ticking at one or ten
-     * seconds. Neither may wait for the other: the drain must never block a
-     * frame, and a frame must never block on a file write.
+     * Lines for the session log, which outlives logcat's three minutes. A queue
+     * because the producer is the GL thread and the consumer a coroutine; the
+     * oldest are dropped, and counted, if nothing drains it.
      */
     private final java.util.concurrent.ConcurrentLinkedQueue<String> sessionLines =
         new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final java.util.concurrent.atomic.AtomicInteger sessionQueued =
         new java.util.concurrent.atomic.AtomicInteger();
-    /**
-     * How many lines may wait to be drained.
-     *
-     * <p>Ten a second at {@code all}, against a consumer that ticks every ten
-     * seconds when nothing is watching the metrics panel, so a hundred is one
-     * tick's worth and 512 is five of them. Past that the session has stopped
-     * draining -- the recorder is gone, or the log is closed -- and the honest
-     * response is to drop the oldest and say how many, which is what the session
-     * log itself does with its own overflow rather than growing without bound
-     * inside a compositor.
-     */
     private static final int SESSION_LINE_LIMIT = 512;
     private int sessionDropped = 0;
 
-    /**
-     * Log a line, and keep a copy for the session log.
-     *
-     * <p>Every {@code Log.i} in {@link #report()} goes through here so the two
-     * cannot drift: a line that reaches logcat and not the file is exactly the
-     * bug this exists to close.
-     */
     private void say(String line) {
         Log.i(TAG, line);
-        if (sessionQueued.get() >= SESSION_LINE_LIMIT) {
-            if (sessionLines.poll() != null) {
-                sessionQueued.decrementAndGet();
-                sessionDropped++;
-            }
+        if (sessionQueued.get() >= SESSION_LINE_LIMIT && sessionLines.poll() != null) {
+            sessionQueued.decrementAndGet();
+            sessionDropped++;
         }
         sessionLines.add(line);
         sessionQueued.incrementAndGet();
     }
 
-    /**
-     * Take everything said since the last call. Empty is the normal answer.
-     *
-     * <p>Called off the GL thread. The queue is the handover, so this neither
-     * blocks a composite nor is blocked by one.
-     */
+    /** Called off the GL thread. Empty is the normal answer. */
     public java.util.List<String> drainDiagnostics() {
         if (sessionLines.isEmpty() && sessionDropped == 0) {
             return java.util.Collections.emptyList();
@@ -713,827 +358,52 @@ public class FrameSynthesizer implements FramePacer.Target {
         return out;
     }
 
-    /** Frame-wide measurements, most recently read back. See {@link #measure}. */
-    private float measuredDark, measuredShadow;
-    /**
-     * Mean distance from the truth, synthesised and held, over moving pixels.
-     *
-     * <p>Their ratio replaces a count of pixels that was dominated by ties and
-     * measured nothing for a month. See {@link InterpolateMaterial}.
-     */
-    private float measuredSynthDistance, measuredBaseDistance;
-    private long measuredAt = 0;
-    /**
-     * The phase the measured frame was actually drawn at.
-     *
-     * <p><b>Because the alternative was a constant, and the constant was wrong.</b>
-     * {@link #measure} samples ONE frame, whichever happens to fall on the
-     * once-a-second boundary, and that frame is drawn at 1/K, 2/K ... (K-1)/K --
-     * never reliably at a half. The line reported "(50% is correct)" regardless,
-     * so at 4x it compared a frame legitimately drawn at 0.25 or 0.75 against
-     * 0.5 and called the difference an error. Readings of 55-83% were taken as
-     * evidence of a systematic phase bias in the pipeline; they were evidence of
-     * this string.
-     */
+    /** Whole-frame measurements, most recently read back. See {@link #measure}. */
+    private float measuredDark, measuredShadow, measuredSynthDistance, measuredBaseDistance;
     private float measuredPhase = 0f;
-    /**
-     * How many 32x32 cells are more than half invented, and the worst one.
-     *
-     * <p>The whole-frame mean beside them cannot distinguish a hole from a
-     * sprinkle, and the difference is the difference between a broken screen
-     * and an invisible one. See {@link #measure}.
-     */
+    private long measuredAt = 0;
     private int measuredPatchCells = 0, measuredCellTotal = 0, measuredEdgeCells = 0;
     private float measuredWorstCell = 0f;
-    /** Reused across readbacks; see {@link #measure}. */
     private java.nio.ByteBuffer cells;
 
-    /** Whether {@link #probeBasepoint()} has run for this allocation. */
-    private boolean basepointProbed = false;
-    private final SquareMaterial squareMaterial = new SquareMaterial();
-
-    /**
-     * VESSEL: ask the driver, on an input whose answer is already known, where
-     * it puts its vectors and which way they point.
-     *
-     * <p><b>Two questions this pipeline has been guessing at, and the spec
-     * settles neither.</b> {@code QCOM_motion_estimation} says a texel holds
-     * "the estimated motion in pixels ... from the &lt;ref&gt; texture to the
-     * &lt;target&gt; texture" and separately that the mask "only controls the
-     * vector basepoint", so a vector departs from a block and can land in
-     * another. It never says which of the two images that basepoint is in, and
-     * it does not say the direction unambiguously either.
-     *
-     * <p><b>{@link SignMaterial} answers the smaller half of that and its class
-     * comment misstates the rest.</b> It says the two readings "differ by a
-     * sign". They do not: under a rigid translation by {@code d} a field indexed
-     * at ref and a field indexed at target both hold {@code +d} everywhere, so
-     * the basepoint is invisible in exactly the case the sign probe votes on --
-     * a camera pan. The two questions are independent, and only one of them has
-     * ever been measured.
-     *
-     * <p>The basepoint is not cosmetic. {@link InterpolateMaterial} projects the
-     * field to the interpolated instant with {@code p = q - b(1 - t)}, which
-     * assumes the vector at {@code q} describes what is at {@code q} in the
-     * NEWER frame. If the driver indexes at ref, the field is offset by a whole
-     * displacement from where it is being read, and that step corrects the wrong
-     * way -- at 120 px the difference between the projection helping and
-     * hurting.
-     *
-     * <p><b>So it is asked rather than reasoned about.</b> A textured square on
-     * a flat field, at {@code SQUARE_FROM} in one frame and {@code SQUARE_TO} in
-     * the other: a translation of {@code SQUARE_STEP} px that no matcher can
-     * misread, well inside the search window, and far enough that the square's
-     * two positions share no block. Then the blocks that come back non-zero sit
-     * over one position or the other, and that is the basepoint; and their sign
-     * is the sign. One draw pair, one call, one readback, once per allocation,
-     * behind its own {@code FG_LOG} category.
-     */
-    /**
-     * Wide enough that the matcher will answer it at all.
-     *
-     * <p><b>Three narrower versions of this measured nothing, and what they
-     * measured instead is worth more than the constant.</b> A 32x32 textured
-     * patch translating 64 px over a static textured background produced 57
-     * responding blocks of 14400, largest vector 2.2 px. The same patch over a
-     * FLAT background produced a broad response of about +52 -- so the
-     * displacement is well inside the search window, and the difference is
-     * entirely in what surrounds the moving thing.
-     *
-     * <p>Which says something about this hardware that nothing in this file
-     * knew: it does not report a small object moving against a still background.
-     * Where the surround is flat it propagates a vector outward into blocks that
-     * have no texture to contradict it; where the surround is textured and
-     * static, zero wins nearly everywhere and the patch does not pull it. That
-     * is a global estimator with a spatial predictor, not an independent search
-     * per block -- and it means the field this pipeline reads is close to a
-     * camera-motion field, with independently moving objects underrepresented.
-     *
-     * <p>512 is 64 block columns, which it does answer.
-     */
-    private static final int SQUARE_EXTENT = 512;
-    private static final int SQUARE_FROM = 256;
-    private static final int SQUARE_STEP = 64;
-    private static final int SQUARE_TOP = 0;
-
-    private void probeBasepoint() {
-        if (basepointProbed || !wants("basepoint")) return;
-        if (!motionEstimationSupported()) return;
-        basepointProbed = true;
-
-        // **The real luma's size, so the search runs under the conditions it
-        // runs under in production.** The probe started at a 256x256 scratch
-        // pair, on the reasoning that the answer is geometric and the size
-        // cannot matter. It may: the ~112 px window is a figure measured on
-        // 1280x720, nothing in the spec says the reach is independent of the
-        // input, and a probe that disagrees with the pipeline about the frame
-        // size is answering a question about a configuration nothing else uses.
-        final int side = luma[0].width;
-        final int tall = luma[0].height;
-        if (side < blockX * 8 || tall < blockY * 8) return;
-
-        final Target ref = new Target();
-        final Target target = new Target();
-        final Target field = new Target();
-        ref.allocate(side, tall, GLES30.GL_R8, GLES20.GL_NEAREST);
-        target.allocate(side, tall, GLES30.GL_R8, GLES20.GL_NEAREST);
-        field.allocate(side / blockX, tall / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-        try {
-            paintSquare(ref, SQUARE_FROM, side, tall);
-            paintSquare(target, SQUARE_FROM + SQUARE_STEP, side, tall);
-
-            while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-            texEstimateMotion(ref.texture, target.texture, field.texture);
-            final int error = GLES20.glGetError();
-            if (error != GLES20.GL_NO_ERROR) {
-                say("fg basepoint: the matcher refused the probe (0x"
-                    + Integer.toHexString(error) + ") -- nothing measured");
-                return;
-            }
-
-            final int gw = field.width, gh = field.height;
-            final java.nio.FloatBuffer out = java.nio.ByteBuffer
-                .allocateDirect(gw * gh * 4 * 4)
-                .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer();
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, field.framebuffer);
-            GLES20.glReadPixels(0, 0, gw, gh, GLES20.GL_RGBA, GLES20.GL_FLOAT, out);
-            final int readError = GLES20.glGetError();
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            renderer.viewportNeedsUpdate = true;
-            if (readError != GLES20.GL_NO_ERROR) {
-                say("fg basepoint: cannot read RGBA16F back (0x"
-                    + Integer.toHexString(readError) + ") -- nothing measured");
-                return;
-            }
-
-            // **The moving region's EDGE, because with a region this wide the
-            // two hypotheses overlap everywhere except there.**
-            //
-            // The stripe occupies [FROM, FROM+EXTENT) in ref and the same shifted
-            // by STEP in target. Indexed at ref the responding blocks run from
-            // FROM; indexed at target they run from FROM+STEP. The interiors are
-            // identical under both readings and say nothing; the left edge is
-            // the whole measurement, and the two predictions are STEP apart.
-            final int leftIfRef = SQUARE_FROM;
-            final int leftIfTarget = SQUARE_FROM + SQUARE_STEP;
-            final int strong = SQUARE_STEP / 2;
-
-            // Per block column: does most of this column carry the motion? A
-            // column rather than a block, because the stripe is full height, so
-            // a column is 90 independent votes on the same answer and one noisy
-            // block cannot move an edge.
-            int leftEdge = -1, rightEdge = -1, columns = 0;
-            double vx = 0, vy = 0;
-            int responded = 0, anyMotion = 0;
-            double strongest = 0;
-            for (int x = 0; x < gw; x++) {
-                int hits = 0;
-                for (int y = 0; y < gh; y++) {
-                    final float mx = out.get((y * gw + x) * 4);
-                    final float my = out.get((y * gw + x) * 4 + 1);
-                    final double magnitude = Math.hypot(mx, my);
-                    if (magnitude > 0.5) anyMotion++;
-                    strongest = Math.max(strongest, magnitude);
-                    if (magnitude < strong) continue;
-                    hits++;
-                    responded++;
-                    vx += mx; vy += my;
-                }
-                if (hits * 2 <= gh) continue;
-                columns++;
-                if (leftEdge < 0) leftEdge = x * blockX;
-                rightEdge = x * blockX + blockX;
-            }
-            if (responded == 0) {
-                say(String.format(
-                    "fg basepoint: nothing cleared %d px over a %+d px translation"
-                        + " -- %d of %d blocks held any vector at all, the largest"
-                        + " %.1f px. %s",
-                    strong, SQUARE_STEP, anyMotion, gw * gh, strongest,
-                    anyMotion == 0
-                        ? "The matcher declined the whole frame."
-                        : "It answered below the bar; the translation is not being"
-                            + " recovered at full magnitude."));
-                return;
-            }
-            vx /= responded; vy /= responded;
-
-            say(String.format(
-                "fg basepoint: a %d px stripe moved %+d px -- %d block columns"
-                    + " carry it, x from %d to %d, mean vector (%+.1f, %+.1f)."
-                    + " Indexed at ref the left edge is %d; at target it is %d",
-                SQUARE_EXTENT, SQUARE_STEP, columns, leftEdge, rightEdge,
-                vx, vy, leftIfRef, leftIfTarget));
-
-            final int missRef = Math.abs(leftEdge - leftIfRef);
-            final int missTarget = Math.abs(leftEdge - leftIfTarget);
-            // Half the step is the midpoint between the two predictions; an edge
-            // landing there discriminates nothing and is reported as such rather
-            // than rounded to whichever side is nearer.
-            if (Math.abs(missRef - missTarget) < SQUARE_STEP / 2
-                    || columns < SQUARE_EXTENT / blockX / 2) {
-                say("fg basepoint: NOT DECISIVE -- the edge sits between the two"
-                    + " predictions, or too little of the stripe answered."
-                    + " Nothing is concluded and the projection step is unchanged.");
-                return;
-            }
-            final boolean indexedAtRef = missRef < missTarget;
-            // **This verdict is against the projection as it now stands, not as
-            // it stood when the probe was written.** InterpolateMaterial used to
-            // project onto the newer site; this probe is what moved it onto the
-            // older one, so ref-indexing is now the case the shader is built
-            // for and target-indexing is the one that would be wrong. A line
-            // that still said "correcting the wrong way" after the correction
-            // landed would be read as a live fault every session.
-            say(String.format(
-                "fg basepoint: vectors are indexed in the %s and point %s, so"
-                    + " InterpolateMaterial's projection onto the older site is %s",
-                indexedAtRef ? "REF image -- the OLDER frame"
-                             : "TARGET image -- the NEWER frame",
-                vx > 0 ? "ref -> target as written" : "target -> ref, inverted",
-                indexedAtRef
-                    ? "correct"
-                    : "WRONG: the field is indexed on the newer frame, so the"
-                        + " step should go to fromNewer instead"));
-        } finally {
-            ref.release();
-            target.release();
-            field.release();
-            renderer.invalidateBoundWindowMaterial();
-        }
-    }
-
-    /** One frame of the probe pair: the square at {@code originX}. */
-    private void paintSquare(Target destination, int originX, int side, int tall) {
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
-        squareMaterial.use();
-        squareMaterial.setUniformVec2(squareMaterial.origin, originX, SQUARE_TOP);
-        squareMaterial.setUniformVec2(squareMaterial.size, side, tall);
-        squareMaterial.setUniformFloat(squareMaterial.extent, SQUARE_EXTENT);
-        blit(squareMaterial, 0, destination.width, destination.height);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-    }
-
-    private int allocWidth = 0;
-    private int allocHeight = 0;
-    private int allocGeneration = -1;
+    // ---- pacing ------------------------------------------------------------
 
     private int multiple = 2;
-    /**
-     * Which way the field points: +1, -1, or 0 while it is still unknown.
-     *
-     * <p>Latched, because it is a property of what the driver means by its own
-     * output rather than of any frame, and it cannot change while the context
-     * lives. See {@link SignMaterial} for why deciding this per pixel -- which is
-     * what this replaces -- shredded every synthesised frame.
-     */
-    private float fieldSign = 0f;
-    /** Share of the last probe that was moving enough to have an opinion. */
-    private float signVotes = 0f;
-    /** When the sign was last probed, so a still scene retries rather than sticks. */
-    private long signProbedAt = 0;
-
-    /**
-     * VESSEL: how often the sign may be probed while it is still unknown.
-     *
-     * <p><b>This was a second, and a second is the diagnostic reporting rate --
-     * a number that has nothing to do with the decision it was gating.</b> The
-     * cost of latching is three seconds of a session running without the
-     * two-stage search, and it was three rather than one for two compounding
-     * reasons, both of them in the gate rather than in the vote:
-     *
-     * <ul>
-     * <li>The answer needs two decisive probes that AGREE, so the floor was
-     *     already two probes -- one second -- before anything went wrong.
-     * <li>{@code signProbedAt} is stamped before the probe is known to be
-     *     worth anything, so a probe that returns nothing costs a full second
-     *     as surely as one that votes. Both ways of returning nothing are
-     *     ordinary: a scene below the five per cent motion floor (measured on
-     *     this device at 0 to 1 px mean displacement for seconds at a time)
-     *     and a share landing between 0.2 and 0.8. Two such probes and the
-     *     latch is at three seconds.
-     * </ul>
-     *
-     * <p>The safety argument for the second probe is that it must come from a
-     * <em>different moment of the scene</em>, which is what stops one unlucky
-     * frame inverting the field for the life of the context. A quarter second
-     * is four real frames at fifteen a second, so it satisfies that argument
-     * exactly as well as a second did -- the second was never load-bearing.
-     *
-     * <p>Now the best case is a quarter second and three wasted probes still
-     * land inside one. Nothing about the vote is relaxed: it is still two
-     * decisive probes at eighty per cent that have to agree, and an undecided
-     * probe still clears the pending answer.
-     */
-    private static final long SIGN_PROBE_MS = 250;
-
-    /**
-     * How often the same reduction runs once there is nothing left to decide.
-     *
-     * <p>After the latch this pass survives only to report the field's mean
-     * displacement for {@code fg field}, which is a log line once a second, so
-     * it keeps the rate the rest of the diagnostics use and stops paying for a
-     * readback four times a second for a number nothing reads that often.
-     */
-    private static final long FIELD_REPORT_MS = 1000;
-    /** A decisive vote awaiting a second, agreeing one. See {@link #probeFieldSign}. */
-    private float pendingSign = 0f;
-
-    /**
-     * Mean length of the motion field, in luma pixels. See {@link #probeFieldSign}.
-     *
-     * <p>Reported so that harm and displacement can be read off the same log and
-     * plotted against each other. Every estimate of "how fast is too fast" so
-     * far has come from a stand-in block matcher on the laptop, and that matcher
-     * behaves nothing like the hardware one at low speed -- it put 19% of blocks
-     * past 100 pixels on a nearly-static scene, where the device reports 0.0%
-     * harm. This is the field the driver actually produced.
-     */
-    private float fieldMagnitude = 0f;
-
-    /**
-     * Vote on the field's sign, and latch the answer once it is decisive.
-     *
-     * <p>Runs at most once a second and stops entirely once latched, so the
-     * steady-state cost is nothing. It has to be a readback -- the sign has to
-     * reach a uniform, and the CPU is what sets uniforms -- and one a second is
-     * the rate the diagnostics already run at safely. Deciding it on the GPU per
-     * pixel is precisely the thing that was wrong.
-     */
-    private void probeFieldSign() {
-        // **Two reasons to run, and the sign is only one of them.**
-        //
-        // The same reduction that votes on the sign also carries how far the
-        // scene moved, in luma pixels, which is the number every attempt to
-        // bound motion compensation has been missing. It has to keep coming
-        // after the sign has latched, so the probe now runs while `field` is
-        // asked for even though it has nothing left to decide.
-        final boolean needSign = fieldSign == 0f;
-        if (!needSign && !wants("field")) return;
-        final long now = SystemClock.uptimeMillis();
-        // Fast while there is an answer to find, slow once there is not. See
-        // SIGN_PROBE_MS: the two were the same number, and the one that
-        // mattered had been set by the one that did not.
-        final long interval = needSign ? SIGN_PROBE_MS : FIELD_REPORT_MS;
-        if (signProbedAt != 0 && now - signProbedAt < interval) return;
-        signProbedAt = now;
-
-        if (signProbe == null) {
-            signProbe = new Target();
-            signProbe.allocateAveraging(64, 36);
-        }
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, signProbe.framebuffer);
-        GLES20.glViewport(0, 0, signProbe.width, signProbe.height);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        signMaterial.use();
-        renderer.quadVertices.bind(signMaterial.programId);
-        signMaterial.setUniformBool(signMaterial.uniforms.flipY, false);
-        signMaterial.setUniformVec2(signMaterial.signUniforms.motionScale,
-                                    1f / Math.max(1, luma[0].width),
-                                    1f / Math.max(1, luma[0].height));
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        // The whole motion, not the leftovers. After the two-stage search
-        // `vectors` holds the residual the warp did not account for, which is
-        // near zero by construction -- reading that here would report a still
-        // scene and, before the sign latched, would have nothing to vote with.
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D,
-                             forwardField != null ? forwardField.texture : vectors.texture);
-        signMaterial.setUniformInt(signMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-        signMaterial.setUniformInt(signMaterial.signUniforms.lumaNewerTexture, 1);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-        signMaterial.setUniformInt(signMaterial.signUniforms.lumaOlderTexture, 2);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-        for (int unit = 2; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, signProbe.texture);
-        GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-
-        final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
-            .order(java.nio.ByteOrder.nativeOrder());
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, signProbe.topFramebuffer);
-        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        renderer.viewportNeedsUpdate = true;
-
-        final float positive = (pixel.get(0) & 0xff) / 255f;
-        signVotes = (pixel.get(1) & 0xff) / 255f;
-        // Mean vector length over the whole field, back in luma pixels. See
-        // SignMaterial's blue channel for why this is worth a readback.
-        fieldMagnitude = (pixel.get(2) & 0xff);
-
-        // Nothing left to decide once the sign is latched; the magnitude above
-        // is the only reason this still runs.
-        if (!needSign) return;
-
-        // A still frame has no opinion: both signs fetch the same content, so the
-        // vote is a tie whatever the truth is. Wait for real motion rather than
-        // latch a coin toss.
-        if (signVotes < 0.05f) return;
-
-        // **Two decisive probes that agree, not one.**
-        //
-        // The underlying cost margin between the two hypotheses was measured at
-        // five per cent -- 0.00192 against 0.00182 -- so a single frame voting
-        // 65% one way is comfortably inside what chance produces. This latches
-        // for the life of the context and there is no path that ever revisits
-        // it, so a wrong latch inverts the field for the whole session, and an
-        // inverted field displaces every pixel by twice its motion the wrong
-        // way. That is the failure mode this same value already caused once,
-        // when it was decided per pixel.
-        //
-        // Eighty per cent, and the same answer from two probes at least
-        // SIGN_PROBE_MS apart -- a quarter second, which at fifteen real frames
-        // a second is four of them, so two different moments of the scene. An
-        // undecided probe clears the pending answer rather than leaving it to
-        // pair up with a vote from some unrelated moment.
-        //
-        // This said "a second" until the gate was separated from the diagnostic
-        // reporting rate; see SIGN_PROBE_MS, which argues at length that the
-        // second was never load-bearing and then left the claim standing here.
-        final float share = positive / signVotes;
-        final float vote = share > 0.8f ? 1f : (share < 0.2f ? -1f : 0f);
-        if (vote == 0f) { pendingSign = 0f; return; }
-        if (pendingSign != vote) { pendingSign = vote; return; }
-        fieldSign = vote;
-
-        // **The share that agrees with the answer, not the share that agrees
-        // with `positive`.**
-        //
-        // `share` is always the fraction preferring the POSITIVE sign, and this
-        // printed it whichever way the latch went -- so a decisive backward
-        // latch, which is what this device produces, reported the 15% that
-        // disagreed with it. Three sessions latched at 15%, 19% and 18%: all
-        // three are 85, 81 and 82 per cent majorities, and all three read like
-        // coin flips in the log. The number that has to be legible here is the
-        // confidence in the decision, because this latches for the life of the
-        // context and a wrong latch inverts every vector in it.
-        final float agreed = fieldSign > 0 ? share : 1f - share;
-        say(String.format(
-            "fg sign: field points %s (%.0f%% of moving pixels agree, %.0f%% of the"
-                + " frame moving) -- latched",
-            fieldSign > 0 ? "forward" : "backward", agreed * 100f, signVotes * 100f));
-    }
-
-    /**
-     * VESSEL: how long one display refresh lasts, from the display itself.
-     *
-     * <p>Two separate things needed this and neither had it. The pacer was
-     * deciding whether a vsync was the nearest one to its target using half of a
-     * 120 Hz refresh, hardcoded -- on a panel running at 60 that is 4 ms where it
-     * should be 8.3, so a slot due at 25 ms with a vsync available at 18 ms
-     * waited and fired at 34.6 instead: 9.6 ms late rather than 7 ms early. And
-     * nothing knew how many frames an interval could physically hold, which is
-     * what {@link #effectiveMultiple} exists to answer.
-     *
-     * <p>Asked of the {@code Display} rather than inferred from timestamps. The
-     * panel knows, it is exact, and a sampled estimate would have to distinguish
-     * consecutive vsyncs from ones two apart without any way to tell.
-     */
-    @Override
-    public long vsyncPeriodNanos() {
-        final android.view.Display display = renderer.xServerView.getDisplay();
-        final float hz = display != null ? display.getRefreshRate() : 0f;
-        return hz > 1f ? (long)(1_000_000_000L / hz) : 0L;
-    }
-
-    /**
-     * How many frames this interval can actually carry, which is not always the
-     * multiple that was asked for.
-     *
-     * <p><b>An interval cannot hold more frames than it holds refreshes.</b> At
-     * 8x with a 90 fps limit in smoothness the request is 720 presented frames a
-     * second into a panel whose fastest mode is 165 -- three quarters of them
-     * have nowhere to go, and every one costs a full interpolation pass to be
-     * discarded. The clamp is the arithmetic that says so.
-     *
-     * <p>Runtime rather than a filtered list of settings, because the guest's
-     * interval is what decides it and the guest's interval moves. A 30 fps limit
-     * in smoothness nominally leaves 33 ms between real frames; when the guest
-     * actually delivers every 45 ms the number of refreshes in that gap changes
-     * with it, and so does the answer.
-     */
-    /**
-     * The widest gap between real frames still worth interpolating across.
-     *
-     * <p><b>The multiple adapting to a stall was filling it with invention.</b>
-     * Measured on Requiem at 8x: the guest fell to 7.3 frames a second, a 137 ms
-     * interval, and the refresh check fitted all eight -- there are sixteen
-     * refreshes in 137 ms, so by that test nothing was wrong. But the refresh
-     * check asks whether there is somewhere to *put* a frame and never whether
-     * the frame is worth making. Every part of this pipeline degrades with the
-     * distance between the two real frames it reads, and 137 ms is twice the
-     * 66 ms gap that already produces the ambiguity, the ripple and the ghosting.
-     *
-     * <p>A hundred milliseconds, ten frames a second, and derived rather than
-     * chosen: the widest gap any configuration the settings offer can
-     * legitimately produce is a 24 fps limit at 2x, which leaves the guest at 12
-     * and the gap at 83 ms. So every valid setup passes, and anything wider means
-     * the guest has stopped rather than slowed -- where the honest response is to
-     * show the frame that exists rather than invent seven around it.
-     */
-    private static final long WORTH_INTERPOLATING_NANOS = 100_000_000L;
-
-    /**
-     * VESSEL: the same question asked of this guest rather than of a constant.
-     *
-     * <p><b>"The guest has stopped rather than slowed" is a relative statement
-     * and 100 ms cannot express it.</b> A hundred milliseconds is a stall for a
-     * title running at 15 fps and the perfectly normal interval of one capped at
-     * 10, and the fixed number treats them the same. Measured across two games
-     * on this device, that is not academic: Metro holds 61 to 69 ms and never
-     * approaches the line, while RE9 swings 44.8 to 140 ms and crosses it five
-     * times in sixty-one seconds. Each crossing takes the multiple from 4x to 1x
-     * -- about sixty presented frames a second to about seven -- and back.
-     *
-     * <p>{@link #idleGate} already made this move for the other gate in this
-     * file, and for the same reason: a threshold that scales with what the
-     * pipeline is actually configured to do, rather than one chosen once against
-     * one configuration.
-     *
-     * <p>So the gate is now twice the interval this guest habitually keeps. The
-     * floor is the old constant, so nothing is ever gated more eagerly than
-     * before; the ceiling is 250 ms, because past that the guest has genuinely
-     * stopped -- a loading screen or a shader compile -- and inventing three
-     * frames across it is what the original comment was written about.
-     *
-     * <p><b>What this is not.</b> It is not a claim that the frames it now
-     * permits look good. Nothing measured this session predicts harm --
-     * displacement, motion diversity, contrast and brightness all came out flat
-     * -- so there is no evidence either way about the picture. What it removes is
-     * an arbitrary line that one game happens to sit on top of.
-     */
-    private static final long WORTH_INTERPOLATING_CEILING_NANOS = 250_000_000L;
-
-    /**
-     * How far past its own habit a guest may drift before it counts as stopped.
-     *
-     * <p>Normalised at 4x and scaled inversely with the multiple by {@link
-     * #worthInterpolating}, because how stale a pair may be depends on how many
-     * frames are built from it. At a 66 ms habit that lands the gate at 198 ms
-     * for 4x, 250 for 2x (the ceiling), and 100 for 8x -- which recovers the
-     * original hand-picked constant at exactly the configuration it was picked
-     * against, Requiem at 8x with a 137 ms interval.
-     *
-     * <p>Three rather than two, widened after the two-times gate still cut RE9
-     * off during ordinary play. Its habit is about 66 ms and its intervals reach
-     * 140, so a gate at 132 sat inside the range the game actually occupies and
-     * fired five times in sixty-one seconds -- each one a drop from about sixty
-     * presented frames a second to about seven. At three the gate lands near 198
-     * and the whole of RE9's ordinary variation falls inside it, leaving the
-     * ceiling to catch a guest that has genuinely stopped.
-     *
-     * <p>The ramp between the two was tried and taken out: grading the multiple
-     * from the habit to the gate bought a gentler last transition and paid for
-     * it with fewer frames through the middle of the range, where the guest
-     * spends most of its time. Widening costs nothing in that range at all.
-     *
-     * <p>What it costs instead is at the far end: frames interpolated from a
-     * pair up to 198 ms apart, which the original 100 ms constant existed to
-     * forbid. That constant was chosen against Requiem at 8x, and two of its
-     * premises did not survive this session -- the matcher turns out to be
-     * accurate at 150 px rather than saturating at 112, and harm is flat against
-     * displacement from 20 px to 200. Neither says a 198 ms pair is fine; both
-     * say the reasoning that produced 100 ms was built on measurements that have
-     * since been corrected.
-     */
-    private static final long GATE_MULTIPLE = 3L;
-
-    /**
-     * How the multiple gives ground between the guest's habit and the gate.
-     *
-     * <p>One would be a straight line, and a straight line was measured worse
-     * than the cliff it replaced: it drops to 3x the moment the interval passes
-     * the habit, so it spends the busiest part of the range showing fewer frames
-     * than doing nothing would have. Below one the curve stays near what was
-     * asked for and then turns down sharply, so the top multiple keeps the
-     * widest band of interval and each step below it a narrower one.
-     */
-    private static final double GATE_CURVE = 0.35;
-
-    /**
-     * A long-horizon view of the guest's interval, for {@link #worthInterpolating}.
-     *
-     * <p>Separate from {@link #recent} on purpose. That one holds nine samples so
-     * it can follow a real change in rate within about half a second, which is
-     * what the aim needs; this one has to describe the guest's habit and must not
-     * move when the guest hitches. Sixty-four samples is about four seconds at 15
-     * fps -- long enough that a stall lasting several frames cannot shift the
-     * middle, short enough to follow a genuine change of scene or settings.
-     */
-    private final long[] baseline = new long[64];
-    private int baselineAt = 0;
-    private int baselineHeld = 0;
-
-    private long baselineInterval() {
-        if (baselineHeld == 0) return 0;
-        final long[] sorted = new long[baselineHeld];
-        System.arraycopy(baseline, 0, sorted, 0, baselineHeld);
-        java.util.Arrays.sort(sorted);
-        return sorted[baselineHeld / 2];
-    }
-
-    /** The widest gap still worth interpolating across, for THIS guest. */
-    private long worthInterpolating() {
-        final long base = baselineInterval();
-        if (base <= 0) return WORTH_INTERPOLATING_NANOS;
-        // **Tighter the more frames are invented from the pair.** How stale a
-        // pair may be depends on how much is built from it: one interpolation
-        // from a 200 ms pair is a compromise, seven from the same pair is the
-        // Requiem case this gate exists for. So the allowance scales inversely
-        // with the multiple, normalised at 4x.
-        final long allowed = base * GATE_MULTIPLE * 4L / Math.max(2, multiple);
-        return Math.min(Math.max(allowed, WORTH_INTERPOLATING_NANOS),
-                        WORTH_INTERPOLATING_CEILING_NANOS);
-    }
-
-    private int effectiveMultiple() {
-        // **Not clamped to the fps limit, deliberately.**
-        //
-        // The guest overruns its cap -- measured at 21.5 fps against a 15 fps
-        // limit that vkd3d-proton had accepted and applied, because its limiter
-        // leans on present-wait timing this driver does not provide. Doubling
-        // that presents 43.9 frames a second where the limit says 30.
-        //
-        // Holding it back to 30 was tried and taken out again. The saving is not
-        // where it first appeared to be: at 97% GPU and 15.5 guest frames a
-        // second a real frame costs about 63 ms of GPU, against 1.4 ms for a
-        // synthesised one -- a factor of forty-five. So the expensive part of an
-        // overrun is the six extra *real* frames the guest rendered, which
-        // nothing here can decline, and suppressing the cheap half saves under
-        // one per cent. The remaining argument was pacing, and more frames
-        // unevenly spaced still reads as smoother than fewer frames evenly
-        // spaced at this rate.
-        //
-        // What is left are the two clamps that are not preferences: a gap too
-        // wide to interpolate across, and an interval that cannot carry the
-        // frames. See WORTH_INTERPOLATING_NANOS for the first.
-        if (multiple < 2) return 1;
-
-        // **Steps, but with the widest band first.**
-        //
-        // A linear ramp was tried and taken out: it fell from 4x to 3x as soon
-        // as the interval passed the guest's habit, which spends most of the
-        // range showing fewer frames than the plain cliff did, and on screen
-        // that is a loss. A cliff is worse at one end; a linear ramp is worse
-        // through the middle.
-        //
-        // The curve holds what was asked for across most of the range and
-        // gives ground quickly near the gate, so each lower multiple occupies a
-        // narrower band of interval than the one above it. With RE9's habit of
-        // about 66 ms and a gate near 198:
-        //
-        //     up to ~120 ms   4x     the band the guest actually lives in
-        //     120 to 170      3x
-        //     170 to 197      2x
-        //     beyond 198      1x     the guest has stopped
-        //
-        // The exponent is what makes the bands unequal. At 1.0 this is the
-        // linear ramp that lost; below 1 the curve stays high and then turns
-        // down, which is the shape asked for -- the gap for each step decreasing
-        // progressively.
-        final long gate = worthInterpolating();
-        if (smoothedInterval > gate) return 1;
-        int asked = multiple;
-        final long habit = baselineInterval();
-        if (habit > 0 && gate > habit && smoothedInterval > habit) {
-            final double headroom = Math.max(0.0, Math.min(1.0,
-                (double)(gate - smoothedInterval) / (double)(gate - habit)));
-            asked = (int)Math.round(1.0 + (multiple - 1)
-                * Math.pow(headroom, GATE_CURVE));
-            asked = Math.max(1, Math.min(multiple, asked));
-        }
-        final long period = vsyncPeriodNanos();
-        if (period <= 0 || smoothedInterval <= 0) return asked;
-        final int refreshes = (int)(smoothedInterval / period);
-        return Math.min(asked, Math.max(1, refreshes));
-    }
-
-    /**
-     * The multiple actually in force for the interval now running.
-     *
-     * <p>Settled once per real frame and then used for every phase decision in
-     * that interval -- the {@code 1/K} the composite presents, the offset in
-     * {@link #phaseFor}, and the slots the pacer schedules. Recomputing it
-     * per-present would let the three disagree inside one interval, which puts
-     * the phases somewhere no frame belongs.
-     */
+    /** The multiple in force for the interval now running. See {@link #effectiveMultiple}. */
     private int activeMultiple = 2;
-
-    /**
-     * The motion field to build frames from: filtered if that ran, raw if not.
-     *
-     * <p>One accessor rather than a decision at each use, so there is no path
-     * where one pass reads the filtered field and another reads the matcher's.
-     */
-    private int fieldTexture() {
-        final Target raw = forwardField != null ? forwardField : vectors;
-        return filteredIndex >= 0 ? filtered[filteredIndex].texture : raw.texture;
-    }
-
-    /**
-     * The same field measured with the frames swapped, or the forward one.
-     *
-     * <p>**The fallback is what switches the consistency test off rather than
-     * feeding it something wrong.** Handing back the forward field makes every
-     * comparison in the shader read {@code mean} against {@code mean}, so the
-     * disagreement is zero everywhere and the term contributes nothing -- but the
-     * shader's own {@code consistency} uniform is set to zero alongside it, so
-     * this is a second line of defence rather than the mechanism. A sampler left
-     * bound to nothing reads black, and black is a vector of zero, which would
-     * read as total disagreement and distrust the whole frame.
-     */
-    private int backFieldTexture() {
-        if (!backwardValid) return fieldTexture();
-        return filteredBackIndex >= 0 ? filteredBack[filteredBackIndex].texture
-                                      : backwardField.texture;
-    }
-
-    /** Whether the field estimated at the last real frame is usable. */
     private boolean motionValid = false;
     private volatile long realFrames = 0;
     private long lastRealFrameNanos = 0;
     private long smoothedInterval = 0;
 
     /**
-     * Weight of the running mean of the real-frame interval.
-     *
-     * <p>Four, which is short enough to follow a genuine change in frame
-     * rate within a few frames and long enough that one late frame does not
-     * move the aim. Integer arithmetic throughout -- these are nanoseconds
-     * and a double buys nothing at that scale.
-     */
-    /**
-     * VESSEL: the last few real-frame intervals, for {@link #medianInterval}.
-     *
-     * <p><b>A mean is the wrong average for this signal.</b> The compositor
-     * draws on guest damage, which is bursty: a load hitch, a shader compile or
-     * one heavy frame produces a single interval two or three times the usual
-     * one, and an exponential mean carries that outlier into the aim for the
-     * several frames it takes to decay. Every prediction scheduled meanwhile is
-     * aimed at an interval the guest is not running at.
-     *
-     * <p>A median throws the outlier away outright and returns the interval the
-     * guest is actually keeping. This is what DXVK's frame-rate limiter does --
-     * median of the last three of its measurements rather than an average -- and
-     * AMD document the failure the other way round in FSR3, where the pacing
-     * estimate could latch onto a bad sample and sit at the wrong period.
-     *
-     * <p>Nine samples: long enough that a single hitch cannot move the middle,
-     * short enough to follow a real change in the guest's rate within about half
-     * a second at 15 fps.
+     * The last nine real-frame intervals. A median, because the compositor
+     * draws on guest damage and one hitch would sit in a mean for several
+     * frames, aiming every prediction meanwhile at a rate the guest is not
+     * running at.
      */
     private final long[] recent = new long[9];
-    private int recentAt = 0;
-    private int recentHeld = 0;
+    private final long[] recentSorted = new long[9];
+    private int recentAt = 0, recentHeld = 0;
+
     /**
-     * The vsync a synthesised frame is due at, or zero for none.
-     *
-     * <p>A timestamp rather than an index, because the phase to show is decided
-     * from when the frame actually reaches the display and not from which of the
-     * N-1 slots it was scheduled as. See {@link #presentSynthesized}.
+     * A long-horizon view of the same interval, for {@link #worthInterpolating}:
+     * sixty-four samples describe the guest's habit and do not move when it
+     * hitches.
      */
+    private final long[] baseline = new long[64];
+    private final long[] baselineSorted = new long[64];
+    private int baselineAt = 0, baselineHeld = 0;
+    /** Settled once per real frame; both sorts are then done once. */
+    private long baselineInterval = 0;
+
     private final java.util.concurrent.atomic.AtomicLong pending =
         new java.util.concurrent.atomic.AtomicLong(0);
 
     /**
-     * Above this gap between real frames the picture is not really moving.
-     *
-     * <p>It was 40 ms once, which is 25 fps, and that switched the whole feature
-     * off for every container that needed it: a 24 fps cap composites every
-     * 41.7 ms, so every frame fell the wrong side of the gate and not one
-     * prediction was ever scheduled. A slow renderer is not an idle one. 250 ms
-     * is four frames a second -- below that a synthesised frame is aimed so far
-     * from anything real that it is invention rather than prediction.
-     */
-    private static final long IDLE_NANOS = 250_000_000L;
-
-    /**
-     * How far a synthesised frame may sit from a real one before it is invention.
-     *
-     * <p><b>A flat quarter-second gate switched 8x off entirely.</b> The gate
-     * asks "is the picture still moving", and 250 ms answers it correctly at 2x
-     * and not at all above that: efficiency mode caps the guest at
-     * {@code limit / multiple}, so 30 fps at 8x leaves the guest drawing every
-     * 333 ms and every interval fell the wrong side of the line. Not one
-     * prediction was ever scheduled, at the setting that asks for the most.
-     *
-     * <p>The quantity that actually matters is the distance from a synthesised
-     * frame to the nearest real one, and that is the interval divided by the
-     * multiple. Gating on it is the same 250 ms at 2x -- so nothing changes where
-     * the old number was right -- and scales where it was not.
+     * Above this distance from a synthesised frame to the nearest real one, a
+     * frame is invention rather than prediction. Scaled by the multiple, so
+     * 250 ms between real frames at 2x.
      */
     private static final long SYNTH_MAX_GAP_NANOS = 125_000_000L;
 
@@ -1542,61 +412,75 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * VESSEL: the spacing of frames as they actually reach the screen.
-     *
-     * <p><b>Every other number here describes what was drawn; this is the only
-     * one that describes when.</b> Fifteen real and fifteen synthesised frames a
-     * second is the right count, and it says nothing about whether they arrive
-     * 33 ms apart or alternate 20 and 46 -- and the second looks like fifteen
-     * frames a second with a limp while every counter reads a perfect thirty.
-     *
-     * <p>Two frames closer together than one display refresh share a scan, so
-     * the earlier of them is never seen at all. That failure is invisible to a
-     * frame count by construction, which is exactly why it needs measuring
-     * separately.
-     *
-     * <p>Taken at the moment of presentation from the compositor's own clock,
-     * rather than derived from the guest's interval: an estimate of the input
-     * cannot describe the output.
+     * The widest gap still worth interpolating across: the guest's habit times
+     * {@link #GATE_MULTIPLE}, scaled inversely with the multiple and normalised
+     * at 4x, floored at 100 ms and capped at 250. Past the cap the guest has
+     * stopped (a load, a shader compile) and inventing frames across it is
+     * worse than showing the one that exists.
      */
+    private static final long WORTH_INTERPOLATING_NANOS = 100_000_000L;
+    private static final long WORTH_INTERPOLATING_CEILING_NANOS = 250_000_000L;
+    private static final long GATE_MULTIPLE = 3L;
     /**
-     * VESSEL: the same cadence, from the display instead of from this thread.
-     *
-     * <p>{@link #notePresented} below records when a draw was *issued*. This
-     * records when the compositor says the frame was *shown*. They are separated
-     * by a queue nothing here controls, and every pacing conclusion in this file
-     * has so far come from the first of them. See {@link FrameTimestamps}.
-     *
-     * <p>Both are kept rather than one replacing the other: the difference
-     * between them is the queue depth, which is itself worth seeing, and the
-     * platform is entitled to decline the real one on some display paths.
+     * How the multiple gives ground between the habit and the gate. Below one
+     * the curve holds what was asked for across most of the range and turns
+     * down near the gate; a linear ramp was measured worse than a cliff.
      */
-    private final FrameTimestamps timestamps = new FrameTimestamps();
+    private static final double GATE_CURVE = 0.35;
+
+    private long worthInterpolating() {
+        if (baselineInterval <= 0) return WORTH_INTERPOLATING_NANOS;
+        final long allowed = baselineInterval * GATE_MULTIPLE * 4L / Math.max(2, multiple);
+        return Math.min(Math.max(allowed, WORTH_INTERPOLATING_NANOS),
+                        WORTH_INTERPOLATING_CEILING_NANOS);
+    }
 
     /**
-     * VESSEL: presents that landed on a refresh another present had already used.
-     *
-     * <p>The one thing the cadence numbers could never establish. A gap measured
-     * on this thread says when a draw was issued, and two draws issued 0.3 ms
-     * apart may or may not have shared a scanout depending on a queue nothing
-     * here can see. Counting the display's own refreshes settles it: two presents
-     * recording the same refresh shared it, and the earlier one was never shown.
-     *
-     * <p>See FramePacer.vsyncIndex for why this replaces the timestamp the
-     * platform refuses to provide.
+     * How many frames this interval can carry: what was asked for, reduced as
+     * the interval approaches the gate, and never more than the interval holds
+     * refreshes. Not clamped to the fps limit: the expensive half of a guest
+     * overrunning its cap is the real frames, which nothing here can decline.
      */
+    private int effectiveMultiple() {
+        if (multiple < 2) return 1;
+        final long gate = worthInterpolating();
+        if (smoothedInterval > gate) return 1;
+        int asked = multiple;
+        final long habit = baselineInterval;
+        if (habit > 0 && gate > habit && smoothedInterval > habit) {
+            final double headroom = Math.max(0.0, Math.min(1.0,
+                (double)(gate - smoothedInterval) / (double)(gate - habit)));
+            asked = (int)Math.round(1.0 + (multiple - 1) * Math.pow(headroom, GATE_CURVE));
+            asked = Math.max(1, Math.min(multiple, asked));
+        }
+        final long period = vsyncPeriodNanos();
+        if (period <= 0 || smoothedInterval <= 0) return asked;
+        return Math.min(asked, Math.max(1, (int)(smoothedInterval / period)));
+    }
+
+    private static long median(long[] values, long[] scratch, int held) {
+        if (held == 0) return 0;
+        System.arraycopy(values, 0, scratch, 0, held);
+        java.util.Arrays.sort(scratch, 0, held);
+        return scratch[held / 2];
+    }
+
+    /** One display refresh, from the panel itself. */
+    @Override
+    public long vsyncPeriodNanos() {
+        final android.view.Display display = renderer.xServerView.getDisplay();
+        final float hz = display != null ? display.getRefreshRate() : 0f;
+        return hz > 1f ? (long)(1_000_000_000L / hz) : 0L;
+    }
+
+    /** The display's own account of when frames were shown. Diagnostics. */
+    private final FrameTimestamps timestamps = new FrameTimestamps();
     private long lastPresentVsync = -1;
     private long collisions = 0;
-
     private long lastPresentNanos = 0;
-    private long presentGapMin = Long.MAX_VALUE;
-    private long presentGapMax = 0;
-    private long presentGapTotal = 0;
-    private long presentGaps = 0;
+    private long presentGapMin = Long.MAX_VALUE, presentGapMax = 0, presentGapTotal = 0, presentGaps = 0;
 
     private void notePresented() {
-        // Before the swap, which is the only moment the frame about to be
-        // produced has an id. See FrameTimestamps.onDraw.
         if (wants("pacing")) {
             timestamps.onDraw();
             final long vsync = FramePacer.vsyncIndex();
@@ -1606,7 +490,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         final long now = System.nanoTime();
         if (lastPresentNanos != 0) {
             final long gap = now - lastPresentNanos;
-            // Longer than a quarter second is a pause, not a cadence.
             if (gap < 250_000_000L) {
                 presentGapMin = Math.min(presentGapMin, gap);
                 presentGapMax = Math.max(presentGapMax, gap);
@@ -1617,12 +500,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         lastPresentNanos = now;
     }
 
-    private long tier0Frames = 0;
-    private long tier1Frames = 0;
-    private long skipped = 0;
-    /** Times the matcher refused, which is invisible in the picture. */
-    private long estimateFailures = 0;
-    private long reportedAt = 0;
+    private long tier0Frames = 0, tier1Frames = 0, skipped = 0, estimateFailures = 0;
+    private long reportedAt = 0, reportedRealFrames = 0;
 
     public FrameSynthesizer(GLRenderer renderer) {
         this.renderer = renderer;
@@ -1633,21 +512,15 @@ public class FrameSynthesizer implements FramePacer.Target {
         this.multiple = Math.max(2, Math.min(8, multiple));
     }
 
-    /**
-     * The one-time line: what was asked for, and what the device can actually do
-     * about it. Printed on the first composite after the targets exist, because
-     * that is the first moment both halves of the answer are known.
-     */
     private void announce() {
         if (announced || diagnostics.isEmpty()) return;
         announced = true;
-        say("fg setup: asked for " + diagnostics
-            + ", " + multiple + "x, guest " + renderer.guestWidth()
-            + "x" + renderer.guestHeight()
+        say("fg setup: asked for " + diagnostics + ", " + multiple + "x, guest "
+            + renderer.guestWidth() + "x" + renderer.guestHeight()
             + " presented into " + renderer.viewTransformation.viewWidth
             + "x" + renderer.viewTransformation.viewHeight
             + " of " + renderer.surfaceWidth + "x" + renderer.surfaceHeight
-            + ", motion estimation " + (motionEstimationSupported()
+            + ", motion estimation " + (tier1Ready()
                 ? "available, block " + blockX + "x" + blockY
                 : "NOT AVAILABLE -- tier 1 will never run"));
     }
@@ -1660,11 +533,8 @@ public class FrameSynthesizer implements FramePacer.Target {
     @Override
     public void onSynthesisDue(long vsyncNanos) {
         pending.set(vsyncNanos);
-        // **Unpaced on purpose, and pacing it twice was a whole class of
-        // judder.** PacedXServerView.requestRender throttles to the container's
-        // frame limit and re-posts anything early through Handler.postDelayed --
-        // the exact mechanism {@link FramePacer} exists to avoid, applied to the
-        // frames it had just finished aiming at a vsync. These are paced already.
+        // Unpaced: the pacer has already aimed this at a vsync, and the view's
+        // frame limiter would re-post it through a delay queue.
         renderer.xServerView.requestRenderUnpaced();
     }
 
@@ -1673,235 +543,136 @@ public class FrameSynthesizer implements FramePacer.Target {
         return pending.getAndSet(0);
     }
 
+    // ---- the real frame ----------------------------------------------------
+
     /**
-     * Point the compositor at the offscreen colour target.
+     * Point the compositor at the offscreen colour target, at guest scale.
      *
-     * @return false when the targets could not be allocated, in which case the
-     *     caller composites to the screen exactly as it did before this existed.
+     * @return false when the targets could not be allocated; the caller then
+     *     composites to the screen as it did before this existed.
      */
     public boolean beginRealFrame() {
         if (!ensureTargets()) return false;
-        captureTimer.begin();
-        // **One to one with what the guest drew.** See
-        // GLRenderer.capturingAtGuestScale: the compositor emits guest
-        // coordinates and the viewport is what upscales them, so binding a
-        // guest-sized viewport and a guest-sized target composites at native
-        // resolution and the upscale moves to present. Everything from here to
-        // the screen is then working on real pixels rather than on invented ones,
-        // at a quarter of the area.
+        if (timing) captureTimer.begin();
         renderer.beginGuestScaleCapture();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, writeColour().framebuffer);
         return true;
     }
 
     /**
-     * Present the real frame, remember what it looked like, and queue the rest.
+     * Present the real frame, estimate the field for the interval, queue the rest.
      *
-     * @return whether anything reached the buffer. **False means the caller must
-     *     re-present**, because GLSurfaceView swaps regardless and the buffer it
-     *     publishes is two or three presents old -- see {@link
-     *     #repeatLastPresent}. This path can now decline: an arrival that would
-     *     land in a scanout already taken is handed to the pacer instead of
-     *     drawn, and on those draws nothing here writes anything at all.
+     * <p>The invariant: every real frame is presented exactly once, in order;
+     * only interpolated phases may be dropped. Frame N is presented as phase
+     * K/K at the end of its interval by the pacer, and here as a fallback if
+     * the pacer never got to it.
+     *
+     * @return whether anything reached the buffer. False means the caller must
+     *     re-present the last frame, because the view swaps regardless.
      */
     public boolean endRealFrame() {
         final Target written = writeColour();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         renderer.endGuestScaleCapture();
-        captureTimer.end();
+        if (timing) captureTimer.end();
 
-        // **The invariant: every real frame is presented exactly once, in
-        // order. Only interpolated phases may ever be dropped.**
-        //
-        // The previous attempt at interpolation left the real frame to the
-        // pacer, which discards anything a newer real frame has superseded --
-        // so on any short interval that frame was never shown at all, and the
-        // display received only half-stale interpolated frames. It froze the
-        // game. Presenting it here, before the history rotates, bounds the
-        // failure: a real frame can be late by at most one interval and can
-        // never be skipped.
         boolean presentedHere = false;
         if (!realPresented && realFrames >= 1) {
             presentLatest();
             presentedHere = true;
         }
 
-        // Luma for this frame, so the pair is ready without re-deriving the older
-        // one every time. Only when tier 1 can actually use it.
-        if (motionEstimationSupported()) {
-            lumaTimer.begin();
+        if (tier1Ready()) {
+            if (timing) lumaTimer.begin();
             renderToTarget(lumaMaterial, written.texture, writeLuma());
-            lumaTimer.end();
+            downsampleMaterial.use();
+            downsampleMaterial.setUniformVec2(downsampleMaterial.downsampleUniforms.texelSize,
+                                              0.25f / lumaCoarse[0].width, 0.25f / lumaCoarse[0].height);
+            renderToTarget(downsampleMaterial, writeLuma().texture, lumaCoarse[oldest()]);
+            if (timing) lumaTimer.end();
         }
 
-        // The slot just written is now the newest. Everything above read
-        // the old arrangement; everything below reads the new one.
+        // The slot just written is now the newest.
         newest = oldest();
         realFrames++;
         renderer.latchWindowPositions();
 
-        // Estimated once here, for the whole interval that follows. Every
-        // prediction between now and the next real frame shares this pair, so
-        // every prediction shares these vectors.
-        motionValid = realFrames >= 2 && motionEstimationSupported() && estimateMotion();
+        motionValid = realFrames >= 2 && tier1Ready() && estimateMotion();
 
-        // The interval now presents phase 1/K here, then 2/K .. K/K through
-        // the pacer -- and K/K is frame N itself, arriving at the end of the
-        // interval it belongs to. That delay is the whole latency cost of
-        // interpolation and is what buys an answerable question.
         if (wants("setup")) announce();
-        // The display's own refresh counter, for the collision check that
-        // replaces the scanout timestamp this device will not provide.
         if (wants("pacing")) FramePacer.countRefreshes();
 
-        // **The interval is measured before anything is presented, because the
-        // present depends on it.** It used to be taken afterwards, so the
-        // {@code 1/K} frame drawn here was placed using an estimate one frame
-        // stale while the pacer's slots used the fresh one -- two halves of the
-        // same interval laid out against different numbers.
+        // The interval is measured before anything is presented, because the
+        // present depends on it.
         final long now = System.nanoTime();
         final long interval = lastRealFrameNanos == 0 ? 0 : now - lastRealFrameNanos;
         lastRealFrameNanos = now;
-
-        // **Aimed with the median interval, because the last one is noise and
-        // the mean is worse than noise.**
-        //
-        // Measured at 2x: one prediction per real frame was scheduled and only
-        // one in three survived -- the rest were cancelled because the next real
-        // frame arrived before the prediction's vsync. The compositor draws on
-        // guest damage, which is bursty, so consecutive gaps differ by a factor
-        // of two or three and an aim computed from a single gap is wrong most of
-        // the time.
-        //
-        // An exponential mean was the first answer and it has a failure the
-        // median does not: one hitch of three times the usual interval stays in
-        // the estimate for several frames afterwards, and every prediction
-        // scheduled in that window is aimed at a rate the guest is not running
-        // at. Measured here across a camera sweep, the interval swung between 62
-        // and 88 ms while the guest's typical gap never moved from about 66.
-        //
-        // It is not a cancellation bug. Presenting a prediction of a moment that
-        // has already been drawn for real is worse than presenting nothing, so
-        // the check is right; what was wrong was aiming so badly that it kept
-        // firing.
-        if (interval > 0 && interval <= idleGate()) {
+        // A gap past the idle gate is a stall, not a cadence. It is kept out
+        // of the interval estimate -- and the interval it starts is shown as
+        // real frames only. Without the second half, the stale estimate
+        // scheduled a full set of frames interpolated across the stall: the
+        // pre-stall picture blended into whatever the guest drew next, for
+        // one interval, every time it paused.
+        final boolean stalled = interval > idleGate();
+        if (stalled) motionValid = false;
+        if (interval > 0 && !stalled) {
             recent[recentAt] = interval;
             recentAt = (recentAt + 1) % recent.length;
             if (recentHeld < recent.length) recentHeld++;
-            smoothedInterval = medianInterval();
-            // The guest's habit, on a horizon long enough that a hitch cannot
-            // move it. See worthInterpolating.
+            smoothedInterval = median(recent, recentSorted, recentHeld);
             baseline[baselineAt] = interval;
             baselineAt = (baselineAt + 1) % baseline.length;
             if (baselineHeld < baseline.length) baselineHeld++;
+            baselineInterval = median(baseline, baselineSorted, baselineHeld);
         }
-
-        // Settled once, here, and used by all three of the phase decisions that
-        // follow. See effectiveMultiple.
         activeMultiple = effectiveMultiple();
 
         realPresented = false;
         lastPhase = 0f;
-        // **The arrival never asks.** A failing guard here sends control to
-        // the `else`, which presents a SECOND real frame into the same
-        // scanout -- 299 collisions in one session, every one a real frame.
-        // Only paced frames yield; see clearOfLastPresent.
-        // **The arrival now asks, because the trace says it should.** It was
-        // made unconditional after a guard here sent control to the `else`,
-        // which presented a SECOND real frame into the same scanout -- 299
-        // collisions in one session. That fix was right about the branch and
-        // wrong about the frame: the answer is not to stop asking, it is to not
-        // fall through to presentLatest when the answer is no.
-        //
-        // Attributed per path, this is where nearly all the waste is:
-        //
-        //     arrival 7/16, paced 0/36, real 0/16
-        //     arrival 8/16, paced 0/39, real 2/16
-        //     arrival 9/16, paced 0/39, real 0/16
-        //
-        // Half of every arrival drawn, upscaled, swapped and overwritten before
-        // the panel read it, while the paced slots -- which do ask -- collided
-        // not once in a hundred and ten.
-        //
-        // A collided arrival is handed to the pacer as slot zero instead, due
-        // immediately. Dropping it was measured and is worse: two thirds of
-        // arrivals disappeared and the present rate fell from 63-65 a second to
-        // 55-57. Deferring keeps the frame and costs it one refresh.
-        //
-        // Nothing is counted or latched here: slot zero goes through
-        // presentSynthesized like any other, which counts it and advances
-        // lastPhase only once it has actually been drawn. See phaseFor -- a
-        // monotonic guard advanced past a moment that was never shown clamps
-        // the next genuine frame forward to it.
+        // Phase 1/K is drawn here on arrival unless that would share a refresh
+        // with the present before it; then it is handed to the pacer as slot
+        // zero, due immediately, rather than drawn into a scanout already
+        // taken. Dropping it was measured worse than deferring it.
         boolean deferredArrival = false;
         if (motionValid && activeMultiple >= 2 && !clearOfLastPresent()) {
             deferredArrival = true;
         } else if (motionValid && activeMultiple >= 2) {
             presentPhase(1f / activeMultiple);
-            // **Counted here, because nothing else counts it.** At 2x this is the
-            // only genuinely synthesised frame an interval produces -- the pacer's
-            // single slot lands on phase 1, which is the real frame. Without this
-            // the synthesised rate reads a handful a second while fifteen are
-            // being made, and that rate is what the feature is judged by.
             tier1Frames++;
             lastPhase = 1f / activeMultiple;
         } else {
-            // Nothing to interpolate with, or no refresh to show it in, so the
-            // real frame is the only thing worth showing and there is no reason
-            // to hold it back.
             presentLatest();
         }
 
-        if (realFrames >= 2 && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
+        if (realFrames >= 2 && !stalled && smoothedInterval > 0 && smoothedInterval <= idleGate()) {
             pacer.schedule(smoothedInterval, activeMultiple, deferredArrival);
         }
         report();
         return !deferredArrival || presentedHere;
     }
 
-    /**
-     * Draw one synthesised frame, choosing the cheapest tier that applies.
-     *
-     * @param index which of the N-1 frames this is; t is index/N
-     */
+    // ---- the synthesised frame ---------------------------------------------
+
+    /** Draw one synthesised frame for the vsync it was due at. */
     public boolean presentSynthesized(long vsyncNanos) {
         if (!ensureTargets() || realFrames < 2 || vsyncNanos <= 0) return false;
-
         final float phase = phaseFor(vsyncNanos);
 
-        // **Tier 1 first, where it used to be second.** The block matcher
-        // measures apparent motion whatever causes it, so its field already
-        // contains a window translation -- and a window that moves while its
-        // contents move is a case tier 0 cannot express at all, because it
-        // replays the translation with the contents frozen at frame N. Tier 1
-        // covers the union of the two, which is why the cheaper tier is now the
-        // fallback for when there is no field rather than the preferred answer.
         if (motionValid) {
             // The real frame is never withheld; an interpolated one yields.
             if (phase < 1f && !clearOfLastPresent()) return false;
             presentPhase(phase);
-            // **Phase 1 is the real frame**, presented through presentLatest by
-            // presentPhase. Counting it here inflated the synthesised rate by
-            // exactly the real rate -- and at 2x the pacer's single slot always
-            // lands on phase 1, so every "synthesised" frame this counted was a
-            // real one. It is the number the whole feature was being judged by.
             if (phase < 1f) tier1Frames++;
             lastPhase = phase;
             return true;
         }
 
-        // No field: re-composite at carried positions, which is exact for a
-        // translation and is all that is available without one.
+        // Tier 0: no field, but a window moved. Exact for a translation.
         if (renderer.anyWindowMoved()) {
-            tier0Timer.begin();
+            if (timing) tier0Timer.begin();
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
             renderer.drawSynthesizedFrame(phase);
-            tier0Timer.end();
-            // Without this the cadence measurement never sees a tier 0 frame, so
-            // on any device lacking the motion extension it reports the gaps
-            // between *real* frames and calls them the present cadence -- twice
-            // the true figure, with the "shortest gap" check blind. The
-            // diagnostic silently described a pipeline that was not running.
+            if (timing) tier0Timer.end();
             notePresented();
             tier0Frames++;
             lastPhase = phase;
@@ -1909,174 +680,69 @@ public class FrameSynthesizer implements FramePacer.Target {
             return true;
         }
 
-        // **Nothing to show, so show nothing.** This used to re-present the
-        // identical real frame: a second draw of a picture already on screen,
-        // which costs an upscale, adds a sample to the cadence statistics that
-        // did not correspond to any new content, and counted as a present. The
-        // frame is already there; the honest response to having nothing to add
-        // is to add nothing.
         skipped++;
         return false;
     }
 
     /**
-     * VESSEL: put the frame that is already on screen back into the buffer.
+     * Put the frame that is already on screen back into the buffer.
      *
-     * <p><b>A draw that declines to draw does not leave the screen alone.</b>
-     * {@code GLSurfaceView} swaps whether or not anything was rendered, and the
-     * buffer it swaps in is not the one being displayed -- it is the one from two
-     * or three presents ago. Every path above that returns without drawing
-     * therefore publishes an old frame, and at 120 presents a second that is an
-     * old frame several times a second, interleaved with correct ones.
+     * <p>The view swaps whether or not anything was drawn, and the buffer it
+     * swaps in is two or three presents old, so a draw that declines to draw
+     * would publish an old frame. Not counted as a present: nothing new is
+     * shown. The cursor is drawn fresh on top, which is why this is also the
+     * right answer to a pointer move.
      *
-     * <p>Measured on the desktop by tracking the pointer through a recording: the
-     * position sequence is not monotonic, and the values that repeat do so
-     * EXACTLY -- 383.0 three times, 388.1 four times -- interleaved with a
-     * sequence advancing normally. Exact repetition is not a cursor drawn late,
-     * it is the same image shown again. 16.2% of frames step backwards against a
-     * 1.3% floor measured on the guest's own frames, which is the hand changing
-     * direction.
-     *
-     * <p>The {@code skipped} comment above argued that "the frame is already
-     * there; the honest response to having nothing to add is to add nothing".
-     * The premise is wrong. The frame is already on the SCREEN; this is about the
-     * BUFFER, which holds something else.
-     *
-     * <p>Repeating costs one upscale and is deliberately not counted as a
-     * present: nothing new was shown, and the cadence statistics describe new
-     * content. What it buys is that the picture cannot go backwards.
+     * @return false when there is nothing to repeat yet.
      */
-    public void repeatLastPresent() {
-        if (repeatTexture == 0) return;
+    public boolean repeatLastPresent() {
+        // A name from a dead context means nothing in the live one; the next
+        // real frame reallocates.
+        if (repeatTexture == 0 || allocGeneration != GLRenderer.contextGeneration()) return false;
         renderer.presentGuestFrame(repeatTexture, true);
+        return true;
     }
 
-    /** The texture last put on screen. See {@link #repeatLastPresent}. */
     private int repeatTexture = 0;
 
     /**
-     * VESSEL: which moment to show, taken from the clock rather than from a slot.
-     *
-     * <p>**Content time has to run at the same rate as wall time, or the picture
-     * judders however many frames are drawn.** The old code presented phase
-     * {@code (i+1)/K} for slot {@code i} while the pacer aimed slot {@code i}
-     * nine tenths of the way to {@code i/K}, so K phases were squeezed into
-     * {@code 0.9(K-1)/K} of an interval and the display then held the last one
-     * for the rest of it. At 2x that is motion running eleven per cent fast
-     * followed by a dead stop lasting more than half an interval, every interval
-     * -- judder manufactured by the pacing, which would read as a fault in the
-     * synthesis.
-     *
-     * <p>Deriving the phase from the vsync timestamp makes the two clocks the
-     * same clock. A callback that fires late shows a later moment, which is
-     * correct; one that fires early shows an earlier one. The schedule now only
-     * has to wake the renderer near the right time rather than hit it.
-     *
-     * <p>Never backwards: a phase behind one already shown would rewind the
-     * picture, and repeating the last is a duplicate frame rather than a
-     * reversal. Never nothing, either -- {@code GLSurfaceView} swaps whether or
-     * not anything was drawn, so a frame that declines to draw presents an
-     * unwritten buffer, which is the flicker.
+     * Which moment to show, from the vsync timestamp rather than from a slot
+     * index, so content time runs at wall time however late a callback fires.
+     * Never backwards; the callers that actually present advance
+     * {@link #lastPhase}.
      */
-    /**
-     * The middle of the recent intervals, ignoring the ones not yet collected.
-     *
-     * <p>Insertion sort over nine longs, once per real frame -- around fifteen
-     * times a second. There is no cheaper structure worth the complexity at this
-     * size and no allocation here.
-     */
-    private long medianInterval() {
-        if (recentHeld == 0) return 0;
-        final long[] sorted = new long[recentHeld];
-        System.arraycopy(recent, 0, sorted, 0, recentHeld);
-        for (int i = 1; i < recentHeld; i++) {
-            final long v = sorted[i];
-            int j = i - 1;
-            while (j >= 0 && sorted[j] > v) {
-                sorted[j + 1] = sorted[j];
-                j--;
-            }
-            sorted[j + 1] = v;
-        }
-        return sorted[recentHeld / 2];
-    }
-
     private float phaseFor(long vsyncNanos) {
         if (smoothedInterval <= 0 || lastRealFrameNanos == 0) return 1f;
         final float elapsed = (float)(vsyncNanos - lastRealFrameNanos) / smoothedInterval;
         float phase = 1f / activeMultiple + elapsed;
         if (phase < lastPhase) phase = lastPhase;
         if (phase > 1f) phase = 1f;
-        // **Not assigned here.** This is asked for a phase before anything has
-        // decided to present one, and the paths below can decline -- at which
-        // point the monotonic guard had already been advanced past a moment that
-        // was never shown, so the next genuine frame was clamped forward to it.
-        // The callers that actually present set it.
         return phase;
     }
 
-    /** The most recent phase presented, so the picture cannot run backwards. */
     private float lastPhase = 0f;
 
-    /**
-     * Show the frame at {@code phase} between the two real frames.
-     *
-     * <p>Phase 1.0 is the newer real frame exactly, so it is blitted rather than
-     * interpolated: the shader would reproduce it, and a copy is both cheaper and
-     * exact. That is also the slot that satisfies the invariant, which is why it
-     * sets {@link #realPresented}.
-     */
+    /** Phase 1 is the newer real frame exactly, so it is blitted rather than interpolated. */
     private void presentPhase(float phase) {
         if (phase >= 1f) {
             presentLatest();
             return;
         }
-        interpolateTimer.begin();
+        if (timing) interpolateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, output.framebuffer);
-        interpolate(phase);
+        interpolate(phase, false);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         repeatTexture = output.texture;
         renderer.presentGuestFrame(output.texture, true);
         notePresented();
-        interpolateTimer.end();
+        if (timing) interpolateTimer.end();
         if (wants("dump")) maybeDump(phase);
-
-        // Once a second, and only if something asked. Deliberately after the
-        // frame the user sees, so a measurement can never delay one.
-        //
-        // **`field` used to be on this gate and read nothing it produced.**
-        // Every consumer of the nine `measured*` values sits inside report()'s
-        // `quality` block; `fg field`'s own numbers come from probeFieldSign,
-        // which is a different pass with a different target. So asking for
-        // `field` alone bought a second full-resolution interpolation pass plus
-        // two blocking glReadPixels round trips every second, for a readback
-        // nothing printed. That is the most expensive diagnostic in the file
-        // charged to the one category that had no use for it.
-        if (wants("quality") && SystemClock.uptimeMillis() - measuredAt >= 1000) {
-            measure(phase);
-        }
+        if (wants("quality") && SystemClock.uptimeMillis() - measuredAt >= 1000) measure(phase);
     }
 
     /**
-     * Whether a present now would land clear of the one before it.
-     *
-     * <p><b>The margin that protects the real frame shrinks as 1/K, which is why
-     * 2x is clean and 4x is not.</b> Frame N has to be delayed so the
-     * interpolations between N-1 and N can be shown before it, so the interval
-     * runs 1/K, 2/K ... K/K with K/K being N itself. That puts N's present at
-     * (K-1)/K of the way through, while N+1 arrives at the end -- leaving
-     * interval/K between them: 33 ms at 2x, 16.5 at 4x, 8.3 at 8x. A few
-     * milliseconds of scheduling jitter on either side is nothing against 33 and
-     * routine against 8.3.
-     *
-     * <p>Measured at 4x on a 15 fps guest: gaps between presents from 0.3 ms to
-     * 26 ms, and 11 of every 70 presents landing on a refresh another present had
-     * already used -- drawn, paid for, never shown.
-     *
-     * <p>So a present waits rather than colliding. What is skipped is only ever an
-     * interpolated frame, and skipping it costs nothing: the pacer's next slot
-     * carries a later phase, so the motion continues from where it should rather
-     * than from where the skipped frame would have put it.
+     * Whether a present now would land clear of the one before it. The margin
+     * shrinks as 1/K, and at 4x a few milliseconds of jitter is routine.
      */
     private boolean clearOfLastPresent() {
         final long period = vsyncPeriodNanos();
@@ -2087,105 +753,54 @@ public class FrameSynthesizer implements FramePacer.Target {
     private void presentLatest() {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         repeatTexture = latestColour().texture;
-        // Upscaled once, here, rather than before any of the work. See
-        // GLRenderer.presentGuestFrame.
         renderer.presentGuestFrame(latestColour().texture, true);
         notePresented();
         realPresented = true;
     }
 
-    /** Whether the newest real frame has reached the screen. See the invariant. */
     private boolean realPresented = true;
 
-    /** Blend the two real frames along the field, at {@code phase} between them. */
-    private void interpolate(float phase) {
-        interpolate(phase, false);
-    }
-
     /**
-     * @param measuring when true, writes four per-pixel measurements instead of a
-     *     picture, into {@link #probe} rather than to the screen. See
-     *     {@link #measure}.
+     * Blend the two real frames along the field at {@code phase}.
+     *
+     * @param measuring writes four per-pixel measurements instead of a picture,
+     *     into {@link #probe}. See {@link #measure}.
      */
     private void interpolate(float phase, boolean measuring) {
-        // Guest resolution, like everything else now. The upscale happens once,
-        // when the finished frame is presented.
         GLES20.glViewport(0, 0, colour[0].width, colour[0].height);
         renderer.viewportNeedsUpdate = true;
         GLES20.glDisable(GLES20.GL_BLEND);
 
         interpolateMaterial.use();
         renderer.quadVertices.bind(interpolateMaterial.programId);
+        final InterpolateMaterial.Uniforms u = interpolateMaterial.interpolateUniforms;
         interpolateMaterial.setUniformBool(interpolateMaterial.uniforms.flipY, false);
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.phase, phase);
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.diagnostic,
-                                            measuring ? 1f : 0f);
-        // **Restored: the one line that made recordings analysable.**
-        //
-        // The shader has always painted this corner; `5010b3e` dropped the line
-        // that switched it on, and the loss was silent. Every ground-truth tool
-        // in tools/frame-bench separates real frames from synthesised ones by
-        // looking for these pixels, so without it a recording is a wall of
-        // frames with no labels: a scan of 5,139 RE9 frames reported "0
-        // synthesised, 5,139 real" and could not say whether a broken frame was
-        // the pipeline or a muzzle flash.
-        //
-        // Never while measuring -- the diagnostic pass writes four measurements
-        // into the same pixels, and stamping them would corrupt the readback.
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.mark,
-                                            !measuring && wants("mark") ? 1f : 0f);
-        // The vectors are in luma pixels, and a luma pixel is a colour pixel --
-        // the luma is the block-rounded TOP-LEFT of the colour frame, not a
-        // rescaled copy -- so one vector unit is one colour texel. Every luma
-        // and field read in the shader then goes through lumaScale, which maps
-        // the colour UV onto the smaller texture. Dividing by the luma size
-        // here, as this used to, put the vectors in luma UV while the fetch
-        // sites were colour UV: right for 1280x720, six pixels off at the right
-        // edge of 1366x768.
-        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.motionScale,
-                                           1f / Math.max(1, colour[0].width),
-                                           1f / Math.max(1, colour[0].height));
-        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.lumaScale,
-                                           colour[0].width / (float)Math.max(1, luma[0].width),
-                                           colour[0].height / (float)Math.max(1, luma[0].height));
-        // The block grid, so a single block can be addressed rather than only the
-        // filtered average of four. See InterpolateMaterial's third point.
-        interpolateMaterial.setUniformVec2(interpolateMaterial.interpolateUniforms.vectorSize,
-                                           vectors.width, vectors.height);
-        // Uniform, not per pixel. See SignMaterial. Until the probe has an
-        // answer the field is taken forward, which is the reading the extension's
-        // own wording suggests; the probe overrides it within a second of motion.
-        interpolateMaterial.setUniformFloat(interpolateMaterial.interpolateUniforms.fieldSign,
-                                            fieldSign != 0f ? fieldSign : 1f);
+        interpolateMaterial.setUniformFloat(u.phase, phase);
+        interpolateMaterial.setUniformFloat(u.diagnostic, measuring ? 1f : 0f);
+        interpolateMaterial.setUniformFloat(u.mark, !measuring && wants("mark") ? 1f : 0f);
+        // The field is in luma pixels and a luma pixel is a colour pixel, so
+        // one field unit is one colour texel; lumaScale maps colour UV onto
+        // the block-rounded luma.
+        interpolateMaterial.setUniformVec2(u.motionScale, 1f / colour[0].width, 1f / colour[0].height);
+        interpolateMaterial.setUniformVec2(u.lumaScale,
+                                           colour[0].width / (float)luma[0].width,
+                                           colour[0].height / (float)luma[0].height);
+        interpolateMaterial.setUniformVec2(u.vectorSize, merged.width, merged.height);
+        interpolateMaterial.setUniformFloat(u.fieldSign, FIELD_SIGN);
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestColour().texture);
         interpolateMaterial.setUniformInt(interpolateMaterial.uniforms.screenTexture, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, colour[oldest()].texture);
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.previousTexture, 1);
+        interpolateMaterial.setUniformInt(u.previousTexture, 1);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldTexture());
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.motionTexture, 2);
-        // The luma pair is no longer bound here: every photometric test in the
-        // shader scores the colour targets, which are already on units 0 and
-        // 1. See InterpolateMaterial's photometric block.
-        //
-        // The field measured the other way round, and the one bit of geometry
-        // this compositor has ever had. See InterpolateMaterial's consistency
-        // block, and backFieldTexture for what is bound when there is none.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, backFieldTexture());
-        interpolateMaterial.setUniformInt(
-            interpolateMaterial.interpolateUniforms.backMotionTexture, 3);
-        interpolateMaterial.setUniformFloat(
-            interpolateMaterial.interpolateUniforms.consistency, backwardValid ? 1f : 0f);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fields[fieldCurrent].texture);
+        interpolateMaterial.setUniformInt(u.motionTexture, 2);
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
 
-        for (int unit = 3; unit >= 0; unit--) {
+        for (int unit = 2; unit >= 0; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
@@ -2193,320 +808,53 @@ public class FrameSynthesizer implements FramePacer.Target {
         renderer.invalidateBoundWindowMaterial();
     }
 
-    /**
-     * VESSEL: the shader's inputs and its output, written to app storage.
-     *
-     * <p><b>The bench had no way to see the device's field, and every one of
-     * its numbers was about a field it built itself.</b> {@code
-     * tools/frame-bench/interp.py} is a port of InterpolateMaterial, and its
-     * {@code load()} has read a {@code dump/} folder since it was written --
-     * a folder nothing ever produced. So the port was only ever run on the
-     * bench's own block matcher, whose fields are clean, coherent and in range,
-     * and the object-border error it reported sat at three or four levels while
-     * the device's own {@code fg truth} line read synthesised frames 14 to 33%
-     * further from the real frame than a perfect interpolation. The gap is the
-     * field, and the field could not be examined.
-     *
-     * <p>Under {@code FG_LOG=dump} this writes, a few times per session and
-     * never twice within {@link #DUMP_INTERVAL_MS}: the two real frames, the
-     * forward and backward fields as the shader reads them (filtered, merged),
-     * the synthesised frame just presented, and a JSON of the numbers the
-     * shader needs to reproduce it. {@code tools/frame-bench/dump.py} pulls
-     * the folder, replays the port on the same inputs and reports how far it
-     * lands from the device's own output -- the fidelity check the README's
-     * contract asks for and never had -- and then any change can be scored on
-     * the real field rather than on an easy one.
-     *
-     * <p>It stalls. Four full-resolution readbacks and two small ones, on the
-     * render thread, cost a few frames each time -- which is why it is gated,
-     * spaced, counted and off by default.
-     */
-    private static final long DUMP_INTERVAL_MS = 4000;
-    private static final int DUMP_LIMIT = 6;
-    private long dumpedAt = 0;
-    private int dumpsWritten = 0;
+    // ---- the field ---------------------------------------------------------
 
-    private void maybeDump(float phase) {
-        if (dumpsWritten >= DUMP_LIMIT) return;
-        final long now = SystemClock.uptimeMillis();
-        if (dumpedAt != 0 && now - dumpedAt < DUMP_INTERVAL_MS) return;
-        // Only frames near the middle are worth a stall: that is where the
-        // synthesis is furthest from both real frames and a fault is largest.
-        if (Math.abs(phase - 0.5f) > 0.13f) return;
-        // **And only the pipeline as it actually runs.** The first six dumps
-        // ever taken were all from the opening seconds of a session: sign not
-        // yet latched, so the single-pass search with no backward field, on a
-        // loading screen with nothing moving. Nothing about the fault under
-        // study was in them. The sign has to have settled, the two-stage search
-        // has to have produced its backward field, and the scene has to be
-        // moving by more than the matcher's own noise -- `fieldMagnitude` is
-        // in luma pixels and needs the `field` category to be kept current.
-        if (fieldSign == 0f || !backwardValid || fieldMagnitude < 24f) return;
-        dumpedAt = now;
-
-        final java.io.File dir = new java.io.File(
-            renderer.xServerView.getContext().getFilesDir(),
-            "fgdump/" + String.format(java.util.Locale.US, "%02d", dumpsWritten));
-        if (!dir.isDirectory() && !dir.mkdirs()) {
-            say("fg dump: cannot create " + dir);
-            dumpsWritten = DUMP_LIMIT;
-            return;
-        }
-        try {
-            readTarget(colour[oldest()], GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "older.rgba"));
-            readTarget(latestColour(), GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "newer.rgba"));
-            readTarget(output, GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "shown.rgba"));
-            final Target forward = fieldTarget();
-            readTarget(forward, GLES20.GL_FLOAT, 16, new java.io.File(dir, "field.f32"));
-            final Target back = backFieldTarget();
-            if (back != null) readTarget(back, GLES20.GL_FLOAT, 16, new java.io.File(dir, "back.f32"));
-            // The merged fields before the median as well.
-            if (merged != null) readTarget(merged, GLES20.GL_FLOAT, 16, new java.io.File(dir, "merged.f32"));
-            if (mergedBack != null) readTarget(mergedBack, GLES20.GL_FLOAT, 16, new java.io.File(dir, "mergedBack.f32"));
-
-            final String json = String.format(java.util.Locale.US,
-                "{\"width\": %d, \"height\": %d, \"lumaWidth\": %d, \"lumaHeight\": %d,"
-                    + " \"gridWidth\": %d, \"gridHeight\": %d, \"blockX\": %d, \"blockY\": %d,"
-                    + " \"phase\": %.4f, \"fieldSign\": %.0f, \"consistency\": %d,"
-                    + " \"fieldMagnitude\": %.0f, \"interval\": %d, \"multiple\": %d,"
-                    + " \"realFrames\": %d, \"agreement\": %.3f, \"frameDiff\": %.4f,"
-                    + " \"dominantPx\": %.1f}\n",
-                colour[0].width, colour[0].height, luma[0].width, luma[0].height,
-                forward.width, forward.height, blockX, blockY,
-                phase, fieldSign != 0f ? fieldSign : 1f, backwardValid ? 1 : 0,
-                fieldMagnitude, smoothedInterval / 1000000L, activeMultiple, realFrames,
-                lastAgreement, lastFrameDiff, lastDominantPx);
-            try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, "meta.json"))) {
-                out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            }
-            dumpsWritten++;
-            say("fg dump: wrote " + dir + " at phase " + phase);
-        } catch (java.io.IOException e) {
-            say("fg dump: " + e);
-            dumpsWritten = DUMP_LIMIT;
-        } finally {
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            renderer.viewportNeedsUpdate = true;
-        }
-    }
-
-    /** One glReadPixels of a whole target, straight to a file. */
-    private void readTarget(Target target, int type, int bytesPerTexel, java.io.File file)
-            throws java.io.IOException {
-        final java.nio.ByteBuffer buffer = java.nio.ByteBuffer
-            .allocateDirect(target.width * target.height * bytesPerTexel)
-            .order(java.nio.ByteOrder.nativeOrder());
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer);
-        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
-        GLES20.glReadPixels(0, 0, target.width, target.height, GLES20.GL_RGBA, type, buffer);
-        final int error = GLES20.glGetError();
-        if (error != GLES20.GL_NO_ERROR) {
-            throw new java.io.IOException("glReadPixels 0x" + Integer.toHexString(error)
-                + " for " + file.getName());
-        }
-        buffer.rewind();
-        try (java.nio.channels.FileChannel channel = new java.io.FileOutputStream(file).getChannel()) {
-            while (buffer.hasRemaining()) channel.write(buffer);
-        }
-    }
-
-    /** The Target behind {@link #fieldTexture()}. */
-    private Target fieldTarget() {
-        final Target raw = forwardField != null ? forwardField : vectors;
-        return filteredIndex >= 0 ? filtered[filteredIndex] : raw;
-    }
-
-    /** The Target behind {@link #backFieldTexture()}, or null when there is none. */
-    private Target backFieldTarget() {
-        if (!backwardValid) return null;
-        return filteredBackIndex >= 0 ? filteredBack[filteredBackIndex] : backwardField;
+    /** Whether every tier 1 target exists. Decided once per allocation. */
+    private boolean tier1Ready() {
+        return merged != null;
     }
 
     /**
-     * VESSEL: ask the interpolation what it just did, over the whole frame.
+     * Estimate the field for the interval that starts now. See the class
+     * comment for the passes.
      *
-     * <p>Runs the same shader a second time in its reporting mode, which writes
-     * four measurements per pixel instead of a colour, then lets the GPU average
-     * the frame down to one texel and reads that back. Four bytes, no stall.
-     *
-     * <p>**Why measure rather than describe.** Every fault this feature has had
-     * was diagnosed by looking at the screen and reasoning backwards, and a black
-     * speck, a shimmer and a frozen patch are indistinguishable in a sentence
-     * while having nothing in common in the code. These four numbers separate
-     * them: a frame that is mostly falling back reads differently from one that is
-     * confidently wrong, and both read differently from one whose vectors are
-     * simply zero.
-     *
-     * <p>Once a second, and only when asked for. The extra pass costs about what
-     * one interpolated frame costs, once per second.
-     */
-    private void measure(float phase) {
-        if (probe == null) {
-            probe = new Target();
-            probe.allocateAveraging(colour[0].width, colour[0].height);
-        }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.framebuffer);
-        interpolate(phase, true);
-
-        // **Unbound first, and this was undefined behaviour.** Generating
-        // mipmaps for a texture still attached to the bound framebuffer is not
-        // something the spec defines, and a driver is free to stall or to
-        // misbehave. It did the latter here for long enough to trip the input
-        // dispatch timeout.
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, probe.texture);
-        GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-
-        final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
-            .order(java.nio.ByteOrder.nativeOrder());
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.topFramebuffer);
-        GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-
-        // R and B are sums of distances over the pixels that moved; A is how
-        // many of them there were. See InterpolateMaterial for why this is two
-        // distances rather than the count of pixels it replaced.
-        measuredSynthDistance = (pixel.get(0) & 0xff) / 255f;
-        measuredDark = (pixel.get(1) & 0xff) / 255f;
-        measuredBaseDistance = (pixel.get(2) & 0xff) / 255f;
-        measuredShadow = (pixel.get(3) & 0xff) / 255f;
-        measuredPhase = phase;
-        measuredAt = SystemClock.uptimeMillis();
-
-        // **And the same channel again, resolved into cells, because the mean
-        // above could not see what broke the screen.**
-        //
-        // A hypothesis-weighting change scored better than the shipped path on
-        // mean error, on error over the blocks that move differently from the
-        // frame, and on speckle, was installed, and put black patches on the
-        // display within minutes. Every one of those numbers is an average or a
-        // high-frequency statistic; a patch is neither. `measuredDark` read
-        // 1.5%, which is exactly what it reads for 1.5% of pixels scattered
-        // evenly across the frame -- and that is invisible.
-        //
-        // Reading one level of the same mip chain costs one more round trip on
-        // a pass that already stalls once a second, and turns the same data
-        // into the thing the eye actually responds to: how many 32x32 cells are
-        // more than half invented, and how bad the worst one is.
-        measuredPatchCells = 0;
-        measuredEdgeCells = 0;
-        measuredWorstCell = 0f;
-        if (probe.cellFramebuffer != 0) {
-            final int count = probe.cellWidth * probe.cellHeight;
-            if (cells == null || cells.capacity() < count * 4) {
-                cells = java.nio.ByteBuffer.allocateDirect(count * 4)
-                    .order(java.nio.ByteOrder.nativeOrder());
-            }
-            cells.position(0);
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.cellFramebuffer);
-            GLES20.glReadPixels(0, 0, probe.cellWidth, probe.cellHeight,
-                                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, cells);
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-            // **Split border from interior, because only one of them is a bug.**
-            //
-            // During a pan the leading edge of the frame fetches content that
-            // genuinely was not rendered -- it was off-screen in both real
-            // frames -- so those cells MUST clamp, and a reading that counts
-            // them is reporting camera motion. The first version of this did
-            // exactly that and made a still scene read 0 and a pan read 94 of
-            // 880, which looks alarming and is unavoidable physics.
-            //
-            // A cell two or more cells in from every edge has no such excuse.
-            // Nothing there should ever need content from outside the frame,
-            // because the displacement required to reach it is larger than the
-            // matcher's own search window. Interior escapes are the number to
-            // watch, and the border count is kept only so the two can be told
-            // apart in a log rather than argued about.
-            measuredEdgeCells = 0;
-            for (int i = 0; i < count; i++) {
-                final float escaped = (cells.get(i * 4 + 1) & 0xff) / 255f;
-                final int cx = i % probe.cellWidth;
-                final int cy = i / probe.cellWidth;
-                final boolean edge = cx < 2 || cy < 2
-                    || cx >= probe.cellWidth - 2 || cy >= probe.cellHeight - 2;
-                // The worst cell is reported for the INTERIOR only. Taken over
-                // the whole frame it read 100% in every sample of a moving
-                // scene, because a border cell during a pan always does -- so
-                // it said nothing at all.
-                if (!edge && escaped > measuredWorstCell) measuredWorstCell = escaped;
-                if (escaped <= 0.5f) continue;
-                if (edge) measuredEdgeCells++; else measuredPatchCells++;
-            }
-            measuredCellTotal = count;
-        }
-
-        renderer.viewportNeedsUpdate = true;
-    }
-
-    /**
-     * Run the hardware block matcher over the luma pair.
-     *
-     * @return false if the vectors could not be produced, in which case no warp
-     *     should be attempted -- an unwritten field would warp by garbage.
+     * @return false if the interval must show real frames only: the matcher
+     *     refused, or the guard declined.
      */
     private boolean estimateMotion() {
-        if (luma[0] == null || vectors == null || output == null) return false;
-        // Once per allocation, on a synthetic pair, before the real one. It
-        // needs nothing from the guest -- only a current context and the block
-        // size -- so the answer arrives on the first real frame of any session
-        // rather than waiting for the scene to move. See probeBasepoint.
-        probeBasepoint();
-        estimateTimer.begin();
+        if (timing) estimateTimer.begin();
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
 
-        pyramidRan = false;
-        backwardValid = false;
-        forwardField = vectors;
-        backwardField = null;
+        final Target older = luma[oldest()], newer = luma[newest];
+        final Target olderCoarse = lumaCoarse[oldest()], newerCoarse = lumaCoarse[newest];
+        // Both grids are rounded down to whole blocks, so the ratio differs per axis.
+        final float ratioX = (float)older.width / coarseVectors.width / blockX;
+        final float ratioY = (float)older.height / coarseVectors.height / blockY;
 
-        // **Not until the sign has latched, and that ordering is load-bearing.**
-        //
-        // Every warp below displaces a frame by the coarse field, and which way
-        // to displace it is what SignMaterial exists to decide. Warping by a
-        // sign that has not been settled would move the older frame twice as far
-        // the wrong way, leaving a residual larger than the motion it replaced --
-        // and the probe would then latch on a field built from that. So the first
-        // frames run the plain single-pass search the probe was written for, and
-        // the two-stage one starts once there is an answer to steer it.
-        final boolean ready = coarseVectors != null && fieldSign != 0f;
-
-        final boolean ok = ready ? estimateTwoStage()
-                                 : estimateOnce(previousLuma().texture,
-                                                latestLuma().texture, vectors.texture);
-        estimateTimer.end();
+        boolean ok = estimateOnce(olderCoarse.texture, newerCoarse.texture, coarseVectors.texture);
+        if (ok) {
+            issueConfidence(ratioX, ratioY, olderCoarse, newerCoarse);
+            // Forward: the older frame moved onto the newer, then the leftovers.
+            warpLuma(older.texture, +1f);
+            ok = estimateOnce(warpedLuma.texture, newer.texture, residual.texture);
+        }
+        if (ok) {
+            // Backward: the newer frame moved onto the older, by the same
+            // prior negated. A prior only has to be close.
+            warpLuma(newer.texture, -1f);
+            ok = estimateOnce(warpedLuma.texture, older.texture, residualBack.texture);
+        }
+        if (timing) estimateTimer.end();
         if (!ok) return false;
 
-        // One bit about the whole field, settled once. See SignMaterial. Reads
-        // the merged field rather than the matcher's last output: after the two
-        // -stage search that output is a residual near zero, which has no opinion
-        // about anything and would report the scene as motionless.
-        probeFieldSign();
+        mergeFields(ratioX, ratioY);
+        filterField();
 
-        // Filtered before anything reads it, so every pass downstream sees the
-        // same field. See MedianMaterial and the `filtered` pair.
-        filteredIndex = filterField(forwardField, filtered, 0);
-        if (backwardField != null) {
-            // The backward field is filtered on the same terms as the forward
-            // one, because the two are subtracted from each other. An outlier
-            // left in only one of them reads as a disagreement between the
-            // frames, which is exactly the signal being measured, and the shader
-            // would answer it by distrusting a source that was fine.
-            filteredBackIndex = filterField(backwardField, filteredBack, 1);
-            backwardValid = true;
-        }
-        else filteredBackIndex = -1;
-        // Diagnostics only; nothing downstream reads it. See FieldProbeMaterial.
-        // After the filters, so it measures the field the shader will actually
-        // build frames from rather than the matcher's raw output -- which, after
-        // a two-stage search, is a residual near zero and describes nothing.
-        probeField();
-        // Last, so the guard's texel has had all of the above to arrive
-        // behind and the map does not wait. See issueConfidence. A `false`
-        // here is the same `false` a refused matcher returns: the interval
-        // shows real frames only.
+        // Last, so the guard's texel has had the whole frame's work to arrive
+        // behind, and the map does not wait.
         if (!confident()) {
             lowConfidenceIntervals++;
             return false;
@@ -2515,12 +863,9 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * One call to the matcher, with the error check the extension needs.
-     *
-     * <p>{@code glGetError} rather than a return value: the entry point has none,
-     * and a failure writes nothing, so an unchecked call leaves the previous
-     * frame's field in place and every pixel is displaced by motion that is one
-     * frame stale.
+     * One call to the matcher, with the error check the extension needs. It
+     * returns nothing and a failure writes nothing, so an unchecked call would
+     * leave the previous frame's field in place.
      */
     private boolean estimateOnce(int ref, int target, int out) {
         texEstimateMotion(ref, target, out);
@@ -2533,105 +878,12 @@ public class FrameSynthesizer implements FramePacer.Target {
         return true;
     }
 
-    /**
-     * Search coarse, warp, then search what is left -- in both directions.
-     *
-     * <p><b>Why the first pass is not enough on its own.</b> The matcher searches
-     * a fixed window of about {@link #SEARCH_WINDOW_PX} luma pixels and takes no
-     * hint about where to look. Requiem moves 122 pixels between real frames.
-     * A matcher whose answer lies outside its own window does not return a poor
-     * vector -- it returns whichever position inside the window correlated best,
-     * which is an answer to a different question, and no amount of filtering
-     * downstream can recover from it. Running the same matcher on a quarter-size
-     * copy puts that motion at 30 pixels, well inside the window.
-     *
-     * <p>The coarse answer is then spent rather than used: {@link
-     * WarpLumaMaterial} moves the older frame by it, the full-resolution matcher
-     * measures only what the coarse pass got wrong, and {@link MergeFieldMaterial}
-     * adds the two back together. The result is a field at full block resolution
-     * that can describe motion four times larger than the window.
-     *
-     * <p><b>And the same trick, run backwards, is what tells the shader which
-     * frame to believe.</b> Warping the newer frame back by the same prior and
-     * matching it against the older one gives an independent field in the other
-     * direction. Where both fields agree -- one the inverse of the other -- both
-     * frames can see the surface. Where they do not, one of them is looking at
-     * something the other cannot, which is a disocclusion, and it is the largest
-     * error term in this pipeline. See InterpolateMaterial's consistency block.
-     *
-     * <p>One warp target serves both directions: the second warp overwrites the
-     * first, and the matcher between them has already consumed it. GL orders
-     * writes to a texture before reads of it within a single context, which is
-     * the same guarantee every render-to-texture pass in this file relies on.
-     */
-    private boolean estimateTwoStage() {
-        final float sign = fieldSign != 0f ? fieldSign : 1f;
-        final float ratioX = (float)luma[0].width / coarseVectors.width / blockX;
-        final float ratioY = (float)luma[0].height / coarseVectors.height / blockY;
-
-        // The pair, a quarter the size, box-filtered rather than point-sampled.
-        // Keyed on the DESTINATION, not the source: the tap offset is a quarter
-        // of a target texel, and the two grids are not in an exact 4:1 ratio.
-        // See DownsampleLumaMaterial.
-        renderToTarget(downsampleFor(lumaCoarse[0]), previousLuma().texture, lumaCoarse[0]);
-        renderToTarget(downsampleFor(lumaCoarse[1]), latestLuma().texture, lumaCoarse[1]);
-        if (!estimateOnce(lumaCoarse[0].texture, lumaCoarse[1].texture, coarseVectors.texture)) {
-            return false;
-        }
-        // Can this interval be interpolated at all? Decided on the coarse
-        // level, before any full-resolution work is spent on it. A `false`
-        // here is the same `false` a refused matcher returns: the interval
-        // shows real frames only.
-        if (confidence != null) issueConfidence(ratioX, ratioY);
-
-        // Forward: the older frame moved onto the newer, then the leftovers.
-        warpLuma(previousLuma().texture, sign, +1f);
-        if (!estimateOnce(warpedLuma.texture, latestLuma().texture, vectors.texture)) return false;
-        mergeField(vectors, +ratioX, +ratioY, merged);
-        forwardField = merged;
-
-        // Backward: the newer frame moved onto the older, by the same prior
-        // negated, then the leftovers. The prior does not have to be right in
-        // this direction -- a prior only has to be close, and whatever it gets
-        // wrong is what the residual pass measures.
-        warpLuma(latestLuma().texture, sign, -1f);
-        if (!estimateOnce(warpedLuma.texture, previousLuma().texture, backVectors.texture)) {
-            return false;
-        }
-        mergeField(backVectors, -ratioX, -ratioY, mergedBack);
-        backwardField = mergedBack;
-
-        pyramidRan = true;
-        return true;
-    }
-
-    /**
-     * The downsampler with its tap offset set. See {@link DownsampleLumaMaterial}.
-     *
-     * <p>A quarter of one DESTINATION texel, which is where a bilinear tap
-     * averages a quadrant of the source region for free. This read the source's
-     * texel size, which is the same number only when the reduction is exactly
-     * 4:1 -- true in x on a 1280-wide luma and false in y, where 720 rounds to a
-     * 176-tall coarse target and the ratio is 4.091.
-     */
-    private DownsampleLumaMaterial downsampleFor(Target destination) {
-        downsampleMaterial.use();
-        downsampleMaterial.setUniformVec2(downsampleMaterial.downsampleUniforms.texelSize,
-                                          0.25f / Math.max(1, destination.width),
-                                          0.25f / Math.max(1, destination.height));
-        return downsampleMaterial;
-    }
-
-    /** Move one luma frame by the coarse field. See {@link WarpLumaMaterial}. */
-    private void warpLuma(int source, float sign, float direction) {
+    /** Move one luma frame by the coarse prior. See {@link WarpLumaMaterial}. */
+    private void warpLuma(int source, float direction) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, warpedLuma.framebuffer);
         warpMaterial.use();
-        // The field is in coarse luma pixels, so the coarse size is what puts it
-        // in texture space -- and the sign is the extension's convention, the one
-        // thing about the field that had to be measured rather than read.
         warpMaterial.setUniformVec2(warpMaterial.warpUniforms.warpScale,
-                                    sign / Math.max(1, lumaCoarse[0].width),
-                                    sign / Math.max(1, lumaCoarse[0].height));
+                                    FIELD_SIGN / lumaCoarse[0].width, FIELD_SIGN / lumaCoarse[0].height);
         warpMaterial.setUniformFloat(warpMaterial.warpUniforms.direction, direction);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, coarseVectors.texture);
@@ -2642,34 +894,94 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
     }
 
-    /**
-     * One texel, read back. See {@link ConfidenceMaterial}.
-     *
-     * <p>The readback waits for the coarse estimate, which is the first and
-     * smallest piece of the frame's work. It is the same one-texel {@code
-     * GL_UNSIGNED_BYTE} read the sign probe does, once per real frame rather
-     * than four times a second. A failed read counts as confident: a broken
-     * diagnostic must not switch the feature off.
-     */
-    /**
-     * VESSEL: the guard's one texel travels through a pixel buffer, so the
-     * render thread never waits for it.
-     *
-     * <p>A plain {@code glReadPixels} blocks until the GPU has produced the
-     * texel, and the texel comes right after the coarse estimate -- the first
-     * work of the interval -- so the thread sat idle while the GPU caught up,
-     * once per real frame. Read into a buffer instead, the call returns at
-     * once; the warps, the full-resolution estimate, the merges and ten median
-     * passes are issued behind it, and only THEN is the buffer mapped. By that
-     * time the texel is long finished and the map does not wait. The decision
-     * lands at the end of {@link #estimateMotion} rather than before the
-     * full-resolution work: on the rare declined interval that work was
-     * issued for nothing, which is cheaper than stalling on every interval.
-     */
-    private int confidenceBuffer = 0;
-    private boolean confidencePending = false;
+    /** Prior plus both residuals, into the packed field. See {@link MergeFieldMaterial}. */
+    private void mergeFields(float ratioX, float ratioY) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, merged.framebuffer);
+        mergeMaterial.use();
+        mergeMaterial.setUniformVec2(mergeMaterial.mergeUniforms.coarseFactor, ratioX, ratioY);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, residualBack.texture);
+        mergeMaterial.setUniformInt(mergeMaterial.mergeUniforms.backTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, coarseVectors.texture);
+        mergeMaterial.setUniformInt(mergeMaterial.mergeUniforms.coarseTexture, 2);
+        blit(mergeMaterial, residual.texture, merged.width, merged.height);
+        for (int unit = 2; unit >= 1; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+    }
 
-    private void issueConfidence(float ratioX, float ratioY) {
+    /**
+     * The median passes over the packed field. Ping-pongs between the two
+     * slots that do not hold the previous frame's result, which is bound as
+     * the temporal candidate throughout; the slot the last pass lands in is
+     * then the history for the next frame.
+     */
+    private void filterField() {
+        if (timing) medianTimer.begin();
+        // The two slots that are not the history.
+        final int[] ping = fieldHistory == 0 ? new int[] {1, 2}
+                         : fieldHistory == 1 ? new int[] {0, 2}
+                         : new int[] {0, 1};
+        final boolean haveHistory = fieldHistory >= 0;
+
+        GLES20.glDisable(GLES20.GL_BLEND);
+        medianMaterial.use();
+        renderer.quadVertices.bind(medianMaterial.programId);
+        final MedianMaterial.MedianUniforms u = medianMaterial.medianUniforms;
+        medianMaterial.setUniformBool(medianMaterial.uniforms.flipY, false);
+        medianMaterial.setUniformVec2(u.texelSize, 1f / merged.width, 1f / merged.height);
+        medianMaterial.setUniformVec2(u.motionScale, 1f / luma[0].width, 1f / luma[0].height);
+        medianMaterial.setUniformFloat(u.fieldSign, FIELD_SIGN);
+        medianMaterial.setUniformFloat(u.temporalValid, haveHistory ? 1f : 0f);
+        // Three votes for the previous vector, measured on a constant pan:
+        // flicker down 6%, blocks flipping between frames halved; at five
+        // the flicker turns back up. One while there is no history.
+        medianMaterial.setUniformFloat(u.temporalWeight, haveHistory ? 3f : 1f);
+        // The matcher's own answer, on offer every pass so the field cannot
+        // drift from what was measured.
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, merged.texture);
+        medianMaterial.setUniformInt(u.originalTexture, 1);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, haveHistory ? fields[fieldHistory].texture : 0);
+        medianMaterial.setUniformInt(u.previousTexture, 2);
+        GLES20.glViewport(0, 0, merged.width, merged.height);
+        renderer.viewportNeedsUpdate = true;
+
+        int chain = merged.texture;
+        int index = -1;
+        for (int pass = 0; pass < MEDIAN_PASSES; pass++) {
+            index = ping[pass % 2];
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fields[index].framebuffer);
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, chain);
+            medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
+            chain = fields[index].texture;
+        }
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        for (int unit = 2; unit >= 0; unit--) {
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
+        GLES20.glEnable(GLES20.GL_BLEND);
+        renderer.invalidateBoundWindowMaterial();
+
+        fieldCurrent = index;
+        fieldHistory = index;
+        if (timing) medianTimer.end();
+    }
+
+    /**
+     * The guard's one texel, rendered right after the coarse estimate and
+     * read into a pixel buffer so the render thread never waits for it. See
+     * {@link ConfidenceMaterial}.
+     */
+    private void issueConfidence(float ratioX, float ratioY, Target olderCoarse, Target newerCoarse) {
         confidencePending = false;
         if (confidenceBuffer == 0) {
             final int[] names = new int[1];
@@ -2681,23 +993,20 @@ public class FrameSynthesizer implements FramePacer.Target {
         }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, confidence.framebuffer);
         confidenceMaterial.use();
-        confidenceMaterial.setUniformVec2(confidenceMaterial.confidenceUniforms.coarseSize,
-                                          coarseVectors.width, coarseVectors.height);
-        confidenceMaterial.setUniformVec2(confidenceMaterial.confidenceUniforms.coarseFactor,
-                                          ratioX, ratioY);
+        final ConfidenceMaterial.ConfidenceUniforms u = confidenceMaterial.confidenceUniforms;
+        confidenceMaterial.setUniformVec2(u.coarseSize, coarseVectors.width, coarseVectors.height);
+        confidenceMaterial.setUniformVec2(u.coarseFactor, ratioX, ratioY);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lumaCoarse[1].texture);
-        confidenceMaterial.setUniformInt(confidenceMaterial.confidenceUniforms.lumaNewerTexture, 1);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, newerCoarse.texture);
+        confidenceMaterial.setUniformInt(u.lumaNewerTexture, 1);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lumaCoarse[0].texture);
-        confidenceMaterial.setUniformInt(confidenceMaterial.confidenceUniforms.lumaOlderTexture, 2);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, olderCoarse.texture);
+        confidenceMaterial.setUniformInt(u.lumaOlderTexture, 2);
         blit(confidenceMaterial, coarseVectors.texture, 1, 1);
         for (int unit = 2; unit >= 1; unit--) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
         }
-
-        // Into the pixel buffer, asynchronously: offset 0, no client pointer.
         while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
         GLES20.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, confidenceBuffer);
         GLES30.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0);
@@ -2709,9 +1018,11 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * The decision, once the texel has had the whole interval's work to
-     * arrive behind. A failed map counts as confident: a broken diagnostic
-     * must not switch the feature off.
+     * The decision. A failed map counts as confident: a broken diagnostic must
+     * not switch the feature off. With hysteresis, because without it the whole
+     * frame flipped between interpolated and real every few intervals when the
+     * agreement hovered at the floor: two readings below to switch off, two
+     * above a higher bar to switch back on. A cut is one reading.
      */
     private boolean confident() {
         if (!confidencePending) return true;
@@ -2732,14 +1043,6 @@ public class FrameSynthesizer implements FramePacer.Target {
         lastDominantPx = g / 255f * 1024f;
         lastFrameDiff = b / 255f;
 
-        // **With hysteresis, because the first build without it flickered
-        // between modes.** On the ceiling the agreement sat around the floor
-        // and the whole frame flipped between interpolated and real every
-        // few intervals -- 7, 5, 1, 0, 2 declined per second in the log --
-        // which reads as more shimmer than the tearing it replaced. So it
-        // takes two consecutive readings below the floor to switch off and
-        // two above a higher bar to switch back on. A cut is different: the
-        // frames are not the same scene, and one reading is enough.
         if (lastFrameDiff > MAX_FRAME_DIFF) {
             confidentNow = false;
             lowStreak = 2;
@@ -2761,210 +1064,148 @@ public class FrameSynthesizer implements FramePacer.Target {
         return confidentNow;
     }
 
-    private boolean confidentNow = true;
-    private int lowStreak = 0, highStreak = 0;
-
-    /** Coarse plus residual. See {@link MergeFieldMaterial}. */
-    private void mergeField(Target residual, float factorX, float factorY, Target destination) {
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
-        mergeMaterial.use();
-        mergeMaterial.setUniformVec2(mergeMaterial.mergeUniforms.coarseFactor, factorX, factorY);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, coarseVectors.texture);
-        mergeMaterial.setUniformInt(mergeMaterial.mergeUniforms.coarseTexture, 1);
-        blit(mergeMaterial, residual.texture, destination.width, destination.height);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-    }
+    // ---- diagnostics: measure and dump -------------------------------------
 
     /**
-     * Reject the vectors that disagree with everything around them.
-     *
-     * <p>Each pass reads one target and writes the other, starting from the
-     * matcher's own output. See {@link MedianMaterial} for why the winner is
-     * always one of the nine inputs rather than an average of them, and
-     * {@link #filtered} for why there are two passes.
+     * Run the interpolation again in its reporting mode, average the frame to
+     * one texel on the GPU, and read that back; then one small readback of the
+     * 32 px cells, because a mean cannot tell a black patch from a scatter.
      */
-    private int filterField(Target source, Target[] destinations, int history) {
-        if (destinations[0] == null || source == null) return -1;
-        medianTimer.begin();
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        medianMaterial.use();
-        renderer.quadVertices.bind(medianMaterial.programId);
-        medianMaterial.setUniformBool(medianMaterial.uniforms.flipY, false);
-        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.texelSize,
-                                      1f / Math.max(1, source.width),
-                                      1f / Math.max(1, source.height));
-        // The temporal candidate. Bound once for the whole chain: it is what the
-        // block said at the PREVIOUS real frame, so it does not change between
-        // passes of this one. See MedianMaterial.
-        final Target past = fieldHistory[history];
-        final boolean haveHistory = past != null && historyValid[history];
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, haveHistory ? past.texture : 0);
-        medianMaterial.setUniformInt(medianMaterial.medianUniforms.previousTexture, 2);
-        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.temporalValid,
-                                       haveHistory ? 1f : 0f);
-        // The previous vector's vote, counted three times. See MedianMaterial
-        // and tools/frame-bench/temporal2.py: at three, flicker on a constant
-        // pan falls 6%, the field's error against the known motion falls from
-        // 9.3 to 8.0 px, and the share of blocks that flip between real frames
-        // halves; at five the field is steadier still but the flicker turns
-        // back up. One while there is no history, which is the plain median.
-        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.temporalWeight,
-                                       haveHistory ? 3f : 1f);
-        // So the temporal candidate is read where the content came from rather
-        // than where the block sits. See MedianMaterial. Zero before the sign
-        // latches, which reads at vUV exactly as it used to.
-        //
-        // **And the two chains need opposite signs, because the two fields
-        // point opposite ways in time.** The forward field at p, for p in N, is
-        // already the offset to where that content sat in N-1, so the content's
-        // previous vector is at p + b and the step is a plus. The backward field
-        // at x, for x in N-1, is the offset to where that content is in N -- so
-        // a frame ago it was at x - b, and the same plus reads the far side,
-        // twice the displacement from the right block. At the 120-150 px this
-        // pipeline runs at that is 240-300 px away: the candidate then disagrees
-        // with all nine neighbours and loses every vote, which is exactly the
-        // inertness 686975c removed from the forward chain and left here.
-        final float temporal = history == 0 ? 1f : -1f;
-        medianMaterial.setUniformVec2(medianMaterial.medianUniforms.motionScale,
-                                      temporal / Math.max(1, luma[0].width),
-                                      temporal / Math.max(1, luma[0].height));
-        medianMaterial.setUniformFloat(medianMaterial.medianUniforms.fieldSign, fieldSign);
-        GLES20.glViewport(0, 0, source.width, source.height);
-        renderer.viewportNeedsUpdate = true;
-
-        int chain = source.texture;
-        int index = -1;
-        for (int pass = 0; pass < MEDIAN_PASSES; pass++) {
-            final int destination = pass % 2;
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destinations[destination].framebuffer);
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, chain);
-            medianMaterial.setUniformInt(medianMaterial.uniforms.screenTexture, 0);
-            // The measurement, on offer every pass. See MedianMaterial. After the
-            // two-stage search this is the merged field rather than the matcher's
-            // last output, which is the residual and describes almost no motion at
-            // all -- offering that as a candidate would pull every block towards
-            // zero, which is the one direction a filter here must never invent.
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture);
-            medianMaterial.setUniformInt(medianMaterial.medianUniforms.originalTexture, 1);
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-            chain = destinations[destination].texture;
-            index = destination;
+    private void measure(float phase) {
+        if (probe == null) {
+            probe = new Target();
+            probe.allocateAveraging(colour[0].width, colour[0].height);
         }
-
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.framebuffer);
+        interpolate(phase, true);
+        // Unbound before the mip generation, which is undefined on a texture
+        // still attached to the bound framebuffer.
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        for (int unit = 2; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
-
-        // Kept for the next real frame. A copy rather than another ping-pong
-        // slot, because `destinations` is reused by the other direction's filter
-        // before this frame is over -- the forward and backward chains share
-        // nothing else, and having them share this would make each direction's
-        // temporal candidate the other direction's field.
-        if (past != null && index >= 0) {
-            renderToTarget(fieldCopyMaterial, destinations[index].texture, past);
-            historyValid[history] = true;
-        }
-        medianTimer.end();
-        return index;
-    }
-
-    /**
-     * VESSEL: report on the field the hardware actually produced.
-     *
-     * <p>Nothing downstream reads this. It exists because a change was scored
-     * on a laptop against a field built from dense optical flow -- coherent,
-     * outlier-free -- approved on every column, installed, and put black
-     * patches on the display. Rebuilt offline against the same recordings it
-     * scores <em>cleaner</em> than the baseline, so the model cannot reproduce
-     * the fault and the difference has to be the field itself.
-     *
-     * <p>Once a second, like the sign probe, and only when asked for.
-     */
-    private void probeField() {
-        if (!wants("probe") && !wants("all")) return;
-        if (vectors == null || luma[0] == null || filteredIndex < 0) return;
-        if (fieldSign == 0f) return;
-        final long now = SystemClock.uptimeMillis();
-        if (fieldProbedAt != 0 && now - fieldProbedAt < 1000) return;
-        fieldProbedAt = now;
-
-        if (fieldProbe == null) {
-            fieldProbe = new Target();
-            fieldProbe.allocateAveraging(vectors.width, vectors.height);
-        }
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fieldProbe.framebuffer);
-        GLES20.glViewport(0, 0, fieldProbe.width, fieldProbe.height);
-        renderer.viewportNeedsUpdate = true;
-        GLES20.glDisable(GLES20.GL_BLEND);
-
-        fieldProbeMaterial.use();
-        renderer.quadVertices.bind(fieldProbeMaterial.programId);
-        fieldProbeMaterial.setUniformBool(fieldProbeMaterial.uniforms.flipY, false);
-        fieldProbeMaterial.setUniformVec2(fieldProbeMaterial.probeUniforms.motionScale,
-                                          1f / Math.max(1, luma[0].width),
-                                          1f / Math.max(1, luma[0].height));
-        fieldProbeMaterial.setUniformVec2(fieldProbeMaterial.probeUniforms.texelSize,
-                                          1f / Math.max(1, vectors.width),
-                                          1f / Math.max(1, vectors.height));
-        fieldProbeMaterial.setUniformFloat(fieldProbeMaterial.probeUniforms.fieldSign,
-                                           fieldSign);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, filtered[filteredIndex].texture);
-        fieldProbeMaterial.setUniformInt(fieldProbeMaterial.uniforms.screenTexture, 0);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, latestLuma().texture);
-        fieldProbeMaterial.setUniformInt(
-            fieldProbeMaterial.probeUniforms.lumaNewerTexture, 1);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousLuma().texture);
-        fieldProbeMaterial.setUniformInt(
-            fieldProbeMaterial.probeUniforms.lumaOlderTexture, 2);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, renderer.quadVertices.count());
-
-        for (int unit = 2; unit >= 0; unit--) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + unit);
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        }
-        GLES20.glEnable(GLES20.GL_BLEND);
-        renderer.invalidateBoundWindowMaterial();
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fieldProbe.texture);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, probe.texture);
         GLES30.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
 
         final java.nio.ByteBuffer pixel = java.nio.ByteBuffer.allocateDirect(4)
             .order(java.nio.ByteOrder.nativeOrder());
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fieldProbe.topFramebuffer);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.topFramebuffer);
         GLES20.glReadPixels(0, 0, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixel);
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+
+        measuredSynthDistance = (pixel.get(0) & 0xff) / 255f;
+        measuredDark = (pixel.get(1) & 0xff) / 255f;
+        measuredBaseDistance = (pixel.get(2) & 0xff) / 255f;
+        measuredShadow = (pixel.get(3) & 0xff) / 255f;
+        measuredPhase = phase;
+        measuredAt = SystemClock.uptimeMillis();
+
+        measuredPatchCells = 0;
+        measuredEdgeCells = 0;
+        measuredWorstCell = 0f;
+        if (probe.cellFramebuffer != 0) {
+            final int count = probe.cellWidth * probe.cellHeight;
+            if (cells == null || cells.capacity() < count * 4) {
+                cells = java.nio.ByteBuffer.allocateDirect(count * 4).order(java.nio.ByteOrder.nativeOrder());
+            }
+            cells.position(0);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probe.cellFramebuffer);
+            GLES20.glReadPixels(0, 0, probe.cellWidth, probe.cellHeight,
+                                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, cells);
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            // Border cells legitimately fetch off the frame during a pan;
+            // interior ones never should.
+            for (int i = 0; i < count; i++) {
+                final float escaped = (cells.get(i * 4 + 1) & 0xff) / 255f;
+                final int cx = i % probe.cellWidth, cy = i / probe.cellWidth;
+                final boolean edge = cx < 2 || cy < 2
+                    || cx >= probe.cellWidth - 2 || cy >= probe.cellHeight - 2;
+                if (!edge && escaped > measuredWorstCell) measuredWorstCell = escaped;
+                if (escaped <= 0.5f) continue;
+                if (edge) measuredEdgeCells++; else measuredPatchCells++;
+            }
+            measuredCellTotal = count;
+        }
         renderer.viewportNeedsUpdate = true;
-
-        probeFit = (pixel.get(0) & 0xff) / 255f / 4f;
-        probeAtFloor = (pixel.get(1) & 0xff) / 255f;
-        probeLonely = (pixel.get(2) & 0xff) / 255f * 32f;
-        probeLonelyAlone = (pixel.get(3) & 0xff) / 255f * 32f;
-
-        say(String.format(
-            "fg probe: mean block fit %.4f, %.1f%% of blocks fit at the noise"
-                + " floor, blocks sit %.1f px from their neighbours on average"
-                + " (%.1f px among the floor-fit ones, and if that is the"
-                + " larger number a bad fit and an odd vector go together)",
-            probeFit, probeAtFloor * 100f, probeLonelyAlone,
-            probeAtFloor > 0.001f ? probeLonely / probeAtFloor : 0f));
     }
+
+    /**
+     * Under {@code FG_LOG=dump}: the shader's inputs and its output, written to
+     * app storage a few times per session for {@code tools/frame-bench/dump.py}
+     * to replay. It stalls, so it is gated, spaced and counted.
+     */
+    private static final long DUMP_INTERVAL_MS = 4000;
+    private static final int DUMP_LIMIT = 6;
+    private long dumpedAt = 0;
+    private int dumpsWritten = 0;
+
+    private void maybeDump(float phase) {
+        if (dumpsWritten >= DUMP_LIMIT) return;
+        final long now = SystemClock.uptimeMillis();
+        if (dumpedAt != 0 && now - dumpedAt < DUMP_INTERVAL_MS) return;
+        // Near the middle, where a fault is largest, and only while the scene
+        // moves by more than the matcher's own noise.
+        if (Math.abs(phase - 0.5f) > 0.13f || lastDominantPx < 24f) return;
+        dumpedAt = now;
+
+        final java.io.File dir = new java.io.File(
+            renderer.xServerView.getContext().getFilesDir(),
+            "fgdump/" + String.format(java.util.Locale.US, "%02d", dumpsWritten));
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            say("fg dump: cannot create " + dir);
+            dumpsWritten = DUMP_LIMIT;
+            return;
+        }
+        try {
+            readTarget(colour[oldest()], GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "older.rgba"));
+            readTarget(latestColour(), GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "newer.rgba"));
+            readTarget(output, GLES20.GL_UNSIGNED_BYTE, 4, new java.io.File(dir, "shown.rgba"));
+            // Packed: forward RG, backward BA. Filtered, and before the median.
+            readTarget(fields[fieldCurrent], GLES20.GL_FLOAT, 16, new java.io.File(dir, "field.f32"));
+            readTarget(merged, GLES20.GL_FLOAT, 16, new java.io.File(dir, "merged.f32"));
+            final String json = String.format(java.util.Locale.US,
+                "{\"width\": %d, \"height\": %d, \"lumaWidth\": %d, \"lumaHeight\": %d,"
+                    + " \"gridWidth\": %d, \"gridHeight\": %d, \"blockX\": %d, \"blockY\": %d,"
+                    + " \"phase\": %.4f, \"fieldSign\": %.0f, \"consistency\": 1, \"packed\": 1,"
+                    + " \"fieldMagnitude\": %.0f, \"interval\": %d, \"multiple\": %d,"
+                    + " \"realFrames\": %d, \"agreement\": %.3f, \"frameDiff\": %.4f,"
+                    + " \"dominantPx\": %.1f}\n",
+                colour[0].width, colour[0].height, luma[0].width, luma[0].height,
+                merged.width, merged.height, blockX, blockY,
+                phase, FIELD_SIGN, lastDominantPx, smoothedInterval / 1000000L, activeMultiple,
+                realFrames, lastAgreement, lastFrameDiff, lastDominantPx);
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, "meta.json"))) {
+                out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            dumpsWritten++;
+            say("fg dump: wrote " + dir + " at phase " + phase);
+        } catch (java.io.IOException e) {
+            say("fg dump: " + e);
+            dumpsWritten = DUMP_LIMIT;
+        } finally {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            renderer.viewportNeedsUpdate = true;
+        }
+    }
+
+    private void readTarget(Target target, int type, int bytesPerTexel, java.io.File file)
+            throws java.io.IOException {
+        final java.nio.ByteBuffer buffer = java.nio.ByteBuffer
+            .allocateDirect(target.width * target.height * bytesPerTexel)
+            .order(java.nio.ByteOrder.nativeOrder());
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer);
+        while (GLES20.glGetError() != GLES20.GL_NO_ERROR) { /* drain */ }
+        GLES20.glReadPixels(0, 0, target.width, target.height, GLES20.GL_RGBA, type, buffer);
+        final int error = GLES20.glGetError();
+        if (error != GLES20.GL_NO_ERROR) {
+            throw new java.io.IOException("glReadPixels 0x" + Integer.toHexString(error)
+                + " for " + file.getName());
+        }
+        buffer.rewind();
+        try (java.nio.channels.FileChannel channel = new java.io.FileOutputStream(file).getChannel()) {
+            while (buffer.hasRemaining()) channel.write(buffer);
+        }
+    }
+
+    // ---- helpers -----------------------------------------------------------
 
     private void renderToTarget(ScreenMaterial material, int source, Target destination) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, destination.framebuffer);
@@ -2973,13 +1214,8 @@ public class FrameSynthesizer implements FramePacer.Target {
     }
 
     /**
-     * Draw a texture over the whole of the current target.
-     *
-     * <p>Blending off for the duration. The compositor enables
-     * SRC_ALPHA/ONE_MINUS_SRC_ALPHA once at context creation and leaves it on,
-     * which is right for stacking windows and wrong for a whole-surface copy: the
-     * letterbox is clear colour at alpha zero, so blended it would let the
-     * previous screen show through as a second, older image underneath.
+     * Draw a texture over the whole of the current target, blending off: the
+     * compositor leaves SRC_ALPHA blending on, which is wrong for a copy.
      */
     private void blit(ScreenMaterial material, int texture, int width, int height) {
         GLES20.glViewport(0, 0, width, height);
@@ -2996,24 +1232,8 @@ public class FrameSynthesizer implements FramePacer.Target {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
 
         GLES20.glEnable(GLES20.GL_BLEND);
-        // The blit bound a program behind bindWindowMaterial's back, and its
-        // one-glUseProgram-per-frame bookkeeping would otherwise let the next
-        // window pass draw with this shader.
         renderer.invalidateBoundWindowMaterial();
     }
-
-    /**
-     * VESSEL: the history, addressed by which slot is newest rather than by a
-     * boolean two accessors can agree on by accident.
-     *
-     * <p>These used to be five one-line ternaries, and two of them --
-     * {@code writeLuma()} and {@code previousLuma()} -- had *identical bodies*.
-     * They returned different buffers only because one was called before the
-     * newest slot flipped and the other after, so the code was correct entirely
-     * by statement order and would have broken the first time a line moved. An
-     * index makes the question "which slot" separate from the question "when".
-     */
-    private int newest = 1;
 
     private int oldest() { return 1 - newest; }
 
@@ -3024,39 +1244,10 @@ public class FrameSynthesizer implements FramePacer.Target {
 
     private Target writeLuma() { return luma[oldest()]; }
 
-    private Target latestLuma() { return luma[newest]; }
-
-    private Target previousLuma() { return luma[oldest()]; }
-
-    /**
-     * Last real frame's filtered field, forward at 0 and backward at 1.
-     *
-     * <p>3DRS's temporal candidate. See {@link MedianMaterial}: the field is
-     * re-estimated from nothing every real frame, so a block whose two best
-     * matches are a near-tie picks one this frame and the other the next, and the
-     * region under it changes fifteen times a second while the scene does not.
-     * Offering what the block said last frame lets the filter break that tie
-     * towards continuity.
-     *
-     * <p>Both directions, because the consistency test subtracts one field from
-     * the other. Steadying only the forward one would make them disagree for a
-     * reason that is in the filter rather than in the scene, which is exactly the
-     * signal that test exists to measure.
-     */
-    private final Target[] fieldHistory = new Target[2];
-    /** False until each history has been written once. See {@link #fieldHistory}. */
-    private final boolean[] historyValid = new boolean[2];
-
-    private final Target[] colour = new Target[2];
-    private final Target[] luma = new Target[2];
+    // ---- allocation --------------------------------------------------------
 
     private boolean ensureTargets() {
         final int generation = GLRenderer.contextGeneration();
-        // **The guest's own resolution, not the panel's.** Every pass downstream
-        // of the capture inherits this, which is the whole point: the picture
-        // carries this much information and no more, so anything larger is work
-        // spent on pixels the upscaler invented. See
-        // GLRenderer.capturingAtGuestScale.
         final int width = renderer.guestWidth();
         final int height = renderer.guestHeight();
         if (width <= 0 || height <= 0) return false;
@@ -3065,9 +1256,8 @@ public class FrameSynthesizer implements FramePacer.Target {
             return true;
         }
 
-        // Only delete when the names still mean something. A new generation means
-        // the objects went with the context that held them, and deleting those ids
-        // would destroy whatever now has them.
+        // Only delete names that still mean something: a new generation means
+        // the objects went with the context, and the names may be reused.
         release(colour[0] != null && allocGeneration == generation);
 
         for (int i = 0; i < 2; i++) {
@@ -3077,118 +1267,7 @@ public class FrameSynthesizer implements FramePacer.Target {
         output = new Target();
         output.allocate(width, height, GLES30.GL_RGBA8, GLES20.GL_LINEAR);
 
-        if (motionEstimationSupported()) {
-            final int[] value = new int[1];
-            GLES20.glGetIntegerv(MOTION_ESTIMATION_SEARCH_BLOCK_X_QCOM, value, 0);
-            blockX = Math.max(1, value[0]);
-            GLES20.glGetIntegerv(MOTION_ESTIMATION_SEARCH_BLOCK_Y_QCOM, value, 0);
-            blockY = Math.max(1, value[0]);
-
-            // The luma pair must be an exact multiple of the search block, so the
-            // largest such rectangle is used rather than the whole frame. The
-            // frame is already the guest's own resolution, so a block covers real
-            // rendered pixels rather than ones the upscaler invented.
-            final int lumaW = (width / blockX) * blockX;
-            final int lumaH = (height / blockY) * blockY;
-            if (lumaW > 0 && lumaH > 0) {
-                for (int i = 0; i < 2; i++) {
-                    luma[i] = new Target();
-                    luma[i].allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                }
-                // **Nearest on both, and that is not an oversight.** The
-                // median wants the nine vectors that were actually estimated, and
-                // the interpolation wants the four blocks as the four answers they
-                // are -- it does its own spatial blending under overlapping
-                // windows. Letting the sampler interpolate as well would blend
-                // twice and would invent a vector no block ever voted for, which
-                // at a motion boundary describes nothing in the scene.
-                vectors = new Target();
-                vectors.allocate(lumaW / blockX, lumaH / blockY, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-
-                // **Rendering to RGBA16F is a capability, not a given.** The
-                // matcher writes `vectors` through the extension rather than
-                // through the pipeline, so its allocation says nothing about
-                // whether a fragment shader may target that format. ES 3.2 makes
-                // it colour-renderable and this device reports 3.2, but asking is
-                // one call and guessing wrong is a blank field -- every vector
-                // zero, every synthesised frame a cross-fade.
-                for (int i = 0; i < 2; i++) {
-                    filtered[i] = new Target();
-                    filtered[i].allocate(lumaW / blockX, lumaH / blockY,
-                                         GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    fieldHistory[i] = new Target();
-                    fieldHistory[i].allocate(lumaW / blockX, lumaH / blockY,
-                                             GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    historyValid[i] = false;
-                }
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, filtered[0].framebuffer);
-                final int complete = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-                if (complete != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-                    Log.w(TAG, "cannot render to RGBA16F (0x" + Integer.toHexString(complete)
-                        + "); the field will be used as the matcher produced it");
-                    filtered[0].release();
-                    filtered[1].release();
-                    filtered[0] = filtered[1] = null;
-                }
-
-                // **The coarse pass and the backward pass, allocated together**
-                // because neither is useful without the other: the backward field
-                // exists to be compared with the forward one, and a comparison
-                // between two fields that could not reach their own answers
-                // compares two errors. See COARSE_DIVISOR and estimateMotion.
-                //
-                // Both grids are rounded down to a whole number of search blocks,
-                // which the extension requires, and the two ratios that come out
-                // of that need not be equal -- 720 rounds differently from 1280.
-                // MergeFieldMaterial takes them as a vec2 for exactly that reason.
-                final int coarseW = Math.max(blockX, (lumaW / COARSE_DIVISOR / blockX) * blockX);
-                final int coarseH = Math.max(blockY, (lumaH / COARSE_DIVISOR / blockY) * blockY);
-                if (complete == GLES20.GL_FRAMEBUFFER_COMPLETE
-                        && coarseW >= blockX * 2 && coarseH >= blockY * 2) {
-                    for (int i = 0; i < 2; i++) {
-                        lumaCoarse[i] = new Target();
-                        lumaCoarse[i].allocate(coarseW, coarseH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                    }
-                    // **LINEAR, against the rule the rest of this file follows.**
-                    // Nearest is right for a field that will be read as four block
-                    // answers, because a blend between two blocks is a vector no
-                    // block voted for. This field is never read that way: it is a
-                    // prior for a warp and an addend in a merge, and one coarse
-                    // block covers 32 source pixels, so nearest would step the
-                    // warped picture in 32-pixel terraces that the residual pass
-                    // would then have to explain away.
-                    coarseVectors = new Target();
-                    coarseVectors.allocate(coarseW / blockX, coarseH / blockY,
-                                           GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
-                    warpedLuma = new Target();
-                    warpedLuma.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
-                    backVectors = new Target();
-                    backVectors.allocate(lumaW / blockX, lumaH / blockY,
-                                         GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    merged = new Target();
-                    merged.allocate(lumaW / blockX, lumaH / blockY,
-                                    GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    mergedBack = new Target();
-                    mergedBack.allocate(lumaW / blockX, lumaH / blockY,
-                                        GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    confidence = new Target();
-                    confidence.allocate(1, 1, GLES30.GL_RGBA8, GLES20.GL_NEAREST);
-                    for (int i = 0; i < 2; i++) {
-                        filteredBack[i] = new Target();
-                        filteredBack[i].allocate(lumaW / blockX, lumaH / blockY,
-                                                 GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
-                    }
-                    say("two-stage search ready: coarse luma " + coarseW + "x" + coarseH
-                        + ", coarse vectors " + (coarseW / blockX) + "x" + (coarseH / blockY)
-                        + ", window about " + SEARCH_WINDOW_PX + " px becomes about "
-                        + (SEARCH_WINDOW_PX * lumaW / coarseW) + " px of scene");
-                }
-                say("tier 1 ready: block " + blockX + "x" + blockY
-                    + ", luma " + lumaW + "x" + lumaH
-                    + ", vectors " + (lumaW / blockX) + "x" + (lumaH / blockY));
-            }
-        }
+        if (motionEstimationSupported()) allocateTier1(width, height);
 
         allocWidth = width;
         allocHeight = height;
@@ -3201,116 +1280,122 @@ public class FrameSynthesizer implements FramePacer.Target {
         return true;
     }
 
-    private void release(boolean deleteObjects) {
+    /**
+     * Everything tier 1 needs, or nothing. The luma pair must be a whole
+     * number of search blocks; the coarse pair likewise; and the field targets
+     * must be colour-renderable, which ES 3.2 guarantees for RGBA16F and is
+     * checked anyway because guessing wrong is a blank field.
+     */
+    private void allocateTier1(int width, int height) {
+        final int[] value = new int[1];
+        GLES20.glGetIntegerv(MOTION_ESTIMATION_SEARCH_BLOCK_X_QCOM, value, 0);
+        blockX = Math.max(1, value[0]);
+        GLES20.glGetIntegerv(MOTION_ESTIMATION_SEARCH_BLOCK_Y_QCOM, value, 0);
+        blockY = Math.max(1, value[0]);
+
+        final int lumaW = (width / blockX) * blockX;
+        final int lumaH = (height / blockY) * blockY;
+        final int coarseW = (lumaW / COARSE_DIVISOR / blockX) * blockX;
+        final int coarseH = (lumaH / COARSE_DIVISOR / blockY) * blockY;
+        if (lumaW <= 0 || lumaH <= 0 || coarseW < blockX * 2 || coarseH < blockY * 2) {
+            say("tier 1 unavailable: guest " + width + "x" + height + " is too small for block "
+                + blockX + "x" + blockY + " at a quarter size");
+            return;
+        }
+        final int gridW = lumaW / blockX, gridH = lumaH / blockY;
+
+        for (int i = 0; i < 2; i++) {
+            luma[i] = new Target();
+            luma[i].allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
+            lumaCoarse[i] = new Target();
+            lumaCoarse[i].allocate(coarseW, coarseH, GLES30.GL_R8, GLES20.GL_LINEAR);
+        }
+        warpedLuma = new Target();
+        warpedLuma.allocate(lumaW, lumaH, GLES30.GL_R8, GLES20.GL_LINEAR);
+        // NEAREST on every field the interpolation reads: the four blocks are
+        // wanted as four answers, and the shader does its own blending. LINEAR
+        // on the prior, which is a warp displacement and would otherwise step
+        // the warped picture in 32 px terraces.
+        coarseVectors = new Target();
+        coarseVectors.allocate(coarseW / blockX, coarseH / blockY, GLES30.GL_RGBA16F, GLES20.GL_LINEAR);
+        residual = new Target();
+        residual.allocate(gridW, gridH, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+        residualBack = new Target();
+        residualBack.allocate(gridW, gridH, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+        final Target packed = new Target();
+        packed.allocate(gridW, gridH, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+        for (int i = 0; i < 3; i++) {
+            fields[i] = new Target();
+            fields[i].allocate(gridW, gridH, GLES30.GL_RGBA16F, GLES20.GL_NEAREST);
+        }
+        confidence = new Target();
+        confidence.allocate(1, 1, GLES30.GL_RGBA8, GLES20.GL_NEAREST);
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, packed.framebuffer);
+        final int complete = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        if (complete != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+            Log.w(TAG, "cannot render to RGBA16F (0x" + Integer.toHexString(complete)
+                + "); tier 1 is off");
+            packed.release();
+            releaseTier1(true);
+            return;
+        }
+        merged = packed;
+        fieldHistory = -1;
+        fieldCurrent = -1;
+        say("tier 1 ready: block " + blockX + "x" + blockY + ", luma " + lumaW + "x" + lumaH
+            + ", grid " + gridW + "x" + gridH + ", coarse " + coarseW + "x" + coarseH
+            + " (window x" + (lumaW / coarseW) + ")");
+    }
+
+    private void releaseTier1(boolean deleteObjects) {
         if (deleteObjects) {
             for (int i = 0; i < 2; i++) {
-                if (colour[i] != null) colour[i].release();
                 if (luma[i] != null) luma[i].release();
-            }
-            if (vectors != null) vectors.release();
-            for (int i = 0; i < 2; i++) if (filtered[i] != null) filtered[i].release();
-            for (int i = 0; i < 2; i++) {
-                if (fieldHistory[i] != null) fieldHistory[i].release();
-            }
-            for (int i = 0; i < 2; i++) {
                 if (lumaCoarse[i] != null) lumaCoarse[i].release();
-                if (filteredBack[i] != null) filteredBack[i].release();
             }
-            if (coarseVectors != null) coarseVectors.release();
+            for (int i = 0; i < 3; i++) if (fields[i] != null) fields[i].release();
             if (warpedLuma != null) warpedLuma.release();
-            if (backVectors != null) backVectors.release();
+            if (coarseVectors != null) coarseVectors.release();
+            if (residual != null) residual.release();
+            if (residualBack != null) residualBack.release();
             if (merged != null) merged.release();
-            if (mergedBack != null) mergedBack.release();
             if (confidence != null) confidence.release();
             if (confidenceBuffer != 0) GLES20.glDeleteBuffers(1, new int[] {confidenceBuffer}, 0);
-            if (signProbe != null) signProbe.release();
-            if (fieldProbe != null) fieldProbe.release();
+        }
+        luma[0] = luma[1] = lumaCoarse[0] = lumaCoarse[1] = null;
+        fields[0] = fields[1] = fields[2] = null;
+        warpedLuma = coarseVectors = residual = residualBack = merged = confidence = null;
+        confidenceBuffer = 0;
+        confidencePending = false;
+        fieldHistory = fieldCurrent = -1;
+        motionValid = false;
+    }
+
+    private void release(boolean deleteObjects) {
+        if (deleteObjects) {
+            for (int i = 0; i < 2; i++) if (colour[i] != null) colour[i].release();
             if (output != null) output.release();
             if (probe != null) probe.release();
         }
-        colour[0] = colour[1] = luma[0] = luma[1] = null;
-        // **The one texture name that is held outside a Target, and it outlived
-        // the object it names.** Every other reference here is nulled; this was
-        // a bare int, and repeatLastPresent guards only on it being non-zero.
-        // A synthesised frame pending across a resolution change reaches
-        // presentSynthesized, which calls ensureTargets -- releasing these and
-        // resetting realFrames to 0 -- and then declines on `realFrames < 2`,
-        // at which point GLRenderer repeats a name that was deleted moments
-        // earlier. Black if the name is merely dead; a full-screen present of
-        // some window's texture if the generation changed and it was recycled.
+        releaseTier1(deleteObjects);
+        colour[0] = colour[1] = null;
+        output = probe = null;
+        // A name held outside a Target; repeatLastPresent guards on it.
         repeatTexture = 0;
-        vectors = null;
-        filtered[0] = filtered[1] = null;
-        filteredIndex = -1;
-        // The names went with the context; a surviving reference here would hand
-        // the median a dead texture as its temporal candidate.
-        fieldHistory[0] = fieldHistory[1] = null;
-        historyValid[0] = historyValid[1] = false;
-        lumaCoarse[0] = lumaCoarse[1] = null;
-        filteredBack[0] = filteredBack[1] = null;
-        filteredBackIndex = -1;
-        confidence = null;
-        confidenceBuffer = 0;
-        confidencePending = false;
-        coarseVectors = warpedLuma = backVectors = merged = mergedBack = null;
-        forwardField = backwardField = null;
-        pyramidRan = false;
-        backwardValid = false;
-        output = null;
-        signProbe = null;
-        fieldProbe = null;
-        fieldProbedAt = 0;
-        fieldSign = 0f;
-        pendingSign = 0f;
-        signVotes = 0f;
-        // The block size can change with the context, and the probe's whole
-        // point is that it is asked of THIS driver state.
-        basepointProbed = false;
-        probe = null;
         announced = false;
     }
 
+    // ---- the log -----------------------------------------------------------
+
     /**
-     * Say once a second which tier is carrying the frames, and what it costs.
-     *
-     * <p>Both halves matter and neither is guessable. The counters say whether
-     * tier 0 is doing the work -- which it should be, for a desktop -- and the
-     * timers say whether the passes fit in the budget, which reasoning about the
-     * shader cannot answer because the cost is bandwidth and render-target
-     * switches rather than arithmetic.
-     */
-    /**
-     * VESSEL: say what the pipeline is doing, in the categories that were asked
-     * for and no others.
-     *
-     * <p>**Every line here exists because its absence cost a day.** Frame
-     * generation fails visually, intermittently, and in ways that a description
-     * of the screen cannot separate -- a black speck, a shimmer and a frozen
-     * patch are one sentence and three different bugs. Each category answers a
-     * question that was previously answered by guessing:
-     *
-     * <ul>
-     * <li>{@code setup} -- is the tier even running, and at what sizes. The
-     *     feature has silently done nothing before now, and this says so.
-     * <li>{@code pacing} -- how many frames are real, how many are invented, how
-     *     many were dropped. A stutter is either here or it is not.
-     * <li>{@code timing} -- what each pass costs. Reasoning about a shader cannot
-     *     answer this: the cost is bandwidth and target switches, not arithmetic.
-     *     It also catches thermal throttling, which scales every pass at once and
-     *     is otherwise indistinguishable from a change having made things slower.
-     * <li>{@code field} -- what the vectors contain. A field that is mostly zero
-     *     and a field that is wrong look identical on screen and are opposite
-     *     problems.
-     * <li>{@code quality} -- what was done with them: how much of the frame was
-     *     trusted, how much fell back, and how much came out black from sources
-     *     that were not. That last number is the one that separates "this shader
-     *     invented a dot" from "this shader faithfully drew a dark pixel the
-     *     vector pointed at", which took nine attempts to establish by eye.
-     * </ul>
+     * Once a second, in the categories asked for. One line is always printed:
+     * a container with frame generation on and nothing to say is the answer.
      */
     private void report() {
         final long now = SystemClock.uptimeMillis();
-        if (wants("timing")) {
+        if (timing) {
             captureTimer.report(now);
             lumaTimer.report(now);
             estimateTimer.report(now);
@@ -3321,168 +1406,85 @@ public class FrameSynthesizer implements FramePacer.Target {
         if (now - reportedAt < 1000) return;
         final long elapsed = reportedAt == 0 ? 1000 : Math.max(1, now - reportedAt);
         reportedAt = now;
-
         final long realThisSecond = realFrames - reportedRealFrames;
         reportedRealFrames = realFrames;
 
-        // The one line that is always printed, because a container with frame
-        // generation on and nothing to say about it is itself the answer.
-        say("real " + realFrames + ", tier0 " + tier0Frames
-            + ", tier1 " + tier1Frames + ", skipped " + skipped
-            + ", " + multiple + "x");
+        say("real " + realFrames + ", tier0 " + tier0Frames + ", tier1 " + tier1Frames
+            + ", skipped " + skipped + ", " + multiple + "x");
 
-        if (wants("pacing") && timestamps.hasData()) {
-            // **The only line here that describes the display rather than this
-            // thread.** Where it disagrees with `fg cadence` below, this one is
-            // right and that one is measuring the queue.
-            say(timestamps.describe(vsyncPeriodNanos()));
-        } else if (wants("pacing") && timestamps.unavailable()) {
-            say("fg presented: this surface answers none of the frame"
-                + " timestamps -- not scanout, not composition, not latch. Every"
-                + " cadence figure below is a draw schedule.");
-        }
-
-        if (wants("pacing") && presentGaps > 0) {
-            // Even spacing is what smooth motion is, not the count. A mean of
-            // 33 ms with a spread from 0.2 to 56 is two frames inside one
-            // refresh -- the first never scanned out -- and then a long wait.
-            say(String.format(
-                "fg cadence: presented every %.1f ms mean, %.1f shortest,"
-                    + " %.1f longest, over %d gaps; %d shared a refresh with"
-                    + " the present before them and were never shown",
-                presentGapTotal / (float)presentGaps / 1e6f,
-                presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps,
-                collisions));
-            collisions = 0;
-            presentGapMin = Long.MAX_VALUE;
-            presentGapMax = 0;
-            presentGapTotal = 0;
-            presentGaps = 0;
-        }
         if (wants("pacing")) {
+            if (timestamps.hasData()) {
+                say(timestamps.describe(vsyncPeriodNanos()));
+            } else if (timestamps.unavailable()) {
+                say("fg presented: this surface answers none of the frame timestamps;"
+                    + " every cadence figure below is a draw schedule.");
+            }
+            if (presentGaps > 0) {
+                say(String.format(
+                    "fg cadence: presented every %.1f ms mean, %.1f shortest, %.1f longest,"
+                        + " over %d gaps; %d shared a refresh with the present before them",
+                    presentGapTotal / (float)presentGaps / 1e6f,
+                    presentGapMin / 1e6f, presentGapMax / 1e6f, presentGaps, collisions));
+                collisions = 0;
+                presentGapMin = Long.MAX_VALUE;
+                presentGapMax = 0;
+                presentGapTotal = 0;
+                presentGaps = 0;
+            }
             final float perSecond = realThisSecond * 1000f / elapsed;
             say(String.format(
-                "fg pacing: %.1f real/s, %.1f synthesised/s, %.1f presented/s,"
-                    + " %d skipped, interval %.1f ms (%.1f fps),"
-                    + " %dx asked / %dx fitted into a %.2f ms refresh, %s",
-                perSecond, tier1Frames * 1000f / elapsed,
-                (perSecond + tier1Frames * 1000f / elapsed),
-                skipped,
-                smoothedInterval / 1e6f,
+                "fg pacing: %.1f real/s, %.1f synthesised/s, %.1f presented/s, %d skipped,"
+                    + " interval %.1f ms (%.1f fps), %dx asked / %dx fitted into a %.2f ms refresh, %s",
+                perSecond, tier1Frames * 1000f / elapsed, perSecond + tier1Frames * 1000f / elapsed,
+                skipped, smoothedInterval / 1e6f,
                 smoothedInterval > 0 ? 1e9f / smoothedInterval : 0f,
                 multiple, activeMultiple, vsyncPeriodNanos() / 1e6f,
                 motionValid ? "field valid" : "NO FIELD -- tier 0 or real frames only"));
-            // The whole-frame guard: how often it declined, and what it saw
-            // last. See ConfidenceMaterial.
             say(String.format(
                 "fg confidence: %d intervals shown as real frames only this second;"
                     + " last agreement %.0f%% (floor %.0f%%), frame difference %.0f levels"
                     + " (ceiling %.0f), dominant motion %.0f px",
                 lowConfidenceIntervals, lastAgreement * 100f, MIN_AGREEMENT * 100f,
                 lastFrameDiff * 255f, MAX_FRAME_DIFF * 255f, lastDominantPx));
-            // Where the gate currently sits and what it was derived from, so a
-            // 4x-to-1x drop can be read rather than guessed at.
             say(String.format(
-                "fg gate: interpolating up to %.0f ms (guest habit %.0f ms),"
-                    + " interval now %.0f ms -- %s",
-                worthInterpolating() / 1e6f, baselineInterval() / 1e6f,
-                smoothedInterval / 1e6f,
-                smoothedInterval > worthInterpolating() ? "OFF, guest has stopped"
-                                                       : "interpolating"));
+                "fg gate: interpolating up to %.0f ms (guest habit %.0f ms), interval now %.0f ms -- %s",
+                worthInterpolating() / 1e6f, baselineInterval / 1e6f, smoothedInterval / 1e6f,
+                smoothedInterval > worthInterpolating() ? "OFF, guest has stopped" : "interpolating"));
         }
 
         if (wants("field")) {
             say(String.format(
-                "fg field: block %dx%d, grid %dx%d, luma %dx%d,"
-                    + " %s, matcher refusals %d, moved %.0f px mean"
-                    + " (window about %d)",
+                "fg field: block %dx%d, grid %dx%d, luma %dx%d, coarse %dx%d, %d median passes,"
+                    + " matcher refusals %d, dominant motion %.0f px, agreement %.0f%%",
                 blockX, blockY,
-                vectors != null ? vectors.width : 0,
-                vectors != null ? vectors.height : 0,
-                luma[0] != null ? luma[0].width : 0,
-                luma[0] != null ? luma[0].height : 0,
-                filteredIndex >= 0 ? MEDIAN_PASSES + " median passes" : "raw",
-                estimateFailures, fieldMagnitude, SEARCH_WINDOW_PX));
-            // **Read the two together.** The window figure above is what one pass
-            // of the matcher can reach; a mean displacement at or past it used to
-            // mean the field was describing something other than the scene. With
-            // the two-stage search running, motion larger than the window is
-            // representable, so `moved` climbing above it is the fix working
-            // rather than the failure it used to be.
-            say("fg search: " + (pyramidRan
-                    ? "two-stage, coarse " + coarseVectors.width + "x" + coarseVectors.height
-                        + " then full " + vectors.width + "x" + vectors.height
-                    : (coarseVectors == null ? "single-pass (no coarse targets)"
-                                             : "single-pass until the field sign latches"))
-                + ", source selection " + (backwardValid
-                    ? "on -- backward field checked against forward"
-                    : "OFF -- no backward field, photometric weighting alone"));
+                merged != null ? merged.width : 0, merged != null ? merged.height : 0,
+                luma[0] != null ? luma[0].width : 0, luma[0] != null ? luma[0].height : 0,
+                coarseVectors != null ? coarseVectors.width : 0,
+                coarseVectors != null ? coarseVectors.height : 0,
+                MEDIAN_PASSES, estimateFailures, lastDominantPx, lastAgreement * 100f));
         }
 
-        if (wants("layers")) {
-            // What went into the flattened frame everything downstream works on.
-            // See GLRenderer.describeLayers.
-            say("fg layers: " + renderer.describeLayers());
-        }
+        if (wants("layers")) say("fg layers: " + renderer.describeLayers());
 
         if (wants("quality")) {
-            // **One line, and the first one that can say frame generation is
-            // making things worse.**
-            //
-            // Everything this replaces was measuring the shader against its own
-            // assumptions -- see InterpolateMaterial's diagnostic block for the
-            // four ways that failed. These are anchored to the two real captured
-            // frames and to nothing else.
-            //
-            // Read it as: of the part of the frame that actually changed, how
-            // much did we push *further* from the truth than simply leaving the
-            // old frame up. Anything above a per cent or two means the synthesis
-            // is actively damaging, however healthy it looks from the inside.
+            // Of the part of the frame that changed: how much further from
+            // frame N the synthesis landed than a perfect interpolation at
+            // this phase would have. Zero is perfect at every phase.
             final float moving = measuredShadow;
-            // Both sums are over the moving pixels, so the ratio needs no
-            // denominator -- it cancels. Below 100% the synthesised frame is
-            // closer to the real one than leaving the old frame up would be.
             final float closeness = measuredBaseDistance > 0.0001f
                 ? measuredSynthDistance / measuredBaseDistance : 0f;
-            // **Subtract what the phase alone accounts for, because it is
-            // almost all of it.** The distances are measured against frame N,
-            // so a frame drawn at phase p and interpolated PERFECTLY sits at
-            // exactly (1-p) of the old frame's distance -- that is geometry,
-            // not quality. Measured over a capture the raw ratio correlates
-            // with (1-phase) at +0.93, so a reading of 80% against one of 21%
-            // looks like a large difference in quality and is mostly a
-            // difference in when the frame was drawn.
-            //
-            // What is left is the part the pipeline is responsible for: how
-            // much further from the real frame it landed than a perfect
-            // interpolation at that same phase would have. Zero is perfect and
-            // it means the same thing at every phase, which the ratio does not.
-            final float excess = moving > 0.001f
-                ? closeness - (1f - measuredPhase) : 0f;
+            final float excess = moving > 0.001f ? closeness - (1f - measuredPhase) : 0f;
             say(String.format(
-                "fg truth: %+.0f%% further from the real frame than a perfect"
-                    + " interpolation at this phase (0%% is perfect), sits at"
-                    + " %.0f%% where phase alone gives %.0f%%, %.3f%% fetched"
-                    + " off the frame, %.0f%% of frame moving, drawn at %.0f%%",
+                "fg truth: %+.0f%% further from the real frame than a perfect interpolation"
+                    + " at this phase (0%% is perfect), sits at %.0f%% where phase alone gives"
+                    + " %.0f%%, %.3f%% fetched off the frame, %.0f%% of frame moving, drawn at %.0f%%",
                 excess * 100f, closeness * 100f, (1f - measuredPhase) * 100f,
                 measuredDark * 100f, moving * 100f, measuredPhase * 100f));
-
-            // **On its own line, because it is the one that would have caught
-            // the change that broke the screen and the line above would not.**
-            //
-            // Every figure above is a mean or a ratio of means. Black patches
-            // are a connected area, and the invented-content mean read 1.5%
-            // while the display had holes in it -- the same 1.5% it reads for a
-            // scatter nobody can see. These two say how concentrated it is: how
-            // many 32x32 cells are more than half invented, and how bad the
-            // single worst cell is. A frame with zero cells and a mean of 1.5%
-            // is fine. One cell is visible. Twenty is what was reverted.
             say(String.format(
-                "fg patches: %d interior cells of %d take over half their"
-                    + " content from off the frame (%d more at the border,"
-                    + " which a pan cannot avoid), worst interior cell %.0f%%",
-                measuredPatchCells, measuredCellTotal, measuredEdgeCells,
-                measuredWorstCell * 100f));
+                "fg patches: %d interior cells of %d take over half their content from off"
+                    + " the frame (%d more at the border, which a pan cannot avoid),"
+                    + " worst interior cell %.0f%%",
+                measuredPatchCells, measuredCellTotal, measuredEdgeCells, measuredWorstCell * 100f));
         }
 
         tier0Frames = 0;
@@ -3491,6 +1493,4 @@ public class FrameSynthesizer implements FramePacer.Target {
         estimateFailures = 0;
         lowConfidenceIntervals = 0;
     }
-
-    private long reportedRealFrames = 0;
 }

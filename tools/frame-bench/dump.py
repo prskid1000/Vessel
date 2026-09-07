@@ -59,7 +59,7 @@ def pull():
         out = os.path.join(DUMP, name)
         os.makedirs(out, exist_ok=True)
         for f in ("meta.json", "older.rgba", "newer.rgba", "shown.rgba", "field.f32", "back.f32",
-                  "merged.f32", "mergedBack.f32", "global.f32"):
+                  "merged.f32", "mergedBack.f32"):
             data = subprocess.run(["adb", "exec-out", "run-as", PACKAGE, "cat",
                                    "files/fgdump/%s/%s" % (name, f)], capture_output=True).stdout
             if data:
@@ -76,20 +76,24 @@ def load(folder):
         a = np.fromfile(os.path.join(folder, name), dtype=np.uint8)
         return a.reshape(h, w, 4)[..., :3].astype(np.float32) / 255.0
 
-    def field(name):
+    def field(name, half=slice(0, 2)):
         p = os.path.join(folder, name)
         if not os.path.exists(p) or os.path.getsize(p) != gw * gh * 16:
             return None
-        return np.fromfile(p, dtype=np.float32).reshape(gh, gw, 4)[..., :2]
+        return np.fromfile(p, dtype=np.float32).reshape(gh, gw, 4)[..., half]
 
     # glReadPixels returns rows bottom-up. The shader samples every texture in
     # the orientation it was written, and all of these were written the same
     # way, so a consistent flip of everything is the identity for the port.
+    #
+    # Packed dumps carry the forward field in RG and the backward one in BA
+    # of the same file; older dumps carry them in two files.
+    packed = bool(meta.get("packed", 0))
+    back_of = lambda name: field(name, slice(2, 4)) if packed else None
     meta["merged"] = field("merged.f32")
-    meta["mergedBack"] = field("mergedBack.f32")
-    g = os.path.join(folder, "global.f32")
-    meta["global"] = np.fromfile(g, dtype=np.float32)[:3].tolist() if os.path.exists(g) and os.path.getsize(g) == 16 else None
-    return meta, rgba("older.rgba"), rgba("newer.rgba"), rgba("shown.rgba"), field("field.f32"), field("back.f32")
+    meta["mergedBack"] = back_of("merged.f32") if packed else field("mergedBack.f32")
+    back = back_of("field.f32") if packed else field("back.f32")
+    return meta, rgba("older.rgba"), rgba("newer.rgba"), rgba("shown.rgba"), field("field.f32"), back
 
 
 def truth_metric(out, older, newer):
@@ -102,9 +106,9 @@ def truth_metric(out, older, newer):
 
 
 VARIANTS = [
-    ("as shipped", {}),
-    ("fit-weighted OBMC", dict(obmc="fit")),
-    ("3x3 blocks, fit-weighted", dict(obmc="fit9")),
+    ("as shipped: field read at the N site", {}),
+    ("field read at the N-1 site (f74b9bc)", dict(projection="older")),
+    ("field read at vUV, no projection", dict(projection="none")),
     ("consistency off", dict(drop="none")),
     ("newer-side round trip off", dict(newer_side=False)),
 ]
@@ -125,9 +129,6 @@ def replay(folder):
     print("  %-30s %10s %10s" % ("variant", "fidelity", "truth"))
     print("  %-30s %10s %10.3f  (phase alone: %.3f)"
           % ("device output", "-", truth_metric(shown, older, newer), 1 - phase))
-    if meta.get("global") is not None:
-        gx, gy, agree = meta["global"]
-        print("  global motion (%+.1f, %+.1f) px, %.0f%% of the coarse field agrees" % (gx, gy, agree * 100))
     if meta.get("merged") is not None:
         out = interp.interpolate(newer, older, meta["merged"], meta["mergedBack"], phase, sign)
         print("  %-30s %10.2f %10.3f" % ("before the median", float(np.abs(out - shown).mean() * 255),
