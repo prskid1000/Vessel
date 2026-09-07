@@ -394,17 +394,25 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
             guestDamaged = false;
             final long synthesized = frameSynthesizer.consumePending();
 
-            if (!haveReal && synthesized > 0) {
-                // **A declined frame still swaps, so it still has to be
-                // written.** See FrameSynthesizer.repeatLastPresent: the buffer
-                // about to be published is two or three presents old rather than
-                // the one on screen, so returning without drawing publishes an
-                // old frame instead of leaving the picture alone.
-                if (!frameSynthesizer.presentSynthesized(synthesized)) {
-                    frameSynthesizer.repeatLastPresent();
+            // **Only guest damage makes a real frame.** A draw can also be
+            // asked for by a pointer move, a cursor change or the surface
+            // itself, none of which changed the guest's picture. Treating one
+            // of those as a real frame captured the same content twice,
+            // rotated the history pair onto two identical frames (a zero
+            // field), cancelled every paced slot of the interval in progress
+            // and polluted the interval estimate -- once per mouse event. The
+            // last frame is repeated instead, which draws the cursor fresh on
+            // top of it; and a declined frame still swaps, so something has
+            // to be written. Only before the first real frame exists is there
+            // nothing to repeat, and then a real composite is the answer.
+            if (!haveReal) {
+                final boolean drawn = synthesized > 0
+                    ? frameSynthesizer.presentSynthesized(synthesized) || frameSynthesizer.repeatLastPresent()
+                    : frameSynthesizer.repeatLastPresent();
+                if (drawn) {
+                    if (listener != null) listener.onFrameEnd();
+                    return;
                 }
-                if (listener != null) listener.onFrameEnd();
-                return;
             }
             if (frameSynthesizer.beginRealFrame()) {
                 drawFrame();
@@ -546,12 +554,29 @@ public class GLRenderer implements GLSurfaceView.Renderer, WindowManager.OnWindo
 
     @Override
     public void onUpdateWindowAttributes(Window window, Bitmask mask) {
-        if (mask.isSet(WindowAttributes.FLAG_CURSOR)) xServerView.requestRender();
+        if (mask.isSet(WindowAttributes.FLAG_CURSOR)) xServerView.requestRenderCursor();
     }
 
+    /**
+     * VESSEL: a pointer move redraws the cursor and nothing else.
+     *
+     * <p>It went through the same {@code requestRender} as guest damage, and
+     * so through the same frame limiter, consuming the guest's budget: a mouse
+     * event a few milliseconds before a real frame pushed that frame out by
+     * most of a limit interval, once per event, which during mouse-look is
+     * every frame. It goes through {@link XServerView#requestRenderCursor}
+     * now, which has its own clock. And a game that has hidden its cursor gets
+     * no draw at all, because nothing on screen would change.
+     */
     @Override
     public void onPointerMove(short x, short y) {
-        xServerView.requestRender();
+        if (!cursorVisible) return;
+        // Unlocked read of a reference and a flag: a stale answer costs one
+        // cursor repaint too many or too few, and the next event corrects it.
+        final Window pointWindow = xServer.inputDeviceManager.getPointWindow();
+        final Cursor cursor = pointWindow != null ? pointWindow.attributes.getCursor() : null;
+        if (cursor != null && !cursor.isVisible()) return;
+        xServerView.requestRenderCursor();
     }
 
     private void renderCursorDrawable(Drawable drawable, int x, int y) {

@@ -2884,6 +2884,29 @@ private class PacedXServerView(
     override fun requestRenderUnpaced() = renderNow()
 
     /**
+     * A cursor repaint, throttled on its own clock so it never delays a guest
+     * frame. At most 60 a second, and never faster than the limit: with frame
+     * generation on a repaint is a cheap re-present of the last frame, without
+     * it a full composite, and either way the mouse is the only thing moving.
+     * Dropped rather than deferred: the next move, or the next frame, shows the
+     * cursor where it is.
+     */
+    override fun requestRenderCursor() {
+        if (minFrameNanos == 0L) {
+            super.requestRender()
+            return
+        }
+        val spacing = minOf(minFrameNanos, NANOS_PER_SECOND / 60)
+        val now = System.nanoTime()
+        if (now - lastCursorNanos < spacing) return
+        lastCursorNanos = now
+        renderNow()
+    }
+
+    @Volatile
+    private var lastCursorNanos = 0L
+
+    /**
      * Widen the hint session to a guest process, when one is known.
      *
      * Called from whatever notices the desktop window and its `_NET_WM_PID` —

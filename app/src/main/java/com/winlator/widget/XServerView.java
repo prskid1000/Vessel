@@ -48,4 +48,15 @@ public class XServerView extends GLSurfaceView {
     public void requestRenderUnpaced() {
         requestRender();
     }
+
+    /**
+     * VESSEL: draw because the cursor moved, on a clock of its own.
+     *
+     * <p>Not the guest's clock: a cursor repaint that consumed the frame
+     * limiter's budget delayed the next real frame by up to a limit interval.
+     * The paced subclass throttles this separately; here it is a plain draw.
+     */
+    public void requestRenderCursor() {
+        requestRender();
+    }
 }
