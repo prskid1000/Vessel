@@ -5,6 +5,13 @@ cmake_minimum_required(VERSION 3.22.1)
 # toolchain for them.
 project(vessel_native C CXX)
 
+# 16 KB page alignment for every LOAD segment. Android 15+ can run with 16 KB
+# pages and Android 17 flags a debuggable app whose libraries are 4 KB-aligned
+# at launch. NDK r27 does not set this by default; r28 does. Set here, once,
+# so no subdirectory can forget it.
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+
 # libwinlator: the JNI half of the vendored X server.
 add_subdirectory(winlator)
 
