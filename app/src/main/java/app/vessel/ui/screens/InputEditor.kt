@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -418,7 +419,39 @@ fun InputEditor(
         if (hidden >= 0) collapsed = emptySet()
     }
 
-    val selected = entries.rowByKey(state.selected)
+    // **Tapping a control showed nothing, and the fold was not the reason.**
+    //
+    // The caption above the list promises "tap a control -- on the map, or in
+    // the list below -- to name it, change what it sends, or take it off the
+    // glass", and tapping one appeared to do nothing at all. What it actually
+    // did was select a control whose settings panel could not find it: `row` is
+    // looked up in `entries`, and `entries` holds only the rows of *unfolded*
+    // groups. Both groups start folded, so the lookup missed, and the panel drew
+    // its own empty state -- that very caption -- while the control sat there
+    // highlighted on the map.
+    //
+    // Auto-opening the fold would have hidden that rather than fixed it, and it
+    // would have moved a list the user had folded on purpose. The lookup below
+    // reads every row instead, so the panel works with the folds left exactly
+    // as they were.
+    //
+    // What is left is reachability: the panel lives directly under the map, so a
+    // tap on the map needs no scroll at all, while a tap on a row far down the
+    // list would put the answer off the top of the screen -- the same "nothing
+    // happened" from the other end. So bring the panel into view, and only when
+    // it is not already there, which leaves a map tap perfectly still.
+    LaunchedEffect(state.selected, learn) {
+        if (learn || state.selected == null) return@LaunchedEffect
+        if (listState.layoutInfo.visibleItemsInfo.none { it.index == SELECTED_ITEM }) {
+            listState.animateScrollToItem(SELECTED_ITEM)
+        }
+    }
+
+    // Every row, not `entries` -- see the effect above. A folded group must not
+    // be able to make a selected control unfindable.
+    val selected = remember(profile, state.selected) {
+        controlEntries(profile).rowByKey(state.selected)
+    }
     val target = picking?.let { pick ->
         entries.rowByKey(pick.row)?.let { row ->
             row.slots.firstOrNull { it.name == pick.slot }?.let { row to it }
@@ -515,6 +548,9 @@ fun InputEditor(
  */
 private const val LEADING_ITEMS = 2
 
+/** The settings panel's own index: it is the second of the [LEADING_ITEMS]. */
+private const val SELECTED_ITEM = 1
+
 private val LIST_PADDING = PaddingValues(bottom = 22.dp)
 
 // — the map ----------------------------------------------------------------------
@@ -608,13 +644,14 @@ private fun TouchOverlayPreview(
                         if (control.kind == TouchKind.DPAD) {
                             Modifier
                         } else {
+                            val shape = if (control.round) Vessel.metrics.shapePill else SQUARE
                             Modifier
-                                .clip(if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeMd)
+                                .clip(shape)
                                 .background(Vessel.colors.surfaceFloating)
                                 .border(
                                     if (isSelected) 2.dp else Vessel.metrics.hairline,
                                     if (isSelected) Vessel.colors.accent else Vessel.colors.accent700,
-                                    if (control.round) Vessel.metrics.shapePill else Vessel.metrics.shapeMd,
+                                    shape,
                                 )
                         },
                     )
@@ -623,7 +660,14 @@ private fun TouchOverlayPreview(
                     // do what a tap on a row does: choose the control you want.
                     // Arranging is a button of its own, because it is a different
                     // intent and deserved more than "you touched the card".
-                    .clickable(onClickLabel = control.title) { onSelect(control.id) },
+                    // **A second tap lets go.** Selecting is the only way this
+                    // screen focuses a control, so it had to be the way out of
+                    // one too -- otherwise the panel keeps answering about a
+                    // control you have finished with and there is nowhere to
+                    // tap to dismiss it.
+                    .clickable(onClickLabel = control.title) {
+                        onSelect(if (isSelected) null else control.id)
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 if (control.kind == TouchKind.DPAD) {
@@ -905,20 +949,27 @@ private fun padRow(profile: InputProfile, control: GamepadControl): ControlEntry
         slots = listOf(Slot(SLOT_SENDS, action, control)),
         sends = X11KeyCatalog.label(action),
         bound = action != GamepadAction.None,
-        round = control !in DPAD_CONTROLS,
+        round = !TouchControls.isDpadDirection(control),
         speaksFor = setOf(control),
     )
 }
 
-/** The selection key of a control that is only on the pad. See [InputEditorState.selected]. */
-private fun padRowKey(control: GamepadControl): String = "pad:${control.name}"
+/**
+ * The corner a square control gets *in this diagram*.
+ *
+ * **A proportion, where the overlay itself uses a fixed 8 dp.** The two agree on
+ * a real screen -- 8 dp on a d-pad arm 39 dp across is a fifth of it -- but this
+ * map is the same layout drawn a third of the size, and 8 dp of corner on a
+ * 16 dp box is not a rounded square, it is a circle. The whole point of the map
+ * is that it is a picture of the overlay, so the corner scales with it like
+ * everything else here does.
+ */
+private val SQUARE = RoundedCornerShape(percent = 20)
 
-private val DPAD_CONTROLS = setOf(
-    GamepadControl.DPAD_UP,
-    GamepadControl.DPAD_DOWN,
-    GamepadControl.DPAD_LEFT,
-    GamepadControl.DPAD_RIGHT,
-)
+/** The selection key of a control that is only on the pad. See [InputEditorState.selected]. */
+private fun padRowKey(control: GamepadControl): String = "$PAD_KEY_PREFIX${control.name}"
+
+private const val PAD_KEY_PREFIX = "pad:"
 
 private fun stickNote(stick: Stick, role: StickRole): String {
     val which = if (stick == Stick.LEFT) "The left stick" else "The right stick"
@@ -981,7 +1032,9 @@ private fun LazyListScope.controlItems(
                 selected = entry.key == state.selected,
                 lit = entry.speaksFor.any { it in lit },
                 shortEdge = shortEdge,
-                onClick = { actions.onSelect(entry.key) },
+                onClick = {
+                    actions.onSelect(entry.key.takeUnless { it == state.selected })
+                },
                 onGlass = glassSwitch(profile, entry, actions),
             )
 
@@ -1605,9 +1658,14 @@ private val KINDS = listOf(
         TouchKind.STICK,
         taken = { layout -> Stick.entries.all { side -> layout.stickTaken(side) } },
     ),
+    // **Still here, though the stock layout no longer uses one.** The built-in
+    // controller draws its d-pad as four separate buttons now, which is what
+    // makes each direction its own control -- and gives up the one thing a
+    // joined cross can do that four buttons cannot: reach a diagonal under a
+    // single thumb. This is where that comes back for anyone who wants it.
     AddableKind(
         "D-pad",
-        "four directions, two at once",
+        "four directions under one thumb, diagonals included",
         TouchKind.DPAD,
         taken = { layout -> layout.controls.any { it.kind == TouchKind.DPAD } },
     ),

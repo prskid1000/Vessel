@@ -118,23 +118,50 @@ class TouchControlTranslator(
         rightY = lookY,
         hatX = hatX,
         hatY = hatY,
-        // **The binding first, then the identity.** A control bound to
-        // `GamepadAction.Pad` says outright which control it sends, and that has
-        // to win: it is how the glass `A` is made to send `B`. Identity is the
-        // fallback for a control that carries a pad control but no explicit
-        // binding, which is every layout written before the binding existed.
+        // **The binding first, then the identity -- and a binding of any kind
+        // counts as a binding.** A control bound to `GamepadAction.Pad` says
+        // outright which control it sends, and that wins: it is how the glass
+        // `A` is made to send `B`. A control bound to a *key* has said something
+        // just as explicit -- that it speaks on the X11 seam -- so it must not
+        // also press the pad control it happens to be. Identity is the fallback
+        // for a control that carries a pad control and is bound to nothing,
+        // which is every layout written before the binding existed.
         //
-        // Note this is deliberately *not* keyed on the action for the other
-        // kinds: two controls bound to the same key are one key and two
-        // different pad buttons. A finger on a control that is neither bound to
-        // a pad control nor is one contributes nothing here, which is what keeps
-        // a hand-built keyboard layout out of the guest's gamepad.
-        // Latched ids as well as fingers: a latched button is held as far as
-        // the guest is concerned, and the finger that latched it is long gone.
+        // This read `?: control.pad` for every non-`Pad` action, so a key
+        // binding fell through to the identity and the control sent both. On
+        // `KeyboardAndMouse` -- the profile that exists precisely for a guest
+        // with no pad -- every glass button sent its key *and* pressed itself on
+        // a gamepad, so a game reading both walked twice as far. That is the
+        // failure `GamepadProfile.Default` names in as many words as the reason
+        // it does not fall back to keys.
+        //
+        // Two controls bound to the same key are still one key and two different
+        // pad buttons, which is why this is keyed on the action's kind rather
+        // than on the action itself. A finger on a control that is neither bound
+        // to a pad control nor is one contributes nothing, which is what keeps a
+        // hand-built keyboard layout out of the guest's gamepad.
+        //
+        // Latched ids as well as fingers: a latched button is held as far as the
+        // guest is concerned, and the finger that latched it is long gone.
+        //
+        // **A d-pad is skipped outright, whatever its [TouchControl.pad] says.**
+        // That field is the cross's *identity* -- one link field for a control
+        // with four directions, which is why [TouchControl.title] refuses to
+        // borrow it for a name -- and the built-in layout filled it with
+        // `DPAD_UP`. Read as a press it made every direction also report up: a
+        // finger anywhere on the cross put `DPAD_UP` in here, and the merge
+        // then added the real direction from [hatX]/[hatY] on top of it. The
+        // deflection is the whole answer for a cross, so it is the only one.
         pressed = (fingers.values + latched)
             .mapNotNull { id ->
                 val control = layout.byId(id) ?: return@mapNotNull null
-                (control.action as? GamepadAction.Pad)?.control ?: control.pad
+                if (control.kind == TouchKind.DPAD) return@mapNotNull null
+                when (val action = control.action) {
+                    is GamepadAction.Pad -> action.control
+                    GamepadAction.None -> control.pad
+                    // A key or a pointer button. It has somewhere else to be.
+                    is GamepadAction.Key, is GamepadAction.Button -> null
+                }
             }
             .toSet(),
     )

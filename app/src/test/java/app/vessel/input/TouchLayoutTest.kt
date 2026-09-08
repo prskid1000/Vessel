@@ -1,10 +1,13 @@
 package app.vessel.input
 
 
+import kotlin.math.max
+import kotlin.math.min
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -150,6 +153,75 @@ class TouchLayoutTest {
         }
     }
 
+    /**
+     * No two controls on a stock layout may share a pixel, on any screen it can
+     * be shown at.
+     *
+     * **Overlap is not a cosmetic fault, it is a misroute.** [TouchLayout.hitTest]
+     * answers with the *last declared* control, so a finger in the overlap gets
+     * whichever one happens to be later in the list -- silently, and only on the
+     * screens where the shapes happen to collide.
+     *
+     * Which is the trap this layout is built over: [TouchControl.size] is a
+     * fraction of the *short* edge and [TouchControl.cx] a fraction of the
+     * *width*, so every horizontal gap in it narrows as a screen gets squarer
+     * while the controls themselves do not. A cluster spaced by eye on a 2.2:1
+     * phone can collide on a 16:10 tablet. The d-pad's four arms are the
+     * tightest cluster here and the reason this test exists.
+     *
+     * Asked of [TouchControl.contains] rather than of the radii, because that is
+     * the function the router actually routes on -- a circle and a square are
+     * different questions and only one of them is the promise the drawing made.
+     * Sampled over the box where two controls could possibly meet, which is a
+     * few hundred points per pair and exact to the step.
+     */
+    @Test
+    fun `every stock layout is unambiguous under a finger`() {
+        // 16:10 is the squarest landscape this runs on; 2.4:1 the widest phone.
+        val screens = listOf(1600f to 1000f, 1920f to 1080f, 2400f to 1080f, 2880f to 1200f)
+        TouchLayouts.stock.forEach { stock ->
+            screens.forEach { (w, h) ->
+                stock.layout.controls.forEachIndexed { i, a ->
+                    stock.layout.controls.drop(i + 1).forEach { b ->
+                        sharedPoint(a, b, w, h)?.let { (x, y) ->
+                            fail(
+                                "${stock.name}: ${a.id} and ${b.id} both take " +
+                                    "(${x.toInt()}, ${y.toInt()}) on ${w.toInt()}x${h.toInt()} " +
+                                    "-- ${b.id} is declared later, so it wins that touch",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** A point both controls answer [TouchControl.contains] for, or null. */
+    private fun sharedPoint(
+        a: TouchControl,
+        b: TouchControl,
+        w: Float,
+        h: Float,
+        step: Float = 2f,
+    ): Pair<Float, Float>? {
+        val ra = a.radiusPx(w, h)
+        val rb = b.radiusPx(w, h)
+        val x0 = max(a.centreX(w) - ra, b.centreX(w) - rb)
+        val x1 = min(a.centreX(w) + ra, b.centreX(w) + rb)
+        val y0 = max(a.centreY(h) - ra, b.centreY(h) - rb)
+        val y1 = min(a.centreY(h) + ra, b.centreY(h) + rb)
+        var x = x0
+        while (x <= x1) {
+            var y = y0
+            while (y <= y1) {
+                if (a.contains(x, y, w, h) && b.contains(x, y, w, h)) return x to y
+                y += step
+            }
+            x += step
+        }
+        return null
+    }
+
     /** Nothing on a stock layout may sit off the screen it is laid out against. */
     @Test
     fun `every stock control is wholly on a landscape screen`() {
@@ -192,7 +264,14 @@ class TouchLayoutTest {
         val stored = InputProfile.Default.touch
         assertFalse(stored.isEmpty)
         assertTrue("both sticks", stored.controls.count { it.padStick != null } == 2)
-        assertTrue("a d-pad", stored.controls.any { it.kind == TouchKind.DPAD })
+        assertTrue(
+            "four separate d-pad directions",
+            stored.controls.mapNotNull { it.pad }.containsAll(TouchControls.DPAD_DIRECTIONS),
+        )
+        assertTrue(
+            "and no joined cross among them",
+            stored.controls.none { it.kind == TouchKind.DPAD },
+        )
         assertTrue(
             "every control is a pad control",
             stored.controls.all { it.pad != null || it.padStick != null },
@@ -307,17 +386,48 @@ class TouchLayoutTest {
         assertEquals(GamepadControl.entries.toSet(), spoken.toSet())
     }
 
-    /** A stick speaks for four half-axes and a d-pad for four directions. */
+    /**
+     * A stick speaks for four half-axes; a d-pad direction speaks for itself.
+     *
+     * **The second half is the point of splitting the cross.** One control that
+     * spoke for four is how a single `pad` field came to mean "this is the
+     * d-pad" rather than "this sends up", and how `padSnapshot` came to send up
+     * for every direction. Four controls that each speak for one leave nothing
+     * to interpret -- the identity a direction carries *is* the direction it
+     * sends, and its name says so too.
+     */
     @Test
-    fun `a stick and a d-pad each speak for four`() {
+    fun `a stick speaks for four, and each d-pad direction for itself`() {
         val stored = InputProfile.Default.touch
         assertEquals(
             Stick.LEFT.halfAxes.toSet(),
             stored.controls.first { it.padStick == Stick.LEFT }.padControls,
         )
-        assertEquals(4, stored.controls.first { it.kind == TouchKind.DPAD }.padControls.size)
-        // And it is called after its shape, not after the one direction it names.
-        assertEquals("D-pad", stored.controls.first { it.kind == TouchKind.DPAD }.title)
+        TouchControls.DPAD_DIRECTIONS.forEach { direction ->
+            val control = stored.controls.single { it.pad == direction }
+            assertEquals(setOf(direction), control.padControls)
+            assertEquals(direction.padLabel(), control.title)
+            assertFalse("$direction is drawn square", control.round)
+        }
+    }
+
+    /**
+     * A joined cross is still a control the model has -- the Installer's arrow
+     * pad is one, and the editor still offers one, because a diagonal under a
+     * single thumb is the one thing four buttons cannot do.
+     */
+    @Test
+    fun `a cross still speaks for all four`() {
+        val cross = TouchControl(
+            id = "dpad",
+            kind = TouchKind.DPAD,
+            cx = 0.5f,
+            cy = 0.5f,
+            size = 0.12f,
+            pad = GamepadControl.DPAD_UP,
+        )
+        assertEquals(TouchControls.DPAD_DIRECTIONS, cross.padControls)
+        assertEquals("D-pad", cross.title)
     }
 
     /**
@@ -352,9 +462,13 @@ class TouchLayoutTest {
         assertEquals(Stick.RIGHT, stick.padStick)
         assertEquals(TouchKind.STICK, stick.kind)
 
+        // A direction off the pad list is that direction, not a cross that
+        // swallows the other three and leaves them nowhere to be placed.
         val dpad = TouchEdit.placedPad(TouchLayout(), GamepadControl.DPAD_LEFT)
-        assertEquals(TouchKind.DPAD, dpad.kind)
-        assertEquals(4, dpad.padControls.size)
+        assertEquals(TouchKind.BUTTON, dpad.kind)
+        assertEquals(GamepadControl.DPAD_LEFT, dpad.pad)
+        assertEquals(setOf(GamepadControl.DPAD_LEFT), dpad.padControls)
+        assertEquals("D-pad left", dpad.title)
 
         // And what it borrows is the profile's answer, resolved on the way out.
         val profile = InputProfile.Default.copy(touch = TouchLayout(listOf(placed)))

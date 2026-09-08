@@ -147,29 +147,24 @@ object TouchEdit {
      * The control a pad row becomes when it is put on the glass.
      *
      * The link, not a copy of the binding: what it sends stays the pad table's
-     * answer, resolved by [InputProfile.overlay]. A d-pad and a stick each name
-     * one of the four controls they speak for, because the model has one field
-     * and a cross is one control with four bindings.
+     * answer, resolved by [InputProfile.overlay]. A stick names one of the four
+     * half-axes it speaks for, because the model has one field and a ring is one
+     * control with four bindings.
+     *
+     * **A d-pad direction is a button, and only that direction.** It used to
+     * come back as a whole `DPAD` cross: asking for `D-pad left` off the pad
+     * list handed you a control that claimed all four directions, so the other
+     * three vanished from the list as already-placed and there was no way to put
+     * one of them somewhere else. A row asks for the control it names.
      */
     fun placedPad(layout: TouchLayout, control: GamepadControl): TouchControl {
         val stick = Stick.entries.firstOrNull { control in it.halfAxes }
-        val kind = when {
-            stick != null -> TouchKind.STICK
-            control in DPAD -> TouchKind.DPAD
-            else -> TouchKind.BUTTON
-        }
+        val kind = if (stick != null) TouchKind.STICK else TouchKind.BUTTON
         return placed(layout, kind, name = "").copy(
             pad = if (stick == null) control else null,
             padStick = stick,
         )
     }
-
-    private val DPAD = setOf(
-        GamepadControl.DPAD_UP,
-        GamepadControl.DPAD_DOWN,
-        GamepadControl.DPAD_LEFT,
-        GamepadControl.DPAD_RIGHT,
-    )
 
     private fun near(control: TouchControl, cx: Float, cy: Float): Boolean =
         kotlin.math.abs(control.cx - cx) < STEP && kotlin.math.abs(control.cy - cy) < STEP

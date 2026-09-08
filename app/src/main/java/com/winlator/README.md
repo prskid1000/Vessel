@@ -861,6 +861,78 @@ The modifications, in the order they were made:
    blind to which artefacts; the one to distrust first is any mean over the
    frame.
 
+### Every file that differs from upstream
+
+This table is the machine-checkable form of the list above — `LicensingTest`
+compares it against a grep for `VESSEL:`, so adding a marked file without adding
+a row here, or removing the last marker from a file without removing its row,
+fails the build.
+
+`FieldProbeMaterial` and `SignMaterial` are not in it because `691edf6` deleted them along with the passes they ran; that same commit removed this
+table by accident while rewriting item 31 above, which is the failure the
+test is here to catch and did.
+
+| File | Items |
+|---|---|
+| `app/src/main/java/com/winlator/core/AppUtils.java` | 11 |
+| `app/src/main/java/com/winlator/core/ArrayUtils.java` | 11 |
+| `app/src/main/java/com/winlator/core/FileUtils.java` | 7, 11 |
+| `app/src/main/java/com/winlator/core/ImageUtils.java` | 11 |
+| `app/src/main/java/com/winlator/core/StringUtils.java` | 11 |
+| `app/src/main/java/com/winlator/inputcontrols/ExternalController.java` | 11 |
+| `app/src/main/java/com/winlator/renderer/GLRenderer.java` | 5, 13, 14, 22, 31 |
+| `app/src/main/java/com/winlator/renderer/FramePacer.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/FrameSynthesizer.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/FrameTimestamps.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/GpuTimer.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/RenderableWindow.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/Texture.java` | 13, 26 |
+| `app/src/main/java/com/winlator/renderer/VertexAttribute.java` | 13 |
+| `app/src/main/java/com/winlator/renderer/material/ConfidenceMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/material/DownsampleLumaMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/material/InterpolateMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/material/MedianMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/material/MergeFieldMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
+| `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
+| `app/src/main/java/com/winlator/renderer/material/WarpLumaMaterial.java` | 31 |
+| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
+| `app/src/main/java/com/winlator/widget/XServerView.java` | 31 |
+| `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
+| `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
+| `app/src/main/java/com/winlator/xserver/ClientOpcodes.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/ClipboardSelection.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28, 29 |
+| `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/SelectionManager.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21, 30 |
+| `app/src/main/java/com/winlator/xserver/XClient.java` | 24 |
+| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30 |
+| `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
+| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24 |
+| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30 |
+| `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
+| `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/events/SelectionNotify.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/events/SelectionRequest.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/requests/SelectionRequests.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/requests/WindowRequests.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
+| `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28, 29 |
+| `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
+| `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23, 28 |
+| `app/src/main/cpp/winlator/include/copy_pool.h` | 28 |
+| `app/src/main/cpp/winlator/src/copy_pool.c` | 28 |
+| `app/src/main/cpp/winlator/src/drawable.c` | 28 |
+| `app/src/main/cpp/winlator/src/frame_extrapolation.c` | 31 |
+| `app/src/main/cpp/winlator/src/frame_timestamps.c` | 31 |
+| `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
+| `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
+| `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |
+
 ## Integration points
 
 Nothing in this tree starts itself. The session layer owns the lifecycle; this

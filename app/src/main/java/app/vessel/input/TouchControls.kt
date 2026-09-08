@@ -154,8 +154,22 @@ data class TouchControl(
         return if (round) dx * dx + dy * dy <= r * r else abs(dx) <= r && abs(dy) <= r
     }
 
-    /** Round, except a d-pad, which is a cross drawn inside a square. */
-    val round: Boolean get() = kind != TouchKind.DPAD
+    /**
+     * Round, except a d-pad and the four directions it is made of.
+     *
+     * **A direction placed on its own is a square, because it is an arm of a
+     * cross rather than a button.** That is the shape the Pad tab's own diagram
+     * already gives the four -- it has drawn them square since it was written,
+     * see the editor's `padRow` -- and the glass disagreeing with the diagram
+     * two taps away is the thing the whole "one table seen twice" posture
+     * exists to prevent.
+     *
+     * The shape follows the *identity*, not a field of its own: a control that
+     * is `D-pad up` looks like `D-pad up` wherever it is drawn, and there is no
+     * second setting to be dragged out of agreement with the first.
+     */
+    val round: Boolean
+        get() = kind != TouchKind.DPAD && !TouchControls.isDpadDirection(pad)
 
     /**
      * What this control is called in a list: the design's four kinds, out of the
@@ -185,12 +199,7 @@ data class TouchControl(
             padStick?.let { return it.halfAxes.toSet() }
             val linked = pad ?: return emptySet()
             if (kind != TouchKind.DPAD) return setOf(linked)
-            return setOf(
-                GamepadControl.DPAD_UP,
-                GamepadControl.DPAD_DOWN,
-                GamepadControl.DPAD_LEFT,
-                GamepadControl.DPAD_RIGHT,
-            )
+            return TouchControls.DPAD_DIRECTIONS
         }
 
     /**
@@ -348,9 +357,16 @@ fun GamepadControl.padGlyph(): String = when (this) {
     GamepadControl.START -> "STA"
     GamepadControl.THUMB_L -> "L3"
     GamepadControl.THUMB_R -> "R3"
-    GamepadControl.DPAD_UP, GamepadControl.DPAD_DOWN,
-    GamepadControl.DPAD_LEFT, GamepadControl.DPAD_RIGHT,
-    -> ""
+    // **Arrows, now that a direction can be a control of its own.** These read
+    // as "" for as long as the only thing wearing them was a whole cross, which
+    // says everything with its silhouette and needs no word -- and still wears
+    // nothing, because [TouchControl.face] answers "" for a `DPAD` before it
+    // ever asks here. Four separate squares are not a silhouette, so they say
+    // which way they go.
+    GamepadControl.DPAD_UP -> "↑"
+    GamepadControl.DPAD_DOWN -> "↓"
+    GamepadControl.DPAD_LEFT -> "←"
+    GamepadControl.DPAD_RIGHT -> "→"
 
     else -> name
 }
@@ -372,6 +388,27 @@ fun GamepadControl.padLabel(): String = when (this) {
 
 /** The numbers the overlay is allowed to take, and what a fresh control gets. */
 object TouchControls {
+    /**
+     * The four directions a d-pad is made of.
+     *
+     * **One copy.** There were three -- an inline `setOf` in
+     * [TouchControl.padControls], `TouchEdit.DPAD` and the editor's
+     * `DPAD_CONTROLS` -- and this change wanted a fourth, for the shape. Four
+     * copies of a four-element set is four chances for them to disagree about
+     * what a d-pad is, which is exactly the kind of drift that made a cross
+     * report `DPAD_UP` for every direction in the first place.
+     */
+    val DPAD_DIRECTIONS: Set<GamepadControl> = setOf(
+        GamepadControl.DPAD_UP,
+        GamepadControl.DPAD_DOWN,
+        GamepadControl.DPAD_LEFT,
+        GamepadControl.DPAD_RIGHT,
+    )
+
+    /** Null-tolerant, because [TouchControl.pad] is absent on a control nobody linked. */
+    fun isDpadDirection(control: GamepadControl?): Boolean =
+        control != null && control in DPAD_DIRECTIONS
+
     /** Radius as a fraction of the shorter edge. 0.04 of 421 dp is a 34 dp target. */
     const val MIN_SIZE: Float = 0.04f
     const val MAX_SIZE: Float = 0.20f
@@ -473,7 +510,13 @@ object TouchLayouts {
                 role = StickRole.Look,
             ),
             button("fire", 0.70f, 0.86f, 0.066f, GamepadAction.Key(X11.SPACE)),
-            button("use", 0.79f, 0.74f, 0.061f, GamepadAction.Key(X11.E)),
+            // 0.77 rather than the comp's 0.74. The comp is drawn at 927x421 --
+            // 2.2:1 -- where `use` clears the look pad with room to spare; the
+            // gap closes as a screen squares up, because a radius is a fraction
+            // of the short edge and `cx` a fraction of the width, and at 16:10
+            // the two circles crossed. `use` is declared later, so a thumb on
+            // the lower-left of the look pad sent `E` instead of looking.
+            button("use", 0.79f, 0.77f, 0.061f, GamepadAction.Key(X11.E)),
             button("sprint", 0.61f, 0.93f, 0.061f, GamepadAction.Key(X11.SHIFT_L)),
             button("menu", 0.96f, 0.08f, 0.055f, GamepadAction.Key(X11.ESC)),
         ),
@@ -547,20 +590,48 @@ object TouchLayouts {
             stick("stick-l", Stick.LEFT, 0.150f, 0.72f, 0.120f),
             stick("stick-r", Stick.RIGHT, 0.850f, 0.72f, 0.120f),
 
-            // **The same radius as a stick, which is what a real pad has.** It
-            // was 0.085 and read as a small thing to aim four directions with:
-            // the arms were 44 px of glass on this panel and a thumb covers more
-            // than that. At 0.120 it matches `stick-l` exactly, which is both the
-            // proportion the hardware has and the one the eye expects from the
-            // pair sitting one above the other.
-            TouchControl(
-                id = "dpad",
-                kind = TouchKind.DPAD,
-                cx = 0.115f,
-                cy = 0.40f,
-                size = 0.120f,
-                pad = GamepadControl.DPAD_UP,
-            ),
+            // **Four buttons, not one cross, and each one is its own control.**
+            //
+            // A cross is a single control with four directions, and the model
+            // has one `pad` field to link it with -- so the stock cross carried
+            // `DPAD_UP` as its *identity* and every consumer had to know that
+            // the field named the shape rather than a direction. One did not:
+            // `padSnapshot` read it as a press, so every direction also sent up.
+            // That is fixed, but the shape is what made the mistake available.
+            //
+            // Split, each direction carries the direction it actually sends,
+            // there is nothing left to misread, and the editor lists four rows a
+            // user can bind and move one at a time instead of one row that
+            // silently spoke for four.
+            //
+            // **The cost, stated plainly: one thumb no longer goes diagonal.** A
+            // cross is one hit area, so a thumb in its corner deflected both
+            // axes at once; four hit areas take one finger each, and up-and-right
+            // now needs two. A `D-pad` is still in the editor's Add list for
+            // anyone who wants the old behaviour back on a layout of their own.
+            //
+            // The geometry keeps the cluster about the size a thumb had learned:
+            // arms of 0.042 offset by 0.108 span 0.150 of the short edge against
+            // the old cross's 0.120, and the 0.024 left between adjacent arms is
+            // the gap that says "four things" rather than "one cross" at a
+            // glance. Horizontal offsets are halved because `cx` is a fraction
+            // of the *width* and `cy` of the *height* -- the 2:1 the face
+            // diamond above is already drawn for.
+            //
+            // **The one number that is a constraint rather than a taste.** That
+            // same split means the horizontal gap closes as a screen gets
+            // squarer: `size` is a fraction of the short edge, so at an aspect
+            // ratio R the arms are 2 x 0.042 apart in short-edge units but only
+            // 0.054 x R. They meet at R = 1.56 and would *overlap* below it --
+            // and overlapping controls do not merely look wrong, they misroute,
+            // because `hitTest` hands the touch to whichever was declared last.
+            // 0.054 keeps them apart through 16:10, which is the squarest
+            // landscape this runs on. `every stock layout is unambiguous under a
+            // finger` is the test that holds it there.
+            padButton("dpad-up", GamepadControl.DPAD_UP, 0.115f, 0.292f, 0.042f),
+            padButton("dpad-down", GamepadControl.DPAD_DOWN, 0.115f, 0.508f, 0.042f),
+            padButton("dpad-left", GamepadControl.DPAD_LEFT, 0.061f, 0.400f, 0.042f),
+            padButton("dpad-right", GamepadControl.DPAD_RIGHT, 0.169f, 0.400f, 0.042f),
 
             // The face diamond, in the arrangement the Pad tab draws it, above
             // the right thumb exactly as the d-pad is above the left.
@@ -593,8 +664,16 @@ object TouchLayouts {
             // press a stick it is steering with, so the stick clicks are their
             // own small buttons inboard of each stick rather than a press on the
             // stick itself.
-            padButton("btn-l3", GamepadControl.THUMB_L, 0.245f, 0.72f, 0.040f, latching = true),
-            padButton("btn-r3", GamepadControl.THUMB_R, 0.755f, 0.72f, 0.040f, latching = true),
+            //
+            // 0.110 inboard rather than 0.095, which is the same short-edge-vs-
+            // width trap the d-pad's arms are spaced against. A stick and its
+            // click need 0.160 of the short edge between centres to clear each
+            // other; 0.095 of the width is only 0.152 of it at 16:10, so on a
+            // tablet the click's circle overlapped the stick's by 8 px -- and
+            // being declared second, it won those touches. The outer edge of the
+            // left stick pressed L3.
+            padButton("btn-l3", GamepadControl.THUMB_L, 0.260f, 0.72f, 0.040f, latching = true),
+            padButton("btn-r3", GamepadControl.THUMB_R, 0.740f, 0.72f, 0.040f, latching = true),
         ),
     )
 
