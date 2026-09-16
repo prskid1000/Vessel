@@ -861,6 +861,49 @@ The modifications, in the order they were made:
    blind to which artefacts; the one to distrust first is any mean over the
    frame.
 
+32. **The core drawing requests the X server never implemented, and the default
+   that took the connection down.** A request this server does not implement
+   used to `throw new UnsupportedOperationException`. That is a
+   `RuntimeException` and not an `XRequestError`, so it missed the handler's
+   `catch` entirely: no protocol error was ever written, the request loop
+   unwound, and `XConnectorEpoll` closed the client. One unimplemented request
+   ended the display.
+
+   **What that cost, measured on 2026-09-16.** Caribbean Legend - Age of Pirates
+   sent a single `PolyPoint` -- core opcode 64, an ordinary drawing request and
+   not an extension -- and died. The symptoms arrive in the wrong place and none
+   of them names the cause: Mesa's WSI sees `xcb_wait_for_special_event` return
+   NULL and reports `VK_ERROR_SURFACE_LOST_KHR`, DXVK tries to rebuild a
+   swapchain against a dead connection, and the process exits on `XIO: fatal IO
+   error 2` -- always `after 434 requests`, identically, five runs running. The
+   `PolyPoint` is roughly 800 log lines before any of that, next to whichever
+   plugin the game happened to be loading, which is why rotation, the AOT
+   compiler and VLC's visualisers all looked like the cause first and none was.
+
+   Two changes, because there are two faults. The default now raises
+   `BadImplementation` (X11 error code 17), which *is* an `XRequestError`: the
+   request is skipped, the error is written, the connection lives. A client that
+   asked for something unimplemented gets a failure for that request, which
+   applications are written to survive; losing the display is not.
+
+   And the drawing requests are implemented rather than merely answered.
+   `PolyPoint` had no case at all; `PolySegment` and `PolyRectangle` had one that
+   called `skipRequest()`, so they consumed the request and silently drew
+   nothing. All three draw now, and `PolyArc`, `FillPoly` and `PolyFillArc` with
+   them -- the last three on a scanline polygon filler and an arc walked as
+   short segments, both built from the `fillRect` and `drawLine` that `Drawable`
+   already had. `CopyPlane` is still consumed rather than drawn, and that one is
+   honest: it reads a single bit plane out of the source and needs the source's
+   pixels unpacked at the source's depth, which `Drawable` does not expose. The
+   depth-1 case applications actually reach for is already served by
+   `drawAlphaMaskedBitmap`.
+
+   **`PolyFillArc` closes its polygon through the centre**, a pie slice, because
+   `ArcPieSlice` is X11's default arc-mode and `GraphicsContext` carries no
+   arc-mode field to consult. A client that set `ArcChord` gets a pie: wrong in
+   the filled region near the centre, right everywhere else. Storing the mode on
+   the GC is the fix, and it is not done here.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -900,7 +943,7 @@ test is here to catch and did.
 | `app/src/main/java/com/winlator/widget/XServerView.java` | 31 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
-| `app/src/main/java/com/winlator/xserver/ClientOpcodes.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/ClientOpcodes.java` | 30, 32 |
 | `app/src/main/java/com/winlator/xserver/ClipboardSelection.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28, 29 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
@@ -911,11 +954,12 @@ test is here to catch and did.
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30 |
 | `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
 | `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24 |
-| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30 |
+| `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30, 32 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/events/SelectionNotify.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/events/SelectionRequest.java` | 30 |
+| `app/src/main/java/com/winlator/xserver/requests/DrawRequests.java` | 32 |
 | `app/src/main/java/com/winlator/xserver/requests/SelectionRequests.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/requests/WindowRequests.java` | 30 |
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |

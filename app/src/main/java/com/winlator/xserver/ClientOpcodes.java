@@ -43,10 +43,15 @@ public abstract class ClientOpcodes {
     public static final byte FREE_GC = 60;
     public static final byte CLEAR_AREA = 61;
     public static final byte COPY_AREA = 62;
+    public static final byte COPY_PLANE = 63;
+    public static final byte POLY_POINT = 64;
     public static final byte POLY_LINE = 65;
     public static final byte POLY_SEGMENT = 66;
     public static final byte POLY_RECTANGLE = 67;
+    public static final byte POLY_ARC = 68;
+    public static final byte FILL_POLY = 69;
     public static final byte POLY_FILL_RECTANGLE = 70;
+    public static final byte POLY_FILL_ARC = 71;
     public static final byte PUT_IMAGE = 72;
     public static final byte GET_IMAGE = 73;
     public static final byte CREATE_COLORMAP = 78;
