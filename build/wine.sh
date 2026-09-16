@@ -632,25 +632,35 @@ make -C "$BUILD" install-lib DESTDIR="$STAGE" || die "make install-lib failed"
 
 [ -d "$PAYLOAD" ] || die "make install-lib produced nothing under $PAYLOAD"
 
-# --- Wine's own addons, Mono and Gecko: not shipped -----------------------------
-# `make install-lib` does not include them, and nothing here puts them back.
+# --- Wine's own addons, Mono and Gecko: not shipped, and neither would load -----
+# `make install-lib` does not include them and nothing here puts them back.
 # `dlls/appwiz.cpl/addons.c` searches `$WINEDATADIR/<subdir>/` and
-# `$INSTALL_DATADIR/wine/<subdir>/`, finds neither, and offers to download —
-# which is the behaviour this build wants. Wine fetches Mono when a .NET binary
-# asks for it and Gecko when something embeds MSHTML, per prefix, on demand.
+# `$INSTALL_DATADIR/wine/<subdir>/`, finds neither, and offers to download. That
+# offer goes nowhere useful on this target, and the reason is the point:
 #
-# Measured, so the next person does not have to: bundling both took the package
-# from 66.3 to 249.6 MiB, mono alone to 146.1 MiB, and none of it compresses —
-# an .msi is a CAB already, so xz -9 took the mono payload from 85,504,000 to
-# 83,246,320 bytes, 2.6%. Against that cost, Gecko is the embedded MSHTML control
-# that engines replace with CEF, and Mono is .NET Framework only — no WPF,
-# nothing for .NET 5 and later, and Unity ships its own.
+#   - **Gecko has no ARM64 build.** dl.winehq.org publishes x86 and x86_64 only,
+#     and mshtml agrees -- GECKO_ARCH_STRING is defined for __i386__ and
+#     __x86_64__ and is the empty string otherwise, so load_gecko() returns at
+#     its first guard. Measured on the device: iexplore.exe logs "Failed to init
+#     Gecko" and control.exe is never spawned.
 #
-# If they ever need to ride along again, the right home is a component of their
+#   - **Mono has no ARM64 build either, and its x86-64 one cannot be loaded.**
+#     libmono-2.0-x86_64.dll is a plain AMD64 PE, and loader.c's
+#     call_dll_entry_point has no ARM64EC case, so its DllMain would be called
+#     with a direct branch and the CPU would decode x86-64 bytes as ARM64
+#     instructions. is_valid_binary() refuses the image before that happens,
+#     which is why .NET stops on a clean 0xc000007b. native/pins.env has the six
+#     attempts at fixing it and what each one proved.
+#
+# So bundling them would cost 183 MiB for two addons that could not run. Measured
+# before that was understood: both took the package from 66.3 to 249.6 MiB, mono
+# alone to 146.1 MiB, and none of it compresses -- an .msi is a CAB already, so
+# xz -9 took the mono payload from 85,504,000 to 83,246,320 bytes, 2.6%.
+#
+# If ARM64 builds of either ever appear, the right home is a component of its
 # own: the store is already keyed by type and version code, so a `WineMono`
 # component keeps the base small, makes the addon opt-in per container, and stops
-# a Mono update forcing a full Wine re-download. That is the same mechanism a real
-# .NET runtime would need anyway.
+# a Mono update forcing a full Wine re-download.
 
 # --- Ship the X11/FreeType runtime ----------------------------------------------
 # `make install-lib` installs Wine and nothing else, so without this the package
