@@ -31,6 +31,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       meson python3-mako python3-yaml python3-packaging \
       # Mesa codegen and shader tooling
       bison flex glslang-tools libarchive-tools gettext \
+      `# cabextract reads the cabinets Microsoft's Visual C++ redistributables` \
+      `# are made of. build/vcruntime.sh needs it and nothing else does: the` \
+      `# 2010 packages are IExpress SFXs and 2012 onward are WiX Burn bundles,` \
+      `# and both are a PE with cabinets appended rather than an archive any of` \
+      `# the tools above can open.` \
+      cabextract \
       # SPIR-V disassembler and assembler, for reading what dxil-spirv emitted.
       # `spirv-dis` turns a .spv into text and `spirv-as` turns it back, which is
       # the only way to inspect or edit a translated shader -- docs/TODO.md #56

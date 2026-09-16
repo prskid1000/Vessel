@@ -236,6 +236,56 @@ and distributed as a `.wcp` package. Obligations still apply to distribution.
 before linking". It has been verified, it is BSD-2-Clause, and it is no longer a
 component — it ships inside the APK and is recorded above.
 
+### VCRuntime is the one component that is not open source
+
+**Open question, and it is not the same shape as anything else on this page.**
+Every other component above is free software whose obligation is to preserve a
+notice or publish a patch. `vcruntime-*.wcp` is Microsoft's Visual C++
+redistributable runtime — proprietary binaries, unpacked verbatim from the
+official packages by `build/vcruntime.sh` and shipped inside the sideload APK as
+a bundled component.
+
+Microsoft's [redistributable download page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+states the condition in one line:
+
+> Redistribution is permitted only for licensed Visual Studio users, as
+> described in the Visual Studio license terms.
+
+So the right to ship these files is **attached to a Visual Studio licence held
+by whoever publishes the build**, not to the files or to this repository. That
+is a question about the publisher, and this document cannot answer it. What it
+can do is write down exactly what is being shipped so the answer is cheap to
+check:
+
+- 193 DLLs, x86 and x64 (`syswow64/` and `system32/`) plus an unused `arm64/`,
+  from the 2010, 2012, 2013 and 2015-2026 runtimes.
+- Unmodified. `build/vcruntime.sh` carves the cabinets out of Microsoft's own
+  installers and copies members out; nothing is rebuilt, patched or relinked,
+  and `native/pins.env` pins every installer by URL and sha256 so what went in
+  can be shown.
+- Only in the `sideload` flavour. The `play` build bundles no components at all.
+
+**Why the files are there rather than the installers.** Running Microsoft's
+installers inside the prefix would put the redistribution question back on the
+user's device, which is the cleaner answer legally and a much worse one
+practically: they are WoW64 processes driving MSI through the emulator and cost
+minutes per container against a file copy that is instant and works offline. The
+trade was made for the user's sake, and it is the trade that creates this
+question.
+
+**What would close it**, in rough order of preference: confirm the publisher
+holds a Visual Studio licence and record that here; or move the component to a
+separate download the user fetches, so the APK ships none of it; or drop the
+component and let a prerequisite installer run on the device, accepting the
+minutes. Until one of those happens this is a known gap, deliberately written
+down rather than left implicit. See item 11 in the checklist.
+
+The registry side is unaffected either way: `PrefixRegistry.vcRuntimes` seeds
+the keys a prerequisite checker reads, and keys are not Microsoft's binaries.
+Seeding them *without* the files is the one combination to avoid — the checker
+then passes and the loader fails anyway, which is what shipped before this
+component existed.
+
 ### The libraries inside the Wine package
 
 The Wine `.wcp` is not only Wine. `build/wine.sh` copies every shared library
@@ -347,6 +397,8 @@ packages rebuilt and a CI run, 10 is a judgement about a moving target.
 | 8 | Prominent notice, in the interface, that the app contains LGPL code | **Closed.** A permanent line at the foot of home naming the X server and its licence, opening `LicencesScreen`; five entries, each with its full text out of `res/raw`. libadrenotools' BSD-2-Clause notice is in the APK now too, which it had not been. Asserted three ways in `LicensingTest`. |
 | 9 | A source offer on the component release page | **Closed 2026-08-10.** DXVK and vkd3d rebuilt so their provenance names a source repository; the renderer covers all six published components with no `unknown`. Not yet published — the next component build carries it. See below. |
 | 10 | A `README` that is true on the day | **Closed 2026-08-10.** The graphics narrative was the last stale part and it is rewritten against measurements rather than removed: the KGSL dma-buf sentence that called itself "the single thing between here and a triangle" is gone with a note saying it outlived its subject, DXVK's row now says it runs a game, presentation carries the measured 0.546 ms DRI3 figure, the Wine patch count is 15, and `ipconfig` is recorded as verified. What replaces the false blocker is the true one: an 8-12 fps cutscene that neither compute, GPU, present nor panel refresh explains. |
+
+| 11 | The right to redistribute Microsoft's Visual C++ runtime | **Open.** `vcruntime-*.wcp` ships 193 unmodified proprietary DLLs inside the sideload APK. Microsoft permits redistribution "only for licensed Visual Studio users", which is a fact about the publisher rather than about the files, so this document cannot close it. Three ways out are written up above under *VCRuntime is the one component that is not open source*; the cheapest is to confirm the licence and record it here. Nothing else on this page has this shape -- every other component is free software. |
 
 ### 9, in detail: running the renderer is what found the hole
 
