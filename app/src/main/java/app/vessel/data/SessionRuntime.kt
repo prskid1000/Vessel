@@ -1528,6 +1528,9 @@ class SessionRuntime @Inject constructor(
         runCatching { linkWineFonts(container, layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "wine fonts: ${it.message}") }
 
+        runCatching { installVcRuntimes(container, layout, current.log) }
+            .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "vc runtimes: ${it.message}") }
+
         runCatching { ensureScriptsDirectory(layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: ${it.message}") }
 
@@ -2903,6 +2906,63 @@ class SessionRuntime @Inject constructor(
                 LogLevel.WARN,
                 "wine fonts: not in ${source.path}, so DirectWrite cannot see " +
                     "these: ${absent.joinToString(", ")}",
+            )
+        }
+    }
+
+    /**
+     * Copy VC++ Redistributable DLLs from the Wine component into the prefix.
+     *
+     * The Wine `.wcp` carries native VC++ runtime DLLs in `system32/` (ARM64 +
+     * x64) and `syswow64/` (x86). These are genuine Microsoft binaries staged
+     * into the `.wcp` payload at build time.
+     *
+     * Games (especially Unreal Engine titles) load these at startup through the
+     * normal DLL search order. The registry keys in [PrefixRegistry.vcRuntimes]
+     * satisfy the prerequisite *check*; these files satisfy the prerequisite
+     * *itself*.
+     */
+    private suspend fun installVcRuntimes(
+        containerId: String,
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val wine = components.directoryFor(containerId, ComponentType.WINE)
+            ?: components.directoryFor(containerId, ComponentType.PROTON)
+            ?: return@withContext
+
+        val windows = File(layout.prefix, DRIVE_C_WINDOWS)
+        val system32 = File(windows, SYSTEM32)
+        val syswow64 = File(windows, SYSWOW64)
+
+        var copied = 0
+        val src32Dir = File(wine, SYSTEM32)
+        if (src32Dir.isDirectory) {
+            src32Dir.listFiles { file -> file.isFile && file.extension.equals("dll", ignoreCase = true) }?.forEach { src ->
+                val dst = File(system32, src.name)
+                if (!dst.isFile || dst.length() != src.length()) {
+                    src.copyTo(dst, overwrite = true)
+                    copied++
+                }
+            }
+        }
+
+        val srcWowDir = File(wine, SYSWOW64)
+        if (srcWowDir.isDirectory) {
+            srcWowDir.listFiles { file -> file.isFile && file.extension.equals("dll", ignoreCase = true) }?.forEach { src ->
+                val dst = File(syswow64, src.name)
+                if (!dst.isFile || dst.length() != src.length()) {
+                    src.copyTo(dst, overwrite = true)
+                    copied++
+                }
+            }
+        }
+
+        if (copied > 0) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "vc runtimes: copied $copied DLLs into the prefix",
             )
         }
     }

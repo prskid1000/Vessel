@@ -366,8 +366,12 @@ object PrefixRegistry {
      * is what carries the new key to prefixes that already exist -- a `.reg` merge
      * adds and replaces, so without it the fallback would only ever reach a
      * container created after this ships.
+     *
+     * 37 seeds Visual C++ Redistributable runtime registry entries (14.0/2015-2022
+     * ARM64, x64, x86; 12.0/2013; 11.0/2012; 10.0/2010) across HKLM and Wow6432Node
+     * hives, satisfying prerequisite installers and engines (e.g. Unreal Engine).
      */
-    const val SEED_VERSION: Int = 36
+    const val SEED_VERSION: Int = 37
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -1408,6 +1412,85 @@ object PrefixRegistry {
         RegistryKey(path = """HKEY_LOCAL_MACHINE\$WOW_NAMESPACE\$UNIX_FOLDER_CLSID""", remove = true),
     )
 
+    /**
+     * Visual C++ Redistributable registry markers for games and installers.
+     *
+     * Unreal Engine and game prerequisite checkers query these keys:
+     * - `HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\<arch>`
+     * - `HKLM\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\<arch>`
+     * for Installed=1, Major, Minor, Bld, and Version. Without them, UE games halt
+     * at startup with a fatal prerequisite prompt ("Microsoft Visual C++ 2015-2022
+     * Redistributable (arm64)" / "(x64)").
+     *
+     * We populate 14.0 (2015-2022), 12.0 (2013), 11.0 (2012), and 10.0 (2010)
+     * across arm64, x64, and x86 architectures in both native and Wow6432Node hives.
+     */
+    val vcRuntimes: List<RegistryKey> = buildList {
+        val vc14Values = listOf(
+            RegistryValue.dword("Installed", 1),
+            RegistryValue.dword("Major", 14),
+            RegistryValue.dword("Minor", 44),
+            RegistryValue.dword("Bld", 35211),
+            RegistryValue.dword("Rbld", 0),
+            RegistryValue("Version", "v14.44.35211.00"),
+        )
+        for (root in listOf(
+            """HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\14.0\VC\Runtimes""",
+            """HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes""",
+        )) {
+            for (arch in listOf("arm64", "x64", "x86")) {
+                add(RegistryKey(path = "$root\\$arch", values = vc14Values))
+            }
+        }
+
+        val vc12Values = listOf(
+            RegistryValue.dword("Installed", 1),
+            RegistryValue.dword("Major", 12),
+            RegistryValue.dword("Minor", 0),
+            RegistryValue.dword("Bld", 40664),
+            RegistryValue.dword("Rbld", 0),
+            RegistryValue("Version", "v12.0.40664.00"),
+        )
+        for (root in listOf(
+            """HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\12.0\VC\Runtimes""",
+            """HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\12.0\VC\Runtimes""",
+        )) {
+            for (arch in listOf("arm64", "x64", "x86")) {
+                add(RegistryKey(path = "$root\\$arch", values = vc12Values))
+            }
+        }
+
+        val vc11Values = listOf(
+            RegistryValue.dword("Installed", 1),
+            RegistryValue.dword("Major", 11),
+            RegistryValue.dword("Minor", 0),
+            RegistryValue.dword("Bld", 60610),
+            RegistryValue.dword("Rbld", 0),
+            RegistryValue("Version", "v11.0.60610.01"),
+        )
+        for (root in listOf(
+            """HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\11.0\VC\Runtimes""",
+            """HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\11.0\VC\Runtimes""",
+        )) {
+            for (arch in listOf("arm64", "x64", "x86")) {
+                add(RegistryKey(path = "$root\\$arch", values = vc11Values))
+            }
+        }
+
+        val vc10Values = listOf(
+            RegistryValue.dword("Installed", 1),
+            RegistryValue("Version", "10.0.40219"),
+        )
+        for (root in listOf(
+            """HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\10.0\VC\VCRedist""",
+            """HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\10.0\VC\VCRedist""",
+        )) {
+            for (arch in listOf("x64", "x86")) {
+                add(RegistryKey(path = "$root\\$arch", values = vc10Values))
+            }
+        }
+    }
+
     /** Wine's `ShellFSFolder` for the unix root — the `/` in the desktop tree. */
     private const val UNIX_FOLDER_CLSID = "{9D20AAE8-0625-44B0-9CA7-71889C2254D9}"
 
@@ -1747,7 +1830,7 @@ object PrefixRegistry {
         // and reading them in that order is reading one decision. Nothing in
         // `regedit` cares about the order of keys in the file.
         fontLink,
-    ) + virtualDesktop + unixNamespace
+    ) + virtualDesktop + unixNamespace + vcRuntimes
 
     /** The seed for a container whose drives nobody has looked at. */
     val seed: List<RegistryKey> get() = seedFor()

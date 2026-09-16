@@ -179,7 +179,11 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(36, PrefixRegistry.SEED_VERSION)
+        assertEquals(37, PrefixRegistry.SEED_VERSION)
+        // 37 adds vcRuntimes: 22 keys under HKLM\Software\Microsoft\VisualStudio
+        // and Wow6432Node for VC 2015-2022 (14.0 arm64, x64, x86), VC 2013 (12.0),
+        // VC 2012 (11.0), and VC 2010 (10.0), satisfying prerequisite checkers
+        // (like Unreal Engine) without failing or stalling game startup.
         // 36 seeds HKCU\Console\QuickEdit. Wine's conhost defaults it off, and
         // with it off a mouse drag in the console selects nothing at all -- the
         // click goes to the program instead. On, a drag selects, Enter copies
@@ -249,7 +253,7 @@ class PrefixRegistryTest {
         // Unifont and this names it. A `.reg` merge replaces values, so the bump
         // is what carries it to prefixes that already exist.
         // 28 added CLAUDE_BIN to [toolsPath] and no key: Claude Code's installer
-        // puts claude.exe in the guest profile's .localin and tells the user to
+        // puts claude.exe in the guest profile's .localin and tells the user to
         // add it to PATH by hand. Seeded instead, and the bump is what carries it
         // to prefixes that already exist.
         // 27 changed two values in [toolsPath] and added no key: Git's PATH entry
@@ -272,11 +276,8 @@ class PrefixRegistryTest {
         // `FaceName` to [consoleColours]: `HKCU\Console` was already in the seed
         // carrying the palette, and the console font belongs on the same key
         // conhost reads everything else from. Nor with 30, which changed that key's
-        // face and grew its palette from two entries to sixteen. **31 does move it**,
-        // to nineteen: [fontLink] is a new key under HKLM and not a value on one the
-        // seed already had, because `system_link_keyW` names that exact path
-        // (`win32u/font.c:107-118`) and nothing else in the seed lives there.
-        assertEquals(19, PrefixRegistry.seed.size)
+        // face and grew its palette from two entries to sixteen. 31 moved it to 19.
+        assertEquals(41, PrefixRegistry.seed.size)
     }
 
     @Test
@@ -906,4 +907,21 @@ class PrefixRegistryTest {
     fun `an empty hive is missing everything rather than passing vacuously`() {
         assertEquals(PrefixRegistry.requiredHiveValues, PrefixRegistry.missingFromHive(""))
     }
+
+    @Test
+    fun `Visual C++ runtime keys are seeded for all architectures and hives`() {
+        val paths = PrefixRegistry.vcRuntimes.map { it.path }
+        assertTrue(paths.contains("""HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\14.0\VC\Runtimes\arm64"""))
+        assertTrue(paths.contains("""HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"""))
+        assertTrue(paths.contains("""HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\14.0\VC\Runtimes\x86"""))
+        assertTrue(paths.contains("""HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\arm64"""))
+        assertTrue(paths.contains("""HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"""))
+        assertTrue(paths.contains("""HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86"""))
+
+        val arm64Vc14 = PrefixRegistry.vcRuntimes.first { it.path == """HKEY_LOCAL_MACHINE\Software\Microsoft\VisualStudio\14.0\VC\Runtimes\arm64""" }
+        assertEquals("00000001", arm64Vc14.values.first { it.name == "Installed" }.data)
+        assertEquals("0000000e", arm64Vc14.values.first { it.name == "Major" }.data)
+        assertEquals("v14.44.35211.00", arm64Vc14.values.first { it.name == "Version" }.data)
+    }
 }
+
