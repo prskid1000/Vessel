@@ -38,6 +38,28 @@ enum class ComponentType(val wire: String, val label: String) {
      */
     OPENGL("OpenGL", "OpenGL"),
 
+    /**
+     * Microsoft's Visual C++ redistributable runtimes, as loose DLLs.
+     *
+     * Also not a Winlator-family type. Separate from [TOOLS] because the two
+     * answer different questions: Tools is a set of programs a *user* runs and
+     * a container without it loses nothing a game needs, while these are
+     * libraries a *game imports*. A title built against MFC stops in the loader
+     * with `c0000135` before it draws a frame -- measured here as
+     *
+     *   Library mfc140u.dll ... not found
+     *   Importing dlls for L"...\Launcher.exe" failed, status c0000135
+     *
+     * Wine implements none of these: `mfc42` and `msvcp60` are Windows' own and
+     * Wine has builtins, but everything from 2010 on is Microsoft's to ship.
+     *
+     * The payload is one directory per architecture, because the answer differs
+     * by architecture and by more than a path: x86 and x64 carry 2010, 2012,
+     * 2013 and v14, while arm64 carries only v14 -- Windows on ARM64 postdates
+     * every earlier runtime, so those builds were never made.
+     */
+    VCRUNTIME("VCRuntime", "VC++ Runtimes"),
+
     TOOLS("Tools", "Tools"),
 }
 

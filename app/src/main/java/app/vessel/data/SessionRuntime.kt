@@ -2911,60 +2911,63 @@ class SessionRuntime @Inject constructor(
     }
 
     /**
-     * Copy VC++ Redistributable DLLs from the Wine component into the prefix.
+     * Copy the Visual C++ redistributable DLLs into the prefix.
      *
-     * The Wine `.wcp` carries native VC++ runtime DLLs in `system32/` (ARM64 +
-     * x64) and `syswow64/` (x86). These are genuine Microsoft binaries staged
-     * into the `.wcp` payload at build time.
+     * **This used to read `<wine>/system32` and `<wine>/syswow64` and copy
+     * nothing at all.** The comment here claimed the Wine `.wcp` staged VC++
+     * DLLs into those directories and `build/wine.sh` never did -- the Wine
+     * payload is `bin`, `lib`, `share` and nothing else. Both `listFiles` calls
+     * returned null on every launch, and the log line never printed once in any
+     * session on the device. Meanwhile [PrefixRegistry.vcRuntimes] was seeding
+     * 22 keys that say these runtimes *are* installed, so the registry asserted
+     * a runtime that was not on disk: a prerequisite checker passed and the
+     * loader then failed anyway, which is worse than seeding nothing. Measured:
      *
-     * Games (especially Unreal Engine titles) load these at startup through the
-     * normal DLL search order. The registry keys in [PrefixRegistry.vcRuntimes]
-     * satisfy the prerequisite *check*; these files satisfy the prerequisite
-     * *itself*.
+     *   Library mfc140u.dll ... not found
+     *   Importing dlls for L"...\Launcher.exe" failed, status c0000135
+     *
+     * [copyWindowsPayload] does the whole job, and using it rather than a copy
+     * loop of its own is the point: it is what compares the package's
+     * `payloadSha256` against `staged-components` and re-stages only when the
+     * bytes actually changed. A bespoke version here was invisible to that
+     * bookkeeping, so a new component version would never have been noticed.
+     *
+     * The package layout carries the architecture split: `system32/` is x64 and
+     * `syswow64/` is x86, which are the names [copyWindowsPayload] already
+     * mirrors, so the prefix needs nothing of its own. The programs these serve
+     * are x86 and x64 PEs, and on ARM64EC an AMD64 import resolves through
+     * `system32` like any other -- `patches/wine/0073` is what lets the loader
+     * accept it. `arm64/` rides along in the package and is deliberately *not*
+     * one of the mirrored names: those DLLs would collide with x64 over the
+     * same file names, to serve ARM64-native Windows programs, which is not
+     * what runs here. They are carried so the answer exists the day one does.
+     *
+     * Wine supplies none of this itself: `mfc42` and `msvcp60` are Windows' own
+     * and have builtins, but 2010 and later are Microsoft's to ship.
      */
     private suspend fun installVcRuntimes(
         containerId: String,
         layout: ContainerLayout,
         log: SessionLog,
     ): Unit = withContext(Dispatchers.IO) {
-        val wine = components.directoryFor(containerId, ComponentType.WINE)
-            ?: components.directoryFor(containerId, ComponentType.PROTON)
+        val source = components.directoryFor(containerId, ComponentType.VCRUNTIME)
             ?: return@withContext
-
-        val windows = File(layout.prefix, DRIVE_C_WINDOWS)
-        val system32 = File(windows, SYSTEM32)
-        val syswow64 = File(windows, SYSWOW64)
-
-        var copied = 0
-        val src32Dir = File(wine, SYSTEM32)
-        if (src32Dir.isDirectory) {
-            src32Dir.listFiles { file -> file.isFile && file.extension.equals("dll", ignoreCase = true) }?.forEach { src ->
-                val dst = File(system32, src.name)
-                if (!dst.isFile || dst.length() != src.length()) {
-                    src.copyTo(dst, overwrite = true)
-                    copied++
-                }
-            }
-        }
-
-        val srcWowDir = File(wine, SYSWOW64)
-        if (srcWowDir.isDirectory) {
-            srcWowDir.listFiles { file -> file.isFile && file.extension.equals("dll", ignoreCase = true) }?.forEach { src ->
-                val dst = File(syswow64, src.name)
-                if (!dst.isFile || dst.length() != src.length()) {
-                    src.copyTo(dst, overwrite = true)
-                    copied++
-                }
-            }
-        }
-
-        if (copied > 0) {
+        val deployed = copyWindowsPayload(source, layout, ComponentType.VCRUNTIME.wire)
+        if (deployed.copied == 0 && deployed.present == 0) {
+            // Worth a WARN rather than a cheerful "nothing to copy": the games
+            // that need these stop in the loader before they draw anything, and
+            // the registry keys in [PrefixRegistry.vcRuntimes] will still tell a
+            // prerequisite checker the runtimes are installed. A silent nothing
+            // here is how that pair goes back to lying.
             log.line(
                 LogSource.VESSEL,
-                LogLevel.INFO,
-                "vc runtimes: copied $copied DLLs into the prefix",
+                LogLevel.WARN,
+                "vc runtimes: ${source.path} deployed nothing — expected DLLs under " +
+                    "$SYSTEM32/ or $SYSWOW64/ in the package",
             )
+            return@withContext
         }
+        log.line(LogSource.VESSEL, LogLevel.INFO, "vc runtimes: ${deployed.describe()}")
     }
 
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
@@ -3155,6 +3158,21 @@ class SessionRuntime @Inject constructor(
                 copied++
             }
         }
+        // **A payload that deployed nothing is not staged, whatever its hash
+        // says.** Recording it would be self-confirming: `alreadyStaged` asks
+        // whether every DLL in each group is present at the destination, and a
+        // group holding no DLLs satisfies that vacuously, so the next launch
+        // would agree the payload is in place and never look again. A package
+        // whose files sit outside the three mirrored locations would install
+        // once, copy nothing, and report success for the life of the container.
+        //
+        // That is not hypothetical: the first VCRuntime package laid its DLLs
+        // out in `x64/` and `x86/` rather than `system32/` and `syswow64/`.
+        // Nothing matched, nothing was copied, `staged-components` gained a
+        // VCRuntime line anyway, and the prefix stayed empty while every piece
+        // of bookkeeping said otherwise.
+        if (copied == 0 && present == 0) return Deployed()
+
         if (!alreadyStaged) recordStaged(layout, key, version)
         return Deployed(copied, present)
     }

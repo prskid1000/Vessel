@@ -37,6 +37,11 @@ KNOWN_TYPES = {
     # installed. Winlator-family apps ignore package types they do not know, so
     # adding one costs compatibility nothing.
     "OpenGL",
+    # Vessel addition: Microsoft's Visual C++ redistributable runtimes, as loose
+    # DLLs laid out per architecture. Not "Tools", which is a set of programs a
+    # user runs; these are libraries a *game* imports, and a game that cannot
+    # find mfc140u.dll stops in the loader with c0000135 before it draws.
+    "VCRuntime",
 }
 
 

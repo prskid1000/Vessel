@@ -33,6 +33,12 @@ val bundledPackages = listOf(
     // and `wine-11.14-canoe.wcp` beside it in dist/ can never be adopted again.
     "wine-proton-exp-11.0-canoe.wcp",
     "fex-2608-canoe.wcp",
+    // Microsoft's VC++ redistributables, x86 and x64, 2010 through 2026. Not a
+    // convenience: a game built against MFC stops in the loader before it draws
+    // anything, and Wine implements none of these. 23.8 MiB packaged against
+    // 129.6 MiB of DLLs, because they are the one payload here that is not
+    // already compressed.
+    "vcruntime-14.51.36247-any.wcp",
     "dxvk-3.0.2-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",
     "zink-26.3.0-devel-9c475fc3-canoe.wcp",
