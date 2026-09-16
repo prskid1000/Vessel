@@ -1,0 +1,161 @@
+From: Vessel <vessel@local>
+Subject: [PATCH] wow64: fix TLS slot collision with Wine errno and guard exception dispatch
+
+Wine's ntdll defines NTDLL_TLS_ERRNO as 16, storing errno as a 32-bit int
+directly into NtCurrentTeb()->TlsSlots[16]. Upstream FEX WOW64 defined:
+  THREAD_STATE = WOW64_TLS_MAX_NUMBER - 3 (19 - 3 = 16)
+which is the exact same slot. Whenever Wine's 64-bit ntdll handles any
+filesystem, loader, or syscall operation that sets errno (e.g. ENOENT = 2
+when checking for builtin DLLs), Wine writes to TlsSlots[16], clobbering
+the lower 32 bits of ThreadState with the errno value (0x2).
+
+When any subsequent fault occurs, BTCpuResetToConsistentStateImpl reads
+ThreadState as 0x2, dereferences Thread->ThreadStats at offset +0x40, and
+triggers an unhandled read fault at 0x42. This fault enters
+KiUserExceptionDispatcher -> Wow64PrepareForException ->
+BTCpuResetToConsistentState, recursing 3,879 times until exhausting the
+thread's 8MB stack.
+
+Fix:
+1. Move THREAD_STATE to slot 14 (WOW64_TLS_MAX_NUMBER - 5), which is safely
+   inside the reserved WoW64 range (0..18) and does not conflict with Wine's
+   use of slot 16 for NTDLL_TLS_ERRNO.
+2. Guard Wow64Info() against null TEB / uninitialized TlsSlots in
+   BTCpuProcessInit.
+3. Guard IsAddressInJit against null ThreadState.
+4. Guard HandleSuspendInterrupt against null ThreadState.
+5. In BTCpuResetToConsistentStateImpl, evaluate OvercommitTracker first,
+   guard ThreadState against null before profiling and CallRetStack, and
+   avoid redundant null checks downstream.
+6. Guard BTCpuNotifyReadFile against null ThreadState.
+---
+ Source/Windows/WOW64/Module.cpp | 52 ++++++++++++++++++++++++---------
+ 1 file changed, 38 insertions(+), 14 deletions(-)
+
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 6094c4e92..4b2d56128 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -77,8 +77,13 @@ struct TLS {
+   enum class Slot : size_t {
+     ENTRY_CONTEXT = WOW64_TLS_MAX_NUMBER - 1,
+     CONTROL_WORD = WOW64_TLS_MAX_NUMBER - 2,
+-    THREAD_STATE = WOW64_TLS_MAX_NUMBER - 3,
+     CACHED_CALLRET_SP = WOW64_TLS_MAX_NUMBER - 4,
++    // WOW64_TLS_MAX_NUMBER - 3 (slot 16) conflicts with Wine's NTDLL_TLS_ERRNO. Wine
++    // stores errno as a 32-bit int in TEB->TlsSlots[16], which clobbers any 64-bit
++    // pointer stored there with the errno integer value (e.g. ENOENT = 2).
++    // Use slot 14 instead (WOW64_TLS_MAX_NUMBER - 5), which is within the
++    // reserved 0..18 WoW64 range and unused by Wine and Windows.
++    THREAD_STATE = WOW64_TLS_MAX_NUMBER - 5,
+   };
+ 
+   _TEB* TEB;
+@@ -86,8 +91,11 @@ struct TLS {
+   explicit TLS(_TEB* TEB)
+     : TEB(TEB) {}
+ 
+-  WOW64INFO& Wow64Info() const {
+-    return *reinterpret_cast<WOW64INFO*>(TEB->TlsSlots[WOW64_TLS_WOW64INFO]);
++  WOW64INFO* Wow64Info() const {
++    if (!TEB) {
++      return nullptr;
++    }
++    return reinterpret_cast<WOW64INFO*>(TEB->TlsSlots[WOW64_TLS_WOW64INFO]);
+   }
+ 
+   std::atomic<uint32_t>& ControlWord() const {
+@@ -174,6 +182,9 @@ bool IsAddressInJit(uint64_t Address) {
+   }
+ 
+   auto Thread = GetTLS().ThreadState();
++  if (!Thread || !Thread->CTX) {
++    return false;
++  }
+   return Thread->CTX->IsAddressInCodeBuffer(Thread, Address);
+ }
+ 
+@@ -391,6 +402,9 @@ public:
+ };
+ 
+ bool HandleSuspendInterrupt(TLS TLS, CONTEXT* Context, uint64_t FaultAddress) {
++  if (!TLS.ThreadState()) {
++    return false;
++  }
+   if (FaultAddress != reinterpret_cast<uint64_t>(&TLS.ThreadState()->InterruptFaultPage)) {
+     return false;
+   }
+@@ -581,7 +595,9 @@ void BTCpuProcessInit() {
+   FEX::Windows::SetupEnvironmentVariableValues(NtDll);
+ 
+   // wow64.dll will only initialise the cross-process queue if this is set
+-  GetTLS().Wow64Info().CpuFlags = WOW64_CPUFLAGS_SOFTWARE;
++  if (auto* Info = GetTLS().Wow64Info()) {
++    Info->CpuFlags = WOW64_CPUFLAGS_SOFTWARE;
++  }
+ 
+   FEX_CONFIG_OPT(ProfileStats, PROFILESTATS);
+   FEX_CONFIG_OPT(StartupSleep, STARTUPSLEEP);
+@@ -873,8 +889,20 @@ NTSTATUS BTCpuSuspendLocalThread(HANDLE Thread, ULONG* Count) {
+ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+   auto* Context = Ptrs->ContextRecord;
+   auto* Exception = Ptrs->ExceptionRecord;
++
++  if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
++    const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
++
++    if (OvercommitTracker && OvercommitTracker->HandleAccessViolation(FaultAddress)) {
++      return true;
++    }
++  }
++
+   auto TLS = GetTLS();
+   auto Thread = TLS.ThreadState();
++  if (!Thread) {
++    return false;
++  }
+   FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedSignalTime);
+ 
+   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+@@ -884,10 +912,6 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+       return true;
+     }
+ 
+-    if (OvercommitTracker && OvercommitTracker->HandleAccessViolation(FaultAddress)) {
+-      return true;
+-    }
+-
+     if (Context::HandleSuspendInterrupt(TLS, Context, FaultAddress)) {
+       LogMan::Msg::DFmt("Resumed from suspend");
+       return true;
+@@ -898,7 +922,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+       return true;
+     }
+ 
+-    if (Thread) {
++    {
+       std::scoped_lock Lock(ThreadCreationMutex);
+       FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
+       if (InvalidationTracker->HandleRWXAccessViolation(Thread, Context->Pc, FaultAddress)) {
+@@ -920,7 +944,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+     }
+   }
+ 
+-  if (!Thread || !IsAddressInJit(Context->Pc)) {
++  if (!IsAddressInJit(Context->Pc)) {
+     return false;
+   }
+ 
+@@ -1027,7 +1051,11 @@ void BTCpuNotifyUnmapViewOfSection(void* Address, BOOL After, ULONG Status) {
+ }
+ 
+ void BTCpuNotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After, NTSTATUS Status) {
+-  auto& InLockedRWXRead = GetFrontendThreadData(GetTLS().ThreadState())->InLockedRWXRead;
++  auto* ThreadState = GetTLS().ThreadState();
++  if (!InvalidationTracker || !ThreadState) {
++    return;
++  }
++  auto& InLockedRWXRead = GetFrontendThreadData(ThreadState)->InLockedRWXRead;
+   if (!After) {
+     ThreadCreationMutex.lock();
+     CTX->GetCodeInvalidationMutex().lock();

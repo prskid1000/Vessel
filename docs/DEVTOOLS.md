@@ -288,7 +288,7 @@ behind the component downloader"*. Microsoft publishes a portable
 `PowerShell-7.6.5-win-arm64.zip`, measured at 99,526,416 B (94.9 MiB) on
 2026-08-17. It is a self-contained .NET deployment: it carries its own CoreCLR as
 native ARM64 PE and does **not** need wine-mono (which this build deliberately
-does not ship — `build/wine.sh:635-697`). Unzip, put `pwsh.exe` on `PATH`, and
+does not ship — `build/wine.sh:635-653`). Unzip, put `pwsh.exe` on `PATH`, and
 Claude Code's PowerShell tool has something real behind it.
 
 Whether a self-contained .NET 8/9 runtime actually starts under Wine ARM64EC is

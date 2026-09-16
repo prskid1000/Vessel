@@ -292,8 +292,8 @@ UNIFONT_UPPER_ARCHIVE="unifont_upper-$TOOLS_UNIFONT_VERSION.otf"
 CACHE="$WORK_DIR/$COMPONENT-downloads"
 mkdir -p "$CACHE"
 
-# Same shape as wine.sh's fetch_addon, and for the same reason: a pinned hash
-# that is checked is a pin, and one that is only written down is a comment.
+# A pinned hash that is checked is a pin, and one that is only written down is a
+# comment.
 # Verified on every run, not only after a download, so a half-written cache entry
 # from a killed build is caught rather than unpacked.
 fetch_pinned() {

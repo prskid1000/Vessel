@@ -1,0 +1,30 @@
+setupapi: accept SP_COPY_NODECOMP without an unsupported style error.
+
+Windows SetupAPI defines SP_COPY_NODECOMP (0x10) to specify that the source
+file should be copied verbatim without attempting decompression. Wine's
+do_file_copyW already performs a direct copy via copy_file() / CopyFileExW(),
+so the requested behaviour is already satisfied. Flagging SP_COPY_NODECOMP
+as an unsupported style produces noisy ERR lines in session logs during
+wineboot --init and various runtime installers, causing callers and log
+parsers to treat the operation as failed.
+
+diff --git a/dlls/setupapi/queue.c b/dlls/setupapi/queue.c
+index bea68177b89..73bb4882e1f 100644
+--- a/dlls/setupapi/queue.c
++++ b/dlls/setupapi/queue.c
+@@ -1162,7 +1162,14 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
+             docopy = FALSE;
+         }
+     }
+-    if (style & (SP_COPY_NODECOMP | SP_COPY_LANGUAGEAWARE | SP_COPY_FORCE_IN_USE |
++    /* Vessel: SP_COPY_NODECOMP (0x10) instructs file copy operations to copy the
++     * file verbatim without attempting decompression. Wine's copy_file() already
++     * copies directly via CopyFileExW() without decompression, so the flag's
++     * semantics are fully satisfied. Flagging it as an unsupported style logs
++     * spurious ERR messages during INF-driven setups (e.g. wineboot --init and
++     * runtime installers).
++     */
++    if (style & (SP_COPY_LANGUAGEAWARE | SP_COPY_FORCE_IN_USE |
+                  SP_COPY_NOSKIP | SP_COPY_WARNIFSKIP))
+     {
+         ERR("Unsupported style(s) 0x%lx\n",style);
