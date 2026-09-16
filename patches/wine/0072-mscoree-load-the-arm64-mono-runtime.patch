@@ -1,0 +1,163 @@
+mscoree: load the ARM64 Mono runtime on ARM64EC, and fetch the package that has one.
+
+Wine Mono has a native ARM64 build and this tree was asking for the x86-64 one.
+
+metahost.c picks the runtime's filename at compile time, and the arm64 case was
+folded in with x86-64:
+
+    #elif defined(__x86_64__) || defined(__aarch64__)
+        libmono2_arch_dll = "\bin\libmono-2.0-x86_64.dll"
+
+That was correct when it was written, because no ARM64 build of Mono existed.
+It is wrong now, and on ARM64EC it is wrong twice over: Arm64EC compiles with
+x64's preprocessor definitions -- Microsoft's ABI documentation is explicit that
+_M_AMD64 and _AMD64_ are defined -- so an ARM64EC build does not even reach the
+__aarch64__ half of that condition. It matches `defined(__x86_64__)` and asks
+for the AMD64 runtime.
+
+Loading that runtime means calling an x86-64 DllMain from ARM64EC code, and the
+loader has no path for it: call_dll_entry_point falls through to a direct branch,
+the CPU decodes x86-64 bytes as ARM64 instructions, and the module dies at
+0xc000001d before it runs a line. Six attempts at building that path are recorded
+in native/pins.env and none of them worked.
+
+None of it was necessary. wine-mono 11.3.0, published 2026-08-17, added "a new
+port of Mono to ARM64 Windows" -- libmono-2.0-arm64.dll, a genuine ARM64 PE,
+machine 0xaa64. It runs natively: no emulator, no exit thunk, no dispatch
+helper, and nothing for the loader to special-case.
+
+So the ARM64EC case is tested first and names the ARM64 runtime, and appwiz.cpl
+downloads the arm64 package rather than the x86 one. The version moves 10.4.1 ->
+11.3.0 because 11.3.0 is the first release that has an arm64 .msi at all; 10.4.1
+published one package, x86, holding the i386 and AMD64 runtimes only.
+
+The arm64 package is a superset rather than an alternative: it carries
+libmono-2.0-arm64.dll, -x86_64.dll and -x86.dll together, so a 32-bit .NET
+program under WoW64 still finds the runtime it needs. Only the name mscoree
+reaches for first has changed.
+
+**The download had to be fixed too, and that bug is upstream's.**
+append_url_params built the redirector's query string with GECKO_ARCH hardcoded,
+for both addons. That was invisible while the two wanted the same value and is
+not any more: Gecko has no ARM64 build and asks for x86_64, Mono has one and asks
+for arm64. winemono.php honours what it is sent -- ?arch=x86_64 answers with
+wine-mono-11.3.0-x86.msi -- so Mono fetched the x86 package, failed the SHA-256
+check against the arm64 digest, and told the user the file was corrupt. The file
+was fine; the request was wrong. The architecture now lives on the addon.
+
+
+--- a/dlls/appwiz.cpl/addons.c
++++ b/dlls/appwiz.cpl/addons.c
+@@ -56,10 +56,24 @@
+ #define GECKO_SHA "???"
+ #endif
+ 
+-#define MONO_VERSION "10.4.1"
+-#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
++/* Vessel: 11.3.0 rather than 10.4.1, because 11.3.0 is the first release with an
++ * ARM64 build in it -- "a new port of Mono to ARM64 Windows", published
++ * 2026-08-17. 10.4.1 shipped one .msi, x86, and the x86 package holds the
++ * i386 and AMD64 runtimes only; on this target the AMD64 one is what mscoree
++ * would pick and it cannot be loaded, because Wine's loader has no ARM64EC path
++ * for calling an x86-64 DllMain. A native ARM64 runtime needs none of that.
++ *
++ * **The arm64 package is a superset, not an alternative.** It carries
++ * libmono-2.0-arm64.dll, -x86_64.dll and -x86.dll together, so a 32-bit .NET
++ * program under WoW64 still finds the runtime it needs; only the name mscoree
++ * reaches for first changes, and metahost.c is where that is decided. */
++#define MONO_VERSION "11.3.0"
++#if defined(__arm64ec__) || defined(__aarch64__)
++#define MONO_ARCH "arm64"
++#define MONO_SHA "b0c47d374efaf22cbff76cb10488ac2d1627b067e085aef7acec573884120e0f"
++#elif defined(__i386__) || defined(__x86_64__)
+ #define MONO_ARCH "x86"
+-#define MONO_SHA "071f4b2887e1c97a11d791ff3d65be9429eed6dec4c2708888bfd546ba358e23"
++#define MONO_SHA "df2dfc1665c2511882e7cabd56eafd0c0a3d94e5a7e86f969277f6c189d418d3"
+ #else
+ #define MONO_ARCH ""
+ #define MONO_SHA "???"
+@@ -67,6 +81,18 @@
+ 
+ typedef struct {
+     const char *version;
++    /* Vessel: the architecture this addon is published for.
++     *
++     * **It used to be Gecko's, for both of them.** append_url_params built the
++     * query string with GECKO_ARCH hardcoded, which was invisible for as long as
++     * the two addons happened to want the same value. They no longer do: Gecko
++     * has no ARM64 build and asks for x86_64, Mono has one since 11.3.0 and asks
++     * for arm64. The redirector honours what it is sent --
++     * winemono.php?arch=x86_64 answers with wine-mono-11.3.0-x86.msi -- so Mono
++     * downloaded the wrong package, failed the SHA-256 check against the arm64
++     * digest, and reported the file as corrupt. The file was fine; the request
++     * was wrong. */
++    const char *architecture;
+     const WCHAR *file_name;
+     const WCHAR *subdir_name;
+     const char *sha;
+@@ -83,6 +109,7 @@
+ static const addon_info_t addons_info[] = {
+     {
+         GECKO_VERSION,
++        GECKO_ARCH,
+         L"wine-gecko-" GECKO_VERSION "-" GECKO_ARCH ".msi",
+         L"gecko",
+         GECKO_SHA,
+@@ -92,6 +119,7 @@
+     },
+     {
+         MONO_VERSION,
++        MONO_ARCH,
+         L"wine-mono-" MONO_VERSION "-" MONO_ARCH ".msi",
+         L"mono",
+         MONO_SHA,
+@@ -612,7 +640,7 @@
+ 
+     lstrcpyW(url+len, L"?arch=");
+     len += lstrlenW(L"?arch=");
+-    len += MultiByteToWideChar(CP_ACP, 0, GECKO_ARCH, sizeof(GECKO_ARCH),
++    len += MultiByteToWideChar(CP_ACP, 0, addon->architecture, -1,
+                                url+len, size/sizeof(WCHAR)-len)-1;
+     lstrcpyW(url+len, L"&v=");
+     len += lstrlenW(L"&v=");
+--- a/dlls/mscoree/metahost.c
++++ b/dlls/mscoree/metahost.c
+@@ -709,9 +709,25 @@
+     return CLRRuntimeInfo_GetRuntimeHost(This, result);
+ }
+ 
+-#ifdef __i386__
++/* Vessel: **ARM64EC is tested first and that ordering is the whole fix.**
++ * Arm64EC compiles with x64's preprocessor definitions -- Microsoft's ABI
++ * documentation says so plainly, `_M_AMD64` and `_AMD64_` are defined -- so an
++ * ARM64EC build falls into the `defined(__x86_64__)` arm below and asks for
++ * libmono-2.0-x86_64.dll. That file exists in the package and is an AMD64 PE,
++ * and loading it means calling an x86-64 DllMain from ARM64EC code, which the
++ * loader has no path for: the CPU decodes x86-64 bytes as ARM64 instructions
++ * and the module dies at 0xc000001d before it runs a line.
++ *
++ * wine-mono 11.3.0 carries libmono-2.0-arm64.dll beside it, a genuine ARM64 PE
++ * (machine 0xaa64), which runs natively and needs no emulator, no exit thunk
++ * and no dispatch helper. The original `|| defined(__aarch64__)` above was
++ * written when no such build existed; it is now the wrong answer for the one
++ * architecture it was added for. */
++#if defined(__arm64ec__) || defined(__aarch64__)
++static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','-','a','r','m','6','4','.','d','l','l',0};
++#elif defined(__i386__)
+ static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','-','x','8','6','.','d','l','l',0};
+-#elif defined(__x86_64__) || defined(__aarch64__)
++#elif defined(__x86_64__)
+ static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','-','x','8','6','_','6','4','.','d','l','l',0};
+ #else
+ static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','.','d','l','l',0};
+--- a/dlls/mscoree/mscoree_private.h
++++ b/dlls/mscoree/mscoree_private.h
+@@ -45,7 +45,7 @@
+ extern HRESULT assembly_get_vtable_fixups(ASSEMBLY *assembly, VTableFixup **fixups, DWORD *count);
+ extern HRESULT assembly_get_native_entrypoint(ASSEMBLY *assembly, NativeEntryPointFunc *func);
+ 
+-#define WINE_MONO_VERSION "10.4.1"
++#define WINE_MONO_VERSION "11.3.0"
+ 
+ /* Mono embedding */
+ typedef struct _MonoDomain MonoDomain;

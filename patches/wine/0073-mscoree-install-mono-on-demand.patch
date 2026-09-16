@@ -1,0 +1,143 @@
+mscoree: install Wine Mono when a program needs it, the way mshtml installs Gecko.
+
+mshtml's load_gecko() searches for the addon, calls install_wine_gecko() when it
+is missing, and searches once more, so the first app to embed an MSHTML control
+installs the engine and gets a working one in the same call.
+
+mscoree has the matching search chain in get_mono_path() and neither of the two
+steps after it. The only install attempt in a prefix's life is the one
+DllRegisterServer() makes while wineboot registers the DLL, which runs before any
+display exists: appwiz.cpl's download dialog cannot create a window there, so it
+fails silently and nothing asks again. Every later .NET process reaches
+CLRRuntimeInfo_GetRuntimeHost(), fails get_mono_path(), prints "Wine Mono is not
+installed" and gives up without ever offering to install it.
+
+Add the install-and-retry so the program that needs the runtime is the one that
+fetches it, and make install_wine_mono() reachable from metahost.c.
+
+install_wine_mono() also refused to do anything in a WoW64 process, returning
+TRUE -- reporting success while installing nothing -- so a 32-bit .NET program
+could never bootstrap the runtime; it only ever appeared if something 64-bit had
+installed it first. The refusal is sound in its reasoning, since driving the .msi
+from syswow64 would register Mono in the 32-bit view alone, but the remedy is to
+install from the right side rather than to decline. invoke_appwiz() now reaches
+the 64-bit control.exe through C:\windows\sysnative when it is running under
+WoW64 -- the alias ntdll/loader.c already uses to load wow64cpu.dll -- and the
+WoW64 branch hands it the whole job, skipping the MSI bookkeeping below that
+would otherwise read the wrong registry view.
+
+**This was removed once and is back for a reason.** It was dropped when the
+runtime it installs could not be loaded: an 85 MB download that ends in the same
+failure is worse than the failure alone. patches/wine/0072 fixes the loading --
+wine-mono 11.3.0 has a native ARM64 build and mscoree now asks for it -- so
+there is something worth installing again.
+
+diff --git a/dlls/mscoree/metahost.c b/dlls/mscoree/metahost.c
+index 75210d9241c..34912020452 100644
+--- a/dlls/mscoree/metahost.c
++++ b/dlls/mscoree/metahost.c
+@@ -420,8 +420,24 @@ static HRESULT CLRRuntimeInfo_GetRuntimeHost(CLRRuntimeInfo *This, RuntimeHost *
+ 
+     if (!get_mono_path(mono_path, FALSE))
+     {
+-        ERR("Wine Mono is not installed\n");
+-        return CLR_E_SHIM_RUNTIME;
++        /* Mirror mshtml's load_gecko(): search, and if the addon is absent, ask
++         * appwiz.cpl to install it and then search once more. Without the retry
++         * the only Mono install attempt in a prefix's life is the one
++         * DllRegisterServer makes at wineboot, which runs before any display
++         * exists -- appwiz's download dialog cannot create a window there, so it
++         * fails silently and nothing ever asks again. mshtml has had the retry
++         * all along, which is why Gecko installs on demand and Mono does not.
++         *
++         * install_wine_mono() is a no-op in a WoW64 process by its own choice,
++         * so a 32-bit .NET app still cannot bootstrap the runtime; the x86 .msi
++         * serves every architecture once a 64-bit caller has installed it. */
++        install_wine_mono();
++
++        if (!get_mono_path(mono_path, FALSE))
++        {
++            ERR("Wine Mono is not installed\n");
++            return CLR_E_SHIM_RUNTIME;
++        }
+     }
+ 
+     EnterCriticalSection(&runtime_list_cs);
+diff --git a/dlls/mscoree/mscoree_main.c b/dlls/mscoree/mscoree_main.c
+index 5758b35cf84..fc19bf3e5db 100644
+--- a/dlls/mscoree/mscoree_main.c
++++ b/dlls/mscoree/mscoree_main.c
+@@ -765,13 +765,29 @@ static BOOL invoke_appwiz(void)
+     WCHAR app[MAX_PATH];
+     WCHAR *args;
+     LONG len;
+-    BOOL ret;
++    BOOL ret, is_wow64 = FALSE;
+ 
+     static const WCHAR controlW[] = {'\\','c','o','n','t','r','o','l','.','e','x','e',0};
++    static const WCHAR sysnativeW[] = {'\\','s','y','s','n','a','t','i','v','e',0};
+     static const WCHAR argsW[] =
+         {' ','a','p','p','w','i','z','.','c','p','l',' ','i','n','s','t','a','l','l','_','m','o','n','o',0};
+ 
+-    len = GetSystemDirectoryW(app, MAX_PATH - ARRAY_SIZE(controlW));
++    IsWow64Process(GetCurrentProcess(), &is_wow64);
++
++    if (is_wow64)
++    {
++        /* GetSystemDirectoryW answers syswow64 in a WoW64 process, and driving
++         * the .msi from there would register the runtime in the 32-bit view
++         * only -- a half-installed Mono the 64-bit side cannot see. The addon
++         * has to be installed by the 64-bit control.exe, and sysnative is the
++         * way across; ntdll/loader.c reaches wow64cpu.dll the same way. */
++        len = GetWindowsDirectoryW(app, MAX_PATH - ARRAY_SIZE(sysnativeW) - ARRAY_SIZE(controlW));
++        memcpy(app + len, sysnativeW, sizeof(sysnativeW) - sizeof(WCHAR));
++        len += ARRAY_SIZE(sysnativeW) - 1;
++    }
++    else
++        len = GetSystemDirectoryW(app, MAX_PATH - ARRAY_SIZE(controlW));
++
+     memcpy(app+len, controlW, sizeof(controlW));
+ 
+     args = malloc(len * sizeof(WCHAR) + sizeof(controlW) + sizeof(argsW));
+@@ -843,7 +859,7 @@ static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path, BOOL ignore_vers
+     return ret;
+ }
+ 
+-static BOOL install_wine_mono(void)
++BOOL install_wine_mono(void)
+ {
+     BOOL is_wow64 = FALSE;
+     HMODULE hmsi = NULL;
+@@ -865,8 +881,17 @@ static BOOL install_wine_mono(void)
+ 
+     if (is_wow64)
+     {
+-        TRACE("not installing mono in wow64 process\n");
+-        return TRUE;
++        /* Was: return TRUE without installing, which told the caller the
++         * runtime was there when nothing had been done. A 32-bit .NET app could
++         * therefore never bootstrap Mono -- it only ever arrived if something
++         * 64-bit had already installed it. The .msi is a single x86 package
++         * that serves every architecture (appwiz.cpl/addons.c defines MONO_ARCH
++         * as "x86" for i386, x86_64 and aarch64 alike), so there is nothing
++         * arch-specific to decide here: hand the whole job to the 64-bit
++         * installer, which registers it in both views. The MSI bookkeeping
++         * below is deliberately skipped, since it would read the 32-bit view. */
++        TRACE("wow64 process, installing through the 64-bit appwiz\n");
++        return invoke_appwiz();
+     }
+ 
+     TRACE("searching for mono runtime\n");
+diff --git a/dlls/mscoree/mscoree_private.h b/dlls/mscoree/mscoree_private.h
+index b0fc503217d..4fbb6eae642 100644
+--- a/dlls/mscoree/mscoree_private.h
++++ b/dlls/mscoree/mscoree_private.h
+@@ -108,6 +108,8 @@ extern HRESULT get_runtime_info(LPCWSTR exefile, LPCWSTR version, LPCWSTR config
+ 
+ extern BOOL get_mono_path(LPWSTR path, BOOL skip_local);
+ 
++extern BOOL install_wine_mono(void);
++
+ extern MonoDomain* get_root_domain(void);
+ 
+ extern HRESULT ICLRRuntimeInfo_GetRuntimeHost(ICLRRuntimeInfo *iface, RuntimeHost **result);
