@@ -21,6 +21,19 @@ class SessionLogParserTest {
     }
 
     @Test
+    fun `wine hacks_init and HACK lines are demoted from error to info`() {
+        val parsed1 = parseSessionLogLine("0118:011c:err:module:hacks_init HACK: ram_reporting_bias enabled")
+        assertEquals(LogLevel.INFO, parsed1.level)
+        assertEquals(LogSource.WINE, parsed1.source)
+        assertEquals("module:hacks_init HACK: ram_reporting_bias enabled", parsed1.text)
+
+        val parsed2 = parseSessionLogLine("err:virtual:hacks_init Allocation 2g limit enabled")
+        assertEquals(LogLevel.INFO, parsed2.level)
+        assertEquals(LogSource.WINE, parsed2.source)
+        assertEquals("virtual:hacks_init Allocation 2g limit enabled", parsed2.text)
+    }
+
+    @Test
     fun `fixme is a warning, because a stub is a warning about behaviour`() {
         val parsed = parseSessionLogLine("fixme:d3d:wined3d_check_device_format stub")
         assertEquals(LogLevel.WARN, parsed.level)

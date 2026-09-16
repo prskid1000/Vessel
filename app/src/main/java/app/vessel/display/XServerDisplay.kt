@@ -38,6 +38,7 @@ import app.vessel.core.xSocketName
 import app.vessel.input.GamepadAction
 import app.vessel.input.GamepadControl
 import com.winlator.inputcontrols.ExternalController
+import com.winlator.xserver.XKeycode
 import app.vessel.input.GamepadTranslator
 import app.vessel.input.GuestInput
 import app.vessel.input.InputProfile
@@ -53,6 +54,7 @@ import app.vessel.input.TouchControl
 import app.vessel.input.TouchControlTranslator
 import app.vessel.input.TouchPadSnapshot
 import app.vessel.input.TouchEdit
+import app.vessel.input.TouchKind
 import app.vessel.input.TouchLayout
 import app.vessel.input.TouchPhase
 import app.vessel.input.X11
@@ -1982,7 +1984,51 @@ private class SessionSurfaceView(
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or
             EditorInfo.IME_ACTION_NONE
-        return BaseInputConnection(this, false)
+        return object : BaseInputConnection(this, false) {
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                if (text.isNullOrEmpty()) return super.commitText(text, newCursorPosition)
+                for (i in 0 until text.length) {
+                    val ch = text[i]
+                    when (ch) {
+                        '\n' -> {
+                            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+                        }
+                        '\t' -> {
+                            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_TAB))
+                            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_TAB))
+                        }
+                        else -> {
+                            val multiEvent = KeyEvent(
+                                SystemClock.uptimeMillis(),
+                                ch.toString(),
+                                KeyCharacterMap.VIRTUAL_KEYBOARD,
+                                0,
+                            )
+                            if (!dispatchKeyEvent(multiEvent)) {
+                                val xKeycode = XKeycode.KEY_CUSTOM_1
+                                xServer.injectKeyPress(xKeycode, ch.code)
+                                this@SessionSurfaceView.handler.postDelayed({ xServer.injectKeyRelease(xKeycode) }, 30L)
+                            }
+                        }
+                    }
+                }
+                return true
+            }
+
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                for (i in 0 until beforeLength) {
+                    dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                    dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+                }
+                return super.deleteSurroundingText(beforeLength, afterLength)
+            }
+
+            override fun sendKeyEvent(event: KeyEvent?): Boolean {
+                if (event != null) return dispatchKeyEvent(event)
+                return super.sendKeyEvent(event)
+            }
+        }
     }
 
     // — fingers ---------------------------------------------------------------------
@@ -2049,16 +2095,19 @@ private class SessionSurfaceView(
             is OverlayTouch.Down -> {
                 val control = touch.control ?: return
                 pressedControls[touch.pointerId] = control.id
-                emit(overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h, now()))
+                val events = overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h, now())
+                emit(events, isButton = control.kind == TouchKind.BUTTON)
                 invalidate()
             }
 
             is OverlayTouch.Move ->
-                emit(overlay.onMove(touch.pointerId, touch.x, touch.y, w, h))
+                emit(overlay.onMove(touch.pointerId, touch.x, touch.y, w, h), isButton = false)
 
             is OverlayTouch.Up -> {
-                pressedControls.remove(touch.pointerId)
-                emit(overlay.onUp(touch.pointerId, now()))
+                val controlId = pressedControls.remove(touch.pointerId)
+                val isButton = controlId?.let { touchLayout.byId(it)?.kind == TouchKind.BUTTON } ?: false
+                val events = overlay.onUp(touch.pointerId, now())
+                emit(events, isButton = isButton)
                 invalidate()
             }
         }
@@ -2370,8 +2419,8 @@ private class SessionSurfaceView(
      * behaviour and a bad experience, and the two are only reconciled by the
      * bridge actually working.
      */
-    private fun emit(events: List<GuestInput>) {
-        if (padBridge.attached) return
+    private fun emit(events: List<GuestInput>, isButton: Boolean = false) {
+        if (padBridge.attached && !isButton) return
         sink.accept(events)
     }
 
@@ -2589,12 +2638,12 @@ private class SessionSurfaceView(
                 KeyEvent.ACTION_DOWN -> {
                     padButton(control, true)
                     val out = gamepad.onButton(control, true)
-                    if (!padBridge.attached) sink.accept(out)
+                    sink.accept(out)
                 }
                 KeyEvent.ACTION_UP -> {
                     padButton(control, false)
                     val out = gamepad.onButton(control, false)
-                    if (!padBridge.attached) sink.accept(out)
+                    sink.accept(out)
                 }
             }
             publishPad()
@@ -2602,21 +2651,30 @@ private class SessionSurfaceView(
             return true
         }
 
-        if (event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD) {
-            return xServer.keyboard.onKeyEvent(event) || super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_MULTIPLE ||
+            event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
+            (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD != 0)
+        ) {
+            if (xServer.keyboard.onKeyEvent(event)) return true
         }
 
-        val binding = X11KeyMap[event.keyCode] ?: return super.dispatchKeyEvent(event)
-        when (event.action) {
-            KeyEvent.ACTION_DOWN ->
-                sink.accept(X11KeyMap.edgesForDown(binding, repeat = event.repeatCount > 0))
-
-            KeyEvent.ACTION_UP ->
-                sink.accept(GuestInput.Key(binding.keycode, pressed = false))
-
-            else -> return super.dispatchKeyEvent(event)
+        val binding = X11KeyMap[event.keyCode]
+        if (binding != null) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    sink.accept(X11KeyMap.edgesForDown(binding, repeat = event.repeatCount > 0))
+                    return true
+                }
+                KeyEvent.ACTION_UP -> {
+                    sink.accept(GuestInput.Key(binding.keycode, pressed = false))
+                    return true
+                }
+            }
         }
-        return true
+
+        if (xServer.keyboard.onKeyEvent(event)) return true
+
+        return super.dispatchKeyEvent(event)
     }
 
     /**

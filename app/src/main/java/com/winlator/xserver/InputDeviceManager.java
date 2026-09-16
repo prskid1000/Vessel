@@ -14,6 +14,7 @@ import com.winlator.xserver.events.LeaveNotify;
 import com.winlator.xserver.events.MappingNotify;
 import com.winlator.xserver.events.MotionNotify;
 import com.winlator.xserver.events.PointerWindowEvent;
+import java.util.List;
 
 public class InputDeviceManager implements Pointer.OnPointerMotionListener, Keyboard.OnKeyboardListener, WindowManager.OnWindowModificationListener, XResourceManager.OnResourceLifecycleListener {
     private static final byte MOUSE_WHEEL_DELTA = 120;
@@ -236,24 +237,64 @@ public class InputDeviceManager implements Pointer.OnPointerMotionListener, Keyb
         }
     }
 
+    private Window findTargetWindow(int eventId) {
+        Window focusedWindow = xServer.windowManager.getFocusedWindow();
+        if (focusedWindow != null && focusedWindow != xServer.windowManager.rootWindow) {
+            if (pointWindow != null && (focusedWindow == pointWindow || focusedWindow.isAncestorOf(pointWindow))) {
+                Window eventWindow = pointWindow.getAncestorWithEventId(eventId, focusedWindow);
+                if (eventWindow != null && eventWindow.attributes.isEnabled()) return eventWindow;
+            }
+            if (focusedWindow.hasEventListenerFor(eventId) && focusedWindow.attributes.isEnabled()) {
+                return focusedWindow;
+            }
+            Window descendant = findChildWithEventListener(focusedWindow, eventId);
+            if (descendant != null && descendant.attributes.isEnabled()) return descendant;
+        }
+
+        if (pointWindow != null && pointWindow != xServer.windowManager.rootWindow) {
+            Window eventWindow = pointWindow.getAncestorWithEventId(eventId, null);
+            if (eventWindow != null && eventWindow.attributes.isEnabled()) return eventWindow;
+        }
+
+        return findTopmostWindowWithEventListener(xServer.windowManager.rootWindow, eventId);
+    }
+
+    private static Window findTopmostWindowWithEventListener(Window parent, int eventId) {
+        if (parent == null) return null;
+        List<Window> children = parent.getChildren();
+        for (int i = children.size() - 1; i >= 0; i--) {
+            Window child = children.get(i);
+            if (!child.attributes.isMapped()) continue;
+            Window found = findTopmostWindowWithEventListener(child, eventId);
+            if (found != null) return found;
+            if (child.hasEventListenerFor(eventId) && child.attributes.isEnabled()) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    private static Window findChildWithEventListener(Window parent, int eventId) {
+        if (parent == null) return null;
+        List<Window> children = parent.getChildren();
+        for (int i = children.size() - 1; i >= 0; i--) {
+            Window child = children.get(i);
+            if (!child.attributes.isMapped()) continue;
+            if (child.hasEventListenerFor(eventId) && child.attributes.isEnabled()) {
+                return child;
+            }
+            Window found = findChildWithEventListener(child, eventId);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
     @Override
     public void onKeyPress(byte keycode, int keysym) {
-        Window focusedWindow = xServer.windowManager.getFocusedWindow();
-        if (focusedWindow == null) return;
         updatePointWindow();
-
-        Window eventWindow = null;
-        Window child = null;
-        if (focusedWindow.isAncestorOf(pointWindow)) {
-            eventWindow = pointWindow.getAncestorWithEventId(Event.KEY_PRESS, focusedWindow);
-            child = eventWindow.isAncestorOf(pointWindow) ? pointWindow : null;
-        }
-        if (eventWindow == null) {
-            if (!focusedWindow.hasEventListenerFor(Event.KEY_PRESS)) return;
-            eventWindow = focusedWindow;
-        }
-
-        if (!eventWindow.attributes.isEnabled()) return;
+        Window eventWindow = findTargetWindow(Event.KEY_PRESS);
+        if (eventWindow == null) return;
+        Window child = (pointWindow != null && eventWindow.isAncestorOf(pointWindow)) ? pointWindow : null;
 
         Bitmask keyButMask = getKeyButMask();
         short x = xServer.pointer.getX();
@@ -277,22 +318,10 @@ public class InputDeviceManager implements Pointer.OnPointerMotionListener, Keyb
 
     @Override
     public void onKeyRelease(byte keycode) {
-        Window focusedWindow = xServer.windowManager.getFocusedWindow();
-        if (focusedWindow == null) return;
         updatePointWindow();
-
-        Window eventWindow = null;
-        Window child = null;
-        if (focusedWindow.isAncestorOf(pointWindow)) {
-            eventWindow = pointWindow.getAncestorWithEventId(Event.KEY_RELEASE, focusedWindow);
-            child = eventWindow.isAncestorOf(pointWindow) ? pointWindow : null;
-        }
-        if (eventWindow == null) {
-            if (!focusedWindow.hasEventListenerFor(Event.KEY_RELEASE)) return;
-            eventWindow = focusedWindow;
-        }
-
-        if (!eventWindow.attributes.isEnabled()) return;
+        Window eventWindow = findTargetWindow(Event.KEY_RELEASE);
+        if (eventWindow == null) return;
+        Window child = (pointWindow != null && eventWindow.isAncestorOf(pointWindow)) ? pointWindow : null;
 
         Bitmask keyButMask = getKeyButMask();
         short x = xServer.pointer.getX();

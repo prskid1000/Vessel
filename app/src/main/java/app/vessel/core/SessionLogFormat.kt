@@ -136,7 +136,10 @@ fun parseSessionLogLine(raw: String): ParsedLogLine {
 
     val marker = findLevelToken(line)
     val body = if (marker == null) line.trim() else line.substring(marker.second + 1).trimStart()
-    val level = marker?.first ?: LogLevel.INFO
+    var level = marker?.first ?: LogLevel.INFO
+    if (level == LogLevel.ERROR && (body.contains("hacks_init") || body.contains("HACK:"))) {
+        level = LogLevel.INFO
+    }
     // The prefix `findLevelToken` walked over is Wine's `pid:tid:` — the last
     // numeric field before the level is the thread, and it is the only thing in
     // the line that says which guest process wrote it.

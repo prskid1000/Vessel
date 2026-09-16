@@ -117,11 +117,13 @@ public class Keyboard {
         }
         else if (action == KeyEvent.ACTION_MULTIPLE) {
             String chars = event.getCharacters();
-            if (chars != null && chars.length() == 1) {
-                int keysym = chars.charAt(0);
-                XKeycode xKeycode = getCustomXKeycodeForKeysym(keysym);
-                xServer.injectKeyPress(xKeycode, keysym);
-                AppUtils.runDelayed(() -> xServer.injectKeyRelease(xKeycode), 30);
+            if (chars != null && !chars.isEmpty()) {
+                for (int i = 0; i < chars.length(); i++) {
+                    final int keysym = chars.charAt(i);
+                    final XKeycode xKeycode = getCustomXKeycodeForKeysym(keysym);
+                    xServer.injectKeyPress(xKeycode, keysym);
+                    AppUtils.runDelayed(() -> xServer.injectKeyRelease(xKeycode), 30L + (i * 15L));
+                }
             }
         }
         return true;

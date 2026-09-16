@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -253,21 +254,27 @@ private fun SessionLogContent(
             return@VScaffold
         }
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                top = Vessel.metrics.s8,
-                bottom = Vessel.metrics.s22,
-            ),
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .horizontalScroll(pan),
         ) {
-            // No footnote under the last row when the cap is hit. This screen is a
-            // log viewer and every sentence added to it is a sentence between the
-            // user and the lines they came for; the cap and Share both work
-            // without one. `state.truncated` is still read — it is what stops
-            // the pager asking for a page that will never come — it just has
-            // nothing to say on screen.
-            items(state.entries, key = { it.index }) { entry -> LogRow(entry, pan) }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxHeight(),
+                contentPadding = PaddingValues(
+                    top = Vessel.metrics.s8,
+                    bottom = Vessel.metrics.s22,
+                ),
+            ) {
+                // No footnote under the last row when the cap is hit. This screen is a
+                // log viewer and every sentence added to it is a sentence between the
+                // user and the lines they came for; the cap and Share both work
+                // without one. `state.truncated` is still read — it is what stops
+                // the pager asking for a page that will never come — it just has
+                // nothing to say on screen.
+                items(state.entries, key = { it.index }) { entry -> LogRow(entry) }
+            }
         }
     }
 }
@@ -282,13 +289,11 @@ private fun SessionLogContent(
  * ordering already says.
  */
 @Composable
-private fun LogRow(entry: LogEntry, pan: ScrollState) {
+private fun LogRow(entry: LogEntry) {
     Row(
         // A hairline of vertical padding, and it is not decoration: without a gap
         // between rows two adjacent lines are indistinguishable.
-        Modifier
-            .horizontalScroll(pan)
-            .padding(vertical = Vessel.metrics.s3),
+        Modifier.padding(vertical = Vessel.metrics.s3),
         horizontalArrangement = Arrangement.spacedBy(Vessel.metrics.s6),
     ) {
         Text(

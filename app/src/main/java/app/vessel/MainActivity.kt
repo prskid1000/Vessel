@@ -110,19 +110,19 @@ class MainActivity : ComponentActivity() {
      * still running behind it.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val view = if (event.isFromPad()) sessionView() else null
-        if (view != null && view.dispatchKeyEvent(event)) {
-            // `hadFocus` is the diagnosis, not decoration: false means the event
-            // would have gone to Compose and been dropped, which is the failure
-            // this override exists for. True means the view would have got it
-            // anyway and this only saved a hop.
+        val view = sessionView()
+        if (view != null && event.keyCode != KeyEvent.KEYCODE_BACK && view.dispatchKeyEvent(event)) {
             if (Log.isLoggable(TAG, Log.DEBUG)) {
-                Log.d(TAG, "pad key ${event.keyCode} routed; view hadFocus=${view.hasFocus()}")
+                Log.d(TAG, "key ${event.keyCode} routed to sessionView; hadFocus=${view.hasFocus()}")
             }
             return true
         }
-        return super.dispatchKeyEvent(event)
+        if (super.dispatchKeyEvent(event)) {
+            return true
+        }
+        return false
     }
+
 
     /** The sticks and the triggers, which arrive as axes rather than as keys. */
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {

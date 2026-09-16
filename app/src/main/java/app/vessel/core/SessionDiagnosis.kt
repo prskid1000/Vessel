@@ -142,11 +142,11 @@ fun diagnoseSession(lines: Iterable<String>): SessionDiagnosis? =
  * what the volume note on `Loggable` exists for.
  */
 private val ROUTINE_ERRORS: List<String> = listOf(
-    // Proton's own announcement of WINE_RAM_REPORTING_BIAS, at ERR level, once
-    // per process. It is Vessel's Hardware setting being applied, so a container
-    // that reports six gigabytes prints this fifteen times and none of them is a
-    // problem. See HardwareLimits.
+    // Proton's own announcement of WINE_RAM_REPORTING_BIAS and other hacks_init messages,
+    // at ERR level, once per process. These are internal announcements, not actionable errors.
     "HACK: ram_reporting_bias",
+    "module:hacks_init",
+    "HACK:",
     // Wine's Kerberos SSP finding no krb5 on Android. Nothing in a game needs
     // it, and there is no krb5 to ship.
     "kerberos_LsaApInitializePackage",
