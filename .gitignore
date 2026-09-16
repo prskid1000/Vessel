@@ -12,6 +12,14 @@ build/
 !/build/*.py
 !/build/targets/
 
+# A .wcp manifest that escaped the packager. build/package_wcp.py writes
+# profile.json into a temp dir and tars it as the archive's first entry -- it is
+# never source, so one sitting at the repo root is the leftover of an
+# interrupted or hand-run packaging step, carrying a stale versionCode that
+# matches nothing in dist/. Root-anchored on purpose: the name is generic enough
+# that an unanchored rule could quietly mask a real file nested somewhere.
+/profile.json
+
 # Transcripts of a build, written next to the tree by hand or by an agent. They
 # are worth keeping for the length of one debugging session and never longer.
 /*.log
