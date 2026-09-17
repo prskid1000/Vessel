@@ -69,14 +69,51 @@ import java.io.IOException;
  * handed out would be a different bug. When `presentPixmap` learns to honour a
  * damage rectangle, the data is already here.
  *
- * <p>Version 2.0 is reported, which is the version regions were introduced in
- * and the lowest that satisfies Mesa's `major_version &gt;= 2` check. Claiming 5
- * or 6 would advertise cursor and pointer-barrier requests that would then be
- * refused at the first call — the same shape of failure this file exists to
- * fix.
+ * <p><b>VESSEL: version 4.0 is reported, and it has to be.</b> 2.0 was chosen
+ * as the lowest that satisfies Mesa's `major_version &gt;= 2` check, on the
+ * reasoning that claiming more would advertise requests that are then refused.
+ * That reasoning holds for 5 and 6 — pointer barriers — and it is wrong for 4,
+ * because libXfixes does not send {@code HideCursor} or {@code ShowCursor} at
+ * all when the server reports less than 4. It drops them client-side, and the
+ * caller cannot tell.
+ *
+ * <p>Wine warps the pointer like this (dlls/winex11.drv/mouse.c,
+ * {@code X11DRV_SetCursorPos}):
+ *
+ * <pre>
+ *   XFixesHideCursor( display, root );
+ *   XWarpPointer( display, ..., pos.x, pos.y );
+ *   data-&gt;warp_serial = NextRequest( display );
+ *   XFixesShowCursor( display, root );
+ * </pre>
+ *
+ * and then discards every motion event whose sequence number is below
+ * {@code warp_serial} — that is how it ignores the warp's own motion rather
+ * than feeding it back. {@code NextRequest} is the serial {@code ShowCursor} is
+ * about to take, so on a server with XFIXES 4 the very next request makes the
+ * sequence catch up and real motion is accepted again.
+ *
+ * <p>At version 2 neither cursor request is sent, nothing follows the warp, and
+ * the sequence never reaches {@code warp_serial}: <b>every mouse motion after
+ * the first warp is discarded</b>. Measured with Caribbean Legend, which
+ * recentres the cursor every frame:
+ *
+ * <pre>
+ *   cursor:X11DRV_SetCursorPos warped to 640,360 serial 114
+ *   cursor:X11DRV_MotionNotify pos 1287,329 old serial 113, ignoring
+ * </pre>
+ *
+ * The cursor moved only when something else — a click changing the cursor
+ * shape — happened to send a request and push the sequence past the warp.
+ *
+ * <p>The two requests are answered rather than acted on, which is the honest
+ * position: this server hands the cursor to the compositor, which draws what
+ * {@code CursorManager} holds, and hiding it for the microseconds of a warp
+ * would not change a pixel. What matters to the client is that the request was
+ * consumed, and that it counts.
  */
 public class XFixesExtension extends Extension {
-    public static final byte MAJOR_VERSION = 2;
+    public static final byte MAJOR_VERSION = 4;
     public static final byte MINOR_VERSION = 0;
 
     /** Region id to its rectangles, four shorts each: x, y, width, height. */
@@ -99,6 +136,9 @@ public class XFixesExtension extends Extension {
         private static final byte CREATE_REGION = 5;
         private static final byte DESTROY_REGION = 10;
         private static final byte SET_REGION = 11;
+        /** VESSEL: XFIXES 4. See the class comment for what silence here cost. */
+        private static final byte HIDE_CURSOR = 29;
+        private static final byte SHOW_CURSOR = 30;
     }
 
     public XFixesExtension(XServer xServer, byte majorOpcode) {
@@ -212,6 +252,14 @@ public class XFixesExtension extends Extension {
                 break;
             case ClientOpcodes.DESTROY_REGION:
                 destroyRegion(inputStream);
+                break;
+            // VESSEL: answered, not acted on -- the window argument is read so
+            // the request is consumed in full, and nothing is hidden because
+            // the compositor draws the cursor and a warp lasts microseconds.
+            // Being *answered at all* is the point: see the class comment.
+            case ClientOpcodes.HIDE_CURSOR:
+            case ClientOpcodes.SHOW_CURSOR:
+                inputStream.readInt();
                 break;
             default:
                 android.util.Log.w(XRequestError.PROTO_TAG, "XFIXES request opcode " + opcode +

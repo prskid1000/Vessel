@@ -904,6 +904,39 @@ The modifications, in the order they were made:
    the filled region near the centre, right everywhere else. Storing the mode on
    the GC is the fix, and it is not done here.
 
+33. **XFIXES 4, and the mouse that only moved when you clicked.** This server
+   reported XFIXES 2.0 -- the lowest version that satisfies Mesa's
+   `major_version >= 2` check -- on the reasoning that claiming more would
+   advertise requests that are then refused. That is right for 5 and 6, which
+   add pointer barriers, and wrong for 4: libXfixes does not *send*
+   `HideCursor` or `ShowCursor` when the server reports less than 4. It drops
+   them client-side, and the caller cannot tell.
+
+   Wine's `X11DRV_SetCursorPos` hides the cursor, warps the pointer, takes
+   `NextRequest()` as `warp_serial`, and shows the cursor again. It then
+   discards every motion event whose sequence number is below `warp_serial`,
+   which is how it ignores the warp's own motion instead of feeding it back.
+   The `ShowCursor` that follows is what makes the sequence catch up.
+
+   At version 2 that request was never sent, so nothing followed the warp, the
+   sequence never reached `warp_serial`, and **every motion event after the
+   first warp was discarded**. Measured with Caribbean Legend, which recentres
+   the cursor every frame:
+
+   ```
+   cursor:X11DRV_SetCursorPos warped to 640,360 serial 114
+   cursor:X11DRV_MotionNotify pos 1287,329 old serial 113, ignoring
+   ```
+
+   The cursor moved only when something else -- a click changing the cursor
+   shape -- sent a request and pushed the sequence past the warp, which is
+   exactly how it looked from the outside: "the mouse moves only when I click".
+
+   `HideCursor` and `ShowCursor` are answered rather than acted on: the window
+   argument is read so the request is consumed in full, and nothing is hidden,
+   because the compositor draws the cursor and a warp lasts microseconds. Being
+   answered at all is the point.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -953,7 +986,7 @@ test is here to catch and did.
 | `app/src/main/java/com/winlator/xserver/XClient.java` | 24 |
 | `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30 |
 | `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
-| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24 |
+| `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24, 33 |
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30, 32 |
 | `app/src/main/java/com/winlator/xserver/errors/XRequestError.java` | 19 |
 | `app/src/main/java/com/winlator/xserver/events/ClientMessage.java` | 15 |
