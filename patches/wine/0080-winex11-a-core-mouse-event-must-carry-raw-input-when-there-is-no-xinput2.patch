@@ -1,0 +1,105 @@
+winex11: send raw input from core mouse events when XInput2 is absent.
+
+**DirectInput sees no mouse at all on this X server, and nothing says so.**
+Caribbean Legend's menu could not be clicked and the cursor it draws never
+moved, while `WM_MOUSEMOVE` was arriving normally -- the game reads the mouse
+through `dinput8`, and Wine's DirectInput mouse is built on raw input.
+
+Raw input for the mouse comes from exactly one place upstream:
+`x11drv_xinput2_rawmotion()` and its button sibling, which send
+`SEND_HWMSG_NO_MSG`. Every core event path sends the mirror flag,
+`SEND_HWMSG_NO_RAW` (mouse.c:639, :663, :1569), so the two halves meet in the
+server and neither doubles the other. That split assumes XI2 exists.
+
+Vessel's X server implements MIT-SHM, DRI3, Present, Sync, XFixes, Composite
+and BigRequests. It has no XInput extension, so
+
+    xinput2_available = XQueryExtension( gdi_display, "XInputExtension", ... )
+
+is FALSE, `x11drv_xinput2_enable()` returns immediately, and the only producer
+of raw mouse input never runs. WM_INPUT is then never posted for a mouse on
+this target: DirectInput, XInput's legacy mouse path and any program calling
+RegisterRawInputDevices() get silence, and a game that reads the mouse no other
+way is unplayable with no error anywhere on the way down.
+
+With no XI2 there is no second half to collide with, so the core event carries
+both halves. `core_event_flags()` returns `SEND_HWMSG_NO_RAW` exactly when
+upstream would -- XI2 present -- and 0 otherwise, so any real X server behaves
+as before.
+
+The coordinates are the ones the core event already carries, which is
+absolute, and dinput handles that: `dlls/dinput/mouse.c:131` subtracts
+`GetCursorPos()` when `MOUSE_MOVE_ABSOLUTE` is set and accumulates the
+difference, which is what its relative axes are.
+
+Keyboard needed nothing: `X11DRV_KeyEvent` already passes 0
+(keyboard.c:1144), which is why typing reached DirectInput and the mouse did
+not.
+
+diff --git a/dlls/winex11.drv/mouse.c b/dlls/winex11.drv/mouse.c
+index e1a5e70..9e21bd6 100644
+--- a/dlls/winex11.drv/mouse.c
++++ b/dlls/winex11.drv/mouse.c
+@@ -621,6 +621,35 @@ static void map_event_coords( HWND hwnd, Window window, Window event_root, int x
+     input->mi.dy = pt.y;
+ }
+ 
++/***********************************************************************
++ *              core_event_flags
++ *
++ * Vessel: whether a core X11 mouse event must also produce raw input.
++ *
++ * Upstream always passes SEND_HWMSG_NO_RAW here, because raw input is XI2's
++ * job: x11drv_xinput2_rawmotion() sends SEND_HWMSG_NO_MSG for the same motion
++ * and the two halves meet in the server. That division assumes XI2 exists.
++ *
++ * Vessel's X server implements MIT-SHM, DRI3, Present, Sync, XFixes, Composite
++ * and BigRequests, and no XInput extension at all -- so xinput2_available is
++ * FALSE, nothing sends raw input, and every program that reads the mouse
++ * through DirectInput or RegisterRawInputDevices gets silence. Measured with
++ * Caribbean Legend, which loads dinput8: the cursor it draws itself never
++ * moved, though WM_MOUSEMOVE was arriving the whole time.
++ *
++ * With no XI2 there is no second half to collide with, so the core event
++ * carries both. dinput handles the absolute coordinates this produces --
++ * dlls/dinput/mouse.c subtracts GetCursorPos() when MOUSE_MOVE_ABSOLUTE is
++ * set -- and on any X server that has XI2 this returns what it always did.
++ */
++static UINT core_event_flags(void)
++{
++#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
++    if (xinput2_available) return SEND_HWMSG_NO_RAW;
++#endif
++    return 0;
++}
++
+ /***********************************************************************
+  *		send_mouse_input
+  *
+@@ -636,7 +665,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
+     {
+         struct x11drv_thread_data *thread_data = x11drv_thread_data();
+         if (!thread_data->clipping_cursor || thread_data->clip_window != window) return;
+-        NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
++        NtUserSendHardwareInput( hwnd, core_event_flags(), input, 0 );
+         return;
+     }
+ 
+@@ -660,7 +689,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
+         SERVER_END_REQ;
+     }
+ 
+-    NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
++    NtUserSendHardwareInput( hwnd, core_event_flags(), input, 0 );
+ }
+ 
+ #ifdef SONAME_LIBXCURSOR
+@@ -1566,7 +1595,7 @@ void move_resize_window( HWND hwnd, int dir, POINT pos )
+             input.mi.dwFlags     = button_up_flags[button - 1] | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
+             input.mi.time        = NtGetTickCount();
+             input.mi.dwExtraInfo = 0;
+-            NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, &input, 0 );
++            NtUserSendHardwareInput( hwnd, core_event_flags(), &input, 0 );
+         }
+ 
+         while (NtUserPeekMessage( &msg, 0, 0, 0, PM_REMOVE ))
