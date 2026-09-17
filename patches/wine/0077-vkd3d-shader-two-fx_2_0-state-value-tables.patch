@@ -1,0 +1,67 @@
+vkd3d-shader: fix the fx_2_0 material colour sources, and give TexCoordIndex its values.
+
+Two data bugs in fx.c's state tables, both found by compiling a game's effects.
+
+**`AmbientMaterialSource = color1;` was unrecognised.**
+`fx_2_materialcolorsource_values` spells D3DMCS_COLOR1 and D3DMCS_COLOR2 as
+"COORD1" and "COORD2". The enum is Direct3D 9's D3DMATERIALCOLORSOURCE --
+D3DMCS_MATERIAL 0, D3DMCS_COLOR1 1, D3DMCS_COLOR2 2 -- and no HLSL or fxc
+spelling has ever been "coord", so the two entries could not be reached by any
+effect and the correct names had nothing to match:
+
+    Sail.fx:3:1: E5000: Unrecognized state constant color1.
+
+**`TexCoordIndex[1] = cameraspacereflectionvector;` had no table to look in.**
+The state is declared with no values at all, so `replace_state_block_constant`
+returns early, the named constant survives into the writer, and the whole pass
+fails with the state's name attached:
+
+    maineffects.fx:286:1: E5017: Unsupported assignment type for state TexCoordIndex.
+
+The values are D3DTSS_TCI_*, which pack a generator into the high half so the
+texture coordinate index can be OR'd into the low half, exactly as the game
+does it.
+
+Measured over the 54 files, on top of 0076: 46 before, 48 after.
+
+diff --git a/libs/vkd3d/libs/vkd3d-shader/fx.c b/libs/vkd3d/libs/vkd3d-shader/fx.c
+index 36a0439..1c39a30 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/fx.c
++++ b/libs/vkd3d/libs/vkd3d-shader/fx.c
+@@ -726,8 +726,8 @@ static const struct rhs_named_value fx_2_wrap_values[] =
+ static const struct rhs_named_value fx_2_materialcolorsource_values[] =
+ {
+     { "MATERIAL", 0 },
+-    { "COORD1", 1 },
+-    { "COORD2", 2 },
++    { "COLOR1", 1 },
++    { "COLOR2", 2 },
+     { NULL }
+ };
+ 
+@@ -833,6 +833,16 @@ static const struct rhs_named_value fx_2_colorarg_values[] =
+     { NULL }
+ };
+ 
++static const struct rhs_named_value fx_2_texcoordindex_values[] =
++{
++    { "PASSTHRU",                    0x00000 },
++    { "CAMERASPACENORMAL",           0x10000 },
++    { "CAMERASPACEPOSITION",         0x20000 },
++    { "CAMERASPACEREFLECTIONVECTOR", 0x30000 },
++    { "SPHEREMAP",                   0x40000 },
++    { NULL }
++};
++
+ static const struct rhs_named_value fx_2_texturetransform_values[] =
+ {
+     { "DISABLE", 0 },
+@@ -1010,7 +1020,7 @@ static const struct fx_state fx_2_pass_states[] =
+     { "BumpEnvMat01",          HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_FLOAT, 1, 8, 113 },
+     { "BumpEnvMat10",          HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_FLOAT, 1, 8, 114 },
+     { "BumpEnvMat11",          HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_FLOAT, 1, 8, 115 },
+-    { "TexCoordIndex",         HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_UINT, 1, 8, 116 },
++    { "TexCoordIndex",         HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_UINT, 1, 8, 116, fx_2_texcoordindex_values },
+     { "BumpEnvLScale",         HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_FLOAT, 1, 8, 117 },
+     { "BumpEnvLOffset",        HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_FLOAT, 1, 8, 118 },
+     { "TextureTransformFlags", HLSL_CLASS_PASS, HLSL_CLASS_SCALAR, FX_UINT, 1, 8, 119, fx_2_texturetransform_values },

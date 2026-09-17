@@ -1,0 +1,104 @@
+vkd3d-shader: write an inline shader assigned to an fx_2_0 pass state.
+
+    grass.fx:53:1: E5017: Unsupported assignment type for state vertexshader.
+
+`VertexShader = compile vs_1_0 main();` inside a pass produces an
+HLSL_IR_COMPILE node, and `write_fx_2_state_assignment` handled only
+HLSL_IR_CONSTANT. The fx_4 path has taken compile nodes since it was written;
+fx_2 never did, so a technique that compiles its own shader could not be
+written at all.
+
+Nothing new is needed to do it. `compile_shader()` already turns a compile node
+into d3dbc bytecode for a shader-typed *parameter*, and
+`write_fx_2_object_initializer()` already writes the object record that goes
+with it -- an id, a size, the bytes, padded to four. This lifts that pair into
+two helpers and uses them for a pass state: the object goes in the object
+buffer, the assignment's value is the object id in the unstructured buffer, and
+its type descriptor is the object form, which carries no rows or columns --
+`write_fx_2_type_iter()` writes shader-typed parameters the same way.
+
+Measured over the 54 files, on top of 0077: 48 before, 49 after.
+
+The five that remain are inline `asm { ... }` shader assembly -- ps_1_1 and
+vs_1_1 text inside the effect -- which vkd3d cannot assemble at all. Wine has
+an assembler for exactly that bytecode in dlls/d3dcompiler_43 (asmshader.l,
+asmshader.y, asmparser.c, bytecodewriter.c, 6,486 lines together), so the work
+is a port rather than a design, but it is a port and not a patch of this size.
+
+diff --git a/libs/vkd3d/libs/vkd3d-shader/fx.c b/libs/vkd3d/libs/vkd3d-shader/fx.c
+index 1c39a30..fe7d4c9 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/fx.c
++++ b/libs/vkd3d/libs/vkd3d-shader/fx.c
+@@ -2199,6 +2199,56 @@ static uint32_t write_fx_2_state_type(const struct hlsl_state_block_entry *entry
+     return offset;
+ }
+ 
++static uint32_t write_fx_2_object_state_type(const struct hlsl_type *data_type,
++        struct fx_write_context *fx)
++{
++    struct vkd3d_bytecode_buffer *buffer = &fx->unstructured;
++    uint32_t offset;
++
++    /* Object types carry no rows or columns, exactly as write_fx_2_type_iter()
++     * writes them for a shader-typed parameter. */
++    offset = put_u32(buffer, hlsl_sm1_base_type(data_type, false, HLSL_SAMPLER_DIM_GENERIC));
++    put_u32(buffer, get_fx_2_type_class(data_type));
++    put_u32(buffer, 0); /* Name */
++    put_u32(buffer, 0); /* Semantic */
++    put_u32(buffer, 1); /* Element count */
++
++    return offset;
++}
++
++static uint32_t write_fx_2_shader_object(const struct hlsl_ir_compile *compile,
++        struct fx_write_context *fx)
++{
++    struct vkd3d_bytecode_buffer *buffer = &fx->objects;
++    struct vkd3d_shader_code code = { 0 };
++    const void *data = NULL;
++    uint32_t id, size = 0;
++
++    if (compile_shader(compile, fx, &code))
++    {
++        size = code.size;
++        data = code.code;
++    }
++
++    id = fx->object_variable_count++;
++
++    put_u32(buffer, id);
++    put_u32(buffer, size);
++    if (size)
++    {
++        static const uint32_t pad;
++
++        bytecode_put_bytes(buffer, data, size);
++        if (size % 4)
++            bytecode_put_bytes_unaligned(buffer, &pad, 4 - (size % 4));
++    }
++    ++fx->shader_count;
++
++    vkd3d_shader_free_shader_code(&code);
++
++    return id;
++}
++
+ static void write_fx_2_state_assignment(const struct hlsl_ir_var *var,
+         struct hlsl_state_block_entry *entry, struct fx_write_context *fx)
+ {
+@@ -2228,6 +2278,15 @@ static void write_fx_2_state_assignment(const struct hlsl_ir_var *var,
+             }
+             break;
+         }
++        case HLSL_IR_COMPILE:
++        {
++            uint32_t id = write_fx_2_shader_object(hlsl_ir_compile(value_node), fx);
++
++            type = write_fx_2_object_state_type(value_node->data_type, fx);
++            value = unstructured->size;
++            put_u32(unstructured, id);
++            break;
++        }
+         default:
+             hlsl_fixme(ctx, &var->loc, "Unsupported assignment type for state %s.", entry->name);
+     }
