@@ -23,6 +23,23 @@ data class GestureConfig(
     val tapSlop: Float = 12f,
     val tapTimeoutMs: Long = 220,
     val longPressMs: Long = 380,
+    /**
+     * How long a tap holds the button down before letting it up.
+     *
+     * **Zero is what this used to be, and a game never saw the click.** A tap
+     * emitted press and release in the same list, which reached the guest in the
+     * same millisecond -- measured on the device, `73318725 pressed=true` and
+     * `73318725 pressed=false`. A program that reads messages catches that; a
+     * game that samples the mouse once a frame does not, because by the time it
+     * looks the button is up again. Caribbean Legend's menu could not be clicked
+     * from the trackpad at all, while touch mode -- where a real finger holds the
+     * button for as long as it rests -- worked.
+     *
+     * 64 ms is just under four frames at 60 Hz and about two at 30. Long enough
+     * that a frame-sampling game cannot miss it, short enough that a double tap
+     * at a comfortable 180 ms rhythm still has both clicks land separately.
+     */
+    val clickHoldMs: Long = 64,
     val scrollDetent: Float = 48f,
     /** Distance the finger pair must change by before the gesture commits to pinch. */
     val pinchDetent: Float = 56f,
@@ -72,6 +89,16 @@ class PointerGestures(
 
     private var state = State.IDLE
     private var multi = Multi.UNDECIDED
+
+    /**
+     * The button a tap pressed and has not released yet. See [GestureConfig.clickHoldMs].
+     *
+     * Held outside [State] on purpose: the gesture is over -- the finger has
+     * gone, the machine is IDLE and ready for the next one -- and only the
+     * button is still down. Making it a state would mean every branch had to
+     * know how to leave it.
+     */
+    private var heldTapButton: PointerButton? = null
 
     private var downAtMs = 0L
     private var downX = 0f
@@ -125,21 +152,41 @@ class PointerGestures(
         val deadline = timeoutAt ?: return emptyList()
         if (timeMs < deadline) return emptyList()
         timeoutAt = null
+        // The tap's own deadline, which is the other thing this channel carries.
+        // Checked first because a held tap button means the finger is already
+        // gone, so none of the long-press conditions below can be true.
+        releaseHeldTap()?.let { return listOf(it) }
         if (state != State.ONE_FINGER || travel > config.tapSlop) return emptyList()
         state = State.DRAGGING
         return listOf(GuestInput.Button(PointerButton.LEFT, pressed = true))
     }
 
+    /** The release a tap still owes, if it owes one. */
+    private fun releaseHeldTap(): GuestInput? {
+        val button = heldTapButton ?: return null
+        heldTapButton = null
+        return GuestInput.Button(button, pressed = false)
+    }
+
     /** Release anything held. For a session that is stopping, or a view losing its window. */
     fun reset(): List<GuestInput> {
         val held = state == State.DRAGGING
+        val tap = releaseHeldTap()
         hardReset()
-        return if (held) listOf(GuestInput.Button(PointerButton.LEFT, pressed = false)) else emptyList()
+        return listOfNotNull(
+            if (held) GuestInput.Button(PointerButton.LEFT, pressed = false) else null,
+            tap,
+        )
     }
 
     // — phases ---------------------------------------------------------------------
 
     private fun onFirstDown(pointers: List<Touch>, timeMs: Long): List<GuestInput> {
+        // A finger landing before the previous tap's release is due takes that
+        // release first: a button left down because the next gesture started
+        // early is a stuck button, which is the one outcome worse than a click
+        // nobody saw.
+        val owed = listOfNotNull(releaseHeldTap())
         hardReset()
         val finger = pointers.firstOrNull() ?: return emptyList()
         state = State.ONE_FINGER
@@ -168,7 +215,7 @@ class PointerGestures(
         // is still a click, so tapping is unchanged.
         state = if (mode == PointerMode.DIRECT) State.DRAGGING else State.ONE_FINGER
         timeoutAt = if (mode == PointerMode.DIRECT) null else timeMs + config.longPressMs
-        return if (mode == PointerMode.DIRECT) {
+        return owed + if (mode == PointerMode.DIRECT) {
             listOf(
                 GuestInput.MoveTo(finger.x, finger.y),
                 GuestInput.Button(PointerButton.LEFT, pressed = true),
@@ -332,23 +379,25 @@ class PointerGestures(
             // how many are left: a two-finger tap almost always lifts one finger
             // a frame before the other, and counting the survivors makes it a
             // left click about half the time.
-            quick && still -> tap(fingers)
+            quick && still -> tap(fingers, timeMs)
 
             else -> emptyList()
         }
     }
 
-    private fun tap(fingers: Int): List<GuestInput> {
+    private fun tap(fingers: Int, timeMs: Long): List<GuestInput> {
         val button = when (fingers) {
             1 -> PointerButton.LEFT
             2 -> PointerButton.RIGHT
             3 -> PointerButton.MIDDLE
             else -> return emptyList()
         }
-        return listOf(
-            GuestInput.Button(button, pressed = true),
-            GuestInput.Button(button, pressed = false),
-        )
+        // Press now, release when the deadline comes back through onTimeout.
+        // See [GestureConfig.clickHoldMs] for the millisecond that made this
+        // necessary.
+        heldTapButton = button
+        timeoutAt = timeMs + config.clickHoldMs
+        return listOf(GuestInput.Button(button, pressed = true))
     }
 
     private fun onCancel(): List<GuestInput> = reset()

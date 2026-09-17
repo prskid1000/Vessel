@@ -28,13 +28,47 @@ class PointerGesturesTest {
     fun `a quick still touch is a left click`() {
         val g = gestures()
         assertEquals(emptyList<GuestInput>(), g.onTouch(TouchPhase.DOWN, one(100f, 100f), 0))
+        // The press lands on release; the release of the *button* waits for the
+        // hold, so a game that samples the mouse once a frame sees it down. See
+        // GestureConfig.clickHoldMs.
         assertEquals(
-            listOf(
-                GuestInput.Button(PointerButton.LEFT, pressed = true),
-                GuestInput.Button(PointerButton.LEFT, pressed = false),
-            ),
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = true)),
             g.onTouch(TouchPhase.UP, one(100f, 100f), 100),
         )
+        assertEquals(100 + GestureConfig().clickHoldMs, g.timeoutAt)
+        assertEquals(
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = false)),
+            g.onTimeout(100 + GestureConfig().clickHoldMs),
+        )
+        assertNull(g.timeoutAt)
+    }
+
+    @Test
+    fun `a tap's button is released before the next gesture starts`() {
+        // A finger landing inside the hold takes the release with it. Without
+        // this the button stays down into the next gesture, which is a stuck
+        // mouse button -- worse than the missed click the hold exists to fix.
+        val g = gestures()
+        g.onTouch(TouchPhase.DOWN, one(100f, 100f), 0)
+        g.onTouch(TouchPhase.UP, one(100f, 100f), 50)
+        assertEquals(
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = false)),
+            g.onTouch(TouchPhase.DOWN, one(120f, 120f), 60),
+        )
+        // And it is owed only once: the finger that took it is now resting, so
+        // what the machine is waiting for is that finger's long press, and
+        // cancelling it leaves nothing owed.
+        assertEquals(emptyList<GuestInput>(), g.onTouch(TouchPhase.CANCEL, emptyList(), 70))
+        assertNull(g.timeoutAt)
+    }
+
+    @Test
+    fun `reset releases a tap still being held`() {
+        val g = gestures()
+        g.onTouch(TouchPhase.DOWN, one(100f, 100f), 0)
+        g.onTouch(TouchPhase.UP, one(100f, 100f), 50)
+        assertEquals(listOf(GuestInput.Button(PointerButton.LEFT, pressed = false)), g.reset())
+        assertEquals(emptyList<GuestInput>(), g.reset())
     }
 
     @Test
@@ -64,11 +98,12 @@ class PointerGesturesTest {
         // what makes a survivor count report a left click about half the time.
         g.onTouch(TouchPhase.POINTER_UP, listOf(Touch(0, 100f, 100f), Touch(1, 140f, 100f)), 90)
         assertEquals(
-            listOf(
-                GuestInput.Button(PointerButton.RIGHT, pressed = true),
-                GuestInput.Button(PointerButton.RIGHT, pressed = false),
-            ),
+            listOf(GuestInput.Button(PointerButton.RIGHT, pressed = true)),
             g.onTouch(TouchPhase.UP, listOf(Touch(0, 100f, 100f)), 100),
+        )
+        assertEquals(
+            listOf(GuestInput.Button(PointerButton.RIGHT, pressed = false)),
+            g.onTimeout(100 + GestureConfig().clickHoldMs),
         )
 
         val three = gestures()
@@ -80,11 +115,12 @@ class PointerGesturesTest {
             10,
         )
         assertEquals(
-            listOf(
-                GuestInput.Button(PointerButton.MIDDLE, pressed = true),
-                GuestInput.Button(PointerButton.MIDDLE, pressed = false),
-            ),
+            listOf(GuestInput.Button(PointerButton.MIDDLE, pressed = true)),
             three.onTouch(TouchPhase.UP, listOf(Touch(0, 100f, 100f)), 120),
+        )
+        assertEquals(
+            listOf(GuestInput.Button(PointerButton.MIDDLE, pressed = false)),
+            three.onTimeout(120 + GestureConfig().clickHoldMs),
         )
     }
 
@@ -193,11 +229,12 @@ class PointerGesturesTest {
         val trackpad = gestures(PointerMode.TRACKPAD)
         trackpad.onTouch(TouchPhase.DOWN, one(100f, 100f), 0)
         assertEquals(
-            listOf(
-                GuestInput.Button(PointerButton.LEFT, pressed = true),
-                GuestInput.Button(PointerButton.LEFT, pressed = false),
-            ),
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = true)),
             trackpad.onTouch(TouchPhase.UP, one(100f, 100f), 80),
+        )
+        assertEquals(
+            listOf(GuestInput.Button(PointerButton.LEFT, pressed = false)),
+            trackpad.onTimeout(80 + GestureConfig().clickHoldMs),
         )
 
         val direct = gestures(PointerMode.DIRECT)
