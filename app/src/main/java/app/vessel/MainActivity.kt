@@ -111,7 +111,19 @@ class MainActivity : ComponentActivity() {
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val view = sessionView()
-        if (view != null && event.keyCode != KeyEvent.KEYCODE_BACK && view.dispatchKeyEvent(event)) {
+        // **`isFromPad` is the rule above, and it was written and never applied.**
+        // Without it every key went to the session first, which is exactly what
+        // the paragraph above says must not happen: an IME sends backspace as a
+        // KEYCODE_DEL key event -- committed text arrives through the input
+        // connection, backspace does not -- so the session consumed it and no
+        // text field in the app could delete a character while a container was
+        // running. Renaming a control in the Input panel was the way it was
+        // found: typing worked, backspace did nothing.
+        if (view != null &&
+            event.isFromPad() &&
+            event.keyCode != KeyEvent.KEYCODE_BACK &&
+            view.dispatchKeyEvent(event)
+        ) {
             if (Log.isLoggable(TAG, Log.DEBUG)) {
                 Log.d(TAG, "key ${event.keyCode} routed to sessionView; hadFocus=${view.hasFocus()}")
             }
