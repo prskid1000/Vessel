@@ -718,11 +718,19 @@ object TouchLayouts {
             // symmetry's own sake: a hand learns one side and then knows the
             // other, and an arc with more keys on it than its twin has them at a
             // different spacing, so neither hand can trust what it learned.
+            //
+            // **The sticks sit on the screen's vertical middle**, which puts the
+            // body of the layout -- both arcs and the four corner keys -- inside
+            // 0.182 to 0.818, symmetric about 0.500. The top row is anchored to
+            // the top edge instead and is not part of that balance, so what the
+            // centring buys is a clear band along the bottom: the editor draws
+            // `Arrange the overlay` and its Done button there, and a control
+            // under that is one nobody can pick up and move.
             TouchControl(
                 id = "stick",
                 kind = TouchKind.STICK,
                 cx = 0.230f,
-                cy = 0.560f,
+                cy = 0.500f,
                 size = 0.115f,
                 label = "Move",
                 role = StickRole.Keys,
@@ -735,7 +743,7 @@ object TouchLayouts {
                 id = "look",
                 kind = TouchKind.STICK,
                 cx = 0.770f,
-                cy = 0.560f,
+                cy = 0.500f,
                 size = 0.115f,
                 label = "Look",
                 role = StickRole.Look,
@@ -758,43 +766,43 @@ object TouchLayouts {
             // The number row runs down the inner arc and continues onto the
             // outer one, then the alphabet follows: top to bottom on both, so
             // the order reads the way the thumb travels.
-            button("key-1", 0.230f, 0.375f, 0.040f, GamepadAction.Key(X11.N1)),
-            button("key-2", 0.172f, 0.400f, 0.040f, GamepadAction.Key(X11.N2)),
-            button("key-3", 0.130f, 0.468f, 0.040f, GamepadAction.Key(X11.N3)),
-            button("key-4", 0.114f, 0.560f, 0.040f, GamepadAction.Key(X11.N4)),
-            button("key-5", 0.130f, 0.653f, 0.040f, GamepadAction.Key(X11.N5)),
-            button("key-6", 0.172f, 0.720f, 0.040f, GamepadAction.Key(X11.N6)),
-            button("key-7", 0.230f, 0.745f, 0.040f, GamepadAction.Key(X11.N7)),
+            button("key-1", 0.230f, 0.315f, 0.040f, GamepadAction.Key(X11.N1)),
+            button("key-2", 0.172f, 0.340f, 0.040f, GamepadAction.Key(X11.N2)),
+            button("key-3", 0.130f, 0.408f, 0.040f, GamepadAction.Key(X11.N3)),
+            button("key-4", 0.114f, 0.500f, 0.040f, GamepadAction.Key(X11.N4)),
+            button("key-5", 0.130f, 0.593f, 0.040f, GamepadAction.Key(X11.N5)),
+            button("key-6", 0.172f, 0.660f, 0.040f, GamepadAction.Key(X11.N6)),
+            button("key-7", 0.230f, 0.685f, 0.040f, GamepadAction.Key(X11.N7)),
 
-            button("key-8", 0.230f, 0.282f, 0.040f, GamepadAction.Key(X11.N8)),
-            button("key-9", 0.164f, 0.303f, 0.040f, GamepadAction.Key(X11.N9)),
-            button("key-0", 0.107f, 0.363f, 0.040f, GamepadAction.Key(X11.N0)),
-            button("key-h", 0.069f, 0.454f, 0.040f, GamepadAction.Key(X11.H)),
-            button("key-i", 0.056f, 0.560f, 0.040f, GamepadAction.Key(X11.I)),
-            button("key-j", 0.069f, 0.666f, 0.040f, GamepadAction.Key(X11.J)),
-            button("key-k", 0.107f, 0.757f, 0.040f, GamepadAction.Key(X11.K)),
-            button("key-l", 0.164f, 0.817f, 0.040f, GamepadAction.Key(X11.L)),
-            button("key-n", 0.230f, 0.838f, 0.040f, GamepadAction.Key(X11.N)),
+            button("key-8", 0.230f, 0.222f, 0.040f, GamepadAction.Key(X11.N8)),
+            button("key-9", 0.164f, 0.243f, 0.040f, GamepadAction.Key(X11.N9)),
+            button("key-0", 0.107f, 0.303f, 0.040f, GamepadAction.Key(X11.N0)),
+            button("key-h", 0.069f, 0.394f, 0.040f, GamepadAction.Key(X11.H)),
+            button("key-i", 0.056f, 0.500f, 0.040f, GamepadAction.Key(X11.I)),
+            button("key-j", 0.069f, 0.606f, 0.040f, GamepadAction.Key(X11.J)),
+            button("key-k", 0.107f, 0.697f, 0.040f, GamepadAction.Key(X11.K)),
+            button("key-l", 0.164f, 0.757f, 0.040f, GamepadAction.Key(X11.L)),
+            button("key-n", 0.230f, 0.778f, 0.040f, GamepadAction.Key(X11.N)),
 
             // The right thumb: the verbs on the inner arc, what a game presses
             // while something is happening.
-            button("key-e", 0.770f, 0.375f, 0.040f, GamepadAction.Key(X11.E)),
-            button("key-r", 0.828f, 0.400f, 0.040f, GamepadAction.Key(X11.R)),
-            button("key-f", 0.870f, 0.468f, 0.040f, GamepadAction.Key(X11.F)),
-            button("key-g", 0.886f, 0.560f, 0.040f, GamepadAction.Key(X11.G)),
-            button("key-c", 0.870f, 0.653f, 0.040f, GamepadAction.Key(X11.C)),
-            button("key-v", 0.828f, 0.720f, 0.040f, GamepadAction.Key(X11.V)),
-            button("key-q", 0.770f, 0.745f, 0.040f, GamepadAction.Key(X11.Q)),
+            button("key-e", 0.770f, 0.315f, 0.040f, GamepadAction.Key(X11.E)),
+            button("key-r", 0.828f, 0.340f, 0.040f, GamepadAction.Key(X11.R)),
+            button("key-f", 0.870f, 0.408f, 0.040f, GamepadAction.Key(X11.F)),
+            button("key-g", 0.886f, 0.500f, 0.040f, GamepadAction.Key(X11.G)),
+            button("key-c", 0.870f, 0.593f, 0.040f, GamepadAction.Key(X11.C)),
+            button("key-v", 0.828f, 0.660f, 0.040f, GamepadAction.Key(X11.V)),
+            button("key-q", 0.770f, 0.685f, 0.040f, GamepadAction.Key(X11.Q)),
 
-            button("key-b", 0.770f, 0.282f, 0.040f, GamepadAction.Key(X11.B)),
-            button("key-m", 0.836f, 0.303f, 0.040f, GamepadAction.Key(X11.M)),
-            button("key-o", 0.893f, 0.363f, 0.040f, GamepadAction.Key(X11.O)),
-            button("key-p", 0.931f, 0.454f, 0.040f, GamepadAction.Key(X11.P)),
-            button("key-t", 0.944f, 0.560f, 0.040f, GamepadAction.Key(X11.T)),
-            button("key-u", 0.931f, 0.666f, 0.040f, GamepadAction.Key(X11.U)),
-            button("key-x", 0.893f, 0.757f, 0.040f, GamepadAction.Key(X11.X)),
-            button("key-y", 0.836f, 0.817f, 0.040f, GamepadAction.Key(X11.Y)),
-            button("key-z", 0.770f, 0.838f, 0.040f, GamepadAction.Key(X11.Z)),
+            button("key-b", 0.770f, 0.222f, 0.040f, GamepadAction.Key(X11.B)),
+            button("key-m", 0.836f, 0.243f, 0.040f, GamepadAction.Key(X11.M)),
+            button("key-o", 0.893f, 0.303f, 0.040f, GamepadAction.Key(X11.O)),
+            button("key-p", 0.931f, 0.394f, 0.040f, GamepadAction.Key(X11.P)),
+            button("key-t", 0.944f, 0.500f, 0.040f, GamepadAction.Key(X11.T)),
+            button("key-u", 0.931f, 0.606f, 0.040f, GamepadAction.Key(X11.U)),
+            button("key-x", 0.893f, 0.697f, 0.040f, GamepadAction.Key(X11.X)),
+            button("key-y", 0.836f, 0.757f, 0.040f, GamepadAction.Key(X11.Y)),
+            button("key-z", 0.770f, 0.778f, 0.040f, GamepadAction.Key(X11.Z)),
 
             // **W and S outboard of the left arcs, A and D outboard of the
             // right ones -- one above, one below, in the four corners the arcs
@@ -820,11 +828,11 @@ object TouchLayouts {
             // in the middle -- and the middle is spoken for, because the editor
             // draws `Arrange the overlay` and its Done button bottom-centre, and
             // a control under that is one nobody can pick up and move.
-            button("key-w", 0.052f, 0.310f, 0.040f, GamepadAction.Key(X11.W)),
-            button("key-s", 0.052f, 0.810f, 0.040f, GamepadAction.Key(X11.S)),
+            button("key-w", 0.052f, 0.250f, 0.040f, GamepadAction.Key(X11.W)),
+            button("key-s", 0.052f, 0.750f, 0.040f, GamepadAction.Key(X11.S)),
 
-            button("key-a", 0.948f, 0.310f, 0.040f, GamepadAction.Key(X11.A)),
-            button("key-d", 0.948f, 0.810f, 0.040f, GamepadAction.Key(X11.D)),
+            button("key-a", 0.948f, 0.250f, 0.040f, GamepadAction.Key(X11.A)),
+            button("key-d", 0.948f, 0.750f, 0.040f, GamepadAction.Key(X11.D)),
 
             // **Along the top edge: the mouse in the corners where an index
             // finger rests, then both hands' modifiers, then the four keys that
