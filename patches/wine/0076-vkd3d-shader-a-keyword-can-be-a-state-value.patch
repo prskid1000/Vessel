@@ -1,0 +1,59 @@
+vkd3d-shader: read `texture` and `point` as state values in a state block.
+
+**Microsoft's compiler accepts `ColorArg1[0] = texture;` and vkd3d-shader
+rejected it with a syntax error**, in 43 of Caribbean Legend's 54 effects:
+
+    balls.fx:12:27: E5000: syntax error, unexpected ';', expecting '('
+
+`texture` is an HLSL keyword (the sampler type), so the lexer returns
+KW_TEXTURE and the right-hand side of a state assignment never reaches the
+NEW_IDENTIFIER path that turns `modulate` or `selectarg1` into a state
+constant. In an effect it means D3DTA_TEXTURE -- `fx_2_colorarg_values` in fx.c
+already carries "TEXTURE" -- and `MinFilter[0] = point;` is D3DTEXF_POINT the
+same way. The left-hand side already accepts KW_TEXTURE (stateblock_lhs_identifier);
+only the value side was missing.
+
+**Recognised in the lexer, not the grammar, because the grammar version
+conflicts.** A `state_block_keyword_value` production reached from
+complex_initializer produced 73 shift/reduce conflicts; restricted to
+`'=' keyword ';'` it still produced one, on KW_TEXTURE against a constructor
+`texture(...)`. hlsl.y carries `%expect 1`, and raising that to hide a second
+conflict is how a grammar starts parsing things nobody meant. The lexer can ask
+the one question that matters with trailing context -- is the keyword followed
+directly by `;` -- and only answers differently inside a state block, where
+`in_state_block` is already maintained.
+
+Measured with upstream vkd3d master on the build host: 8 / 54 before, 45 / 54
+after, no new bison conflicts, and nothing that compiled before stopped
+compiling.
+
+diff --git a/libs/vkd3d/libs/vkd3d-shader/hlsl.l b/libs/vkd3d/libs/vkd3d-shader/hlsl.l
+index 85f0d89..da62c1b 100644
+--- a/libs/vkd3d/libs/vkd3d-shader/hlsl.l
++++ b/libs/vkd3d/libs/vkd3d-shader/hlsl.l
+@@ -124,6 +124,25 @@ pass                    {return KW_PASS;                }
+ PixelShader             {return KW_PIXELSHADER;         }
+ PointStream             {return KW_POINTSTREAM;         }
+ pixelshader             {return KW_PIXELSHADER;         }
++point/{WS}*;            |
++texture/{WS}*;          {
++                            struct hlsl_ctx *ctx = yyget_extra(yyscanner);
++
++                            /* Vessel: a keyword standing alone as the value of a
++                             * state assignment is the state constant of that name.
++                             * Microsoft's compiler reads "ColorArg1[0] = texture;"
++                             * as D3DTA_TEXTURE and "MinFilter[0] = point;" as
++                             * D3DTEXF_POINT; the grammar only ever sees the
++                             * keyword and fails "expecting '('". Recognised here
++                             * rather than in hlsl.y because a grammar rule for it
++                             * collides with every declaration that starts with
++                             * the same keyword. Outside a state block it is still
++                             * the keyword. */
++                            if (!ctx->in_state_block)
++                                return yytext[0] == 'p' ? KW_POINT : KW_TEXTURE;
++                            yylval->name = hlsl_strdup(ctx, yytext);
++                            return NEW_IDENTIFIER;
++                        }
+ point                   {return KW_POINT;               }
+ RasterizerOrderedBuffer           {return KW_RASTERIZERORDEREDBUFFER;            }
+ RasterizerOrderedStructuredBuffer {return KW_RASTERIZERORDEREDSTRUCTUREDBUFFER;  }

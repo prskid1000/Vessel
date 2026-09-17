@@ -1,0 +1,74 @@
+ntdll: give back the busy count when cancelling queued threadpool work.
+
+**Every cancelled queue entry leaked one busy worker, forever, and the pool
+answered by creating a thread for every submit.** Caribbean Legend reached 388
+threads in 14 seconds and died when the address space ran out.
+
+Since Wine 5.12 (6d712a42ca, "ntdll: Increment num_busy_workers when queuing
+TP object") `num_busy_workers` counts queue entries as well as running
+callbacks: tp_object_prio_queue adds one when an object joins the queue, and
+the worker takes it back after running the callback. That commit moved every
+increment and decrement it could see. tp_object_cancel also removes an object
+from the queue, and was not among them -- it unlinks the entry and zeroes
+num_pending_callbacks, so no worker ever dequeues it and its count is never
+returned. Upstream master is identical today.
+
+The count only has to drift above num_workers once. tp_object_submit starts a
+thread whenever `num_busy_workers >= num_workers`, so from then on every submit
+creates one, whether or not any worker is actually busy, until max_workers
+(500).
+
+**What reaches it.** MSVC's parallel algorithms (std::for_each with
+std::execution::par and friends) allocate a work object, post it once per
+partition, run partitions on the calling thread, and then call
+WaitForThreadpoolWorkCallbacks(work, TRUE) to cancel whatever the pool has not
+started. The calling thread usually wins, so the cancel usually finds a queued
+entry. Traced on device with +threadpool:
+
+    engine.exe:0188  647 x TpAllocWork(callback 0x140196650)
+                     8718 x TpPostWork, 647 x TpWaitForWork(.., 1)
+
+    rounds   workers started   workers exited
+       50               42                8
+      200              113                8
+      400              224                8
+      647              361                8
+
+Every round completes and not one worker exits: half a leaked thread per
+round, linear, never recovered.
+
+**Why it kills a game here and not on a PC.** A worker on Windows or Linux x86
+costs its stack. Under FEX each one also reserves its JIT state -- a 511 MiB
+region, a 246 MiB FEXMem_Lookup and a 16 MiB L1 table, about 1.3 GiB of
+address space per thread. The 39-bit user address space is 512 GiB:
+
+    10:03:12  threads  25  VmSize  50 GiB
+    10:03:26  threads 384  VmSize 508 GiB
+    allocate_virtual_memory out of memory for allocation, size 20000000
+    libc: failed to allocate shadow stack: Out of memory
+
+and the process is gone. The black screen is the same fault seen earlier: the
+loading work that would have drawn the first frame is what spawns the threads.
+
+The invariant this relies on holds under pool->cs: an object is linked into the
+pool list exactly when num_pending_callbacks is non-zero (tp_object_execute
+decrements it before the lock is released), so cancel drops exactly one
+counted entry and gives back exactly one.
+
+diff --git a/dlls/ntdll/threadpool.c b/dlls/ntdll/threadpool.c
+index 4f707bdd782..e9489816e6d 100644
+--- a/dlls/ntdll/threadpool.c
++++ b/dlls/ntdll/threadpool.c
+@@ -2045,6 +2045,12 @@ static void tp_object_cancel( struct threadpool_object *object )
+         object->num_pending_callbacks = 0;
+         list_remove( &object->pool_entry );
+ 
++        /* The queue entry being dropped was counted busy by
++         * tp_object_prio_queue, and no worker will ever pick it up to give
++         * that count back. */
++        assert(pool->num_busy_workers);
++        pool->num_busy_workers--;
++
+         if (object->type == TP_OBJECT_TYPE_WAIT)
+             object->u.wait.signaled = 0;
+     }
