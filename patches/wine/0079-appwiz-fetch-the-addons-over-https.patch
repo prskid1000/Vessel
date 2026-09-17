@@ -1,0 +1,58 @@
+appwiz.cpl: fetch Gecko and Mono over https.
+
+**"Download failed." on the device, 2026-09-17, and the same request hangs from
+a desktop.** `http://source.winehq.org` accepts the connection, takes the
+request, and never answers:
+
+    * Established connection to source.winehq.org (2606:4700:...) port 80
+    > GET /winemono.php?arch=arm64&v=11.3.0&winev=11.0 HTTP/1.1
+    * Request completely sent off
+    (nothing, until the timeout)
+
+The same URL over https answers immediately:
+
+    HTTP/1.1 302 Found
+    Location: http://dl.winehq.org/wine/wine-mono/11.3.0/wine-mono-11.3.0-arm64.msi
+
+It worked the day before, so this is WineHQ's front end changing under us rather
+than anything here. urlmon reports INET_E_DOWNLOAD_FAILURE, appwiz shows its
+IDS_DOWNLOAD_FAILED box, and nothing says which hop died -- the failing one is
+the redirector, not the download: `dl.winehq.org` still serves the .msi over
+plain http, which is what the redirect points at and what the phone fetched by
+hand while the dialog was on screen.
+
+Both addons move, because both use the same front end and Gecko would fail the
+same way the day something needs it.
+
+**TLS is available on this target**, which is the part worth checking rather
+than assuming: `crypt32`'s unixlib reads `/etc/security/cacerts` for Android
+(dlls/crypt32/unixlib.c:628), and the device has 145 certificates there, so
+`InternetOpenUrlW` can verify the chain. Vessel also points
+`WINE_ADDITIONAL_CERTS_DIR` at the container's own `certs/` directory for
+anything the user adds.
+
+`get_url()` appends the query parameters to any URL beginning "http", so "https"
+still gets `?arch=...&v=...&winev=...` -- no other change is needed.
+
+diff --git a/dlls/appwiz.cpl/addons.c b/dlls/appwiz.cpl/addons.c
+index aed8043..a56e05b 100644
+--- a/dlls/appwiz.cpl/addons.c
++++ b/dlls/appwiz.cpl/addons.c
+@@ -113,7 +113,7 @@ static const addon_info_t addons_info[] = {
+         L"wine-gecko-" GECKO_VERSION "-" GECKO_ARCH ".msi",
+         L"gecko",
+         GECKO_SHA,
+-        "http://source.winehq.org/winegecko.php",
++        "https://source.winehq.org/winegecko.php",
+         L"MSHTML", L"GeckoUrl", L"GeckoCabDir",
+         MAKEINTRESOURCEW(ID_DWL_GECKO_DIALOG)
+     },
+@@ -123,7 +123,7 @@ static const addon_info_t addons_info[] = {
+         L"wine-mono-" MONO_VERSION "-" MONO_ARCH ".msi",
+         L"mono",
+         MONO_SHA,
+-        "http://source.winehq.org/winemono.php",
++        "https://source.winehq.org/winemono.php",
+         L"Dotnet", L"MonoUrl", L"MonoCabDir",
+         MAKEINTRESOURCEW(ID_DWL_MONO_DIALOG)
+     }
