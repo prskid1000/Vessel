@@ -45,9 +45,98 @@ class GamepadTest {
     @Test
     fun `a stick resting inside the deadzone holds nothing`() {
         val g = pad()
-        // A worn stick that rests at 0.2 would otherwise hold W down forever,
-        // and the symptom looks like possession rather than like hardware.
-        assertEquals(emptyList<GuestInput>(), g.onSticks(lx = 0.2f, ly = 0.2f, rx = 0f, ry = 0f))
+        // A worn stick that rests off-centre would otherwise hold W down
+        // forever, and the symptom looks like possession rather than hardware.
+        //
+        // 0.15 on each axis is a deflection of 0.212, inside the deadzone. It
+        // used to read 0.2 and 0.2, which is 0.283 -- outside a *circle* of
+        // radius 0.25 and inside the square the old per-axis threshold drew.
+        // A stick pushed that far has been pushed; the reason the old number
+        // passed is the reason diagonals did not work.
+        assertEquals(emptyList<GuestInput>(), g.onSticks(lx = 0.15f, ly = 0.15f, rx = 0f, ry = 0f))
+    }
+
+    /**
+     * The failure this pins: a thumb pushed north-west walked nowhere.
+     *
+     * Each direction used to threshold its own axis, which makes the dead area
+     * a square. Reaching the deadzone on both axes at once takes a push of
+     * `deadzone * 1.41`, so a deflection of 0.3 -- plenty straight up -- put
+     * 0.21 on each axis diagonally and pressed nothing at all.
+     */
+    @Test
+    fun `a diagonal just past the deadzone presses both its keys`() {
+        val g = pad()
+        val diagonal = 0.3f / SQRT_2
+        assertTrue(diagonal < config.deadzone)
+        assertEquals(
+            listOf(
+                GuestInput.Key(X11.D, 0, pressed = true),
+                GuestInput.Key(X11.S, 0, pressed = true),
+            ),
+            g.onSticks(lx = diagonal, ly = diagonal, rx = 0f, ry = 0f),
+        )
+    }
+
+    /**
+     * Eight sectors of 45 degrees, and which one the stick is in is the whole
+     * answer. Straight up is one key however hard it is pushed -- a cardinal
+     * that also pressed its neighbour would be a character that strafes when
+     * asked to walk.
+     */
+    @Test
+    fun `a cardinal push is one key and a diagonal is two, at any distance`() {
+        for (push in listOf(0.26f, 0.5f, 1f)) {
+            assertEquals(
+                "straight up at $push",
+                listOf(GuestInput.Key(X11.W, 0, pressed = true)),
+                pad().onSticks(lx = 0f, ly = -push, rx = 0f, ry = 0f),
+            )
+            assertEquals(
+                "north-west at $push",
+                listOf(
+                    GuestInput.Key(X11.A, 0, pressed = true),
+                    GuestInput.Key(X11.W, 0, pressed = true),
+                ),
+                pad().onSticks(lx = -push / SQRT_2, ly = -push / SQRT_2, rx = 0f, ry = 0f),
+            )
+        }
+    }
+
+    /**
+     * A thumb resting on a sector boundary must not flicker its second key.
+     * The key that is on leaves by a wider angle than it entered by, which is
+     * the same two-threshold trick the deadzone uses on distance.
+     */
+    @Test
+    fun `a direction already held survives a wobble across the sector line`() {
+        val g = pad()
+        // 45 degrees: both on.
+        g.onSticks(lx = 0.7f, ly = 0.7f, rx = 0f, ry = 0f)
+
+        // 20 degrees, just outside the 22.5 the second key enters at.
+        val rad = Math.toRadians(20.0)
+        assertEquals(
+            emptyList<GuestInput>(),
+            g.onSticks(
+                lx = Math.cos(rad).toFloat(),
+                ly = Math.sin(rad).toFloat(),
+                rx = 0f,
+                ry = 0f,
+            ),
+        )
+
+        // 10 degrees, past the wider angle it leaves by.
+        val out = Math.toRadians(10.0)
+        assertEquals(
+            listOf(GuestInput.Key(X11.S, 0, pressed = false)),
+            g.onSticks(
+                lx = Math.cos(out).toFloat(),
+                ly = Math.sin(out).toFloat(),
+                rx = 0f,
+                ry = 0f,
+            ),
+        )
     }
 
     @Test
@@ -193,4 +282,10 @@ class GamepadTest {
             }
         }
     }
+
+    private companion object {
+        /** A diagonal of length L puts L / sqrt(2) on each axis. */
+        const val SQRT_2 = 1.41421356f
+    }
+
 }

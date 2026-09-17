@@ -1,6 +1,7 @@
 package app.vessel.input
 
 import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * Every control on a gamepad Vessel can bind, named by what it is rather than by
@@ -51,7 +52,11 @@ sealed interface StickRole {
     /** Relative pointer motion at [GamepadConfig.lookSpeed]. Two sticks set to this sum. */
     data object Look : StickRole
 
-    /** Four half-axis controls, thresholded at the deadzone with hysteresis. */
+    /**
+     * Up to two half-axis controls, the way an eight-way cross sends them: a
+     * circular deadzone on the length of the deflection, then one 45-degree
+     * sector each for the four directions and the four diagonals between them.
+     */
     data object Keys : StickRole
 
     /**
@@ -382,12 +387,7 @@ class GamepadTranslator(
                     out += releaseHalfAxes(stick)
                 }
 
-                StickRole.Keys -> {
-                    out += direction(stick.right, x, positive = true)
-                    out += direction(stick.left, x, positive = false)
-                    out += direction(stick.down, y, positive = true)
-                    out += direction(stick.up, y, positive = false)
-                }
+                StickRole.Keys -> out += keys(stick, x, y)
 
                 // Its deflection goes to the guest's own gamepad instead; see the role.
                 StickRole.Pad -> out += releaseHalfAxes(stick)
@@ -403,7 +403,11 @@ class GamepadTranslator(
     fun onTrigger(control: GamepadControl, value: Float): List<GuestInput> =
         onButton(control, value >= config.triggerThreshold)
 
-    /** The D-pad, which most pads report as a pair of hat axes rather than as buttons. */
+    /**
+     * The D-pad, which most pads report as a pair of hat axes rather than as
+     * buttons. Digital, so per-axis thresholds are the whole answer; see
+     * [direction].
+     */
     fun onHat(x: Float, y: Float): List<GuestInput> = buildList {
         addAll(direction(GamepadControl.DPAD_RIGHT, x, positive = true))
         addAll(direction(GamepadControl.DPAD_LEFT, x, positive = false))
@@ -453,11 +457,17 @@ class GamepadTranslator(
         }
 
     /**
-     * One half-axis as a held control, with hysteresis.
+     * One half-axis of the d-pad as a held control, with hysteresis.
      *
-     * Two thresholds rather than one because a stick pushed to exactly the
-     * deadzone chatters, and a chattering `W` in a game is a character that
-     * stutters rather than walks.
+     * Two thresholds rather than one because a hat resting on the threshold
+     * chatters, and a chattering `W` in a game is a character that stutters
+     * rather than walks.
+     *
+     * **A cross, and only a cross.** An analogue stick goes through [keys],
+     * which gates on the length of the deflection rather than on each axis --
+     * the difference between a circular deadzone and a square one. A hat has no
+     * such problem to solve: it reports -1, 0 or 1, so north-west arrives as
+     * exactly (-1, -1) and each axis clears any threshold on its own.
      */
     /**
      * Let go of anything a stick that is no longer sending keys was holding.
@@ -468,6 +478,48 @@ class GamepadTranslator(
     private fun releaseHalfAxes(stick: Stick): List<GuestInput> {
         if (stick.halfAxes.none { it in held }) return emptyList()
         return stick.halfAxes.filter { it in held }.flatMap { onButton(it, false) }
+    }
+
+    /**
+     * A stick's deflection as the one or two keys an eight-way cross would send.
+     *
+     * **The deadzone is a circle and the directions are octants**, which is not
+     * how this read at first. Each half-axis was thresholded on its own
+     * component, and that makes the dead area a *square*: a diagonal has to
+     * reach `deadzone` on both axes at once, which is a push of `deadzone * 1.41`
+     * -- 41% further than the same key needs straight up. The gap between the
+     * circle and the square is not merely stiff, it is dead. A thumb a third of
+     * the way out, pushed north-west, put 0.21 on each axis and neither passed
+     * 0.25, so the character stood still while the same push due north walked.
+     * Two keys together were impossible below 0.354 at any angle.
+     *
+     * So: one gate on the *length* of the vector, then each direction asks
+     * whether the vector points within 67.5 degrees of it. That splits the
+     * circle into eight 45-degree sectors -- four with one key, four with two --
+     * and every sector begins at the same distance from the centre.
+     *
+     * **Hysteresis on both, because both can chatter.** The length keeps its
+     * two thresholds, and the angle gets a wider one to leave by: a thumb
+     * resting on a sector boundary would otherwise flicker its second key on and
+     * off, and a game reading that sees `A` tapped a dozen times a second.
+     */
+    private fun keys(stick: Stick, x: Float, y: Float): List<GuestInput> {
+        val magnitude = hypot(x, y)
+        val holding = stick.halfAxes.any { it in held }
+        val live = magnitude >= if (holding) config.releaseZone else config.deadzone
+        val out = mutableListOf<GuestInput>()
+        for ((control, component) in listOf(
+            stick.right to x,
+            stick.left to -x,
+            stick.down to y,
+            stick.up to -y,
+        )) {
+            val on = control in held
+            val share = if (magnitude > 0f) component / magnitude else 0f
+            val want = live && share >= if (on) LEAVE_SECTOR else ENTER_SECTOR
+            if (want != on) out += onButton(control, want)
+        }
+        return out
     }
 
     private fun direction(control: GamepadControl, value: Float, positive: Boolean): List<GuestInput> {
@@ -493,5 +545,11 @@ class GamepadTranslator(
     private companion object {
         /** A tick after the app was backgrounded should not fling the cursor. */
         const val MAX_TICK_MS = 100L
+
+        /** cos(67.5): a direction is pressed while the stick points inside its octant. */
+        const val ENTER_SECTOR = 0.3827f
+
+        /** cos(75). Released only once the stick has left the sector by 7.5 degrees. */
+        const val LEAVE_SECTOR = 0.2588f
     }
 }
