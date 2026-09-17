@@ -286,6 +286,42 @@ Seeding them *without* the files is the one combination to avoid — the checker
 then passes and the loader fails anyway, which is what shipped before this
 component existed.
 
+### DirectX is the second component that is not open source
+
+**Open question, the same shape as VCRuntime above and not yet answered.**
+`directx-*.wcp` is Microsoft's DirectX End-User Runtime (June 2010) --
+proprietary binaries, unpacked verbatim from the official
+`directx_Jun2010_redist.exe` by `build/directx.sh` and shipped inside the
+sideload APK as a bundled component.
+
+What is shipped, so the answer is cheap to check:
+
+- 193 DLLs, x64 (`system32/`) and x86 (`syswow64/`): D3DX9 24-43, D3DX10 33-43,
+  D3DX11 42-43, D3DCSX 42-43, D3DCompiler 33-43, XAudio2 2.0-2.7, XACT 2.0-3.7,
+  X3DAudio 1.0-1.7, XAPOFX 1.0-1.5 and XInput 1.1-1.3 and 9.1.0.
+- Unmodified. The cabinets inside the redistributable are extracted and the
+  DLLs copied out; the `.inf` and `.cat` beside each are dropped, and so are the
+  installer (`DXSETUP.exe`, `DSETUP.dll`, `dsetup32.dll`, `dxupdate.cab`,
+  `dxdllreg_x86.cab`) and Managed DirectX. `native/pins.env` pins the download
+  by URL and sha256.
+- Only in the `sideload` flavour. The `play` build bundles no components at all.
+
+**What has not been established** is whether Microsoft's terms for this
+redistributable permit shipping its DLLs extracted from the package, or only
+the package itself run through its own installer. This document does not
+assert either, because nobody working on it has read the governing terms
+closely enough to say. The practical alternatives are the same three as for
+VCRuntime, and the second is cheaper here than there: the redistributable's own
+installer runs unattended, so a component that carries
+`directx_Jun2010_redist.exe` unopened and runs `DXSETUP.exe /silent` in the
+prefix would ship Microsoft's package exactly as published. See item 12.
+
+**Why ship it at all**, since Wine has builtins for every one of these names:
+Wine's D3DX compiles effects through vkd3d-shader, and on 2026-09-17 that
+compiled none of Caribbean Legend's 54 `.fx` files (8 with upstream vkd3d 2.1,
+45 with an unmerged lexer fix). The game then drew a still scene with no menu.
+Microsoft's `d3dx9_43` and `d3dcompiler_43` compiled all 54 in the same session.
+
 ### The libraries inside the Wine package
 
 The Wine `.wcp` is not only Wine. `build/wine.sh` copies every shared library
@@ -399,6 +435,7 @@ packages rebuilt and a CI run, 10 is a judgement about a moving target.
 | 10 | A `README` that is true on the day | **Closed 2026-08-10.** The graphics narrative was the last stale part and it is rewritten against measurements rather than removed: the KGSL dma-buf sentence that called itself "the single thing between here and a triangle" is gone with a note saying it outlived its subject, DXVK's row now says it runs a game, presentation carries the measured 0.546 ms DRI3 figure, the Wine patch count is 15, and `ipconfig` is recorded as verified. What replaces the false blocker is the true one: an 8-12 fps cutscene that neither compute, GPU, present nor panel refresh explains. |
 
 | 11 | The right to redistribute Microsoft's Visual C++ runtime | **Open.** `vcruntime-*.wcp` ships 193 unmodified proprietary DLLs inside the sideload APK. Microsoft permits redistribution "only for licensed Visual Studio users", which is a fact about the publisher rather than about the files, so this document cannot close it. Three ways out are written up above under *VCRuntime is the one component that is not open source*; the cheapest is to confirm the licence and record it here. Nothing else on this page has this shape -- every other component is free software. |
+| 12 | The right to redistribute Microsoft's DirectX End-User Runtime | **Open.** `directx-*.wcp` ships 193 unmodified proprietary DLLs extracted from `directx_Jun2010_redist.exe` inside the sideload APK. Whether Microsoft's terms allow the DLLs outside their package has not been checked. Written up above under *DirectX is the second component that is not open source*, including the option that avoids the question: ship the redistributable unopened and run its own silent installer in the prefix. |
 
 ### 9, in detail: running the renderer is what found the hole
 

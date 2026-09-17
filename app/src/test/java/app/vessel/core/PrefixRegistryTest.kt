@@ -28,7 +28,8 @@ class PrefixRegistryTest {
     @Test
     fun `every D3D DLL is overridden native,builtin, and opengl32 is removed`() {
         assertEquals(
-            listOf("d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi", "opengl32"),
+            listOf("d3d8", "d3d9", "d3d10core", "d3d11", "d3d12", "d3d12core", "dxgi") +
+                D3DX_DLL_OVERRIDES + "opengl32",
             PrefixRegistry.dllOverrides.values.map { it.name },
         )
         // Every D3D entry forces the shipped native build...
@@ -52,7 +53,7 @@ class PrefixRegistryTest {
         // The shipped list, plus the one value the seed has to *remove* from
         // prefixes that already carry it. See RegistryKind.DELETE.
         assertEquals(
-            D3D_DLL_OVERRIDES + WGL_DLL,
+            D3D_DLL_OVERRIDES + D3DX_DLL_OVERRIDES + WGL_DLL,
             PrefixRegistry.dllOverrides.values.map { it.name },
         )
         assertEquals(
@@ -108,7 +109,7 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed renders to exactly this reg file`() {
-        val expected = listOf(
+        val expected = (listOf(
             "Windows Registry Editor Version 5.00",
             "",
             """[HKEY_CURRENT_USER\Software\Wine\Direct3D]""",
@@ -122,6 +123,7 @@ class PrefixRegistryTest {
             """"d3d12"="native,builtin"""",
             """"d3d12core"="native,builtin"""",
             """"dxgi"="native,builtin"""",
+        ) + D3DX_DLL_OVERRIDES.map { """"$it"="native,builtin"""" } + listOf(
             """"opengl32"=-""",
             "",
             """[HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\amd64]""",
@@ -129,7 +131,7 @@ class PrefixRegistryTest {
             "",
             """[HKEY_LOCAL_MACHINE\Software\Microsoft\Wow64\x86]""",
             """@="libwow64fex.dll"""",
-        ).joinToString("\r\n", postfix = "\r\n")
+        )).joinToString("\r\n", postfix = "\r\n")
 
         // The theme block is asserted by name and value below rather than being
         // transcribed here: thirty colours in a golden string is a test nobody
@@ -179,7 +181,9 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(37, PrefixRegistry.SEED_VERSION)
+        assertEquals(38, PrefixRegistry.SEED_VERSION)
+        // 38 seeds D3DX_DLL_OVERRIDES native,builtin beside the Direct3D list,
+        // matching the session environment, for the DirectX component.
         // 37 adds vcRuntimes: 22 keys under HKLM\Software\Microsoft\VisualStudio
         // and Wow6432Node for VC 2015-2022 (14.0 arm64, x64, x86), VC 2013 (12.0),
         // VC 2012 (11.0), and VC 2010 (10.0), satisfying prerequisite checkers

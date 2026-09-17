@@ -370,8 +370,13 @@ object PrefixRegistry {
      * 37 seeds Visual C++ Redistributable runtime registry entries (14.0/2015-2022
      * ARM64, x64, x86; 12.0/2013; 11.0/2012; 10.0/2010) across HKLM and Wow6432Node
      * hives, satisfying prerequisite installers and engines (e.g. Unreal Engine).
+     *
+     * 38 seeds [D3DX_DLL_OVERRIDES] `native,builtin` in [dllOverrides], matching
+     * the session environment, for the DirectX component: Wine's builtin D3DX
+     * cannot compile the effects games ship, and a prefix launched without the
+     * environment should reach Microsoft's copy the same way a session does.
      */
-    const val SEED_VERSION: Int = 37
+    const val SEED_VERSION: Int = 38
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -476,6 +481,9 @@ object PrefixRegistry {
     val dllOverrides: RegistryKey = RegistryKey(
         path = """HKEY_CURRENT_USER\Software\Wine\DllOverrides""",
         values = D3D_DLL_OVERRIDES.map { RegistryValue(it, DLL_OVERRIDE_MODE) } +
+            // Already `native,builtin` in the session environment, so the seed
+            // and the environment agree here rather than differ in mode.
+            D3DX_DLL_OVERRIDES.map { RegistryValue(it, DLL_OVERRIDE_MODE) } +
             // **Removed, not omitted.** `opengl32` was seeded here and must stop
             // being — `SessionEnvironment.WGL_DLL` has the measurement. Dropping
             // it from the list would only affect prefixes created afterwards; a

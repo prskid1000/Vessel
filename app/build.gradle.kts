@@ -39,6 +39,11 @@ val bundledPackages = listOf(
     // 129.6 MiB of DLLs, because they are the one payload here that is not
     // already compressed.
     "vcruntime-14.51.36247-any.wcp",
+    // Microsoft's DirectX End-User Runtime, June 2010: D3DX9-11, D3DCompiler
+    // 33-43, XAudio2, XACT, XInput, x86 and x64. Wine's own D3DX compiles
+    // effects through vkd3d-shader, which could not compile Caribbean Legend's;
+    // with these native the game reaches its menu. 35 MiB packaged.
+    "directx-9.29.1974-any.wcp",
     "dxvk-3.0.2-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",
     "zink-26.3.0-devel-9c475fc3-canoe.wcp",

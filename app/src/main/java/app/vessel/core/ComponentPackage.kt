@@ -60,6 +60,25 @@ enum class ComponentType(val wire: String, val label: String) {
      */
     VCRUNTIME("VCRuntime", "VC++ Runtimes"),
 
+    /**
+     * Microsoft's DirectX End-User Runtime (June 2010), as loose DLLs.
+     *
+     * Separate from [VCRUNTIME] because the question is different. Wine has no
+     * `mfc140u`, so a VC++ runtime is simply present or missing; Wine *does* have
+     * builtins for every DLL in here, so this package is a second implementation
+     * and which one loads is an override decision -- made in
+     * `SessionEnvironment.D3DX_DLL_OVERRIDES`, next to the Direct3D list it
+     * deliberately does not join.
+     *
+     * The case for shipping it is D3DX's effect compiler. Wine's compiles through
+     * vkd3d-shader, which could not compile one of Caribbean Legend's 54 effects;
+     * the game then drew a still scene with no menu. Microsoft's `d3dx9_43` and
+     * `d3dcompiler_43` compiled all of them in the same session.
+     *
+     * Same layout as [VCRUNTIME]: `system32/` is x64 and `syswow64/` is x86.
+     */
+    DIRECTX("DirectX", "DirectX Runtimes"),
+
     TOOLS("Tools", "Tools"),
 }
 

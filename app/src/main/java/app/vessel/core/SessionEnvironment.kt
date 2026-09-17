@@ -47,6 +47,58 @@ val D3D_DLL_OVERRIDES: List<String> = listOf(
 )
 
 /**
+ * The D3DX and D3DCompiler DLLs the DirectX component ships, loaded Microsoft's
+ * first and Wine's second.
+ *
+ * **Not in [D3D_DLL_OVERRIDES], because the mode is the opposite promise.** That
+ * list is `n` -- native *only* -- and can be, because DXVK is always installed and
+ * a missing file there is a broken container. These are `n,b`: the DirectX
+ * component is a separate package, and a container without it must still get
+ * Wine's builtins rather than `STATUS_DLL_NOT_FOUND` from every game that links
+ * D3DX. With the package present Microsoft's copy wins; without it, nothing
+ * changes from before it existed.
+ *
+ * **Why Microsoft's first at all.** Wine's builtins compile effects through
+ * vkd3d-shader, and it cannot compile the effects games ship. Caribbean Legend's
+ * 54 `.fx` files, compiled one vkd3d at a time on 2026-09-17: 0 with the vkd3d in
+ * our Wine, 8 with upstream 2.1, 45 with a lexer fix on top, and the nine still
+ * failing include the ocean and world map, which are inline `asm {}` that vkd3d
+ * has no assembler for. On the device every technique lookup then failed and the
+ * game drew a still scene with no menu. With `d3dx9_43` and `d3dcompiler_43`
+ * native the same session compiled all 54.
+ *
+ * It also cuts a chain [WGL_DLL] documents: Wine's builtin `d3dx11_43` imports
+ * `d3dcompiler_47`, which imports `wined3d` and with it `opengl32`. Microsoft's
+ * `d3dx11_43` imports Microsoft's `d3dcompiler_43` and stops there.
+ *
+ * **What is deliberately not here**, although the package carries the files:
+ *
+ * - `d3dcompiler_47` -- not in the June 2010 runtime (it came with the Windows 8.1
+ *   SDK), so there is no Microsoft copy to prefer; Wine's builtin serves it.
+ * - `xaudio2_*`, `xactengine*`, `x3daudio*`, `xapofx*` -- Wine implements these on
+ *   FAudio, and Microsoft's XAudio2 before 2.8 is a COM server that a file copy
+ *   does not register, so native-first would find a DLL nothing can instantiate.
+ * - `xinput*` -- Vessel's gamepad bridge reaches games through `winebus.sys` and
+ *   Wine's XInput; Microsoft's would be one more layer between the pad and the
+ *   game with nothing it adds.
+ */
+val D3DX_DLL_OVERRIDES: List<String> =
+    (24..43).map { "d3dx9_$it" } +
+        "d3dx10" + (33..43).map { "d3dx10_$it" } +
+        (42..43).map { "d3dx11_$it" } +
+        (42..43).map { "d3dcsx_$it" } +
+        (33..43).map { "d3dcompiler_$it" }
+
+/**
+ * The part of `WINEDLLOVERRIDES` Vessel always sends, before any manifest term.
+ *
+ * Direct3D native only, then D3DX and D3DCompiler native first -- see the two
+ * lists for why the modes differ.
+ */
+val SESSION_DLL_OVERRIDES: String =
+    D3D_DLL_OVERRIDES.joinToString(",") + "=n;" + D3DX_DLL_OVERRIDES.joinToString(",") + "=n,b"
+
+/**
  * **`opengl32` was in the list above and had to come out. It killed games.**
  *
  * Measured on the device with Metro 2033 Redux, twice each way, one variable:
@@ -2618,7 +2670,7 @@ fun sessionEnvironment(
  * [manifestEnvironment] leaves it alone and this function is the only writer.
  */
 internal fun dllOverrides(profile: ContainerProfile, manifest: ParamManifest?): String =
-    appendedTo(WINEDLLOVERRIDES_ENV, D3D_DLL_OVERRIDES.joinToString(",") + "=n", profile, manifest)
+    appendedTo(WINEDLLOVERRIDES_ENV, SESSION_DLL_OVERRIDES, profile, manifest)
 
 /**
  * [variable]'s value: what Vessel requires, then every manifest term for it.

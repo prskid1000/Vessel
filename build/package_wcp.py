@@ -42,6 +42,12 @@ KNOWN_TYPES = {
     # user runs; these are libraries a *game* imports, and a game that cannot
     # find mfc140u.dll stops in the loader with c0000135 before it draws.
     "VCRuntime",
+    # Vessel addition: Microsoft's DirectX End-User Runtime (June 2010) --
+    # D3DX, D3DCompiler, XAudio2, XACT, XInput -- as loose DLLs per
+    # architecture. Separate from VCRuntime because Wine *has* builtins for
+    # all of these, so whether each one loads is an override decision rather
+    # than a missing-import fix, and that decision lives with this package.
+    "DirectX",
 }
 
 

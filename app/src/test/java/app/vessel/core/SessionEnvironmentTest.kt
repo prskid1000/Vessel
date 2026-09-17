@@ -396,10 +396,26 @@ class SessionEnvironmentTest {
 
     @Test
     fun `WINEDLLOVERRIDES names every D3D and WGL DLL as native`() {
-        assertEquals(
-            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
-            env()["WINEDLLOVERRIDES"],
-        )
+        // Spelled out once, so the constant every other test uses is itself
+        // pinned: Direct3D native only, then D3DX and D3DCompiler native first.
+        val d3dx = (24..43).joinToString(",") { "d3dx9_$it" } + ",d3dx10," +
+            (33..43).joinToString(",") { "d3dx10_$it" } + ",d3dx11_42,d3dx11_43,d3dcsx_42,d3dcsx_43," +
+            (33..43).joinToString(",") { "d3dcompiler_$it" }
+        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;$d3dx=n,b", env()["WINEDLLOVERRIDES"])
+        assertEquals(SESSION_DLL_OVERRIDES, env()["WINEDLLOVERRIDES"])
+    }
+
+    @Test
+    fun `D3DX stays native first and never native only`() {
+        // `n` alone would turn a container without the DirectX component into
+        // STATUS_DLL_NOT_FOUND for every game that links D3DX; `n,b` falls back
+        // to Wine's builtin. And the audio and input DLLs the package also
+        // carries are deliberately absent -- Wine's FAudio and XInput serve those.
+        val value = env()["WINEDLLOVERRIDES"]!!
+        assertTrue(value.endsWith("d3dcompiler_43=n,b"))
+        for (builtin in listOf("xaudio2_7", "xactengine3_7", "x3daudio1_7", "xapofx1_5", "xinput1_3", "d3dcompiler_47")) {
+            assertTrue("$builtin must stay Wine's builtin", builtin !in value)
+        }
     }
 
     @Test
@@ -414,7 +430,7 @@ class SessionEnvironmentTest {
             manifest = manifest,
         )
         assertEquals(
-            "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;winhttp=n,b",
+            "$SESSION_DLL_OVERRIDES;winhttp=n,b",
             environment["WINEDLLOVERRIDES"],
         )
     }
@@ -426,7 +442,7 @@ class SessionEnvironmentTest {
         val manifest = fexManifest.withDllOverrides()
         for (blank in listOf("", "   ", ";")) {
             assertEquals(
-                "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
+                SESSION_DLL_OVERRIDES,
                 env(mapOf("wine.dllOverrides" to ParamValue.Text(blank)), manifest)["WINEDLLOVERRIDES"],
             )
         }
@@ -847,7 +863,7 @@ class SessionEnvironmentTest {
                 // later is picked up by the next session with nothing to remember.
                 "WINE_ADDITIONAL_CERTS_DIR" to File(prefix.parentFile, "certs").absolutePath,
                 "WINEDEBUG" to "-all,err+all,warn+module,+winediag,+loaddll,warn+debugstr",
-                "WINEDLLOVERRIDES" to "d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n",
+                "WINEDLLOVERRIDES" to SESSION_DLL_OVERRIDES,
                 "DISPLAY" to ":0",
                 // No Win32 caption on any top-level window. Measured before the
                 // patch existed: a 1280x720 game window had a 1274x673 client at
@@ -1555,7 +1571,7 @@ class SessionEnvironmentTest {
     @Test
     fun `a container that appends nothing gets exactly the required overrides`() {
         val value = env(manifest = overrideManifest(zinkSpec, extraSpec))["WINEDLLOVERRIDES"]
-        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n", value)
+        assertEquals(SESSION_DLL_OVERRIDES, value)
     }
 
     @Test
@@ -1564,7 +1580,7 @@ class SessionEnvironmentTest {
             params = mapOf("wine.openglZink" to ParamValue.Flag(true)),
             manifest = overrideManifest(zinkSpec, extraSpec),
         )["WINEDLLOVERRIDES"]
-        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;opengl32=n", value)
+        assertEquals("$SESSION_DLL_OVERRIDES;opengl32=n", value)
     }
 
     @Test
@@ -1580,7 +1596,7 @@ class SessionEnvironmentTest {
             ),
             manifest = overrideManifest(zinkSpec, extraSpec),
         )["WINEDLLOVERRIDES"]
-        assertEquals("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;opengl32=n;opengl32=b", value)
+        assertEquals("$SESSION_DLL_OVERRIDES;opengl32=n;opengl32=b", value)
     }
 
     @Test
@@ -1592,7 +1608,7 @@ class SessionEnvironmentTest {
             params = mapOf("wine.dllOverrides" to ParamValue.Text("  ;d3d9=b;  ")),
             manifest = overrideManifest(zinkSpec, extraSpec),
         )["WINEDLLOVERRIDES"]!!
-        assertTrue(value.startsWith("d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n;"))
+        assertTrue(value.startsWith("$SESSION_DLL_OVERRIDES;"))
         assertTrue(value.endsWith("d3d9=b"))
     }
 

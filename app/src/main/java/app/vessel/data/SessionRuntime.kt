@@ -1531,6 +1531,9 @@ class SessionRuntime @Inject constructor(
         runCatching { installVcRuntimes(container, layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "vc runtimes: ${it.message}") }
 
+        runCatching { installDirectXRuntimes(container, layout, current.log) }
+            .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "directx runtimes: ${it.message}") }
+
         runCatching { ensureScriptsDirectory(layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: ${it.message}") }
 
@@ -2968,6 +2971,45 @@ class SessionRuntime @Inject constructor(
             return@withContext
         }
         log.line(LogSource.VESSEL, LogLevel.INFO, "vc runtimes: ${deployed.describe()}")
+    }
+
+    /**
+     * Copy Microsoft's DirectX End-User Runtime DLLs into the prefix.
+     *
+     * The same mechanism as [installVcRuntimes] and for the same reason:
+     * [copyWindowsPayload] is what notices a new package by its `payloadSha256`.
+     *
+     * **Unlike the VC++ runtimes, every name here collides with a Wine builtin**,
+     * and copying over it is correct rather than a clobber. What `system32`
+     * holds for a Wine builtin is a placeholder; which implementation loads is
+     * decided by the override, not by the file. `D3DX_DLL_OVERRIDES` puts D3DX
+     * and D3DCompiler `native,builtin`, so Microsoft's copy wins; the audio and
+     * input DLLs carry no override, so Wine's builtin still wins over the
+     * Microsoft file sitting beside it. `wineboot --update` leaves a real PE in
+     * place rather than restoring its placeholder, so this survives a Wine
+     * upgrade.
+     */
+    private suspend fun installDirectXRuntimes(
+        containerId: String,
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val source = components.directoryFor(containerId, ComponentType.DIRECTX)
+            ?: return@withContext
+        val deployed = copyWindowsPayload(source, layout, ComponentType.DIRECTX.wire)
+        if (deployed.copied == 0 && deployed.present == 0) {
+            // A WARN for the same reason as the VC++ runtimes: the override still
+            // says native first, so a game falls back to Wine's builtin D3DX and
+            // fails in its effect compiler with nothing here saying why.
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "directx runtimes: ${source.path} deployed nothing — expected DLLs under " +
+                    "$SYSTEM32/ or $SYSWOW64/ in the package",
+            )
+            return@withContext
+        }
+        log.line(LogSource.VESSEL, LogLevel.INFO, "directx runtimes: ${deployed.describe()}")
     }
 
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
