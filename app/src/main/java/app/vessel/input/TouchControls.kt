@@ -796,6 +796,36 @@ object TouchLayouts {
             button("key-y", 0.836f, 0.817f, 0.040f, GamepadAction.Key(X11.Y)),
             button("key-z", 0.770f, 0.838f, 0.040f, GamepadAction.Key(X11.Z)),
 
+            // **W and S outboard of the left arcs, A and D outboard of the
+            // right ones -- one above, one below, in the four corners the arcs
+            // leave empty.**
+            //
+            // The stick already sends all four -- that is what `StickRole.Keys`
+            // means -- but a stick sends them the way a stick does: one
+            // direction at a time, from a centre it springs back to. A game that
+            // wants `S` held while a menu is open, or `D` tapped once, wants a
+            // button, and those four were the only letters on this keyboard with
+            // nowhere to tap them. Both routes stay live: holding `S` on the
+            // glass while pushing the stick forward is the same contradiction as
+            // pressing two keys at once on a keyboard, and the guest resolves it
+            // the same way.
+            //
+            // **Two and two rather than four on one side**, which is what a WASD
+            // cluster looked like when it was tried: a crowd under one thumb
+            // while the other side had nothing, and the two halves stopped being
+            // mirror images. Forward and back go to the hand that walks; strafe
+            // goes to the hand that aims.
+            //
+            // The corners are the only ground left that is neither on an arc nor
+            // in the middle -- and the middle is spoken for, because the editor
+            // draws `Arrange the overlay` and its Done button bottom-centre, and
+            // a control under that is one nobody can pick up and move.
+            button("key-w", 0.052f, 0.310f, 0.040f, GamepadAction.Key(X11.W)),
+            button("key-s", 0.052f, 0.810f, 0.040f, GamepadAction.Key(X11.S)),
+
+            button("key-a", 0.948f, 0.310f, 0.040f, GamepadAction.Key(X11.A)),
+            button("key-d", 0.948f, 0.810f, 0.040f, GamepadAction.Key(X11.D)),
+
             // **Along the top edge: the mouse in the corners where an index
             // finger rests, then both hands' modifiers, then the four keys that
             // are not letters.** Esc, Tab, Space and Enter sit together in the
