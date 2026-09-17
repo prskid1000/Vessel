@@ -48,6 +48,30 @@ data class InputProfile(
     val isBuiltInDefault: Boolean get() = id == DEFAULT_ID
 
     /**
+     * Whether this is one of the seeded profiles, which cannot be deleted.
+     *
+     * [DEFAULT_ID] because something has to resolve when a container names
+     * nothing; [KEYBOARD_ID] because it is seeded too, and a delete undone by
+     * the next read is not a delete.
+     */
+    val isBuiltIn: Boolean get() = id == DEFAULT_ID || id == KEYBOARD_ID
+
+    /**
+     * What this profile resets to.
+     *
+     * Its own seed when it is one of the seeded profiles, and the pad otherwise.
+     * **`Reset layout` used to name [TouchLayouts.Gamepad] outright**, so a
+     * keyboard profile reset itself into a controller -- the one arrangement its
+     * user had chosen against.
+     *
+     * A profile of the user's own falls back to the pad, which is a guess: there
+     * is nothing recorded about which seed it was duplicated from. Reset is a
+     * button of last resort on a layout that is already a mess, and offering the
+     * shipped controller is better than offering nothing.
+     */
+    val seed: InputProfile get() = builtIn.firstOrNull { it.id == id } ?: Default
+
+    /**
      * The overlay as it will actually behave: every pad-linked control resolved
      * against the pad table.
      *
@@ -140,5 +164,44 @@ data class InputProfile(
             pad = GamepadProfile.Default,
             touch = TouchLayouts.Gamepad,
         )
+
+        /**
+         * The id of the second profile that is always there.
+         *
+         * It shares one property with [DEFAULT_ID] -- it cannot be deleted,
+         * because a profile that reappears after being deleted is worse than one
+         * that refuses -- and none of the others: nothing resolves here, and a
+         * container that names nothing still gets [Default].
+         */
+        const val KEYBOARD_ID: String = "keyboard"
+
+        /**
+         * **Keyboard and mouse, for the games that cannot read a pad at all.**
+         *
+         * Caribbean Legend is why this is seeded rather than left as a layout to
+         * be found: it has no native controller support -- nothing about a
+         * gamepad in its configuration, and the community plays it through Steam
+         * Input mapping a pad onto keys -- so a fresh container opens
+         * [TouchLayouts.Gamepad] on a game that reads none of it. Every control
+         * here sends a key or a mouse button instead.
+         *
+         * It carries [TouchLayouts.KeyboardAndMouse], which is
+         * [TouchLayouts.Gamepad]'s geometry with keys on it, so switching
+         * between the two moves nothing under either thumb.
+         *
+         * The pad table is the default one and the overlay does not use it -- no
+         * control here carries `pad` or `padStick`, so nothing borrows it. It is
+         * there for a real controller plugged into a container running this
+         * profile, which still deserves a working table.
+         */
+        val Keyboard: InputProfile = InputProfile(
+            id = KEYBOARD_ID,
+            name = "Keyboard and mouse",
+            pad = GamepadProfile.Default,
+            touch = TouchLayouts.KeyboardAndMouse,
+        )
+
+        /** The profiles that are always offered, in the order they are shown. */
+        val builtIn: List<InputProfile> = listOf(Default, Keyboard)
     }
 }

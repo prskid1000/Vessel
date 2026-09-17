@@ -41,8 +41,14 @@ class InputProfileRepository @Inject constructor(
     val profiles: Flow<List<InputProfile>> =
         store.data.map { document ->
             val stored = document.profiles.map { it.toProfile() }
-            val default = stored.firstOrNull { it.isBuiltInDefault } ?: InputProfile.Default
-            listOf(default) + stored.filterNot { it.isBuiltInDefault }
+            // Each seeded profile as it stands -- what was written for it, or the
+            // seed -- then everything else in the order it was written. The
+            // seeds are listed from [InputProfile.builtIn] rather than named one
+            // by one, so a third of them is a data change here and nowhere else.
+            val seeded = InputProfile.builtIn.map { seed ->
+                stored.firstOrNull { it.id == seed.id } ?: seed
+            }
+            seeded + stored.filterNot { it.isBuiltIn }
         }
 
     /** Kept as a name callers already use; the default is in it either way. */
@@ -63,12 +69,23 @@ class InputProfileRepository @Inject constructor(
      */
     suspend fun resolve(id: String?): InputProfile {
         if (id == null) return defaultProfile()
-        return find(id) ?: defaultProfile()
+        // The seed, when the id names one and nothing has been written for it.
+        // **Without this a seeded profile could be selected and never took
+        // effect**: `find` reads the store, a seed is not in the store until it
+        // is edited, and the fallback then handed back the *default*. Choosing
+        // "Keyboard and mouse" left the pad on the glass and in the editor,
+        // which reads as the choice not sticking rather than as a lookup that
+        // missed.
+        return find(id)
+            ?: InputProfile.builtIn.firstOrNull { it.id == id }
+            ?: defaultProfile()
     }
 
+    /** A seeded profile as it stands: what was written for it, or the seed. */
+    private suspend fun seeded(seed: InputProfile): InputProfile = find(seed.id) ?: seed
+
     /** The default as it stands: what was written for it, or the seed. */
-    private suspend fun defaultProfile(): InputProfile =
-        find(InputProfile.DEFAULT_ID) ?: InputProfile.Default
+    private suspend fun defaultProfile(): InputProfile = seeded(InputProfile.Default)
 
     /** Insert or replace, keeping declaration order stable for the list. */
     suspend fun save(profile: InputProfile) {
@@ -90,10 +107,12 @@ class InputProfileRepository @Inject constructor(
      * the coupling the separate documents exist to avoid.
      */
     suspend fun delete(id: String) {
-        // The one thing the default's id still means. Refused here and not only
-        // in the interface, because "there is always a profile" is an invariant
-        // of the store rather than a rule of one screen.
-        if (id == InputProfile.DEFAULT_ID) return
+        // The one thing a seeded id still means. Refused here and not only in
+        // the interface, because "there is always a profile" is an invariant of
+        // the store rather than a rule of one screen -- and because a delete
+        // that the next read undoes, which is what deleting a seed would be,
+        // is worse than one that refuses.
+        if (InputProfile.builtIn.any { it.id == id }) return
         store.updateData { document ->
             document.copy(profiles = document.profiles.filterNot { it.id == id })
         }

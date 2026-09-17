@@ -677,11 +677,167 @@ object TouchLayouts {
         ),
     )
 
+    /**
+     * **Keyboard and mouse: two rings of keys, one around each thumb.**
+     *
+     * A phone is held by its ends, so the ground a thumb covers is a disc
+     * centred on where it rests -- and the middle of the screen is the one place
+     * neither thumb goes. That shape is the layout: a stick with its keys in
+     * rings around it on each side, the middle left for the two keys pressed so
+     * often they deserve their own ground, and the top edge for what an index
+     * finger reaches.
+     *
+     * Thirty-two keys fit inside that reach. Every letter a game binds is here
+     * -- WASD on the left stick, the rest split between the rings -- with the
+     * whole number row, both mouse buttons, both hands' Shift and Control, Esc,
+     * Enter, Tab and Space.
+     *
+     * **Distance from the stick is how often a game presses the key.** Inner
+     * ring: the number row on the left, the verbs on the right. Outer ring: the
+     * rest of the alphabet, alphabetical, which is what a game asks for between
+     * fights rather than during them and the only order a key can be found in
+     * without hunting.
+     *
+     * Not `Wasd`, which stays: that one is six controls for a game played with
+     * two thumbs and no thought. This is the full hand.
+     */
+    val KeyboardAndMouse: TouchLayout = TouchLayout(
+        listOf(
+            // **A stick with two arcs of keys sweeping outboard of it, twice,
+            // and the middle left empty.** A phone is held by its ends, so the
+            // ground a thumb covers is an arc swept from the corner it rests in;
+            // the middle of the screen is the one place neither thumb reaches.
+            //
+            // **Both layers sweep outward, and the inboard halves are left
+            // out.** A full ring would put half its keys between the hands --
+            // the far side of the stick from the thumb, and the longest reach on
+            // the screen -- so those slots would be the worst on the layout and
+            // would crowd the middle at the same time.
+            //
+            // **The two sides are mirror images, seven and nine each.** Not for
+            // symmetry's own sake: a hand learns one side and then knows the
+            // other, and an arc with more keys on it than its twin has them at a
+            // different spacing, so neither hand can trust what it learned.
+            TouchControl(
+                id = "stick",
+                kind = TouchKind.STICK,
+                cx = 0.230f,
+                cy = 0.560f,
+                size = 0.115f,
+                label = "Move",
+                role = StickRole.Keys,
+                up = GamepadAction.Key(X11.W),
+                down = GamepadAction.Key(X11.S),
+                left = GamepadAction.Key(X11.A),
+                right = GamepadAction.Key(X11.D),
+            ),
+            TouchControl(
+                id = "look",
+                kind = TouchKind.STICK,
+                cx = 0.770f,
+                cy = 0.560f,
+                size = 0.115f,
+                label = "Look",
+                role = StickRole.Look,
+            ),
+
+            // **The arcs are circular in pixels at the squarest screen and widen
+            // from there.** `cx` is a fraction of the width and `size` a
+            // fraction of the short edge, so a constant `cx` arm is a larger
+            // pixel offset on a longer screen: dividing the horizontal arm by
+            // 1.6 makes each arc round at 16:10 and flatter-but-further-apart at
+            // 2.4:1. Outward is the safe direction -- buttons only separate.
+            //
+            // **How many fit is arithmetic, not taste.** Over a half circle of
+            // radius R, n keys sit 2 * R * sin(90 / (n - 1)) apart and two radii
+            // are 0.080: 0.093 at seven on the inner arc, 0.109 at nine on the
+            // outer. Ten and eleven were both tried on the outer arc; eleven
+            // measured 0.077, an overlap, which `hitTest` resolves by handing
+            // the touch to whichever control was declared later.
+            //
+            // The number row runs down the inner arc and continues onto the
+            // outer one, then the alphabet follows: top to bottom on both, so
+            // the order reads the way the thumb travels.
+            button("key-1", 0.230f, 0.375f, 0.040f, GamepadAction.Key(X11.N1)),
+            button("key-2", 0.172f, 0.400f, 0.040f, GamepadAction.Key(X11.N2)),
+            button("key-3", 0.130f, 0.468f, 0.040f, GamepadAction.Key(X11.N3)),
+            button("key-4", 0.114f, 0.560f, 0.040f, GamepadAction.Key(X11.N4)),
+            button("key-5", 0.130f, 0.653f, 0.040f, GamepadAction.Key(X11.N5)),
+            button("key-6", 0.172f, 0.720f, 0.040f, GamepadAction.Key(X11.N6)),
+            button("key-7", 0.230f, 0.745f, 0.040f, GamepadAction.Key(X11.N7)),
+
+            button("key-8", 0.230f, 0.282f, 0.040f, GamepadAction.Key(X11.N8)),
+            button("key-9", 0.164f, 0.303f, 0.040f, GamepadAction.Key(X11.N9)),
+            button("key-0", 0.107f, 0.363f, 0.040f, GamepadAction.Key(X11.N0)),
+            button("key-h", 0.069f, 0.454f, 0.040f, GamepadAction.Key(X11.H)),
+            button("key-i", 0.056f, 0.560f, 0.040f, GamepadAction.Key(X11.I)),
+            button("key-j", 0.069f, 0.666f, 0.040f, GamepadAction.Key(X11.J)),
+            button("key-k", 0.107f, 0.757f, 0.040f, GamepadAction.Key(X11.K)),
+            button("key-l", 0.164f, 0.817f, 0.040f, GamepadAction.Key(X11.L)),
+            button("key-n", 0.230f, 0.838f, 0.040f, GamepadAction.Key(X11.N)),
+
+            // The right thumb: the verbs on the inner arc, what a game presses
+            // while something is happening.
+            button("key-e", 0.770f, 0.375f, 0.040f, GamepadAction.Key(X11.E)),
+            button("key-r", 0.828f, 0.400f, 0.040f, GamepadAction.Key(X11.R)),
+            button("key-f", 0.870f, 0.468f, 0.040f, GamepadAction.Key(X11.F)),
+            button("key-g", 0.886f, 0.560f, 0.040f, GamepadAction.Key(X11.G)),
+            button("key-c", 0.870f, 0.653f, 0.040f, GamepadAction.Key(X11.C)),
+            button("key-v", 0.828f, 0.720f, 0.040f, GamepadAction.Key(X11.V)),
+            button("key-q", 0.770f, 0.745f, 0.040f, GamepadAction.Key(X11.Q)),
+
+            button("key-b", 0.770f, 0.282f, 0.040f, GamepadAction.Key(X11.B)),
+            button("key-m", 0.836f, 0.303f, 0.040f, GamepadAction.Key(X11.M)),
+            button("key-o", 0.893f, 0.363f, 0.040f, GamepadAction.Key(X11.O)),
+            button("key-p", 0.931f, 0.454f, 0.040f, GamepadAction.Key(X11.P)),
+            button("key-t", 0.944f, 0.560f, 0.040f, GamepadAction.Key(X11.T)),
+            button("key-u", 0.931f, 0.666f, 0.040f, GamepadAction.Key(X11.U)),
+            button("key-x", 0.893f, 0.757f, 0.040f, GamepadAction.Key(X11.X)),
+            button("key-y", 0.836f, 0.817f, 0.040f, GamepadAction.Key(X11.Y)),
+            button("key-z", 0.770f, 0.838f, 0.040f, GamepadAction.Key(X11.Z)),
+
+            // **Along the top edge: the mouse in the corners where an index
+            // finger rests, then both hands' modifiers, then the four keys that
+            // are not letters.** Esc, Tab, Space and Enter sit together in the
+            // middle rather than in the gap between the hands, which leaves that
+            // gap empty -- and keeps every control clear of `Arrange the
+            // overlay`, whose Done button is drawn bottom-centre over the
+            // layout. Two controls under it were two a user could not pick up.
+            //
+            // The cost is real and worth stating: `Space` is a top-edge reach
+            // rather than a thumb roll, which is the wrong place for a jump
+            // button in a shooter. It is one drag away for anyone who wants it
+            // back, and this is a starting point rather than a verdict.
+            //
+            // **Three letters each, so the row reads as one set.** Left and
+            // right Shift and Control are different keycodes and a game bound to
+            // one will not answer the other, so all four are here -- but "Left
+            // Ctrl" on a button sitting on the left says the same thing twice,
+            // and the catalogue's long names are for a picker listing every key
+            // at once, not for a 48 dp circle. The side is the position; the
+            // label is the key.
+            //
+            // `CTL` rather than `CTR`, which reads as "centre" on a row whose
+            // middle four are exactly that.
+            button("mouse-left", 0.055f, 0.09f, 0.048f, GamepadAction.Button(PointerButton.LEFT), label = "LMB"),
+            button("key-ctrl-l", 0.140f, 0.09f, 0.048f, GamepadAction.Key(X11.CTRL_L), latching = true, label = "CTL"),
+            button("key-shift-l", 0.225f, 0.09f, 0.048f, GamepadAction.Key(X11.SHIFT_L), latching = true, label = "SFT"),
+            button("key-esc", 0.395f, 0.09f, 0.040f, GamepadAction.Key(X11.ESC), label = "ESC"),
+            button("key-tab", 0.465f, 0.09f, 0.040f, GamepadAction.Key(X11.TAB), label = "TAB"),
+            button("key-space", 0.535f, 0.09f, 0.040f, GamepadAction.Key(X11.SPACE), label = "SPC"),
+            button("key-enter", 0.605f, 0.09f, 0.040f, GamepadAction.Key(X11.ENTER), label = "ENT"),
+            button("key-shift-r", 0.775f, 0.09f, 0.048f, GamepadAction.Key(X11.SHIFT_R), latching = true, label = "SFT"),
+            button("key-ctrl-r", 0.860f, 0.09f, 0.048f, GamepadAction.Key(X11.CTRL_R), latching = true, label = "CTL"),
+            button("mouse-right", 0.945f, 0.09f, 0.048f, GamepadAction.Button(PointerButton.RIGHT), label = "RMB"),
+        ),
+    )
+
     /** Nothing on screen, for a container played with a real pad. */
     val None: TouchLayout = TouchLayout()
 
     val stock: List<Stock> = listOf(
         Stock("A whole controller", "Both sticks, the d-pad, and every button.", Gamepad),
+        Stock("Keyboard and mouse", "WASD, mouse look, the mouse buttons and the keys games use.", KeyboardAndMouse),
         Stock("WASD and look", "A stick, a look pad and four buttons.", Wasd),
         Stock("Arrows and Enter", "A d-pad, Enter and Esc — for an installer.", Installer),
         Stock("Nothing", "An empty overlay. Add controls yourself.", None),
@@ -721,7 +877,15 @@ object TouchLayouts {
      * the name is the user's field now, and a layout the user has not named
      * anything is better read straight off its binding.
      */
-    private fun button(id: String, cx: Float, cy: Float, size: Float, action: GamepadAction) =
+    private fun button(
+        id: String,
+        cx: Float,
+        cy: Float,
+        size: Float,
+        action: GamepadAction,
+        latching: Boolean = false,
+        label: String = "",
+    ) =
         TouchControl(
             id = id,
             kind = TouchKind.BUTTON,
@@ -729,5 +893,7 @@ object TouchLayouts {
             cy = cy,
             size = size,
             action = action,
+            latching = latching,
+            label = label,
         )
 }

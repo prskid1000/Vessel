@@ -1371,6 +1371,9 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
  * sight; this class is the part that cannot be tested that way, so it is kept
  * as close to a `when` over a sealed type as it can be.
  */
+/** Off unless `setprop log.tag.VesselPointer DEBUG`. See [GuestInputSink.accept]. */
+private const val POINTER_TAG = "VesselPointer"
+
 private class GuestInputSink(
     private val xServer: XServer,
     private val transformation: () -> ViewTransformation,
@@ -1382,6 +1385,17 @@ private class GuestInputSink(
     fun accept(inputs: List<GuestInput>) = inputs.forEach { accept(it) }
 
     fun accept(input: GuestInput) {
+        // Off unless `setprop log.tag.VesselPointer DEBUG`. Here because "the app
+        // never dispatched" and "the guest never applied" look identical from
+        // outside, and telling them apart is the whole question when a cursor
+        // lags: this line carries the clock the guest's own log does not have.
+        if (Log.isLoggable(POINTER_TAG, Log.DEBUG)) {
+            when (input) {
+                is GuestInput.MoveTo, is GuestInput.MoveBy, is GuestInput.Button ->
+                    Log.d(POINTER_TAG, "${SystemClock.uptimeMillis()} $input")
+                else -> Unit
+            }
+        }
         when (input) {
             is GuestInput.MoveTo -> moveTo(input.x, input.y)
             is GuestInput.MoveBy -> moveBy(input.dx, input.dy)

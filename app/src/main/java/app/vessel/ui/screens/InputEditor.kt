@@ -288,9 +288,9 @@ private fun ProfileActions(state: InputEditorState, actions: InputEditorActions)
         size = HEADER_ACTION_SIZE,
     )
     ProfileTransferButtons(state, actions, compact = true)
-    // The built-in default is never deletable, and the control is absent rather
+    // A seeded profile is never deletable, and the control is absent rather
     // than disabled: a dead button asks to be pressed once.
-    if (!state.profile.isBuiltInDefault) {
+    if (!state.profile.isBuiltIn) {
         VIconAction(
             VIcons.Trash,
             "Delete this profile",
@@ -887,7 +887,11 @@ private fun controlEntries(
         // pad-linked control's action in from the binding table, so the resolved
         // form never equals the stock constant and the way back would be offered
         // on an arrangement nobody has touched.
-        reset = Reset.Layout.takeIf { !layout.isEmpty && profile.touch != TouchLayouts.Gamepad },
+        // Against the profile's *own* seed rather than the pad: on a keyboard
+        // profile the pad is not the way back, so comparing with it offered a
+        // reset on an arrangement nobody had touched -- and the reset then
+        // turned it into a controller.
+        reset = Reset.Layout.takeIf { !layout.isEmpty && profile.touch != profile.seed.touch },
         group = ControlGroup.Glass,
         collapsed = ControlGroup.Glass in collapsed,
     )
@@ -1095,7 +1099,7 @@ private fun ResetAction(
             // positions` because it restores sizes and membership too.
             Reset.Layout -> VButton(
                 "Reset layout",
-                { actions.onProfile(profile.copy(touch = TouchLayouts.Gamepad)) },
+                { actions.onProfile(profile.copy(touch = profile.seed.touch)) },
                 style = VButtonStyle.Ghost,
             )
 
@@ -1857,12 +1861,16 @@ private fun ProfilesSection(
         // stored, so "did that stick?" is answered by looking at it.
         VLabeledField(
             label = "Name",
-            help = if (state.profile.isBuiltInDefault) {
-                "The default cannot be deleted — it is what a container falls back to, so " +
-                    "there is always one. Everything else about it, this name included, is " +
-                    "yours to change."
-            } else {
-                null
+            help = when {
+                state.profile.isBuiltInDefault ->
+                    "The default cannot be deleted — it is what a container falls back to, so " +
+                        "there is always one. Everything else about it, this name included, is " +
+                        "yours to change."
+                state.profile.isBuiltIn ->
+                    "This one is seeded rather than resolved to, so it cannot be deleted " +
+                        "either — it would come back on the next read. Everything about it, " +
+                        "this name included, is yours to change."
+                else -> null
             },
         ) {
             Row(
@@ -1951,7 +1959,7 @@ private fun ProfileRow(
             Text(
                 "${profile.boundCount} bound · " +
                     "${profile.touch.controls.size} on the glass" +
-                    if (profile.isBuiltInDefault) " · built in" else "",
+                    if (profile.isBuiltIn) " · built in" else "",
                 style = Vessel.type.monoSmall,
                 color = Vessel.colors.textMuted,
                 maxLines = 1,
@@ -1969,10 +1977,10 @@ private fun ProfileRow(
             contentDescription = "Delete ${profile.name}",
             onClick = { actions.onDelete(profile) },
             style = VButtonStyle.Ghost,
-            // The built-in default is a constant rather than a record: there is
-            // nothing on disk to delete, and offering it would be a button that
-            // could only ever do nothing.
-            enabled = !profile.isBuiltInDefault,
+            // A seeded profile is a constant until something is written for
+            // it, so there is nothing on disk to delete and the delete would be
+            // undone by the next read either way.
+            enabled = !profile.isBuiltIn,
             size = CLEAR_TARGET,
         )
     }
