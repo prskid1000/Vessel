@@ -1,0 +1,213 @@
+turnip: say how much GPU memory each device holds.
+
+Every graphics API Vessel runs reaches the GPU through Turnip -- DXVK, vkd3d
+and Zink are all its Vulkan clients -- so a byte count here is the one VRAM
+figure that covers D3D 8 to 12, OpenGL and Vulkan alike. DXVK's own allocator
+figure covers D3D 8 to 11 only, vkd3d writes none, Zink none, and every KGSL
+memory node is denied to apps.
+
+Counted where a BO is really created (kgsl_bo_init, kgsl_bo_init_dmabuf) and
+really destroyed (kgsl_bo_finish after the last reference). Published to
+VESSEL_GPU_MEM_DIR/<pid>-<device> ("<bytes> <heap size>") from tu_queue_submit at most once a second,
+only when it moved, via rename; removed in tu_DestroyDevice.
+
+Motivation, measured: Empyrion crashed after six minutes at its main menu with
+DxvkMemoryAllocator: Memory allocation failed, 6114 of 6136 MiB, and there was
+no way to see how it got there.
+
+--- a/src/freedreno/vulkan/tu_device.h
++++ b/src/freedreno/vulkan/tu_device.h
+@@ -321,6 +321,13 @@
+    uint32_t device_idx;
+    int fd;
+ 
++   /* Vessel: GPU memory this device holds, for the host's VRAM graph. See
++    * tu_vessel_gpu_mem_publish(). Bytes, changed with __atomic builtins because
++    * BOs are created and freed from any thread the application likes. */
++   uint64_t vessel_bo_bytes;
++   uint64_t vessel_bo_published_bytes;
++   uint64_t vessel_bo_published_ns;
++
+    struct ir3_compiler *compiler;
+ 
+    /* Backup in-memory cache to be used if the app doesn't provide one */
+--- a/src/freedreno/vulkan/tu_knl.h
++++ b/src/freedreno/vulkan/tu_knl.h
+@@ -224,6 +224,14 @@
+ void
+ tu_bo_finish(struct tu_device *dev, struct tu_bo *bo);
+ 
++/* Vessel: see tu_knl.cc. */
++void
++tu_vessel_gpu_mem_add(struct tu_device *dev, int64_t bytes);
++void
++tu_vessel_gpu_mem_publish(struct tu_device *dev);
++void
++tu_vessel_gpu_mem_retire(struct tu_device *dev);
++
+ VkResult
+ tu_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
+ 
+--- a/src/freedreno/vulkan/tu_knl.cc
++++ b/src/freedreno/vulkan/tu_knl.cc
+@@ -27,6 +27,102 @@
+ #include "tu_queue.h"
+ #include "tu_rmv.h"
+ 
++#include "util/os_time.h"
++
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++/* Vessel: how much GPU memory each device holds, for the host to graph.
++ *
++ * Every graphics API Vessel runs reaches the GPU through this driver -- DXVK,
++ * vkd3d and Zink are all Vulkan clients of Turnip -- so a byte count here is the
++ * one VRAM figure that covers D3D 8 to 12, OpenGL and Vulkan alike. The layers
++ * above keep their own books (DXVK writes its allocator's view to
++ * VESSEL_GFX_STATS) but each sees only itself, and the kernel's per-process
++ * counters are all denied to apps on the phones this ships to.
++ *
++ * The count moves where a BO is really created and really destroyed, in the
++ * kernel backend: tu_bo_finish() runs once per *reference*, so counting there
++ * would subtract a shared BO once per holder. Imported dma-bufs are counted --
++ * a swapchain image the device holds is memory the device holds -- and sparse
++ * VMAs are not, because they reserve address space rather than memory.
++ *
++ * Published as one file per device, VESSEL_GPU_MEM_DIR/<pid>-<device>, holding
++ * "<bytes held> <heap size>" and a newline. Written from tu_queue_submit(), which every API
++ * reaches every frame, at most once a second and only when the figure moved;
++ * written with a rename so the host never reads half a number; removed when the
++ * device is destroyed. A process that dies without destroying its device
++ * leaves a file whose pid is gone, and the host drops it. With the variable
++ * unset -- anything but a Vessel session -- all of this is one branch. */
++
++static const char *
++vessel_gpu_mem_dir(void)
++{
++   static const char *dir = getenv("VESSEL_GPU_MEM_DIR");
++   return dir && *dir ? dir : NULL;
++}
++
++static void
++vessel_gpu_mem_path(struct tu_device *dev, char *out, size_t size)
++{
++   snprintf(out, size, "%s/%d-%" PRIxPTR, vessel_gpu_mem_dir(), (int) getpid(),
++            (uintptr_t) dev);
++}
++
++void
++tu_vessel_gpu_mem_add(struct tu_device *dev, int64_t bytes)
++{
++   __atomic_fetch_add(&dev->vessel_bo_bytes, (uint64_t) bytes, __ATOMIC_RELAXED);
++}
++
++void
++tu_vessel_gpu_mem_publish(struct tu_device *dev)
++{
++   if (!vessel_gpu_mem_dir())
++      return;
++
++   const uint64_t now = os_time_get_nano();
++   uint64_t last = __atomic_load_n(&dev->vessel_bo_published_ns, __ATOMIC_RELAXED);
++   if (last && now - last < 1000000000ull)
++      return;
++
++   const uint64_t bytes = __atomic_load_n(&dev->vessel_bo_bytes, __ATOMIC_RELAXED);
++   if (last && bytes == __atomic_load_n(&dev->vessel_bo_published_bytes, __ATOMIC_RELAXED))
++      return;
++
++   /* One writer per second across however many queues submit concurrently. */
++   if (!__atomic_compare_exchange_n(&dev->vessel_bo_published_ns, &last, now, false,
++                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++      return;
++
++   char path[512], tmp[520];
++   vessel_gpu_mem_path(dev, path, sizeof(path));
++   snprintf(tmp, sizeof(tmp), "%s.tmp", path);
++
++   FILE *f = fopen(tmp, "w");
++   if (!f)
++      return;
++   /* The heap size beside it: it is the budget the application was told, and
++    * Vessel sets it from the container's VRAM setting, so the host can draw
++    * the line against the ceiling that actually applies. */
++   fprintf(f, "%" PRIu64 " %" PRIu64 "\n", bytes, dev->physical_device->heap.size);
++   if (fclose(f) == 0 && rename(tmp, path) == 0)
++      __atomic_store_n(&dev->vessel_bo_published_bytes, bytes, __ATOMIC_RELAXED);
++}
++
++void
++tu_vessel_gpu_mem_retire(struct tu_device *dev)
++{
++   if (!vessel_gpu_mem_dir())
++      return;
++
++   char path[512];
++   vessel_gpu_mem_path(dev, path, sizeof(path));
++   unlink(path);
++}
++
+ VkResult
+ tu_bo_init_new_explicit_iova(struct tu_device *dev,
+                              struct vk_object_base *base,
+@@ -324,10 +420,13 @@
+                 struct vk_sync_signal *signals, uint32_t signal_count,
+                 struct tu_u_trace_submission_data *u_trace_submission_data)
+ {
+-   return queue->device->instance->knl->queue_submit(queue, submit,
+-                                                     waits, wait_count,
+-                                                     signals, signal_count,
+-                                                     u_trace_submission_data);
++   VkResult result =
++      queue->device->instance->knl->queue_submit(queue, submit,
++                                                 waits, wait_count,
++                                                 signals, signal_count,
++                                                 u_trace_submission_data);
++   tu_vessel_gpu_mem_publish(queue->device);
++   return result;
+ }
+ 
+ /**
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -412,6 +412,7 @@
+       .base = base,
+    };
+ 
++   tu_vessel_gpu_mem_add(dev, bo->size);
+    tu_dump_bo_init(dev, bo);
+ 
+    VkResult result = VK_SUCCESS;
+@@ -482,6 +483,8 @@
+       .shared_fd = os_dupfd_cloexec(fd),
+    };
+ 
++   tu_vessel_gpu_mem_add(dev, bo->size);
++
+    struct stat st;
+    if (fstat(fd, &st) == 0)
+       /* Use the inode number as the unique ID, but set the MSB to avoid
+@@ -540,6 +543,8 @@
+    if (!p_atomic_dec_zero(&bo->refcnt))
+       return;
+ 
++   /* Vessel: the last reference, so the memory really goes. See tu_knl.cc. */
++   tu_vessel_gpu_mem_add(dev, -(int64_t) bo->size);
+    tu_debug_bos_del(dev, bo);
+    tu_dump_bo_del(dev, bo);
+ 
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3374,6 +3374,9 @@
+    if (!device)
+       return;
+ 
++   /* Vessel: the device's VRAM file goes with it. See tu_knl.cc. */
++   tu_vessel_gpu_mem_retire(device);
++
+    tu_memory_trace_finish(device);
+ 
+    if (FD_RD_DUMP(ENABLE))

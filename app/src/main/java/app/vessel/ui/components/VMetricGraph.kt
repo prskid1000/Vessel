@@ -529,9 +529,9 @@ private fun Legend(series: VMetricSeries) {
  * memory — so that a line near the top of its box means *flat out* rather than
  * *taller than its neighbour*.
  *
- * Compact, because four of these float over a desktop the user is trying to see:
+ * Compact, because five of these float over a desktop the user is trying to see:
  * the name and the current reading share one line, and the graph under it is
- * [SPARK_GRAPH_HEIGHT]. That is a glance, not a reading; the Metrics tab's
+ * [app.vessel.ui.theme.VMetrics.railSparkHeight]. That is a glance, not a reading; the Metrics tab's
  * [VMetricGraphCard] is where the same series gets room and statistics.
  *
  * It draws no surface of its own — the rail is one translucent card and these are
@@ -587,7 +587,7 @@ fun VMetricSpark(
             }
         }
         if (series != null) {
-            VMetricGraph(listOf(series), height = Vessel.metrics.sparkHeight)
+            VMetricGraph(listOf(series), height = Vessel.metrics.railSparkHeight)
         } else {
             Text(
                 unavailable ?: NO_READING,

@@ -187,6 +187,25 @@ data class MetricSample(
     val d3dMemAllocatedMb: Int? = null,
     val d3dMemUsedMb: Int? = null,
 
+    // — video memory —
+    /**
+     * GPU memory held by every Vulkan device in the session, as Turnip counts it.
+     *
+     * **The VRAM figure, for every API.** DXVK, vkd3d and Zink are all Vulkan
+     * clients of Turnip, so this is the same number for a D3D 9 game, a D3D 12
+     * one and an OpenGL one -- where [d3dMemUsedMb] covers D3D 8 to 11 only and
+     * sees DXVK's own allocations from the inside. The two are different levels
+     * rather than two answers to one question: the driver holds whole blocks,
+     * DXVK packs its resources into them, and the gap is slack.
+     */
+    val vramUsedMb: Int? = null,
+    /**
+     * The heap those devices were given, which is what an application is told
+     * its VRAM is -- Vessel sets it from the container's VRAM setting. The
+     * ceiling [vramUsedMb] runs into: DXVK refuses an allocation past it.
+     */
+    val vramBudgetMb: Int? = null,
+
     // — memory —
     /** Device RAM in use, from `ActivityManager.MemoryInfo`. */
     val ramUsedMb: Int? = null,
@@ -517,6 +536,15 @@ class GfxRunSummary {
     private val cpuClockPeak = Extent()
     private val gpuTemp = Extent()
 
+    /**
+     * The highest VRAM figure of the run, and the budget it was held against.
+     * A peak rather than an extent: the question a VRAM line answers is how
+     * close the run came to the ceiling, and the mean of a figure that only
+     * climbs during a load says nothing.
+     */
+    private var vramPeakMb = 0
+    private var vramBudgetMb = 0
+
     /** Ticks that carried any device reading, which is nearly all of them. */
     private var deviceSamples: Int = 0
 
@@ -527,6 +555,8 @@ class GfxRunSummary {
         sample.clockMhz?.let { cpuClock.add(it.toFloat()); any = true }
         sample.clockPeakMhz?.let { cpuClockPeak.add(it.toFloat()); any = true }
         sample.gpuTempDeciC?.let { gpuTemp.add(it / 10f); any = true }
+        sample.vramUsedMb?.let { if (it > vramPeakMb) vramPeakMb = it; any = true }
+        sample.vramBudgetMb?.let { vramBudgetMb = it }
         if (any) deviceSamples++
     }
 
@@ -545,6 +575,10 @@ class GfxRunSummary {
             cpuClock.append(this, "cpu MHz mean")
             cpuClockPeak.append(this, "cpu MHz peak core")
             gpuTemp.append(this, "gpu degC")
+            if (vramPeakMb > 0) {
+                append(" · vram peak ").append(vramPeakMb).append(" MB")
+                if (vramBudgetMb > 0) append(" of ").append(vramBudgetMb).append(" MB")
+            }
         }
     }
 
@@ -819,6 +853,36 @@ data class GfxStats(
  * rather than a zero — the same contract every other source in
  * [app.vessel.data.MetricSampler] has.
  */
+/** One device's file under `VESSEL_GPU_MEM_DIR`: bytes it holds, and its heap size. */
+data class GpuMemReading(val bytes: Long, val heapBytes: Long)
+
+/**
+ * Parse `<bytes held> <heap size>`, as `patches/mesa/0011` writes it.
+ *
+ * The heap is optional so a file from a build that wrote only the first number
+ * still counts, and anything that is not two non-negative integers is null:
+ * the writer renames a finished file into place, so a malformed one is not a
+ * half-written number but something else entirely.
+ */
+fun parseGpuMemFile(text: String): GpuMemReading? {
+    val parts = text.trim().split(' ').filter { it.isNotEmpty() }
+    val bytes = parts.getOrNull(0)?.toLongOrNull()?.takeIf { it >= 0 } ?: return null
+    val heap = parts.getOrNull(1)?.let { it.toLongOrNull()?.takeIf { heap -> heap >= 0 } ?: return null } ?: 0L
+    return GpuMemReading(bytes, heap)
+}
+
+/**
+ * The process a `VESSEL_GPU_MEM_DIR` file belongs to, from its name
+ * `<pid>-<device>`. Null for the writer's `.tmp` files and for anything else
+ * that is not ours, so a stray file is ignored rather than summed.
+ */
+fun gpuMemFilePid(name: String): Int? {
+    if (name.endsWith(".tmp")) return null
+    val dash = name.indexOf('-')
+    if (dash <= 0 || dash == name.length - 1) return null
+    return name.substring(0, dash).toIntOrNull()?.takeIf { it > 0 }
+}
+
 fun parseGfxStats(text: String, json: Json): GfxStats? =
     runCatching { json.decodeFromString(GfxStats.serializer(), text.trim()) }
         .getOrNull()

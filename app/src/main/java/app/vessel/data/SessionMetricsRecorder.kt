@@ -7,6 +7,7 @@ import app.vessel.core.SessionDisplayServer
 import app.vessel.core.MetricHistory
 import app.vessel.core.MetricSource
 import app.vessel.core.gfxStatsFile
+import app.vessel.core.gpuMemDir
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -157,13 +158,22 @@ class SessionMetricsRecorder @Inject constructor(
         // the very first samples of a run honest as well, which is exactly the
         // stretch someone chasing a slow launch is looking at.
         withContext(Dispatchers.IO) { runCatching { stats.delete() } }
+        // The same reasoning for the VRAM files, and the directory has to exist
+        // before any device writes into it: Turnip does not create it.
+        val gpuMem = gpuMemDir(paths.of(containerId).tmp)
+        withContext(Dispatchers.IO) {
+            runCatching {
+                gpuMem.mkdirs()
+                gpuMem.listFiles()?.forEach { it.delete() }
+            }
+        }
 
         // The device probe, plus the one row that is about the program rather
         // than about the phone. At session start no Direct3D program has drawn,
         // so the `d3d` row opens unavailable and says why — which is the truth
         // for the header, written once and never revised. The live copy in
         // `_state` is re-asked as the run goes, below.
-        val sources = sampler.sources + sampler.graphicsSource(stats)
+        val sources = sampler.sources + sampler.graphicsSource(stats) + sampler.vramSource(gpuMem)
         _state.value = SessionMetricsState(
             containerId = containerId,
             startedAt = startedAt,
@@ -204,6 +214,7 @@ class SessionMetricsRecorder @Inject constructor(
                     // smooth away exactly the dips this graph exists to show.
                     fps = display.frameRate.value.fps.takeIf { it > 0f || display.frameRate.value.history.isNotEmpty() },
                     gfxStats = stats,
+                    gpuMem = gpuMem,
                 )
                 // Said once, into the session log, the first time the display
                 // server knows. Not logcat: its main buffer holds under three
@@ -231,6 +242,7 @@ class SessionMetricsRecorder @Inject constructor(
                 // clocks and heat and no D3D at all.
                 summary.addDevice(sample)
                 val d3d = sample.d3dDrawCallsPerFrame != null
+                val vram = sample.vramUsedMb != null
                 _state.update {
                     if (it.startedAt != startedAt) {
                         it
@@ -242,10 +254,10 @@ class SessionMetricsRecorder @Inject constructor(
                             // D3D device and once if it exits — and rebuilding
                             // the list every second would recompose every card
                             // on the panel for a value that did not move.
-                            sources = if (d3d == it.sources.d3dAvailable) {
+                            sources = if (d3d == it.sources.d3dAvailable && vram == it.sources.vramAvailable) {
                                 it.sources
                             } else {
-                                sampler.sources + sampler.graphicsSource(stats)
+                                sampler.sources + sampler.graphicsSource(stats) + sampler.vramSource(gpuMem)
                             },
                         )
                     }
@@ -332,3 +344,7 @@ class SessionMetricsRecorder @Inject constructor(
  */
 private val List<MetricSource>.d3dAvailable: Boolean
     get() = any { it.label == "d3d" && it.available }
+
+/** The same, for the VRAM row. */
+private val List<MetricSource>.vramAvailable: Boolean
+    get() = any { it.label == "vram" && it.available }

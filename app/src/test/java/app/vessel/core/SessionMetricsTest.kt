@@ -549,3 +549,54 @@ class MetricFormatTest {
         assertFalse(stats.neverDrew)
     }
 }
+
+/**
+ * Turnip's per-device VRAM files, `patches/mesa/0011`: "<bytes held> <heap size>"
+ * in a file named `<pid>-<device>`.
+ */
+class GpuMemFileTest {
+
+    @Test
+    fun `a file carries the bytes held and the heap`() {
+        assertEquals(GpuMemReading(2_405_433_344L, 6_433_013_760L), parseGpuMemFile("2405433344 6433013760\n"))
+    }
+
+    @Test
+    fun `a file with only the byte count still counts`() {
+        assertEquals(GpuMemReading(1024L, 0L), parseGpuMemFile("1024\n"))
+    }
+
+    @Test
+    fun `anything that is not two non-negative integers is not a reading`() {
+        assertNull(parseGpuMemFile(""))
+        assertNull(parseGpuMemFile("abc 12"))
+        assertNull(parseGpuMemFile("-5 12"))
+        assertNull(parseGpuMemFile("5 lots"))
+    }
+
+    @Test
+    fun `the pid comes from the name and the writer's temporaries are skipped`() {
+        assertEquals(23606, gpuMemFilePid("23606-b400007a1c2e0010"))
+        assertNull(gpuMemFilePid("23606-b400007a1c2e0010.tmp"))
+        assertNull(gpuMemFilePid("gfx-stat"))
+        assertNull(gpuMemFilePid("-abc"))
+        assertNull(gpuMemFilePid("23606-"))
+    }
+
+    @Test
+    fun `the device line reports the vram peak against its budget`() {
+        val summary = GfxRunSummary()
+        summary.addDevice(MetricSample(elapsedMs = 0L, vramUsedMb = 900, vramBudgetMb = 6136))
+        summary.addDevice(MetricSample(elapsedMs = 1_000L, vramUsedMb = 6114, vramBudgetMb = 6136))
+        summary.addDevice(MetricSample(elapsedMs = 2_000L, vramUsedMb = 4000, vramBudgetMb = 6136))
+        val line = summary.deviceLine()!!
+        assertTrue(line, "vram peak 6114 MB of 6136 MB" in line)
+    }
+
+    @Test
+    fun `a run that never drew says nothing about vram`() {
+        val summary = GfxRunSummary()
+        summary.addDevice(MetricSample(elapsedMs = 0L, cpuPercent = 3))
+        assertFalse(summary.deviceLine()!!.contains("vram"))
+    }
+}

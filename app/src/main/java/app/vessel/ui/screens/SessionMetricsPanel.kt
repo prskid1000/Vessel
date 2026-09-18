@@ -94,7 +94,10 @@ fun SessionMetricsRail(
     }
 
     val history = state.history
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s6)) {
+    // s3 rather than s6, with each spark 16 dp rather than 22: five of these
+    // have to fit in the height four used to, over a desktop the user is trying
+    // to see, with the rail's own buttons still in reach below them.
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Vessel.metrics.s3)) {
         // Loads take an area fill and levels take a bare line, which is
         // [VSeriesForm]'s rule and not a decoration: the area under a proportion
         // of a fixed whole is the work done, and there is nothing underneath a
@@ -141,6 +144,18 @@ fun SessionMetricsRail(
                 }
             },
             unavailable = state.railGap("ram"),
+        )
+        VMetricSpark(
+            label = "vram",
+            value = sample.vramUsedMb?.let(::formatMegabytes),
+            // Against the budget, like memory against device RAM: a line near
+            // the top of this box is a game about to be refused an allocation.
+            series = (sample.vramBudgetMb ?: history.peak { it.vramUsedMb })?.let { ceiling ->
+                history.seriesOrNull(ceiling, VSeriesTone.Primary, VSeriesForm.Line, "held") {
+                    it.vramUsedMb
+                }
+            },
+            unavailable = state.railGap("vram"),
         )
         Text(
             if (paused) {
@@ -281,6 +296,8 @@ fun SessionMetricsPanel(state: SessionMetricsState?, modifier: Modifier = Modifi
             ),
             unavailable = state.unavailable("ram"),
         )
+
+        VramCard(state)
 
         TemperatureCard(state)
 
@@ -607,39 +624,37 @@ private fun D3dCards(state: SessionMetricsState) {
         )
     }
 
-    // **Pipelines are numbers and not a line, and vidmem is the line they sit
-    // under.** A pipeline count only ever goes up and then stops, so a graph of
-    // one is a staircase that says less than the two numbers at its ends; what
-    // is worth watching over time is the memory, which moves in both directions
-    // and is the thing that ends a session when it runs out.
+    // **The pipeline counts, and the compile backlog as their line.** A count
+    // only ever goes up and then stops, so a graph of one is a staircase that
+    // says less than the two numbers at its ends; the backlog is the part that
+    // moves, and a backlog that will not drain is a title that is still
+    // stuttering.
     //
-    // Guarded, since the vkd3d producer landed. It writes neither the memory
-    // pair nor the pipeline counts — `patches/vkd3d/0007` says why for each —
-    // and this card is every one of those fields, so for a D3D 12 title it
-    // would render a titled box with an empty graph and no stats. An absent
-    // card reads as "not produced"; an empty one reads as "produced and zero".
-    val vramPeak = history.peak { it.d3dMemAllocatedMb } ?: 0
-    if (vramPeak == 0 && history.peak { it.d3dPipelines } == null) return
+    // Video memory used to share this card. It has its own now, beside RAM,
+    // measured by the driver for every API rather than by DXVK for D3D 8-11
+    // alone -- see [VramCard].
+    //
+    // Guarded: vkd3d writes no pipeline counts (`patches/vkd3d/0007` says why),
+    // and an absent card reads as "not produced" where an empty one reads as
+    // "produced and zero".
+    if (history.peak { it.d3dPipelines } == null) return
+    val backlogPeak = history.peak { it.d3dPipeTasksPending }?.coerceAtLeast(1) ?: 1
     VMetricGraphCard(
-        title = "d3d · video memory",
-        axisStyle = ::formatMegabytes,
+        title = "d3d · pipelines",
+        axisStyle = { "$it" },
         spanSeconds = history.spanSeconds,
-        value = sample.d3dMemUsedMb?.let(::formatMegabytes),
+        value = sample.d3dPipelines?.toString(),
         stats = buildList {
-            addAll(history.stats { it.d3dMemUsedMb }.stats(::formatMegabytes))
-            history.peak { it.d3dMemAllocatedMb }?.let {
-                add(VMetricStat("allocated", formatMegabytes(it)))
-            }
             // The peak rather than the current value, because these only climb
-            // and the peak is therefore the answer either way — except for a
+            // and the peak is therefore the answer either way -- except for a
             // replayed trace whose last sample predates the last compile.
-            history.peak { it.d3dPipelines }?.let { add(VMetricStat("pipelines", "$it")) }
             history.peak { it.d3dPipelineLibraries }?.takeIf { it > 0 }?.let {
                 add(VMetricStat("libraries", "$it"))
             }
             history.peak { it.d3dPipelinesCompute }?.takeIf { it > 0 }?.let {
                 add(VMetricStat("compute", "$it"))
             }
+            history.peak { it.d3dPipeTasksPending }?.let { add(VMetricStat("backlog peak", "$it")) }
             // A backlog that is still there at the end of a run is a title that
             // was still compiling, which is a title that was still stuttering.
             sample.d3dPipeTasksPending?.takeIf { it > 0 }?.let {
@@ -647,13 +662,64 @@ private fun D3dCards(state: SessionMetricsState) {
             }
         },
         series = listOfNotNull(
-            history.seriesOrNull(vramPeak, VSeriesTone.Primary, VSeriesForm.Area, "used") {
-                it.d3dMemUsedMb
-            },
-            history.seriesOrNull(vramPeak, VSeriesTone.Neutral, VSeriesForm.Line, "allocated") {
-                it.d3dMemAllocatedMb
+            history.seriesOrNull(backlogPeak, VSeriesTone.Primary, VSeriesForm.Area, "backlog") {
+                it.d3dPipeTasksPending
             },
         ),
+    )
+}
+
+/**
+ * Video memory, laid out like the memory card beside it: what is held, against
+ * the ceiling that applies.
+ *
+ * **One figure for every API.** The main series is Turnip's count of the GPU
+ * memory its devices hold, which DXVK, vkd3d and Zink all allocate through --
+ * so a D3D 9 game, a D3D 12 game and an OpenGL one draw the same line. DXVK's
+ * own view comes second when there is one: it packs resources into the blocks
+ * the driver holds, so its "in use" runs a little under the driver's figure
+ * and the gap is slack rather than a disagreement.
+ *
+ * **Drawn against the budget, not its own range**, for the reason the memory
+ * card is drawn against device RAM: the question anyone brings is whether the
+ * run is about to hit the wall. The budget is the heap Turnip reports, which is
+ * what the application was told and what the container's VRAM setting sets --
+ * DXVK refuses an allocation past it, and a game that does not handle the
+ * refusal crashes. That is what this card was added to see coming.
+ */
+@Composable
+private fun VramCard(state: SessionMetricsState) {
+    val history = state.history
+    val sample = history.latest ?: return
+    val held = history.stats { it.vramUsedMb }
+    val budget = history.peak { it.vramBudgetMb }
+    // Before any program draws there is nothing to plot, and the source row
+    // says why; a card of nulls would read as a measured zero.
+    if (held == null && history.peak { it.d3dMemUsedMb } == null) return
+    val ceiling = budget
+        ?: listOfNotNull(history.peak { it.vramUsedMb }, history.peak { it.d3dMemAllocatedMb }).maxOrNull()
+        ?: return
+    val current = sample.vramUsedMb
+    VMetricGraphCard(
+        title = "vram",
+        axisStyle = ::formatMegabytes,
+        spanSeconds = history.spanSeconds,
+        value = current?.let(::formatMegabytes),
+        stats = buildList {
+            addAll(held.stats(::formatMegabytes))
+            budget?.let { add(VMetricStat("budget", formatMegabytes(it))) }
+            // Headroom now, not at the peak: this is the number that says how
+            // close the next allocation is to being refused.
+            if (budget != null && current != null) {
+                add(VMetricStat("headroom", formatMegabytes((budget - current).coerceAtLeast(0))))
+            }
+            history.peak { it.d3dMemUsedMb }?.let { add(VMetricStat("d3d in use", formatMegabytes(it))) }
+        },
+        series = listOfNotNull(
+            history.seriesOrNull(ceiling, VSeriesTone.Primary, VSeriesForm.Area, "held") { it.vramUsedMb },
+            history.seriesOrNull(ceiling, VSeriesTone.Neutral, VSeriesForm.Line, "d3d in use") { it.d3dMemUsedMb },
+        ),
+        unavailable = if (held == null) state.unavailable("vram") else null,
     )
 }
 

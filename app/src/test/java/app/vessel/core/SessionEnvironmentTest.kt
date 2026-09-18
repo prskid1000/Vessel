@@ -893,6 +893,10 @@ class SessionEnvironmentTest {
                 // producer can open a unix path from inside the prefix — see
                 // [GFX_STATS_DOS_PATH].
                 "VESSEL_GFX_STATS" to GFX_STATS_DOS_PATH,
+                // Where Turnip writes each Vulkan device's GPU memory -- the
+                // VRAM graph for every API at once. A unix path, unlike its
+                // neighbour: Turnip runs beside Wine, not inside the prefix.
+                "VESSEL_GPU_MEM_DIR" to gpuMemDir(tmp).absolutePath,
                 // Every .NET program needs this, because Wine's icu.dll is
                 // forwarders to an icuuc68.dll that is not in the build. Without
                 // it PowerShell opened a console window and vanished, with the

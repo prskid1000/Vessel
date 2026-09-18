@@ -328,3 +328,36 @@ to compile and behave, but the two have not been verified together.
 patch that touches `tu_knl_kgsl.cc`; this hunk sits between two of its hunks in
 `tu_knl_kgsl_load`. Rebase this one, not that one — it is a diagnostic and
 deleting it costs nothing but the answer.
+
+## 0011-turnip-say-how-much-gpu-memory-each-device-holds.patch
+
+**The one VRAM number that covers every API.** DXVK, vkd3d and Zink are all
+Vulkan clients of Turnip, so a count of the memory Turnip's devices hold is the
+same figure for a D3D 9 game, a D3D 12 game and an OpenGL one. The alternatives
+each see a slice: DXVK's allocator (already in `VESSEL_GFX_STATS`) covers D3D 8
+to 11 only, vkd3d and Zink report nothing, and every KGSL memory node -- which
+would have been the kernel's own answer -- is denied to apps on these phones.
+
+**Where it counts.** In the KGSL backend, at the two places a BO is born with
+`refcnt = 1` (`kgsl_bo_init`, `kgsl_bo_init_dmabuf` -- the dma-heap and ION
+paths for shareable memory both end in the second) and the one place it dies
+(`kgsl_bo_finish`, *after* `p_atomic_dec_zero`). Not in `tu_bo_finish`, which
+runs once per reference: a BO shared by two holders would be subtracted twice.
+Sparse VMAs are left out; they reserve address space, not memory. Imported
+dma-bufs are counted, because a swapchain image the device holds is memory the
+device holds.
+
+**How it gets out.** One file per device, `VESSEL_GPU_MEM_DIR/<pid>-<device>`,
+holding the bytes held and the heap size -- the budget the application was told, which Vessel sets from the container's VRAM setting. Written from `tu_queue_submit` -- every API reaches it every
+frame -- at most once a second and only when the figure moved, through a
+temporary file and a `rename` so the reader never sees half a number. Deleted in
+`tu_DestroyDevice`. A process that dies without destroying its device leaves a
+file whose pid is gone; the host drops it. Turnip is a native Android library,
+not a PE module, so unlike `VESSEL_GFX_STATS` the variable is a plain unix path.
+
+**Measured motivation.** Empyrion crashed after six minutes at its main menu:
+`DxvkMemoryAllocator: Memory allocation failed`, 6,114 of 6,136 MiB, then a
+null read in `DxvkImage::assignStorageWithUsage`. The log had the moment of
+death and nothing of how memory got there.
+
+**Policy.** Vessel's, not upstream's. AI-authored in full.

@@ -418,6 +418,13 @@ data class VMetrics(
     val sparkHeight: Dp = 22.dp,
 
     /**
+     * The session rail's sparkline, shorter than [sparkHeight]. The rail grew a
+     * fifth quantity -- VRAM -- and five of these have to fit where four did,
+     * with the rail's buttons still reachable under them.
+     */
+    val railSparkHeight: Dp = 16.dp,
+
+    /**
      * The taskbar frame-rate chart.
      *
      * 56 dp for 40 samples is a 1.4 dp slot — a bar and a hairline gap, which at

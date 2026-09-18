@@ -14,7 +14,9 @@ import app.vessel.core.MetricSample
 import app.vessel.core.MetricSource
 import app.vessel.core.ThermalRole
 import app.vessel.core.parseCpuFreqKhz
+import app.vessel.core.gpuMemFilePid
 import app.vessel.core.parseGfxStats
+import app.vessel.core.parseGpuMemFile
 import app.vessel.core.parseKgslGpuBusy
 import app.vessel.core.parseProcPidStatCpuTicks
 import app.vessel.core.parseProcPidStatmResidentPages
@@ -152,6 +154,7 @@ class MetricSampler @Inject constructor(
         atMillis: Long = System.currentTimeMillis(),
         fps: Float? = null,
         gfxStats: File? = null,
+        gpuMem: File? = null,
     ): MetricSample {
         if (tick % RESCAN_TICKS == 0) pids = ourPids()
         tick++
@@ -182,6 +185,7 @@ class MetricSampler @Inject constructor(
         val memory = deviceMemory()
         refreshBattery(atMillis)
         val d3d = readGfxStats(gfxStats, atMillis)
+        val vram = readVram(gpuMem)
 
         return MetricSample(
             elapsedMs = elapsedMs,
@@ -228,6 +232,62 @@ class MetricSampler @Inject constructor(
             d3dPipeTasksPending = d3d?.pipeTasksPending,
             d3dMemAllocatedMb = d3d?.memAllocatedMb,
             d3dMemUsedMb = d3d?.memUsedMb,
+            vramUsedMb = vram?.first,
+            vramBudgetMb = vram?.second,
+        )
+    }
+
+    /**
+     * Turnip's per-device files, summed: megabytes held and the largest heap.
+     *
+     * Null when no device has written one, which is every moment before a
+     * program first draws and is reported as such by [vramSource] rather than
+     * as a zero. **A file whose process is gone is deleted here**: Turnip removes
+     * its own when the device is destroyed, but a guest that crashes never gets
+     * that far, and without this a dead game's gigabytes would stay on the graph
+     * for the rest of the session.
+     *
+     * The heap is the largest rather than the sum because every device on the
+     * phone is handed the same one -- two processes do not get twice the VRAM.
+     */
+    private fun readVram(dir: File?): Pair<Int, Int?>? {
+        val files = dir?.listFiles() ?: return null
+        var bytes = 0L
+        var heap = 0L
+        var any = false
+        for (file in files) {
+            val pid = gpuMemFilePid(file.name) ?: continue
+            if (!File("$PROC/$pid").exists()) {
+                runCatching { file.delete() }
+                continue
+            }
+            val reading = readFile(file.path)?.let(::parseGpuMemFile) ?: continue
+            bytes += reading.bytes
+            if (reading.heapBytes > heap) heap = reading.heapBytes
+            any = true
+        }
+        if (!any) return null
+        return (bytes / BYTES_PER_MB).toInt() to (heap / BYTES_PER_MB).toInt().takeIf { it > 0 }
+    }
+
+    /**
+     * Whether the VRAM figure is arriving, and why not when it is not. Asked
+     * rather than cached, for the reason [graphicsSource] gives: it flips when a
+     * program creates its first Vulkan device, which is a fact about the run.
+     */
+    fun vramSource(dir: File?): MetricSource {
+        val reading = readVram(dir)
+        return MetricSource(
+            label = "vram",
+            origin = dir?.path ?: "the session's VESSEL_GPU_MEM_DIR",
+            available = reading != null,
+            reason = if (reading != null) {
+                ""
+            } else {
+                "no GPU device yet: Turnip reports it for every Direct3D, OpenGL and Vulkan " +
+                    "program while that program holds GPU memory, so a session that has not " +
+                    "drawn anything leaves it empty. This is not a source that failed."
+            },
         )
     }
 

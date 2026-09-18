@@ -743,6 +743,9 @@ val RESERVED_SESSION_ENV: Set<String> = setOf(
     // preference anyone wants to be able to express, and the graphs are not
     // improved by being able to move their own source.
     "VESSEL_GFX_STATS",
+    // Where Turnip writes each device's GPU memory, reserved for the reason
+    // its neighbour above is: the variable is a path this app reads back.
+    "VESSEL_GPU_MEM_DIR",
     // Where vkd3d writes its submission timeline, and reserved for exactly the
     // reason its neighbour above is: the variable *is* the destination. It is
     // also in [DIAGNOSTIC_SESSION_ENV], which is where the switch that turns it
@@ -1402,6 +1405,18 @@ const val GFX_STATS_FILE: String = "gfx-stats.json"
 fun gfxStatsFile(tmp: File): File = File(tmp, GFX_STATS_FILE)
 
 /**
+ * Where Turnip writes one file per Vulkan device saying how much GPU memory it
+ * holds -- `patches/mesa/0011`. A directory rather than a file because a
+ * session routinely has several devices at once (a launcher and its game, a
+ * game and its crash handler), and each writes only its own.
+ *
+ * A unix path, unlike [GFX_STATS_DOS_PATH]: Turnip is a native Android library
+ * running beside Wine rather than a PE module inside the prefix, so the path it
+ * is handed is the path it opens.
+ */
+fun gpuMemDir(tmp: File): File = File(tmp, "gpu-mem")
+
+/**
  * The DOS path the D3D layers are handed for [GFX_STATS_FILE], and the reason
  * they are not handed the unix one.
  *
@@ -2031,6 +2046,9 @@ fun sessionEnvironment(
     // A DOS path, not `gfxStatsFile(paths.tmp).absolutePath` — the unix path
     // reached both producers and neither could open it. See [GFX_STATS_DOS_PATH].
     environment["VESSEL_GFX_STATS"] = GFX_STATS_DOS_PATH
+
+    // The VRAM graph's source, for every API at once. See [gpuMemDir].
+    environment["VESSEL_GPU_MEM_DIR"] = gpuMemDir(paths.tmp).absolutePath
 
     // **Every .NET program dies on Wine's ICU stub without this, and the death
     // looks like nothing at all.**
