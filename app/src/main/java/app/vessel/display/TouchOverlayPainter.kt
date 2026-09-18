@@ -134,7 +134,8 @@ internal class TouchOverlayPainter(private val density: Float) {
 
         val label = control.face
         if (label.isNotEmpty()) {
-            text.color = withAlpha(INK, (alpha * LABEL_GAIN).coerceAtMost(1f))
+            // The same alpha as the control it names: one number, one look.
+            text.color = withAlpha(INK, alpha)
             text.textSize = labelSize(r, label)
             text.getTextBounds(label, 0, label.length, bounds)
             canvas.drawText(label, cx, cy - (bounds.top + bounds.bottom) / 2f, text)
@@ -229,12 +230,6 @@ internal class TouchOverlayPainter(private val density: Float) {
         /** Extra ground under a finger. The only press feedback glass can give. */
         const val PRESS_BOOST = 0.30f
 
-        /**
-         * A label reads stronger than its control, so it stays legible -- as a
-         * multiple rather than an addition, so it fades out with the control.
-         * 1.7 keeps the default 35% exactly where the old "+0.25" put it (0.60).
-         */
-        const val LABEL_GAIN = 1.7f
 
         const val EDIT_RING_ALPHA = 0.55f
 
