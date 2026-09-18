@@ -413,8 +413,17 @@ object TouchControls {
     const val MIN_SIZE: Float = 0.04f
     const val MAX_SIZE: Float = 0.20f
 
-    const val MIN_OPACITY: Float = 0.10f
-    const val MAX_OPACITY: Float = 0.80f
+    /**
+     * 0 to 1, and the ends mean what they say: 0 is **not drawn at all** -- the
+     * controls still take their touches, which is how someone who has learned a
+     * layout plays over a clean screen -- and 1 is fully solid.
+     *
+     * It was 0.10 to 0.80, and below the slider the painter floored a control's
+     * ring at 0.35 and drew its label 0.25 stronger, so the bottom of the
+     * slider was a clearly visible overlay and there was no way to hide one.
+     */
+    const val MIN_OPACITY: Float = 0.0f
+    const val MAX_OPACITY: Float = 1.0f
 
     /**
      * 0.35.

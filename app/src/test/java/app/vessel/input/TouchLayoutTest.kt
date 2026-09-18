@@ -114,6 +114,21 @@ class TouchLayoutTest {
         assertEquals(TouchControls.MAX_OPACITY, wild.opacity, 0f)
     }
 
+    /**
+     * 0 is a setting, not a missing value: it hides the overlay and leaves the
+     * controls working. The floor used to be 0.10, so a layout saved at 0 came
+     * back visible, and the ends of the slider are what the user asked to mean
+     * "hidden" and "solid".
+     */
+    @Test
+    fun `opacity runs from hidden to solid and both ends survive`() {
+        fun opacity(value: Float) =
+            TouchControl(id = "x", kind = TouchKind.BUTTON, cx = 0.5f, cy = 0.5f, opacity = value).sane().opacity
+        assertEquals(0f, opacity(0f), 0f)
+        assertEquals(1f, opacity(1f), 0f)
+        assertEquals(0f, opacity(-0.2f), 0f)
+    }
+
     @Test
     fun `a not-a-number never survives into the layout`() {
         val nan = TouchControl(

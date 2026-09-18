@@ -93,6 +93,10 @@ internal class TouchOverlayPainter(private val density: Float) {
         // placed, and a 10% ghost being dragged around is the one state where the
         // per-control opacity actively fights the task.
         val alpha = if (editing) 1f else control.opacity
+        // **Zero is hidden, and hidden includes a press.** The control still
+        // works -- the translator never looks at opacity -- but a flash under
+        // the thumb would put back exactly what the user took off the screen.
+        if (alpha <= 0f) return
         val pressBoost = if (pressed) PRESS_BOOST else 0f
 
         fill.color = withAlpha(SURFACE, (alpha * SURFACE_ALPHA + pressBoost).coerceAtMost(1f))
@@ -100,7 +104,9 @@ internal class TouchOverlayPainter(private val density: Float) {
             selected -> withAlpha(ACCENT, 1f)
             editing -> withAlpha(ACCENT, EDIT_RING_ALPHA)
             pressed -> withAlpha(ACCENT, 1f)
-            else -> withAlpha(INK, alpha.coerceAtLeast(MIN_RING_ALPHA))
+            // Proportional, no floor: the slider's bottom has to be able to
+            // mean "almost gone" for its end to be able to mean "gone".
+            else -> withAlpha(INK, alpha)
         }
         stroke.strokeWidth = (if (selected) 2f else 1f) * density
 
@@ -128,7 +134,7 @@ internal class TouchOverlayPainter(private val density: Float) {
 
         val label = control.face
         if (label.isNotEmpty()) {
-            text.color = withAlpha(INK, (alpha + LABEL_BOOST).coerceAtMost(1f))
+            text.color = withAlpha(INK, (alpha * LABEL_GAIN).coerceAtMost(1f))
             text.textSize = labelSize(r, label)
             text.getTextBounds(label, 0, label.length, bounds)
             canvas.drawText(label, cx, cy - (bounds.top + bounds.bottom) / 2f, text)
@@ -223,11 +229,12 @@ internal class TouchOverlayPainter(private val density: Float) {
         /** Extra ground under a finger. The only press feedback glass can give. */
         const val PRESS_BOOST = 0.30f
 
-        /** A ring never goes below this, or a 10% control is a rumour. */
-        const val MIN_RING_ALPHA = 0.35f
-
-        /** A label reads a little stronger than its control, so it stays legible. */
-        const val LABEL_BOOST = 0.25f
+        /**
+         * A label reads stronger than its control, so it stays legible -- as a
+         * multiple rather than an addition, so it fades out with the control.
+         * 1.7 keeps the default 35% exactly where the old "+0.25" put it (0.60).
+         */
+        const val LABEL_GAIN = 1.7f
 
         const val EDIT_RING_ALPHA = 0.55f
 

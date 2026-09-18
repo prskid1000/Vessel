@@ -1784,9 +1784,11 @@ private fun InputSettings(
             value = opacity,
             min = TouchControls.MIN_OPACITY,
             max = TouchControls.MAX_OPACITY,
-            readout = "${(opacity * 100).roundToInt()} %",
-            help = "The overlay is on top of the guest, so it takes the touch before Wine " +
-                "does. Anywhere a control is not, the touch goes through.",
+            readout = if (opacity <= 0f) "hidden" else "${(opacity * 100).roundToInt()} %",
+            help = "0 hides the controls without turning them off: they still take the touch, " +
+                "so a layout you know can be played over a clean screen. The overlay is on top " +
+                "of the guest, so it takes the touch before Wine does. Anywhere a control is " +
+                "not, the touch goes through.",
             onValue = { next ->
                 actions.onProfile(
                     profile.copy(
