@@ -1728,12 +1728,27 @@ private class SessionSurfaceView(
      */
     private val look = object : Runnable {
         override fun run() {
+            val started = SystemClock.uptimeMillis()
             sink.accept(gamepad.tick(now()))
             sink.accept(overlay.tick(now()))
+            val injected = SystemClock.uptimeMillis()
             publishPad()
-            if (isLooking()) handler.postDelayed(this, LOOK_INTERVAL_MS)
+            // Debug-only timing: how late this heartbeat ran against its 8 ms
+            // schedule, and how much of the run was spent injecting into the X
+            // server, which takes its window-manager lock on this thread.
+            if (Log.isLoggable(POINTER_TAG, Log.DEBUG)) {
+                val late = if (lastLookRun == 0L) 0L else started - lastLookRun
+                Log.d(
+                    POINTER_TAG,
+                    "look tick: since last ${late} ms, inject ${injected - started} ms, " +
+                        "total ${SystemClock.uptimeMillis() - started} ms",
+                )
+            }
+            lastLookRun = started
+            if (isLooking()) handler.postDelayed(this, LOOK_INTERVAL_MS) else lastLookRun = 0L
         }
     }
+    private var lastLookRun = 0L
     private var looking = false
 
     private fun isLooking(): Boolean = gamepad.looking || overlay.looking
