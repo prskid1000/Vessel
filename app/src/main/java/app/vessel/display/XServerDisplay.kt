@@ -1391,7 +1391,10 @@ private class GuestInputSink(
         // lags: this line carries the clock the guest's own log does not have.
         if (Log.isLoggable(POINTER_TAG, Log.DEBUG)) {
             when (input) {
-                is GuestInput.MoveTo, is GuestInput.MoveBy, is GuestInput.Button ->
+                // Keys as well: the keyboard overlay and a stick set to keys
+                // send nothing else, so without them this line cannot say
+                // whether a thumb on the glass reached the X server at all.
+                is GuestInput.MoveTo, is GuestInput.MoveBy, is GuestInput.Button, is GuestInput.Key ->
                     Log.d(POINTER_TAG, "${SystemClock.uptimeMillis()} $input")
                 else -> Unit
             }
@@ -2110,18 +2113,20 @@ private class SessionSurfaceView(
                 val control = touch.control ?: return
                 pressedControls[touch.pointerId] = control.id
                 val events = overlay.onDown(touch.pointerId, control, touch.x, touch.y, w, h, now())
-                emit(events, isButton = control.kind == TouchKind.BUTTON)
+                emit(events, control)
                 invalidate()
             }
 
             is OverlayTouch.Move ->
-                emit(overlay.onMove(touch.pointerId, touch.x, touch.y, w, h), isButton = false)
+                emit(
+                    overlay.onMove(touch.pointerId, touch.x, touch.y, w, h),
+                    touchLayout.byId(pressedControls[touch.pointerId]),
+                )
 
             is OverlayTouch.Up -> {
-                val controlId = pressedControls.remove(touch.pointerId)
-                val isButton = controlId?.let { touchLayout.byId(it)?.kind == TouchKind.BUTTON } ?: false
+                val control = touchLayout.byId(pressedControls.remove(touch.pointerId))
                 val events = overlay.onUp(touch.pointerId, now())
-                emit(events, isButton = isButton)
+                emit(events, control)
                 invalidate()
             }
         }
@@ -2419,23 +2424,40 @@ private class SessionSurfaceView(
 
     /** Everything the pad is holding right now, as one HID report. */
     /**
-     * The overlay's keystrokes, dropped while the guest has a real gamepad.
+     * The overlay's keystrokes and pointer output, for the control that made
+     * them.
      *
-     * The same rule the physical pad already follows a few lines up, and for the
-     * same reason: a game that reads XInput *and* the keyboard would take the
-     * glass stick twice and walk twice as far. The translator still runs — its
-     * look timer has to keep an honest idea of deflection either way — and only
-     * its output is discarded.
-     *
-     * The consequence is worth stating plainly, because it is the whole risk of
-     * this change: when the bridge is attached and delivering nothing, a control
-     * that used to send `W` now sends nothing at all. That is the correct
-     * behaviour and a bad experience, and the two are only reconciled by the
-     * bridge actually working.
+     * A game that reads XInput *and* the keyboard must not take one thumb
+     * twice, so anything that is already on the guest's pad stays off the
+     * keyboard -- see [speaksBesideThePad] for which controls that is. The
+     * translator runs either way; only output that would be a duplicate is
+     * discarded.
      */
-    private fun emit(events: List<GuestInput>, isButton: Boolean = false) {
-        if (padBridge.attached && !isButton) return
+    private fun emit(events: List<GuestInput>, control: TouchControl?) {
+        if (padBridge.attached && !control.speaksBesideThePad()) return
         sink.accept(events)
+    }
+
+    /**
+     * Whether a control's keys and pointer output still belong to the session
+     * while the guest has a pad.
+     *
+     * **Only the d-pad is muted.** A button bound to a key is not on the pad
+     * (`padSnapshot` sends only [GamepadAction.Pad] bindings and bare
+     * identities), and a stick is on the pad only when its role is
+     * [StickRole.Pad] -- in which case the translator emits no keys for it
+     * anyway. The d-pad is the one control that is *always* on the wire, as
+     * the hat, and whose arrow-key bindings would then arrive a second time.
+     *
+     * This read "anything that is not a button", which muted every stick. A
+     * stick set to keys is the whole of the keyboard profile's movement, and
+     * with a pad attached -- which is every session -- it sent nothing at all:
+     * measured, seven swipes across the Move stick produced not one key while
+     * taps on the buttons beside it arrived.
+     */
+    private fun TouchControl?.speaksBesideThePad(): Boolean = when (this?.kind) {
+        TouchKind.BUTTON, TouchKind.STICK -> true
+        TouchKind.DPAD, null -> false
     }
 
     private fun publishPad() {

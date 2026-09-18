@@ -112,10 +112,19 @@ class TouchControlTranslator(
      * identities at all, which is every layout a user built by hand.
      */
     fun padSnapshot(): TouchPadSnapshot = TouchPadSnapshot(
-        leftX = stickX,
-        leftY = stickY,
-        rightX = lookX,
-        rightY = lookY,
+        // **A stick goes to the pad only when its role says it is the pad's
+        // stick** -- the same rule the buttons below follow for their bindings.
+        // Every stick used to be copied onto the guest's axes whatever it was
+        // set to, so a stick sending WASD also pushed the pad's left stick, and
+        // a game reading both walked twice. That double path is why the session
+        // then dropped *all* stick output while a pad was attached -- which
+        // silenced the keyboard profile's Move stick entirely. One stick, one
+        // destination: [StickRole.Pad] here, keys or the mouse through the
+        // translator, never both.
+        leftX = if (stickRole(leftStickId) == StickRole.Pad) stickX else 0f,
+        leftY = if (stickRole(leftStickId) == StickRole.Pad) stickY else 0f,
+        rightX = if (stickRole(rightStickId) == StickRole.Pad) lookX else 0f,
+        rightY = if (stickRole(rightStickId) == StickRole.Pad) lookY else 0f,
         hatX = hatX,
         hatY = hatY,
         // **The binding first, then the identity -- and a binding of any kind
@@ -165,6 +174,8 @@ class TouchControlTranslator(
             }
             .toSet(),
     )
+
+    private fun stickRole(id: String?): StickRole? = layout.byId(id)?.role
 
     /** Controls a long press is holding down, so they can be drawn as held. */
     val latchedIds: Set<String> get() = latched

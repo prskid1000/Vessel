@@ -389,4 +389,27 @@ class TouchControlTranslatorTest {
         assertTrue(out.contains(GuestInput.Key(X11.RIGHT, 0, pressed = true)))
         assertTrue(out.contains(GuestInput.Key(X11.UP, 0, pressed = true)))
     }
+
+    /**
+     * One stick, one destination. A stick sending keys used to be copied onto
+     * the guest's pad as well, so a game reading both walked twice -- and the
+     * session's answer to that was to drop every stick's keys while a pad was
+     * attached, which left the keyboard profile's Move stick sending nothing.
+     */
+    @Test
+    fun `a stick sending keys stays off the pad, and a pad stick is on it`() {
+        val keys = translator(stick)
+        val r = stick.radiusPx(w, h)
+        val out = keys.onDown(0, stick, stick.centreX(w), stick.centreY(h) - r, w, h)
+        assertEquals(listOf(GuestInput.Key(X11.W, 0, pressed = true)), out)
+        assertEquals(0f, keys.padSnapshot().leftY)
+
+        val padStick = stick.copy(role = StickRole.Pad)
+        val pad = translator(padStick)
+        assertEquals(
+            emptyList<GuestInput>(),
+            pad.onDown(0, padStick, padStick.centreX(w), padStick.centreY(h) - r, w, h),
+        )
+        assertEquals(-1f, pad.padSnapshot().leftY)
+    }
 }
