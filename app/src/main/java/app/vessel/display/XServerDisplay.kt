@@ -1,5 +1,7 @@
 package app.vessel.display
 
+import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -1374,13 +1376,129 @@ private class DisplaySession(context: Context, request: DisplayRequest) {
 /** Off unless `setprop log.tag.VesselPointer DEBUG`. See [GuestInputSink.accept]. */
 private const val POINTER_TAG = "VesselPointer"
 
+/**
+ * Every call into the X server from the input path, made on one thread of its
+ * own, in order -- and never on the caller's.
+ *
+ * **The UI thread used to make these calls itself, and they take the X server's
+ * window-manager lock.** At Empyrion's menu that cost 0.2 ms. In its world the
+ * server's own thread held the lock for most of every frame, and one relative
+ * move measured **133 to 312 ms** to inject: the look heartbeat, scheduled every
+ * 8 ms, ran every 140 to 320 ms, and each tick's step was capped at 100 ms of
+ * motion, so the rest of every wait was thrown away. Mouse-look felt a third as
+ * fast and moved in lurches.
+ *
+ * So the caller only queues, and returns. **Moves that arrive while the queue is
+ * blocked are merged**: relative deltas add into the last queued delta and
+ * absolute positions replace the last queued position, so a 300 ms stall costs
+ * one late injection carrying all of the motion rather than a stalled heartbeat
+ * and lost distance. Nothing else is merged or reordered -- a button or a key is
+ * a fence the moves on either side of it do not cross.
+ */
+private class XInjector(private val xServer: XServer) {
+    private sealed interface Op
+    private class Delta(var dx: Int, var dy: Int) : Op
+    private class To(var x: Int, var y: Int) : Op
+    private class Run(val block: (XServer) -> Unit) : Op
+
+    private val queue = ArrayDeque<Op>()
+    private var lastHolderReport = 0L
+
+    private companion object {
+        const val SLOW_INJECT_MS = 50L
+        const val HOLDER_REPORT_EVERY_MS = 2_000L
+        const val HOLDER_FRAMES = 24
+    }
+    private val lock = Any()
+    private var draining = false
+    private val worker: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "vessel-input").apply { isDaemon = true }
+    }
+
+    fun delta(dx: Int, dy: Int) = synchronized(lock) {
+        val last = queue.lastOrNull()
+        if (last is Delta) {
+            last.dx += dx
+            last.dy += dy
+        } else {
+            queue.addLast(Delta(dx, dy))
+        }
+        scheduleLocked()
+    }
+
+    fun moveTo(x: Int, y: Int) = synchronized(lock) {
+        val last = queue.lastOrNull()
+        if (last is To) {
+            last.x = x
+            last.y = y
+        } else {
+            queue.addLast(To(x, y))
+        }
+        scheduleLocked()
+    }
+
+    fun run(block: (XServer) -> Unit) = synchronized(lock) {
+        queue.addLast(Run(block))
+        scheduleLocked()
+    }
+
+    private fun scheduleLocked() {
+        if (draining) return
+        draining = true
+        worker.execute(::drain)
+    }
+
+    private fun drain() {
+        while (true) {
+            // Taken off the queue under the lock, so a merge can only ever land
+            // on an op that has not started; executed outside it, so a caller
+            // queueing more never waits on the X server.
+            val op = synchronized(lock) {
+                val next = queue.removeFirstOrNull()
+                if (next == null) draining = false
+                next
+            } ?: return
+            // Debug-only: who holds the window-manager lock *now*, while they
+            // still hold it -- by the time a slow injection returns, they have
+            // let go and their stack says nothing.
+            val debug = Log.isLoggable(POINTER_TAG, Log.DEBUG)
+            val holder = if (debug) xServer.ownerOf(XServer.Lockable.WINDOW_MANAGER) else null
+            val holderStack = holder?.takeIf { it !== Thread.currentThread() }?.stackTrace
+            val started = SystemClock.uptimeMillis()
+            runCatching {
+                when (op) {
+                    is Delta -> if (op.dx != 0 || op.dy != 0) xServer.injectPointerMoveDelta(op.dx, op.dy)
+                    is To -> xServer.injectPointerMove(op.x, op.y)
+                    is Run -> op.block(xServer)
+                }
+            }.onFailure { Log.w(POINTER_TAG, "input injection failed", it) }
+            val waited = SystemClock.uptimeMillis() - started
+            if (debug && waited >= SLOW_INJECT_MS && started - lastHolderReport >= HOLDER_REPORT_EVERY_MS) {
+                lastHolderReport = started
+                Log.d(
+                    POINTER_TAG,
+                    "injection waited $waited ms; window-manager lock held by " +
+                        (holder?.name ?: "nobody when checked") +
+                        (holderStack?.take(HOLDER_FRAMES)?.joinToString("") { "\n    at $it" } ?: ""),
+                )
+            }
+        }
+    }
+}
+
 private class GuestInputSink(
-    private val xServer: XServer,
+    xServer: XServer,
     private val transformation: () -> ViewTransformation,
     private val viewSize: () -> Pair<Int, Int>,
 ) {
 
     private val subPixel = SubPixel()
+
+    /** See [XInjector]: nothing here waits on the X server's locks. */
+    private val injector = XInjector(xServer)
+
+    /** Read without injecting: screen geometry is not behind the input locks. */
+    private val screen = xServer
 
     fun accept(inputs: List<GuestInput>) = inputs.forEach { accept(it) }
 
@@ -1411,7 +1529,7 @@ private class GuestInputSink(
 
     /** Anything held, released. Called when the view loses its window. */
     fun releaseAll() {
-        PointerButton.entries.forEach { xServer.injectPointerButtonRelease(it.toVendored()) }
+        PointerButton.entries.forEach { button -> injector.run { it.injectPointerButtonRelease(button.toVendored()) } }
         subPixel.reset()
     }
 
@@ -1426,7 +1544,7 @@ private class GuestInputSink(
      */
     private fun moveTo(viewX: Float, viewY: Float) {
         val t = transformation()
-        val screen = xServer.screenInfo
+        val screen = this.screen.screenInfo
         val (w, h) = viewSize()
         val x: Int
         val y: Int
@@ -1440,7 +1558,7 @@ private class GuestInputSink(
             x = (viewX * screen.width / w.coerceAtLeast(1)).toPixel()
             y = (viewY * screen.height / h.coerceAtLeast(1)).toPixel()
         }
-        xServer.injectPointerMove(
+        injector.moveTo(
             x.coerceIn(0, screen.width - 1),
             y.coerceIn(0, screen.height - 1),
         )
@@ -1461,15 +1579,15 @@ private class GuestInputSink(
     private fun moveBy(dx: Float, dy: Float) {
         val scale = transformation().aspect.takeIf { it > 0f } ?: 1f
         val (x, y) = subPixel.take(dx / scale, dy / scale)
-        if (x != 0 || y != 0) xServer.injectPointerMoveDelta(x, y)
+        if (x != 0 || y != 0) injector.delta(x, y)
     }
 
     private fun button(button: PointerButton, pressed: Boolean) {
         val vendored = button.toVendored()
         if (pressed) {
-            xServer.injectPointerButtonPress(vendored)
+            injector.run { it.injectPointerButtonPress(vendored) }
         } else {
-            xServer.injectPointerButtonRelease(vendored)
+            injector.run { it.injectPointerButtonRelease(vendored) }
         }
     }
 
@@ -1482,17 +1600,17 @@ private class GuestInputSink(
      */
     private fun zoom(ticks: Int) {
         if (ticks == 0) return
-        xServer.injectKeyPress(X11.CTRL_L.toByte(), 0)
+        injector.run { it.injectKeyPress(X11.CTRL_L.toByte(), 0) }
         accept(GuestInput.Scroll(ScrollAxis.VERTICAL, ticks))
-        xServer.injectKeyRelease(X11.CTRL_L.toByte())
+        injector.run { it.injectKeyRelease(X11.CTRL_L.toByte()) }
     }
 
     private fun key(key: GuestInput.Key) {
         val keycode = key.keycode.toByte()
         if (key.pressed) {
-            xServer.injectKeyPress(keycode, key.keysym)
+            injector.run { it.injectKeyPress(keycode, key.keysym) }
         } else {
-            xServer.injectKeyRelease(keycode)
+            injector.run { it.injectKeyRelease(keycode) }
         }
     }
 
