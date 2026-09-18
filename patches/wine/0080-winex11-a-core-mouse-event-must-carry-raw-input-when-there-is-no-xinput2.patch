@@ -1,105 +1,220 @@
-winex11: send raw input from core mouse events when XInput2 is absent.
+winex11: a core mouse event must carry raw input when there is no XInput2.
 
-**DirectInput sees no mouse at all on this X server, and nothing says so.**
-Caribbean Legend's menu could not be clicked and the cursor it draws never
-moved, while `WM_MOUSEMOVE` was arriving normally -- the game reads the mouse
-through `dinput8`, and Wine's DirectInput mouse is built on raw input.
+Raw mouse input has one producer upstream -- X11DRV_RawMotion and
+X11DRV_RawButtonEvent, both XI2 -- and the core paths suppress it with
+SEND_HWMSG_NO_RAW. Vessel's X server has no XInput extension, so WM_INPUT was
+never posted for a mouse and dinput8 games (Caribbean Legend) could not click.
 
-Raw input for the mouse comes from exactly one place upstream:
-`x11drv_xinput2_rawmotion()` and its button sibling, which send
-`SEND_HWMSG_NO_MSG`. Every core event path sends the mirror flag,
-`SEND_HWMSG_NO_RAW` (mouse.c:639, :663, :1569), so the two halves meet in the
-server and neither doubles the other. That split assumes XI2 exists.
+Third version. The first posted the core event's absolute position as raw
+input, and dinput subtracted a cursor the same event had already moved: the
+game's cursor drifted off screen. The second (WINE_REVISION 92) sent relative
+deltas between core positions -- and was only ever applied to the build tree,
+never written back to this file, so the WINE_REVISION 93 rebuild silently
+restored the first.
 
-Vessel's X server implements MIT-SHM, DRI3, Present, Sync, XFixes, Composite
-and BigRequests. It has no XInput extension, so
+Neither could serve a game that locks the mouse. Positions are clamped to the
+screen, so deltas between them stop at the edge: Empyrion's mouse-look turned
+about 640 px' worth from the centre and stopped. Vessel's X server now sends
+the motion it was asked for, before clamping, as a _VESSEL_RAW_MOTION
+ClientMessage to the focused window (com/winlator change 36). This handles it
+and posts relative raw motion; once one has arrived, core motion stops
+producing raw motion, so nothing doubles. For an X server that sends no such
+message, deltas between core positions remain the fallback, now measured from
+the SetCursorPos warp target, process-wide, so a game that re-centres every
+frame is not measured from where the pointer was before it. Buttons -- wheel
+delta included -- always come from the core event.
 
-    xinput2_available = XQueryExtension( gdi_display, "XInputExtension", ... )
-
-is FALSE, `x11drv_xinput2_enable()` returns immediately, and the only producer
-of raw mouse input never runs. WM_INPUT is then never posted for a mouse on
-this target: DirectInput, XInput's legacy mouse path and any program calling
-RegisterRawInputDevices() get silence, and a game that reads the mouse no other
-way is unplayable with no error anywhere on the way down.
-
-With no XI2 there is no second half to collide with, so the core event carries
-both halves. `core_event_flags()` returns `SEND_HWMSG_NO_RAW` exactly when
-upstream would -- XI2 present -- and 0 otherwise, so any real X server behaves
-as before.
-
-The coordinates are the ones the core event already carries, which is
-absolute, and dinput handles that: `dlls/dinput/mouse.c:131` subtracts
-`GetCursorPos()` when `MOUSE_MOVE_ABSOLUTE` is set and accumulates the
-difference, which is what its relative axes are.
-
-Keyboard needed nothing: `X11DRV_KeyEvent` already passes 0
-(keyboard.c:1144), which is why typing reached DirectInput and the mouse did
-not.
-
+diff --git a/dlls/winex11.drv/event.c b/dlls/winex11.drv/event.c
+index 60f7cfde3e3..de46a721907 100644
+--- a/dlls/winex11.drv/event.c
++++ b/dlls/winex11.drv/event.c
+@@ -1852,8 +1852,15 @@ struct client_message_handler
+     void (*handler)(HWND, XClientMessageEvent *); /* corresponding handler function */
+ };
+ 
++/* Vessel: raw mouse motion from the X server. See x11drv_vessel_raw_motion(). */
++static void handle_vessel_raw_motion( HWND hwnd, XClientMessageEvent *event )
++{
++    x11drv_vessel_raw_motion( (int)event->data.l[0], (int)event->data.l[1] );
++}
++
+ static const struct client_message_handler client_messages[] =
+ {
++    { XATOM__VESSEL_RAW_MOTION, handle_vessel_raw_motion },
+     { XATOM_MANAGER,      handle_manager_message },
+     { XATOM_WM_PROTOCOLS, handle_wm_protocols },
+     { XATOM__XEMBED,      handle_xembed_protocol },
 diff --git a/dlls/winex11.drv/mouse.c b/dlls/winex11.drv/mouse.c
-index e1a5e70..9e21bd6 100644
+index e1a5e70a6fe..2cf2bea5699 100644
 --- a/dlls/winex11.drv/mouse.c
 +++ b/dlls/winex11.drv/mouse.c
-@@ -621,6 +621,35 @@ static void map_event_coords( HWND hwnd, Window window, Window event_root, int x
+@@ -621,6 +621,113 @@ static void map_event_coords( HWND hwnd, Window window, Window event_root, int x
      input->mi.dy = pt.y;
  }
  
 +/***********************************************************************
-+ *              core_event_flags
++ *              Vessel: raw mouse input without XInput2
 + *
-+ * Vessel: whether a core X11 mouse event must also produce raw input.
++ * Raw mouse input has one producer upstream -- X11DRV_RawMotion() and
++ * X11DRV_RawButtonEvent(), both XI2 -- and the core paths deliberately suppress
++ * it with SEND_HWMSG_NO_RAW so the two halves do not double each other. Vessel's
++ * X server has no XInput extension, so xinput2_available is FALSE, that
++ * producer never runs, and WM_INPUT is never posted for a mouse: DirectInput and
++ * RegisterRawInputDevices() see nothing. Caribbean Legend reads its mouse
++ * through dinput8 and its menu could not be clicked.
 + *
-+ * Upstream always passes SEND_HWMSG_NO_RAW here, because raw input is XI2's
-+ * job: x11drv_xinput2_rawmotion() sends SEND_HWMSG_NO_MSG for the same motion
-+ * and the two halves meet in the server. That division assumes XI2 exists.
++ * **Motion comes from the X server's own message when there is one.** Deriving
++ * raw motion from core pointer positions cannot work for a game that locks the
++ * mouse: positions are clamped to the screen, so Empyrion's mouse-look turned
++ * until the pointer reached the screen edge and then stopped. Vessel's X server
++ * sends the motion it was asked for, before clamping, as a _VESSEL_RAW_MOTION
++ * ClientMessage (handled in event.c); once one has arrived, raw motion comes
++ * only from those and core motion stops producing it, so nothing is doubled.
 + *
-+ * Vessel's X server implements MIT-SHM, DRI3, Present, Sync, XFixes, Composite
-+ * and BigRequests, and no XInput extension at all -- so xinput2_available is
-+ * FALSE, nothing sends raw input, and every program that reads the mouse
-+ * through DirectInput or RegisterRawInputDevices gets silence. Measured with
-+ * Caribbean Legend, which loads dinput8: the cursor it draws itself never
-+ * moved, though WM_MOUSEMOVE was arriving the whole time.
++ * **Before that, relative, and measured across warps.** The fallback for an X
++ * server that sends no such message: deltas between core positions, never the
++ * absolute position (which made dinput subtract a cursor the same event had
++ * already moved -- the game's cursor drifted off screen), and with the
++ * reference point moved by X11DRV_SetCursorPos, process-wide, so a game that
++ * re-centres every frame is not measured from where the pointer was before.
 + *
-+ * With no XI2 there is no second half to collide with, so the core event
-+ * carries both. dinput handles the absolute coordinates this produces --
-+ * dlls/dinput/mouse.c subtracts GetCursorPos() when MOUSE_MOVE_ABSOLUTE is
-+ * set -- and on any X server that has XI2 this returns what it always did.
++ * Buttons always come from the core event; raw input needs them too.
 + */
-+static UINT core_event_flags(void)
++static pthread_mutex_t raw_base_mutex = PTHREAD_MUTEX_INITIALIZER;
++static int raw_base_x, raw_base_y;
++static BOOL raw_have_base;
++static BOOL raw_motion_from_server;
++
++static void set_raw_base( int x, int y )
++{
++    pthread_mutex_lock( &raw_base_mutex );
++    raw_base_x = x;
++    raw_base_y = y;
++    raw_have_base = TRUE;
++    pthread_mutex_unlock( &raw_base_mutex );
++}
++
++static void send_raw_relative( int dx, int dy, DWORD flags )
++{
++    INPUT raw = { .type = INPUT_MOUSE };
++
++    raw.mi.dx = dx;
++    raw.mi.dy = dy;
++    raw.mi.dwFlags = flags;
++    raw.mi.time = NtGetTickCount();
++    NtUserSendHardwareInput( 0, SEND_HWMSG_NO_MSG, &raw, 0 );
++}
++
++/* _VESSEL_RAW_MOTION, from event.c: the motion as the X server received it. */
++void x11drv_vessel_raw_motion( int dx, int dy )
++{
++    raw_motion_from_server = TRUE;
++    if (dx || dy) send_raw_relative( dx, dy, MOUSEEVENTF_MOVE );
++}
++
++static void send_raw_from_core_event( const INPUT *input )
++{
++    /* A copy, so buttons keep everything they carry -- mouseData is the wheel
++     * delta -- and only the motion half is rewritten. */
++    INPUT raw = *input;
++
++    raw.mi.dwFlags &= ~(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE);
++    raw.mi.dx = 0;
++    raw.mi.dy = 0;
++
++    if ((input->mi.dwFlags & MOUSEEVENTF_MOVE) && !raw_motion_from_server)
++    {
++        int dx = 0, dy = 0;
++
++        pthread_mutex_lock( &raw_base_mutex );
++        if (raw_have_base)
++        {
++            dx = input->mi.dx - raw_base_x;
++            dy = input->mi.dy - raw_base_y;
++        }
++        raw_base_x = input->mi.dx;
++        raw_base_y = input->mi.dy;
++        raw_have_base = TRUE;
++        pthread_mutex_unlock( &raw_base_mutex );
++
++        if (dx || dy)
++        {
++            raw.mi.dx = dx;
++            raw.mi.dy = dy;
++            raw.mi.dwFlags |= MOUSEEVENTF_MOVE;
++        }
++    }
++
++    /* Nothing left: a move with no movement, or motion the X server reports. */
++    if (!raw.mi.dwFlags) return;
++    NtUserSendHardwareInput( 0, SEND_HWMSG_NO_MSG, &raw, 0 );
++}
++
++static BOOL core_event_needs_raw(void)
 +{
 +#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
-+    if (xinput2_available) return SEND_HWMSG_NO_RAW;
++    return !xinput2_available;
++#else
++    return TRUE;
 +#endif
-+    return 0;
 +}
 +
  /***********************************************************************
   *		send_mouse_input
   *
-@@ -636,7 +665,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
-     {
+@@ -637,6 +744,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
          struct x11drv_thread_data *thread_data = x11drv_thread_data();
          if (!thread_data->clipping_cursor || thread_data->clip_window != window) return;
--        NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
-+        NtUserSendHardwareInput( hwnd, core_event_flags(), input, 0 );
+         NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
++        if (core_event_needs_raw()) send_raw_from_core_event( input );
          return;
      }
  
-@@ -660,7 +689,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
-         SERVER_END_REQ;
+@@ -661,6 +769,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
      }
  
--    NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
-+    NtUserSendHardwareInput( hwnd, core_event_flags(), input, 0 );
+     NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
++    if (core_event_needs_raw()) send_raw_from_core_event( input );
  }
  
  #ifdef SONAME_LIBXCURSOR
-@@ -1566,7 +1595,7 @@ void move_resize_window( HWND hwnd, int dir, POINT pos )
-             input.mi.dwFlags     = button_up_flags[button - 1] | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
-             input.mi.time        = NtGetTickCount();
-             input.mi.dwExtraInfo = 0;
--            NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, &input, 0 );
-+            NtUserSendHardwareInput( hwnd, core_event_flags(), &input, 0 );
-         }
+@@ -1487,6 +1596,8 @@ BOOL X11DRV_SetCursorPos( INT x, INT y )
+     pXFixesHideCursor( data->display, root_window );
+     XWarpPointer( data->display, root_window, root_window, 0, 0, 0, 0, pos.x, pos.y );
+     data->warp_serial = NextRequest( data->display );
++    /* Vessel: fallback raw deltas are measured from where the pointer now is. */
++    if (core_event_needs_raw()) set_raw_base( x, y );
+     pXFixesShowCursor( data->display, root_window );
+     XFlush( data->display ); /* avoids bad mouse lag in games that do their own mouse warping */
+     TRACE( "warped to %d,%d serial %lu\n", x, y, data->warp_serial );
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index 41fc515357a..2725f427cb6 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -590,10 +590,14 @@ enum x11drv_atoms
+     XATOM_text_uri_list,
+     XATOM_GAMESCOPE_XALIA_OVERLAY,
+     XATOM_GAMESCOPE_DISPLAY_EDID_PATH,
++    XATOM__VESSEL_RAW_MOTION,
+     NB_XATOMS
+ };
  
-         while (NtUserPeekMessage( &msg, 0, 0, 0, PM_REMOVE ))
+ extern Atom X11DRV_Atoms[NB_XATOMS - FIRST_XATOM];
++
++/* Vessel: raw mouse motion delivered by the X server; see mouse.c. */
++extern void x11drv_vessel_raw_motion( int dx, int dy );
+ extern const char * const X11DRV_atom_names[];
+ extern Atom systray_atom;
+ extern HWND systray_hwnd;
+diff --git a/dlls/winex11.drv/x11drv_main.c b/dlls/winex11.drv/x11drv_main.c
+index 0ddf6cf1147..e0b829b7791 100644
+--- a/dlls/winex11.drv/x11drv_main.c
++++ b/dlls/winex11.drv/x11drv_main.c
+@@ -207,6 +207,7 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
+     "text/uri-list",
+     "GAMESCOPE_XALIA_OVERLAY",
+     "GAMESCOPE_DISPLAY_EDID_PATH",
++    "_VESSEL_RAW_MOTION",
+ };
+ 
+ /***********************************************************************
