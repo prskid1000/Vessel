@@ -1,0 +1,126 @@
+offlinecompiler: code written at runtime is not compiled from the file.
+
+A code map records where a guest block ran, not what it was. The runtime
+translated it from memory; the offline compiler translates the same address
+from the image mapped off disk. For a packed image those are different bytes:
+a code section with SizeOfRawData == 0 is zeroes on disk and filled by a stub
+at startup, and a writable code section can be rewritten in place.
+
+Measured: one packed steam_api64.dll (WUS0 raw size 0, virtual 0x1EF000, RWX)
+shared byte-for-byte by four games in one container. The first launch of each
+container had no cache and ran. Every launch after it loaded a translation
+compiled from the empty section: EXCEPTION_ILLEGAL_INSTRUCTION at +0x17F0FE,
+the DLL's handler faulting on a null read, c0000409, 1,223 nested dispatches,
+8 MB main stack exhausted.
+
+Blocks whose first byte is outside file data, or inside a writable section, are
+now left out of the cache and translated at runtime as on the first launch.
+Ordinary images -- read-execute code sections with file data behind every
+byte -- produce the same cache as before.
+
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -474,6 +474,69 @@
+ #endif
+ 
+ // Returns filename of generated cache on success
++#ifdef _WIN32
++/* Vessel: a block may be compiled ahead of time only if its bytes are the
++ * file's bytes.
++ *
++ * A code map records *where* a guest block ran, not what it was. The runtime
++ * translated it from memory; this tool translates the same address from the
++ * image mapped off disk. Those are the same bytes for an ordinary code section
++ * and different bytes for two kinds of image:
++ *
++ *  - **A section with no file data.** A packer declares its real code section
++ *    with `SizeOfRawData == 0` and a large `VirtualSize`, and a stub writes the
++ *    code into it at startup. Mapped off disk that section is zeroes, so every
++ *    block recorded inside it is compiled from zeroes.
++ *  - **A writable code section.** Code that can be written can be rewritten --
++ *    decrypted in place, patched by the stub -- so even bytes the file does
++ *    carry are not the bytes that ran.
++ *
++ * Measured on a Steam API DLL packed exactly this way (`WUS0`: raw size 0,
++ * virtual size 0x1EF000, RWX; `WUS1`: RWX, the unpacker). The first launch had
++ * no cache, translated the unpacked code from memory and ran. This tool then
++ * compiled the recorded blocks from the empty section, and **every launch after
++ * the first** loaded that translation instead: `EXCEPTION_ILLEGAL_INSTRUCTION`
++ * at `+0x17F0FE`, the DLL's own handler faulting on a null read, `c0000409`,
++ * and 1,223 nested dispatches until the 8 MB main stack was gone. "Works once
++ * on a fresh container, never again" is this, and a user cannot tell it from
++ * the game being broken.
++ *
++ * Skipping costs nothing that was ever real: those blocks are translated at
++ * runtime, from memory, which is what worked. An ordinary image's code
++ * sections are read-execute with file data behind every byte, so its cache is
++ * unchanged. The runtime side needs no matching change -- the cache simply
++ * does not contain these blocks -- and the invalidation tracker still sees the
++ * writes at runtime as it always did.
++ *
++ * Judged on the block's first byte. A block starting in file data and running
++ * off the end of it would need a decoder here to find; a code section whose
++ * raw size ends mid-function is not a layout any linker produces, and a packer
++ * that does it is caught by the writable test anyway. */
++static bool BlockIsFromFile(uintptr_t ImageBase, uint64_t Rva) {
++  const auto* NtHeaders = reinterpret_cast<const FEX::Windows::ArchImageNtHeaders*>(RtlImageNtHeader(reinterpret_cast<HMODULE>(ImageBase)));
++  if (!NtHeaders) {
++    return false;
++  }
++
++  const auto* Section = IMAGE_FIRST_SECTION(NtHeaders);
++  for (WORD i = 0; i < NtHeaders->FileHeader.NumberOfSections; ++i, ++Section) {
++    const uint64_t Start = Section->VirtualAddress;
++    const uint64_t Span = std::max<uint64_t>(Section->Misc.VirtualSize, Section->SizeOfRawData);
++    if (Rva < Start || Rva >= Start + Span) {
++      continue;
++    }
++    if (Section->Characteristics & IMAGE_SCN_MEM_WRITE) {
++      return false;
++    }
++    return Rva - Start < Section->SizeOfRawData;
++  }
++
++  // Outside every section: the headers, or past the image. Neither is code a
++  // cache should carry.
++  return false;
++}
++#endif
++
+ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInfo& Binary, uint64_t CodeCacheConfigId,
+                                                       fextl::set<uintptr_t> BlockList, std::string_view OutDir) {
+ #ifndef _WIN32
+@@ -626,9 +689,16 @@
+      * than it would still trigger the swap, which 0016's checks then catch.
+      */
+     constexpr size_t BlockSizeMargin = 4 * 1024 * 1024;
+-    size_t Compiled = 0, Skipped = 0;
++    size_t Compiled = 0, Skipped = 0, NotFromFile = 0;
+ 
+     for (auto Addr : BlockList) {
++#ifdef _WIN32
++      // Vessel: see BlockIsFromFile.
++      if (!BlockIsFromFile(SyscallHandler->VAFileStart, Addr)) {
++        ++NotFromFile;
++        continue;
++      }
++#endif
+       if (!CTX->CheckIfBlockIsCacheable(*Thread, Addr + SyscallHandler->VAFileStart, MaxInst)) {
+         continue;
+       }
+@@ -642,6 +712,15 @@
+       ++Compiled;
+     }
+ 
++    if (NotFromFile) {
++      // Printed, not logged: IFmt is below the default ceiling, and this line is
++      // the only record that a whole image's worth of recorded blocks was
++      // refused on purpose rather than lost.
++      fmt::println("  {} of {} recorded blocks are in code written at runtime (a section with no file data, or a "
++                   "writable one) and were left to be translated from memory",
++                   NotFromFile, BlockList.size());
++    }
++
+     if (Skipped) {
+       LogMan::Msg::IFmt("Code buffer full after {} blocks; {} left uncached and will be translated at "
+                         "runtime. A single buffer holds 128 MB of translated code, which is the branch "

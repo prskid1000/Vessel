@@ -1375,3 +1375,60 @@ speculation.
 
 **Policy.** Not for upstream, for the reason at the top of this file. AI-authored
 in full.
+
+## 0025-offlinecompiler-code-written-at-runtime-is-not-compiled-from-the-file.patch
+
+**A packed image worked on the first launch of a container and never again.**
+Four games in one container -- Caribbean Legend, Valheim, Honeycomb, Empyrion --
+ship the same `steam_api64.dll`, byte for byte (MD5 `d6326e8455f5…`, 1,118,360
+bytes), so they share one FEX file id and one cache file. The DLL is packed:
+
+| Section | VirtualSize | SizeOfRawData | Flags |
+|---|---|---|---|
+| `WUS0` | `0x1EF000` | **0** | RWX, uninitialised |
+| `WUS1` | `0xFD000` | `0xFC800` | RWX (the unpacker) |
+
+The real code lives in `WUS0`, which is zeroes on disk until a stub writes it at
+startup. A code map records *addresses*. The first launch translated those
+addresses from memory -- the unpacked code -- and ran. `process-all` then
+compiled the same addresses from the image mapped off disk, where `WUS0` is
+empty, and every later launch loaded that. From the session log with `seh` at
+EVERYTHING:
+
+```
+seh:dispatch_exception code=c000001d (EXCEPTION_ILLEGAL_INSTRUCTION) addr=…FCF0FE
+seh:virtual_unwind backtrace: …FCF0FE: L"steam_api64.dll" + 000000000017F0FE.
+seh:call_seh_handlers calling handler …FCCA30
+virtual:virtual_handle_fault unrepaired read fault at 0x0 from 0x7fd7fc05e4
+seh:dispatch_exception code=c0000409 … info[0]=0000000000000002
+```
+
+and the handler then re-entered itself 1,223 times until the 8 MB main stack was
+gone. The cache file was visibly mapped into the dying process:
+`r-xp … caches/fex/d84d4973d061/cache/steam_api64.dll-385cce10be1dbfe1-…`.
+
+**This corrects the closing paragraph of `0021`.** It set aside "refusing to cache
+images with writable executable sections" as moot on the strength of the
+invalidation tracker. On the device the unpacker's writes landed after the cache
+was mapped and the cached translation still ran, so for this layout that argument
+does not hold. Why the runtime missed those writes -- whether cached blocks'
+pages are write-tracked at all before their first JIT miss -- is not established
+here, and is the thing to measure if a hot-patching title ever shows the same
+symptom in an ordinary code section.
+
+**The fix is on the compile side, block by block.** A block is compiled ahead of
+time only if its first byte lies in file data *and* its section is not writable.
+Everything else is translated at runtime, from memory, which is what the first
+launch did and what worked. An ordinary image -- read-execute code sections with
+file data behind every byte -- produces exactly the cache it did before, and the
+compiler prints how many blocks it refused so a refusal is never silent.
+
+**Clearing the caches already built is not a separate step.** `fexCacheKey` folds
+the FEX package identity into the cache directory's name and
+`sweepStaleFexCaches` deletes every directory that is not the live one, so the
+revision bump that ships this retires every cache the old compiler wrote -- on
+every container and every device, on first launch -- without anything keyed on a
+game or a file name.
+
+**Policy.** Not for upstream, for the reason at the top of this file. AI-authored
+in full.
