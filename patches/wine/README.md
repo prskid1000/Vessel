@@ -178,3 +178,25 @@ private file mapping, Wine writes relocations into an image before protecting it
 sections, and so any PE loaded away from its `ImageBase` could never execute. Its
 own measurement — `wineboot.exe` at its preferred base mapped `c-r-x` fine while a
 relocated `ntdll.dll` failed — is the same relocation that `0044` is about.
+
+## 0081-ntdll-a-ram-cap-is-a-ceiling-on-free-memory-not-a-debt-against-it.patch
+
+**Every capped container reported zero free RAM.** `WINE_RAM_REPORTING_BIAS` is
+Proton's knob and Vessel's container RAM setting: the difference between the
+device's memory and the cap. `get_performance_info` subtracted it from
+`MemTotal`, which is right, and then from `MemAvailable` too, taking any
+shortfall out of swap. On a 15.2 GB phone capped to 6 GB the bias is 9 GB, and
+the phone has 5 to 8.5 GB really free (from the session traces), so the answer
+was always the `else` branch: `freeram = 0`.
+
+Empyrion checks for 8 GB free at startup. It printed "Warning! Low memory
+detected." on every launch and fell back to its lowest textures -- at any cap,
+because under this arithmetic no cap below the device's size leaves anything
+free.
+
+**A cap is a ceiling.** No more than the capped total can be available, so free
+memory is reported as the real `MemAvailable`, clamped to that total. Swap is
+left alone: the bias was never swap's to pay. The total and the page count in
+`virtual.c` were already right and are unchanged.
+
+**Policy.** Vessel's. AI-authored in full.

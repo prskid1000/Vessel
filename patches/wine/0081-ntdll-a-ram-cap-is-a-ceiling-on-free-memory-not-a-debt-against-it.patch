@@ -1,0 +1,44 @@
+ntdll: a RAM cap is a ceiling on free memory, not a debt against it.
+
+WINE_RAM_REPORTING_BIAS subtracted the whole bias from available memory as
+well as from the total. A 15.2 GB phone capped to 6 GB has a 9 GB bias and
+5 to 8.5 GB really free, so get_performance_info reported 0 bytes free, every
+time. Empyrion's startup check wants 8 GB free: "Low memory detected" on every
+launch, and its textures dropped to the lowest setting.
+
+Free memory is now the real MemAvailable, clamped to the capped total. Swap is
+no longer charged the shortfall.
+
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -2849,13 +2849,23 @@
+             fclose(fp);
+             totalram -= min( totalram, ram_reporting_bias );
+             if (mem_available) freeram = mem_available;
+-            if ((long long)freeram >= ram_reporting_bias) freeram -= ram_reporting_bias;
+-            else
+-            {
+-                long long bias = ram_reporting_bias - freeram;
+-                freeswap -= min( bias, freeswap );
+-                freeram = 0;
+-            }
++            /* Vessel: a RAM cap is a ceiling on what is free, not a debt
++             * against it.
++             *
++             * This used to subtract the whole bias from available memory as
++             * well as from the total, and take any shortfall out of swap. On
++             * a 15.2 GB phone capped to 6 GB the bias is 9 GB, so with the 5
++             * to 8.5 GB a phone actually has free, every program was told it
++             * had none: Empyrion's startup check wants 8 GB free, printed
++             * "Low memory detected" on every launch and dropped its textures
++             * to the lowest setting, and would have at any cap below the
++             * device's size.
++             *
++             * What a cap means is that no more than the capped total can be
++             * available, so that is what is reported: the real figure, never
++             * above the total the program was given. Swap is left alone -- the
++             * bias was never swap's to pay. */
++            if (ram_reporting_bias && freeram > totalram) freeram = totalram;
+         }
+     }
+ #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__) || \
