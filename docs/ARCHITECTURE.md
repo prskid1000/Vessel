@@ -435,7 +435,10 @@ A package can reach the store two ways, and the store cannot tell which:
 | Flavour | Where the `.wcp` comes from | Size |
 |---|---|---|
 | `sideload` | **inside the APK**, `assets/components/` | 133 MB installed APK |
-| `play` | downloaded | 32 MB |
+
+There is no other flavour. A `play` flavour existed and was removed: Play policy
+forbids executable code outside the package, so it could neither bundle nor
+download a single component and could run nothing. See `CLAUDE.md`.
 
 The `sideload` APK carries the whole set, so installing it is the whole of
 setup: no side-loading a package by hand, no `tools/device-*.sh`, and no network
@@ -446,9 +449,10 @@ MB of APK and 900 MB of unpacking for a Wine nothing adopts. They are stored
 uncompressed (`androidResources.noCompress`), because a `.wcp` is already xz and
 because an inflated asset cannot be read through `openFd`.
 
-`play` ships none, and that is expressed as an absent asset directory rather
-than as a flag: `BundledComponents` finds nothing there, the setup dialog never
-appears, and the download path is the only source. Both paths go through the
+A build made without `dist/` ships none, and that is expressed as an absent
+asset directory rather than as a flag: `BundledComponents` finds nothing there,
+the setup dialog never appears, and the download path is the only source. Both
+paths go through the
 same `WcpInstaller` into the same `components/<Type>/<versionCode>/`, which is
 what makes a container's references resolve whichever way its components
 arrived.

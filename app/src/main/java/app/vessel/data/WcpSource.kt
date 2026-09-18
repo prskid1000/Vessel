@@ -82,10 +82,9 @@ class FileWcpSource(private val file: File) : WcpSource {
 /**
  * A `.wcp` shipped inside the APK, under `assets/components/`.
  *
- * Only the `sideload` flavour has any. The `play` flavour ships none, because
- * Play policy forbids executable code outside the package and these are nothing
- * but executable code — so there the asset directory is simply absent and
- * [BundledComponents] finds nothing, which is the correct behaviour rather than a
+ * A build made without `dist/` ships none, so there the asset directory is
+ * simply absent and [BundledComponents] finds nothing, which is the correct
+ * behaviour rather than a
  * special case.
  *
  * **No digest.** The bytes are inside an APK the platform verified against its
@@ -131,7 +130,7 @@ class AssetWcpSource(
          *
          * `AssetManager.list` returns an empty array for a missing directory on
          * some platform versions and throws on others, so both are folded into
-         * "there are none" — which is exactly what the `play` flavour is.
+         * "there are none" -- which is what a build without `dist/` is.
          */
         fun listAll(assets: AssetManager): List<AssetWcpSource> =
             runCatching { assets.list(DIRECTORY).orEmpty() }

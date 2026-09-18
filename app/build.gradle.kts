@@ -206,10 +206,9 @@ abstract class BundleComponentsTask : DefaultTask() {
  * at all — the packages are built by the scripts under `build/` in Docker, which
  * is a much longer road than `./gradlew assembleSideloadDebug` — and refusing to
  * build would mean the app could not be compiled without them. The resulting APK
- * simply bundles nothing, which is the state the `play` flavour is permanently in
- * and which the app already handles: the setup dialog does not appear and the
- * download path is the only source. The warning is what stops that being a
- * surprise at install time.
+ * simply bundles nothing, which the app already handles: the setup dialog does
+ * not appear and the download path is the only source. The warning is what
+ * stops that being a surprise at install time.
  */
 val bundleComponents = tasks.register<BundleComponentsTask>("bundleComponents") {
     description = "Stages the bundled .wcp components into the sideload flavour's assets."
@@ -277,9 +276,14 @@ android {
     // this NDK if the machine does not have it.
     ndkVersion = "27.0.12077973"
 
-    // Two channels from one source, as in the reference app: `sideload` may
-    // download and install .wcp components itself; `play` cannot, because Play
-    // policy forbids shipping executable code outside the package.
+    // **One channel: `sideload`.** There used to be a `play` flavour too, and it
+    // was removed on purpose: Play policy forbids executable code outside the
+    // package, so a Play build could neither bundle nor download Wine, FEX, DXVK
+    // or Turnip -- a 4.8 MB APK that could run nothing, attached to releases as
+    // if it could. Vessel is distributed as the sideload APK only; see
+    // CLAUDE.md. The flavour dimension is kept, with `sideload` its only member,
+    // so every task name (`assembleSideloadRelease`, ...) and the sideload source
+    // set stay exactly as they were.
     flavorDimensions += "channel"
     productFlavors {
         create("sideload") {
@@ -287,18 +291,11 @@ android {
             buildConfigField("String", "UPDATE_CHANNEL", "\"SIDELOAD\"")
             buildConfigField("boolean", "CAN_INSTALL_COMPONENTS", "true")
         }
-        create("play") {
-            dimension = "channel"
-            buildConfigField("String", "UPDATE_CHANNEL", "\"PLAY\"")
-            buildConfigField("boolean", "CAN_INSTALL_COMPONENTS", "false")
-        }
     }
 
     // `sideload` carries the component packages inside the APK, so that
     // installing the APK is the whole of setup: no side-loading, no downloads,
-    // no first-run network. `play` carries none and keeps the download path,
-    // because Play forbids executable code outside the package and every one of
-    // these is executable code.
+    // no first-run network.
     //
     // The packages are *copied in by the build* from `dist/` rather than
     // committed under `app/src/sideload/assets/`. They are build outputs — 100 MB
@@ -405,9 +402,7 @@ android {
 
 // The sideload flavour carries the component packages inside the APK, so that
 // installing the APK is the whole of setup: no side-loading, no downloads, no
-// first-run network. The play flavour carries none and keeps the download path,
-// because Play forbids executable code outside the package and every one of
-// these is executable code.
+// first-run network.
 //
 // Wired through the variant API rather than by adding an asset `srcDir`. A
 // generated directory handed to `sourceSets.assets.srcDir(...)` carries no task

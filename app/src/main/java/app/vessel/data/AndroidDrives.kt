@@ -47,8 +47,8 @@ class AndroidDrives @Inject constructor(
      * `MANAGE_EXTERNAL_STORAGE` is a settings toggle rather than a runtime
      * dialog, and only the sideload flavour declares it — see
      * `src/sideload/AndroidManifest.xml`. False is a legitimate steady state,
-     * not an error: a `play` build simply has no mappable storage, and the UI
-     * says so rather than offering a picker that cannot work.
+     * not an error: the permission is a settings toggle the user may refuse,
+     * and the UI says so rather than offering a picker that cannot work.
      */
     val canMap: Boolean get() = Environment.isExternalStorageManager()
 

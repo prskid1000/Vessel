@@ -36,8 +36,8 @@ one permission — there is no filesystem driver to write.
 Wine runs as the app, so it can read exactly what the app can. Reaching
 `/storage/emulated/0` needs `MANAGE_EXTERNAL_STORAGE`, which is a Play-policy
 sensitive permission and a system settings toggle rather than a dialog. The
-`sideload` flavour can ask for it; the `play` flavour probably cannot ship with
-it. That split already exists in the build and is where this belongs:
+`sideload` flavour can ask for it. (A `play` flavour that probably could not
+ship with it has since been removed; `sideload` is the only one.) The split below was written while both existed; only the sideload half applies now:
 
 - **sideload** — request `MANAGE_EXTERNAL_STORAGE`, offer the whole of shared
   storage as `D:`.

@@ -45,7 +45,7 @@ import javax.inject.Inject
  * same reason: nothing is being synchronised. `specialUse` carries a
  * human-readable subtype in the manifest saying exactly what it is for, which is
  * the mechanism Google provides for precisely this case, and the app is
- * sideloaded rather than Play-distributed on the `sideload` flavour.
+ * sideloaded rather than Play-distributed -- `sideload` is its only flavour.
  *
  * `START_NOT_STICKY`: a session that the system killed must not silently come
  * back without the user asking. It would restart a Wine prefix, with no screen

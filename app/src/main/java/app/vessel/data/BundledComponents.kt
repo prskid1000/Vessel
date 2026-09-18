@@ -36,12 +36,12 @@ data class BundledPackage(
 /**
  * The component packages carried inside the APK.
  *
- * **The `sideload` flavour ships all six; the `play` flavour ships none.** That
- * is the whole of the difference and it is expressed as assets rather than as
- * code: Play policy forbids executable code outside the package, and these
- * packages are nothing but executable code, so `app/src/play` has no
- * `assets/components` and this class finds an empty list there. Nothing checks a
- * `BuildConfig` flag, because an empty catalogue already produces exactly the
+ * **The `sideload` flavour ships all six.** (There was a `play` flavour that
+ * shipped none, because Play policy forbids executable code outside the package;
+ * it could run nothing and was removed -- see CLAUDE.md.) A build without them,
+ * such as a fresh clone with no `dist/`, has no `assets/components` and this
+ * class finds an empty list there. Nothing checks a `BuildConfig` flag, because
+ * an empty catalogue already produces exactly the
  * right behaviour — no setup, and the download path as the only source.
  *
  * The catalogue is derived from the assets themselves rather than from a list

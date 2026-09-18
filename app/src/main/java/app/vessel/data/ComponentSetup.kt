@@ -241,9 +241,9 @@ class ComponentSetup @Inject constructor(
         val catalogue = bundled.catalogue()
         val pending = catalogue.filterNot { bundled.isInstalled(it) }
         if (pending.isEmpty()) {
-            // Nothing bundled to unpack — the `play` flavour always, and the
-            // `sideload` one until assets are added. Not the end of setup any
-            // more: what a phone actually needs may be downloadable instead.
+            // Nothing bundled to unpack -- a build made without `dist/`. Not the
+            // end of setup any more: what a phone actually needs may be
+            // downloadable instead.
             downloadMissing()
             return
         }

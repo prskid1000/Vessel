@@ -9,7 +9,8 @@
     Play-policy sensitive permission that this project has no grounds to claim
     in a store build.
 
-    The `play` flavour therefore does not declare it and cannot map a folder.
+    (A `play` flavour, since removed, therefore did not declare it and could
+    not map a folder.)
     The alternative there is SAF, which hands back a `content://` tree — not a
     path, so there is nothing to symlink and Wine cannot open it. Better to
     refuse in words than to ship a picker that half works. See
