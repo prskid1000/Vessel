@@ -13,6 +13,7 @@ import com.winlator.xconnector.XOutputStream;
 import com.winlator.xconnector.XStreamLock;
 import com.winlator.core.Bitmask;
 import com.winlator.xserver.Drawable;
+import com.winlator.sysvshm.SysVSharedMemory;
 import com.winlator.xserver.Pixmap;
 import com.winlator.xserver.Window;
 import com.winlator.xserver.XClient;
@@ -517,7 +518,8 @@ public class PresentExtension extends Extension {
                         + " max=" + (copyMaxNanos / 1000) + "us"
                         + " last=" + (dt / 1000) + "us"
                         + " " + pixmap.drawable.width + "x" + pixmap.drawable.height
-                        + " means syncIn=" + (syncInNanos / copyCount / 1000) + "us"
+                        + " means preWait=" + (preWaitNanos / copyCount / 1000) + "us"
+                        + " syncIn=" + (syncInNanos / copyCount / 1000) + "us"
                         + " copy=" + (copyOnlyNanos / copyCount / 1000) + "us"
                         + " syncOut=" + (syncOutNanos / copyCount / 1000) + "us"
                         + " other=" + (syncOtherNanos / copyCount / 1000) + "us"
@@ -599,6 +601,48 @@ public class PresentExtension extends Extension {
         }
     }
 
+    /**
+     * VESSEL (change 35): wait for the GPU to finish the frame *before* taking
+     * the window-manager lock.
+     *
+     * {@code copyArea} opens with {@code DMA_BUF_IOCTL_SYNC(START|READ)}, which
+     * waits for the GPU's write to the pixmap -- measured on Empyrion as the
+     * whole of a present's cost (mean 5.7 ms, up to 86 ms, against 0.3 ms for
+     * the copy itself), all of it with {@code WINDOW_MANAGER} held. Every
+     * mouse move and key press takes that lock too, so input queued behind the
+     * GPU finishing each frame: a relative move measured 133-312 ms to inject
+     * in the game world against 0.2 ms at its menu.
+     *
+     * The lock stays where it is -- see {@link #presentPixmap} for why dropping
+     * it would be a use-after-free. What moves is the wait: the pixmap id is
+     * peeked (the stream is rewound, so {@link #presentPixmap} parses the
+     * request untouched), its descriptor dup()ed under the pixmap lock alone,
+     * and the dma-buf polled until the GPU is done. The sync inside the lock
+     * then finds nothing left to wait for. Bounded, and a miss is harmless: the
+     * in-lock sync still waits for whatever remains.
+     */
+    private void awaitPixmapOutsideLock(XInputStream inputStream) {
+        int at = inputStream.getActivePosition();
+        inputStream.readInt(); // window
+        int pixmapId = inputStream.readInt();
+        inputStream.setActivePosition(at);
+
+        int fd = -1;
+        try (XLock lock = xServer.lock(XServer.Lockable.PIXMAP_MANAGER)) {
+            Pixmap pixmap = xServer.pixmapManager.getPixmap(pixmapId);
+            int own = pixmap != null ? pixmap.drawable.getDmaBufFd() : -1;
+            if (own >= 0) fd = SysVSharedMemory.dupFd(own);
+        }
+        if (fd < 0) return;
+        long t0 = System.nanoTime();
+        SysVSharedMemory.dmaBufAwaitWrites(fd, PRESENT_FENCE_WAIT_MS);
+        preWaitNanos += System.nanoTime() - t0;
+    }
+
+    /** Longer than any frame should take; a fence past it is left to the in-lock sync. */
+    private static final int PRESENT_FENCE_WAIT_MS = 250;
+    private long preWaitNanos;
+
     @Override
     public void handleRequest(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException, XRequestError {
         int opcode = client.getRequestData();
@@ -609,6 +653,7 @@ public class PresentExtension extends Extension {
                 queryVersion(client, inputStream, outputStream);
                 break;
             case ClientOpcodes.PRESENT_PIXMAP:
+                awaitPixmapOutsideLock(inputStream);
                 try (XLock lock = xServer.lock(XServer.Lockable.WINDOW_MANAGER, XServer.Lockable.PIXMAP_MANAGER)) {
                     presentPixmap(client, inputStream, outputStream);
                 }

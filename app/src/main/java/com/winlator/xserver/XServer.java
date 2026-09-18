@@ -51,13 +51,40 @@ public class XServer {
     // display host is a Service, not that Activity, so the dependency is
     // inverted into a sink the host may set.
     private Callback<String> debugSink;
-    private final EnumMap<Lockable, ReentrantLock> locks = new EnumMap<>(Lockable.class);
+    private final EnumMap<Lockable, OwnedLock> locks = new EnumMap<>(Lockable.class);
+
+    // Vessel (change 34): a ReentrantLock that will say who holds it. getOwner()
+    // is protected on ReentrantLock and exists for exactly this -- monitoring.
+    private static final class OwnedLock extends ReentrantLock {
+        // Vessel (change 35): fair. An unfair lock lets the thread that just
+        // released it take it straight back, and the X server's request thread
+        // does exactly that from one present to the next -- an input thread
+        // waiting behind it measured up to 312 ms, several whole frames, not
+        // one. Fair ordering costs a little throughput under contention and
+        // hands the lock to whoever has waited longest.
+        OwnedLock() {
+            super(true);
+        }
+
+        Thread owner() {
+            return getOwner();
+        }
+    }
+
+    /**
+     * The thread holding [lockable] right now, or null. Diagnostic only, and
+     * racy by nature: the answer may be stale the moment it returns. Used to
+     * catch whoever keeps the window-manager lock long enough to stall input.
+     */
+    public Thread ownerOf(Lockable lockable) {
+        return locks.get(lockable).owner();
+    }
     private boolean relativeMouseMovement = false;
 
     public XServer(ScreenInfo screenInfo) {
         this.screenInfo = screenInfo;
         cursorLocker = new CursorLocker(this);
-        for (Lockable lockable : Lockable.values()) locks.put(lockable, new ReentrantLock());
+        for (Lockable lockable : Lockable.values()) locks.put(lockable, new OwnedLock());
 
         pixmapManager = new PixmapManager();
         drawableManager = new DrawableManager(this);
@@ -113,7 +140,7 @@ public class XServer {
     }
 
     private class SingleXLock implements XLock {
-        private final ReentrantLock lock;
+        private final OwnedLock lock;
 
         private SingleXLock(Lockable lockable) {
             this.lock = locks.get(lockable);
@@ -169,15 +196,48 @@ public class XServer {
 
     public void injectPointerMove(int x, int y) {
         try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
+            int dx = x - pointer.getX();
+            int dy = y - pointer.getY();
             pointer.setPosition(x, y);
+            sendRawMotion(dx, dy);
         }
     }
 
     public void injectPointerMoveDelta(int dx, int dy) {
         try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
             pointer.setPosition(pointer.getX() + dx, pointer.getY() + dy);
+            sendRawMotion(dx, dy);
         }
     }
+
+    /**
+     * Vessel (change 36): the motion that was asked for, before the pointer
+     * was clamped to the screen, as a `_VESSEL_RAW_MOTION` ClientMessage to the
+     * focused window.
+     *
+     * Raw mouse input is how a game that locks the cursor reads the mouse, and
+     * on Windows it comes from the device, not from the cursor -- it does not
+     * stop at the edge of the screen. This server has no XInput2, so Wine's
+     * only source of raw input was the pointer's *position*, and the position
+     * is clamped: Empyrion's mouse-look turned until the pointer reached the
+     * screen edge, about 640 px from the centre, and then stopped -- "look
+     * left and right only very little". The requested delta is not clamped;
+     * patches/wine/0080 turns this message into raw input and stops deriving
+     * raw motion from positions once it has seen one.
+     *
+     * Sent to the focused window because Wine only dispatches a ClientMessage
+     * to a window it can map to an HWND, and the game's toplevel is the one
+     * with focus. A client that does not know the atom ignores the message.
+     */
+    private void sendRawMotion(int dx, int dy) {
+        if (dx == 0 && dy == 0) return;
+        Window focus = windowManager.getFocusedWindow();
+        if (focus == null || focus == windowManager.rootWindow) return;
+        if (rawMotionAtom == 0) rawMotionAtom = Atom.internAtom("_VESSEL_RAW_MOTION");
+        focus.sendClientMessage(rawMotionAtom, dx, dy);
+    }
+
+    private int rawMotionAtom;
 
     public void injectPointerButtonPress(Pointer.Button buttonCode) {
         try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {

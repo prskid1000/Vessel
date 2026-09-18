@@ -28,6 +28,7 @@
 // itself. So there is nothing to declare locally and no reason to; a hand-rolled
 // copy of a uapi struct is one kernel revision away from being wrong.
 #include <linux/dma-buf.h>
+#include <poll.h>
 
 int ashmemCreateRegion(const char* name, int64_t size) {
 #if __ANDROID_API__ >= 26
@@ -172,6 +173,32 @@ Java_com_winlator_sysvshm_SysVSharedMemory_dmaBufSyncRead(JNIEnv *env, jclass ob
         return JNI_FALSE;
     }
     return JNI_TRUE;
+}
+
+// VESSEL (change 35): wait for the GPU's pending write to a dma-buf, without
+// touching its contents, and close the descriptor.
+//
+// poll(POLLIN) on a dma-buf returns once its write fences have signalled --
+// the same fences DMA_BUF_IOCTL_SYNC(START|READ) waits on before it does its
+// cache maintenance. Doing this first, outside the X server's locks, is what
+// turns the in-lock sync from "wait for the GPU" (measured mean 5.7 ms, up to
+// 86 ms, on every present) into bookkeeping. Bounded: a fence that never
+// signals must not hang the X server, and the in-lock sync still waits for
+// whatever is left, so a timeout costs time and never correctness.
+//
+// Takes ownership of fd -- the caller dup()s it under the pixmap lock so the
+// descriptor cannot be closed and reused underneath the wait.
+JNIEXPORT jboolean JNICALL
+Java_com_winlator_sysvshm_SysVSharedMemory_dmaBufAwaitWrites(JNIEnv *env, jclass obj, jint fd,
+                                                             jint timeoutMs) {
+    if (fd < 0) return JNI_FALSE;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int ret;
+    do {
+        ret = poll(&pfd, 1, timeoutMs);
+    } while (ret < 0 && errno == EINTR);
+    close(fd);
+    return ret > 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL

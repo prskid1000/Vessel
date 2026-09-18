@@ -165,4 +165,13 @@ public class SysVSharedMemory {
      * @return whether the kernel performed the sync.
      */
     public static native boolean dmaBufSyncRead(int fd, boolean start);
+
+    /**
+     * VESSEL (change 35): {@code poll(POLLIN)} on a dma-buf -- wait for the
+     * GPU's pending write to finish -- then close {@code fd}, which the caller
+     * must own (a {@link #dupFd} copy). Bounded by {@code timeoutMs}.
+     *
+     * @return whether the buffer became readable before the timeout.
+     */
+    public static native boolean dmaBufAwaitWrites(int fd, int timeoutMs);
 }

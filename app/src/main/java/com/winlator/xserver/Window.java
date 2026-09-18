@@ -240,6 +240,17 @@ public class Window extends XResource {
         return true;
     }
 
+    /**
+     * Vessel (change 36): a ClientMessage to every client listening on this
+     * window, whatever its event mask -- delivered the way {@link #requestClose}
+     * delivers WM_DELETE_WINDOW, and for the same reason.
+     */
+    public void sendClientMessage(int type, int... data) {
+        for (EventListener listener : eventListeners) {
+            listener.sendEvent(new ClientMessage(this, type, data));
+        }
+    }
+
     public int getTransientFor() {
         Property property = getProperty(Atom.WM_TRANSIENT_FOR);
         return property != null ? property.getInt(0) : 0;

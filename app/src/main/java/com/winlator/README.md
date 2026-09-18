@@ -937,6 +937,38 @@ The modifications, in the order they were made:
    because the compositor draws the cursor and a warp lasts microseconds. Being
    answered at all is the point.
 
+34. **`ownerOf`: which thread holds an X server lock.** The locks are
+   `ReentrantLock` subclasses that expose `getOwner()`, the protected accessor
+   `ReentrantLock` provides for monitoring. Nothing locks differently. It exists
+   because injecting one relative mouse move measured 133 to 312 ms in a running
+   game -- the window-manager lock was held that long on another thread -- and a
+   lock that cannot say who holds it cannot say why. The debug input log uses it
+   to capture the holder's stack while it is still holding.
+
+35. **Presents wait for the GPU outside the window-manager lock, and the
+   locks are fair.** Every mouse move and key press takes `WINDOW_MANAGER`, and
+   `PRESENT_PIXMAP` held it across `DMA_BUF_IOCTL_SYNC`, which waits for the
+   GPU to finish the frame. The present path's own split timer on Empyrion:
+   `syncIn` mean 5.7 ms, max 86 ms, against `copy` 0.3 ms. A captured holder
+   stack named `dmaBufSyncRead` under `presentPixmap` while a relative move
+   waited 64 ms; in the game world such waits reached 312 ms, several frames,
+   because the unfair `ReentrantLock` let the request thread re-take the lock
+   from one present to the next ahead of the waiting input thread.
+   `PRESENT_PIXMAP` now peeks the pixmap id, dup()s its dma-buf under
+   `PIXMAP_MANAGER` alone and `poll(POLLIN)`s it (`dmaBufAwaitWrites`,
+   bounded at 250 ms) before taking the lock; the in-lock sync then has
+   nothing left to wait for. The lock itself stays, for the reason
+   `presentPixmap`'s comment gives. All X server locks are now fair.
+
+36. **Raw mouse motion that does not stop at the screen edge.** Every pointer
+   injection also sends the *requested* motion -- before the pointer is clamped
+   to the screen -- as a `_VESSEL_RAW_MOTION` ClientMessage (format 32, dx and
+   dy) to the focused window. There is no XInput2 here, so Wine derived raw
+   input from pointer positions, and positions stop at the edge: Empyrion's
+   mouse-look turned about 640 px' worth and stopped. `patches/wine/0080`
+   turns the message into raw input. `Window.sendClientMessage` delivers it
+   to every listener regardless of event mask, as `requestClose` does.
+
 ### Every file that differs from upstream
 
 This table is the machine-checkable form of the list above — `LicensingTest`
@@ -972,7 +1004,7 @@ test is here to catch and did.
 | `app/src/main/java/com/winlator/renderer/material/SGSRMaterial.java` | 22 |
 | `app/src/main/java/com/winlator/renderer/material/ShaderMaterial.java` | 13, 22 |
 | `app/src/main/java/com/winlator/renderer/material/WarpLumaMaterial.java` | 31 |
-| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27 |
+| `app/src/main/java/com/winlator/sysvshm/SysVSharedMemory.java` | 6, 27, 35 |
 | `app/src/main/java/com/winlator/widget/XServerView.java` | 31 |
 | `app/src/main/java/com/winlator/winhandler/WinHandler.java` | 4 |
 | `app/src/main/java/com/winlator/xconnector/UnixSocketConfig.java` | 8 |
@@ -981,10 +1013,10 @@ test is here to catch and did.
 | `app/src/main/java/com/winlator/xserver/Drawable.java` | 27, 28, 29 |
 | `app/src/main/java/com/winlator/xserver/Property.java` | 15 |
 | `app/src/main/java/com/winlator/xserver/SelectionManager.java` | 30 |
-| `app/src/main/java/com/winlator/xserver/Window.java` | 15 |
+| `app/src/main/java/com/winlator/xserver/Window.java` | 15, 36 |
 | `app/src/main/java/com/winlator/xserver/WindowManager.java` | 16, 21, 30 |
 | `app/src/main/java/com/winlator/xserver/XClient.java` | 24 |
-| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30 |
+| `app/src/main/java/com/winlator/xserver/XServer.java` | 1, 2, 3, 10, 20, 24, 30, 34, 35, 36 |
 | `app/src/main/java/com/winlator/xserver/XShmFence.java` | 23 |
 | `app/src/main/java/com/winlator/xserver/extensions/XFixesExtension.java` | 20, 24, 33 |
 | `app/src/main/java/com/winlator/xserver/XClientRequestHandler.java` | 19, 30, 32 |
@@ -998,7 +1030,7 @@ test is here to catch and did.
 | `app/src/main/java/com/winlator/xserver/extensions/DRI3Extension.java` | 17, 21, 23, 24, 27 |
 | `app/src/main/java/com/winlator/xserver/extensions/Extension.java` | 24 |
 | `app/src/main/java/com/winlator/xserver/extensions/MITSHMExtension.java` | 25 |
-| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28, 29 |
+| `app/src/main/java/com/winlator/xserver/extensions/PresentExtension.java` | 17, 18, 24, 27, 28, 29, 35 |
 | `app/src/main/java/com/winlator/xserver/extensions/SyncExtension.java` | 23, 24 |
 | `app/src/main/cpp/winlator/CMakeLists.txt` | 12, 23, 28 |
 | `app/src/main/cpp/winlator/include/copy_pool.h` | 28 |
@@ -1006,7 +1038,7 @@ test is here to catch and did.
 | `app/src/main/cpp/winlator/src/drawable.c` | 28 |
 | `app/src/main/cpp/winlator/src/frame_extrapolation.c` | 31 |
 | `app/src/main/cpp/winlator/src/frame_timestamps.c` | 31 |
-| `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27 |
+| `app/src/main/cpp/winlator/src/sysvshared_memory.c` | 27, 35 |
 | `app/src/main/cpp/winlator/src/xconnector_epoll.c` | 9 |
 | `app/src/main/cpp/winlator/src/xshmfence.c` | 23 |
 
