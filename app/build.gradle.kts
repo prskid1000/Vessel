@@ -44,6 +44,9 @@ val bundledPackages = listOf(
     // effects through vkd3d-shader, which could not compile Caribbean Legend's;
     // with these native the game reaches its menu. 35 MiB packaged.
     "directx-9.29.1974-any.wcp",
+    // The Steam client emulator (gbe_fork, build/gbe.sh), laid into
+    // C:\Program Files (x86)\Steam; Steam games start through its loader.
+    "gbe-2026.8.23-any.wcp",
     "dxvk-3.0.2-canoe.wcp",
     "vkd3d-3.0.1-canoe.wcp",
     "zink-26.3.0-devel-9c475fc3-canoe.wcp",

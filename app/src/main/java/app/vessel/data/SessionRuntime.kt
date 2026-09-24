@@ -23,6 +23,7 @@ import app.vessel.core.SessionDiagnosis
 import app.vessel.core.SessionDisplayServer
 import app.vessel.core.SessionPaths
 import app.vessel.core.SessionScratch
+import app.vessel.core.SteamClient
 import app.vessel.core.TurnipDriver
 import app.vessel.core.UpscalerRequest
 import app.vessel.core.WINE_BOOT
@@ -1534,6 +1535,9 @@ class SessionRuntime @Inject constructor(
         runCatching { installDirectXRuntimes(container, layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "directx runtimes: ${it.message}") }
 
+        runCatching { installSteamClient(container, layout, current.log) }
+            .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "steam client: ${it.message}") }
+
         runCatching { ensureScriptsDirectory(layout, current.log) }
             .onFailure { current.log.line(LogSource.VESSEL, LogLevel.WARN, "scripts: ${it.message}") }
 
@@ -3012,6 +3016,73 @@ class SessionRuntime @Inject constructor(
         log.line(LogSource.VESSEL, LogLevel.INFO, "directx runtimes: ${deployed.describe()}")
     }
 
+    /**
+     * Lay the Steam client emulator into `C:\Program Files (x86)\Steam`.
+     *
+     * File by file over what is there, never delete-and-replace as
+     * [installToolTree] does: this folder is also where a user edits
+     * `steam_settings` (a name, a language) and where the loader's per-launch
+     * ini is written, and an upgrade must not take either with it. Only files
+     * the payload carries are written, so a user's own additions survive and a
+     * user's edit to a file the payload also ships is replaced -- once, when a
+     * new version is adopted.
+     *
+     * Stamped by the payload's identity like [copyWindowsPayload], for the same
+     * reason: a version whose bytes are already here copies nothing, and a new
+     * one is noticed even when every size matches.
+     */
+    private suspend fun installSteamClient(
+        containerId: String,
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val source = components.directoryFor(containerId, ComponentType.STEAM)
+            ?.let { File(it, SteamClient.PAYLOAD_DIR) }
+            ?: return@withContext
+        if (!source.isDirectory) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "steam client: ${source.path} is missing; the package has no " +
+                    "${SteamClient.PAYLOAD_DIR}/ tree",
+            )
+            return@withContext
+        }
+        val target = File(layout.prefix, SteamClient.PREFIX_DIR)
+        val version = payloadIdentity(source.parentFile!!)
+        val stamp = File(target, STEAM_VERSION_STAMP)
+        val installed = SteamClient.REQUIRED.all { File(target, it).isFile }
+        if (installed && runCatching { stamp.readText().trim() }.getOrNull() == version) return@withContext
+
+        var copied = 0
+        source.walkTopDown().filter { it.isFile }.forEach { file ->
+            val to = File(target, file.relativeTo(source).path)
+            if (!to.parentFile!!.isDirectory && !to.parentFile!!.mkdirs()) {
+                error("could not create ${to.parentFile!!.path}")
+            }
+            file.copyTo(to, overwrite = true)
+            copied++
+        }
+        val missing = SteamClient.REQUIRED.filterNot { File(target, it).isFile }
+        if (missing.isNotEmpty()) {
+            // No stamp: the next launch tries again rather than trusting a folder
+            // that games would then be routed into and fail from.
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.WARN,
+                "steam client: the package has no ${missing.joinToString(", ")}; " +
+                    "Steam games will start without the client",
+            )
+            return@withContext
+        }
+        runCatching { stamp.writeText(version) }
+        log.line(
+            LogSource.VESSEL,
+            LogLevel.INFO,
+            "steam client: $copied file(s) into ${SteamClient.INSTALL_DIR}",
+        )
+    }
+
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
     private fun installToolTree(
         source: File,
@@ -3827,6 +3898,9 @@ class SessionRuntime @Inject constructor(
          * PowerShell or the JDK collides with it.
          */
         const val TOOLS_VERSION_STAMP = ".vessel-tools-version"
+
+        /** The same idea for `C:\Program Files (x86)\Steam`; see [installSteamClient]. */
+        const val STEAM_VERSION_STAMP = ".vessel-steam-version"
 
         /**
          * The Tools payload's font directory, holding the one console face.

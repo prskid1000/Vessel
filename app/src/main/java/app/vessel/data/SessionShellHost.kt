@@ -1,7 +1,9 @@
 package app.vessel.data
 
 import app.vessel.core.GuestViewport
+import app.vessel.core.PeReader
 import app.vessel.core.SessionDisplayServer
+import app.vessel.core.SteamClient
 import app.vessel.ui.shell.AppShortcut
 import app.vessel.ui.shell.GuestPath
 import app.vessel.ui.shell.GuestWindow
@@ -121,10 +123,17 @@ class SessionShellHost @Inject constructor(
             return "${shortcut.workingDir} is not a folder on this container's drives."
         }
 
+        // A Steam game goes through the Steam client's loader, as it would through
+        // steam.exe on a PC; anything else, or a Steam game this cannot route,
+        // starts exactly as it always did. See [SteamClient].
+        val runDir = shortcut.workingDir.takeIf { workingDirectory != null }
+            ?: shortcut.executable.substringBeforeLast('\\', shortcut.executable.substringBeforeLast('/'))
+        val started = steamCommand(layout.prefix, file, shortcut.executable, runDir, command) ?: command
+
         return when (
             val outcome = runtime.launchProgram(
-                program = command.program,
-                arguments = command.arguments,
+                program = started.program,
+                arguments = started.arguments,
                 workingDirectory = workingDirectory ?: file.parentFile,
             )
         ) {
@@ -218,7 +227,7 @@ class SessionShellHost @Inject constructor(
 private const val WINE_CONSOLE = "wineconsole"
 
 /** An executable Wine can be handed, and the arguments to hand it with. */
-private data class GuestCommand(val program: String, val arguments: List<String>)
+internal data class GuestCommand(val program: String, val arguments: List<String>)
 
 /**
  * What to actually run for a shortcut.
@@ -233,6 +242,48 @@ private data class GuestCommand(val program: String, val arguments: List<String>
  * through, and returning null keeps the failure a refusal rather than a launch
  * of Wine's stub PowerShell, which would appear to work.
  */
+/**
+ * [command] rewritten to start through the Steam client's loader, or null to
+ * start it unchanged.
+ *
+ * Null -- the plain launch -- whenever routing would be worse than not routing:
+ * the program is not an `.exe` in a folder carrying `steam_api(64).dll`, the
+ * client is not installed in this prefix, there is no AppID for the loader to
+ * pass (it would stop on a message box), or the exe is neither x86 nor x64.
+ *
+ * The loader reads `<its name>.ini` beside itself, so the ini for this launch is
+ * written there; the game's own arguments ride on the loader's command line,
+ * which it appends to the game's.
+ */
+internal fun steamCommand(
+    prefix: File,
+    exe: File,
+    guestExe: String,
+    guestRunDir: String,
+    command: GuestCommand,
+): GuestCommand? {
+    if (command.program != guestExe || !exe.name.endsWith(".exe", ignoreCase = true)) return null
+    val folder = exe.parentFile ?: return null
+    if (!SteamClient.isSteamGame(folder)) return null
+    val install = File(prefix, SteamClient.PREFIX_DIR)
+    if (!SteamClient.REQUIRED.all { File(install, it).isFile }) return null
+    val appId = SteamClient.appIdFor(folder) ?: return null
+    val architecture = PeReader.architectureOf(exe)
+    val loader = SteamClient.loaderFor(architecture) ?: return null
+    // Steam's DRM wrapper waits for the client before it runs the game; gbe's
+    // helper answers it, injected at startup. Only for a wrapped exe, and only
+    // when the package carries the helper, so an older package still launches.
+    val inject = SteamClient.extraDllsFor(architecture)
+        ?.takeIf { SteamClient.hasSteamStub(exe) && File(install, it.replace('\\', '/')).isDirectory }
+        ?.let { "${SteamClient.INSTALL_DIR}\\$it" }
+    runCatching {
+        File(install, SteamClient.iniNameFor(loader)).writeText(
+            SteamClient.loaderIni(exe = guestExe, runDir = guestRunDir, appId = appId, injectFolder = inject),
+        )
+    }.getOrElse { return null }
+    return GuestCommand("${SteamClient.INSTALL_DIR}\\$loader", command.arguments)
+}
+
 private fun commandFor(shortcut: AppShortcut, added: List<String> = emptyList()): GuestCommand? {
     val path = shortcut.executable
     // The user's arguments first, then anything Vessel had to add. Order is

@@ -79,6 +79,16 @@ enum class ComponentType(val wire: String, val label: String) {
      */
     DIRECTX("DirectX", "DirectX Runtimes"),
 
+    /**
+     * The Steam client emulator, gbe_fork in its steamclient shape
+     * (`build/gbe.sh`), laid into `C:\Program Files (x86)\Steam`.
+     *
+     * Not [TOOLS]: a Steam game does not start without a client, and the app
+     * does more than place the files -- it starts Steam games through the
+     * package's loader. See [SteamClient].
+     */
+    STEAM("Steam", "Steam Client"),
+
     TOOLS("Tools", "Tools"),
 }
 

@@ -168,6 +168,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && test -x /usr/bin/7z
 
 # Object files land here; mount a volume over it.
+# Microsoft's CRT and Windows SDK, for the one component that must be built for
+# Microsoft's ABI rather than MinGW's: the Steam client emulator (build/gbe.sh),
+# whose DLLs a game's MSVC-built steam_api64.dll calls through C++ vtables.
+# llvm-mingw's clang targets *-pc-windows-msvc against these with lld-link.
+#
+# xwin downloads them from Microsoft's own servers and lays them out for a
+# case-sensitive file system; `--accept-license` accepts Microsoft's license for
+# that download. Build-time only: nothing of it ships except the static CRT
+# linked into the emulator, as in any MSVC build. Keep XWIN_VERSION and the hash
+# in sync with native/pins.env.
+ARG XWIN_VERSION=0.10.0
+ARG XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
+# Without these xwin takes whatever Microsoft's manifest calls latest, and the
+# same Dockerfile would build against a different SDK next year.
+ARG XWIN_MANIFEST=17
+ARG XWIN_SDK=10.0.26100
+ARG XWIN_CRT=14.44.17.14
+RUN set -eux; \
+    curl -fSL -o /tmp/xwin.tar.gz \
+      "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl.tar.gz"; \
+    echo "${XWIN_SHA256}  /tmp/xwin.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/xwin.tar.gz -C /tmp; \
+    "/tmp/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl/xwin" --accept-license \
+      --manifest-version "${XWIN_MANIFEST}" --sdk-version "${XWIN_SDK}" --crt-version "${XWIN_CRT}" \
+      --arch x86_64,x86 --cache-dir /tmp/xwin-cache splat --output /opt/xwin; \
+    rm -rf /tmp/xwin.tar.gz "/tmp/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl" /tmp/xwin-cache; \
+    test -f /opt/xwin/crt/lib/x86_64/libcmt.lib; \
+    test -f /opt/xwin/sdk/include/um/windows.h
+ENV XWIN_HOME=/opt/xwin
+ENV XWIN_VERSION=${XWIN_VERSION}
+
 ENV VESSEL_WORK_DIR=/work
 RUN mkdir -p /work
 

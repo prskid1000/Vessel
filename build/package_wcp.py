@@ -48,6 +48,11 @@ KNOWN_TYPES = {
     # all of these, so whether each one loads is an override decision rather
     # than a missing-import fix, and that decision lives with this package.
     "DirectX",
+    # Vessel addition: the Steam client emulator (gbe_fork, build/gbe.sh) in its
+    # steamclient shape, laid into C:\Program Files (x86)\Steam. Not "Tools":
+    # a game does not run without it, and the app launches Steam games through
+    # its loader rather than merely placing files.
+    "Steam",
 }
 
 

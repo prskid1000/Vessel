@@ -181,7 +181,7 @@ class PrefixRegistryTest {
 
     @Test
     fun `the seed version is recorded so a change can re-run only that step`() {
-        assertEquals(38, PrefixRegistry.SEED_VERSION)
+        assertEquals(39, PrefixRegistry.SEED_VERSION)
         // 38 seeds D3DX_DLL_OVERRIDES native,builtin beside the Direct3D list,
         // matching the session environment, for the DirectX component.
         // 37 adds vcRuntimes: 22 keys under HKLM\Software\Microsoft\VisualStudio
@@ -281,7 +281,8 @@ class PrefixRegistryTest {
         // carrying the palette, and the console font belongs on the same key
         // conhost reads everything else from. Nor with 30, which changed that key's
         // face and grew its palette from two entries to sixteen. 31 moved it to 19.
-        assertEquals(41, PrefixRegistry.seed.size)
+        // 39 added Steam's four keys (SteamClient.registryKeys).
+        assertEquals(45, PrefixRegistry.seed.size)
     }
 
     @Test

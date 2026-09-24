@@ -375,8 +375,13 @@ object PrefixRegistry {
      * the session environment, for the DirectX component: Wine's builtin D3DX
      * cannot compile the effects games ship, and a prefix launched without the
      * environment should reach Microsoft's copy the same way a session does.
+     *
+     * 39 seeds [SteamClient.registryKeys]: `SteamPath`, `InstallPath` and
+     * `ActiveProcess`'s client paths, pointing at `C:\Program Files (x86)\Steam`
+     * where the Steam component installs. Four keys, and no `pid` -- the loader
+     * writes that on every launch.
      */
-    const val SEED_VERSION: Int = 38
+    const val SEED_VERSION: Int = 39
 
     /**
      * A value written into the hive naming the exact seed that wrote it.
@@ -1838,7 +1843,7 @@ object PrefixRegistry {
         // and reading them in that order is reading one decision. Nothing in
         // `regedit` cares about the order of keys in the file.
         fontLink,
-    ) + virtualDesktop + unixNamespace + vcRuntimes
+    ) + virtualDesktop + unixNamespace + vcRuntimes + SteamClient.registryKeys
 
     /** The seed for a container whose drives nobody has looked at. */
     val seed: List<RegistryKey> get() = seedFor()

@@ -1,0 +1,86 @@
+diff --git a/dll/dll/steam_controller.h b/dll/dll/steam_controller.h
+index 3188b78..3e2da67 100644
+--- a/dll/dll/steam_controller.h
++++ b/dll/dll/steam_controller.h
+@@ -109,6 +109,13 @@ public ISteamInput
+     bool initialized{};
+     bool explicitly_call_run_frame{};
+ 
++    // SteamInputDeviceConnected_t / Disconnected_t are only posted once the game
++    // asks for them, and each pad's last reported state is what a change is
++    // measured against.
++    bool device_callbacks_enabled{};
++    bool device_reported[4]{};
++    void report_device_changes();
++
+     void set_handles(std::map<std::string, std::map<std::string, std::pair<std::set<std::string>, std::string>>> action_sets);
+ 
+     void RunCallbacks();
+diff --git a/dll/steam_controller.cpp b/dll/steam_controller.cpp
+index b3fdf6f..7db0638 100644
+--- a/dll/steam_controller.cpp
++++ b/dll/steam_controller.cpp
+@@ -909,9 +909,52 @@ bool Steam_Controller::BNewDataAvailable()
+ // callback when you enable them
+ void Steam_Controller::EnableDeviceCallbacks()
+ {
+-    PRINT_DEBUG_TODO();
+-    //TODO SteamInput005
+-    return;
++    PRINT_DEBUG_ENTRY();
++    std::lock_guard<std::recursive_mutex> lock(global_mutex);
++    device_callbacks_enabled = true;
++    // Every pad already connected is announced now, as Steam does. Games that
++    // enable these callbacks (No Man's Sky) wait for them before they read any
++    // action data, so without this a connected pad is never used.
++    if (!disabled && initialized) GamepadUpdate();
++    report_device_changes();
++}
++
++// Posts a connected or disconnected callback for every pad whose state changed
++// since the last report -- and, with a connection, SteamInputConfigurationLoaded_t,
++// which Steam sends once a pad's bindings are ready and which is the other thing
++// a game may wait on before it activates an action set.
++void Steam_Controller::report_device_changes()
++{
++    if (!device_callbacks_enabled || disabled) return;
++
++    for (int i = 0; i < 4; ++i) {
++        bool connected = GamepadIsConnected((GAMEPAD_DEVICE)i) != GAMEPAD_FALSE;
++        if (connected == device_reported[i]) continue;
++        device_reported[i] = connected;
++
++        InputHandle_t handle = (InputHandle_t)(i + 1);
++        if (connected) {
++            PRINT_DEBUG("pad %i connected, handle %llu", i, (unsigned long long)handle);
++            SteamInputDeviceConnected_t data{};
++            data.m_ulConnectedDeviceHandle = handle;
++            callbacks->addCBResult(data.k_iCallback, &data, sizeof(data));
++
++            SteamInputConfigurationLoaded_t loaded{};
++            loaded.m_unAppID = settings->get_local_game_id().AppID();
++            loaded.m_ulDeviceHandle = handle;
++            loaded.m_ulMappingCreator = settings->get_local_steam_id();
++            loaded.m_unMajorRevision = 0;
++            loaded.m_unMinorRevision = 0;
++            loaded.m_bUsesSteamInputAPI = !action_handles.empty();
++            loaded.m_bUsesGamepadAPI = false;
++            callbacks->addCBResult(loaded.k_iCallback, &loaded, sizeof(loaded));
++        } else {
++            PRINT_DEBUG("pad %i disconnected, handle %llu", i, (unsigned long long)handle);
++            SteamInputDeviceDisconnected_t data{};
++            data.m_ulDisconnectedDeviceHandle = handle;
++            callbacks->addCBResult(data.k_iCallback, &data, sizeof(data));
++        }
++    }
+ }
+ 
+ // Enable SteamInputActionEvent_t callbacks. Directly calls your callback function
+@@ -935,6 +978,7 @@ void Steam_Controller::RunFrame(bool bReservedValue)
+     PRINT_DEBUG_ENTRY();
+ 
+     GamepadUpdate();
++    report_device_changes();
+ }
+ 
+ void Steam_Controller::RunFrame()

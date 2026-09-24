@@ -1,0 +1,17 @@
+diff --git a/game_overlay_renderer_lib/game_overlay_renderer_lib.cpp b/game_overlay_renderer_lib/game_overlay_renderer_lib.cpp
+index 2c18f794..4f708f2b 100644
+--- a/game_overlay_renderer_lib/game_overlay_renderer_lib.cpp
++++ b/game_overlay_renderer_lib/game_overlay_renderer_lib.cpp
+@@ -80,7 +80,12 @@ void __stdcall VirtualFreeWrapper(
+ )
+ {
+     // https://stackoverflow.com/a/2805560
++#if defined(__clang__)
++    // clang expands neither macro inside a pragma; this is what they yield.
++    #pragma comment(linker, "/EXPORT:VirtualFreeWrapper=?VirtualFreeWrapper@@YGXPAX0000000000@Z")
++#else
+     #pragma comment(linker, "/EXPORT:" __FUNCTION__ "=" __FUNCDNAME__)
++#endif
+ }
+ #endif // __WINDOWS_32__
+ 
