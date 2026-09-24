@@ -32,6 +32,11 @@ on:
         required: false
         default: true
         type: boolean
+      cache_xwin:
+        description: Cache the Microsoft CRT/SDK that build/gbe.sh fetches into the work volume
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -122,6 +127,18 @@ jobs:
           tags: vessel-build:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Keyed on the pins that decide its contents, so a pin change is a miss
+      # and build/gbe.sh fetches the new versions. A runner's own cache is
+      # private to this repository, which is what Microsoft's license allows:
+      # the SDK is used here, never published.
+      - name: Restore the Microsoft CRT/SDK
+        if: steps.decide.outputs.build == 'true' && inputs.cache_xwin
+        uses: actions/cache@v4
+        with:
+          path: /tmp/vessel-work/xwin
+          key: xwin-${{ hashFiles('native/pins.env') }}
+          restore-keys: xwin-
 
       - name: Build ${{ inputs.component }}
         if: steps.decide.outputs.build == 'true'

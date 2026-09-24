@@ -51,10 +51,33 @@ VERSION_CODE="$(vessel_version_code "$VERSION" "${GBE_REVISION:-0}")"
 info "gbe $VERSION revision ${GBE_REVISION:-0} as code $VERSION_CODE"
 
 LLVM="${LLVM_MINGW_HOME:-/opt/llvm-mingw}/bin"
-XWIN="${XWIN_HOME:-/opt/xwin}"
 [ -x "$LLVM/clang" ] && [ -x "$LLVM/lld-link" ] || die "no clang/lld-link in $LLVM (the Docker image provides them)"
-[ -d "$XWIN/crt/include" ] && [ -d "$XWIN/sdk/include/um" ] \
-  || die "no Microsoft CRT/SDK at $XWIN -- the image splats it there with xwin; rebuild it with 'docker build -t vessel-build .'"
+
+# --- Microsoft's CRT and Windows SDK -------------------------------------------
+#
+# Downloaded here rather than baked into the image: the image is published, and
+# Microsoft's license allows downloading and using these, not redistributing
+# them. `--accept-license` accepts it for whoever runs this build. Pinned to the
+# versions in native/pins.env, so a rebuild next year gets the same SDK, and
+# kept in the work volume, so it is fetched (~700 MB, under a minute) once. A
+# stamp names the versions it holds; a pin change re-fetches.
+XWIN="${XWIN_HOME:-$WORK_DIR/xwin}"
+XWIN_WANT="xwin $XWIN_VERSION manifest $XWIN_MANIFEST sdk $XWIN_SDK crt $XWIN_CRT x86_64,x86"
+if [ "$(cat "$XWIN/.vessel-xwin" 2>/dev/null)" != "$XWIN_WANT" ]; then
+  command -v xwin >/dev/null 2>&1 || die "xwin is not installed; it is in the Dockerfile, so this is a stale image"
+  [ "$(xwin --version | awk '{print $2}')" = "$XWIN_VERSION" ] \
+    || die "the image has $(xwin --version) but native/pins.env pins xwin $XWIN_VERSION; rebuild the image"
+  log "fetching Microsoft's CRT and Windows SDK ($XWIN_WANT)"
+  rm -rf "$XWIN" "$WORK_DIR/xwin-cache"
+  xwin --accept-license --manifest-version "$XWIN_MANIFEST" --sdk-version "$XWIN_SDK" \
+      --crt-version "$XWIN_CRT" --arch x86_64,x86 --cache-dir "$WORK_DIR/xwin-cache" \
+      splat --output "$XWIN" > "$WORK_DIR/xwin.log" 2>&1 \
+    || { tail -20 "$WORK_DIR/xwin.log"; die "xwin could not fetch the pinned SDK/CRT"; }
+  rm -rf "$WORK_DIR/xwin-cache"
+  printf '%s' "$XWIN_WANT" > "$XWIN/.vessel-xwin"
+fi
+[ -f "$XWIN/crt/lib/x86_64/libcmt.lib" ] && [ -f "$XWIN/sdk/include/um/windows.h" ] \
+  || die "the Microsoft CRT/SDK at $XWIN is incomplete; delete it and run again"
 
 fetch_source "$COMPONENT" "$GBE_REPO" "$GBE_REF" "$GBE_COMMIT"
 
@@ -100,7 +123,10 @@ for a in "\$@"; do
     *) args+=("\$a") ;;
   esac
 done
-exec "$LLVM/$driver" --target=$triple -fuse-ld=lld -fms-runtime-lib=static \\
+# /Brepro: the PE timestamp becomes a hash of the image, so two builds of the
+# same pins are byte-identical -- without it the link time was the only
+# difference between them.
+exec "$LLVM/$driver" --target=$triple -fuse-ld=lld -fms-runtime-lib=static -Wl,/Brepro \\
   -idirafter "$XWIN/crt/include" -idirafter "$XWIN/sdk/include/ucrt" \\
   -idirafter "$XWIN/sdk/include/um" -idirafter "$XWIN/sdk/include/shared" -idirafter "$XWIN/sdk/include/winrt" \\
   -L"$XWIN/crt/lib/$arch" -L"$XWIN/sdk/lib/um/$arch" -L"$XWIN/sdk/lib/ucrt/$arch" \\

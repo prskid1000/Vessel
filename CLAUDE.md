@@ -38,6 +38,22 @@
 - Builds run in Docker from PowerShell or Git Bash:
   `docker run --rm -v "C:\Users\prith\Vessel:/src" -v vessel-work:/work vessel-build ./build/wine.sh`
   (prefix `MSYS_NO_PATHCONV=1` in Git Bash). Wine takes ~20 minutes.
+- No `vessel-build` image yet? Pull the published one instead of building it:
+  `docker pull prskid10000/vessel-build:latest` then
+  `docker tag prskid10000/vessel-build:latest vessel-build`.
+  `.github/workflows/docker-image.yml` republishes it on every `Dockerfile`
+  change; a local `docker build -t vessel-build .` gives the same image.
+- The image must stay redistributable. Never bake downloads with
+  non-redistributable licenses into it: `build/gbe.sh` fetches Microsoft's
+  CRT/SDK with xwin into the `/work` volume at run time for that reason.
+
+## Steam client emulator (gbe)
+
+- `build/gbe.sh` builds gbe_fork (`GBE_*` in `native/pins.env`, patches in
+  `patches/gbe/`) into the `Steam` component, installed in
+  `C:\Program Files (x86)\Steam`; Steam games start through its loader.
+- It must be built for Microsoft's ABI (clang `*-pc-windows-msvc`). A MinGW
+  build links fine and crashes against Valve's MSVC `steam_api64.dll`.
 
 ## Vendored code
 

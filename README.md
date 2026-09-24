@@ -61,10 +61,25 @@ Other devices are not a goal yet, but chip-specific flags live in
 Everything builds in Docker, on Windows or Linux, one command per component.
 Full instructions, including the Windows/WSL2 path: [docs/BUILDING.md](docs/BUILDING.md).
 
+The toolchain image is published, so a first build starts with a pull instead
+of an hour-long `docker build`
+([prskid10000/vessel-build](https://hub.docker.com/r/prskid10000/vessel-build) on Docker Hub,
+rebuilt by `.github/workflows/docker-image.yml` whenever the `Dockerfile` changes):
+
 ```bash
-docker build -t vessel-build .
+docker pull prskid10000/vessel-build:latest
+docker tag prskid10000/vessel-build:latest vessel-build
 docker run --rm -v "$PWD:/src" -v vessel-work:/work vessel-build ./build/wine.sh
 ```
+
+Or build it yourself from the `Dockerfile` (every toolchain in it is pinned by
+version and checksum): `docker build -t vessel-build .`
+
+`build/gbe.sh` (the Steam client emulator) additionally downloads Microsoft's
+CRT and Windows SDK into the `vessel-work` volume on its first run, at the
+versions pinned in `native/pins.env`, accepting Microsoft's license for you.
+They are not in the published image because that license does not allow
+redistributing them.
 
 > **On Docker Desktop, use a named volume for `/work`.** Its VM mounts `/tmp` as
 > tmpfs with `noexec`, so a `configure` script extracted there cannot be run and
