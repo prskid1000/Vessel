@@ -28,7 +28,8 @@ class PeIconReaderTest {
         groups: Map<Int, List<PeFixture.Row>>,
         icons: Map<Int, ByteArray>,
         name: String = "program.exe",
-    ): File = temporary.newFile(name).apply { writeBytes(PeFixture.exe(groups, icons)) }
+        groupNames: Map<Int, String> = emptyMap(),
+    ): File = temporary.newFile(name).apply { writeBytes(PeFixture.exe(groups, icons, groupNames)) }
 
     private fun argb(a: Int, r: Int, g: Int, b: Int) = (a shl 24) or (r shl 16) or (g shl 8) or b
 
@@ -197,6 +198,38 @@ class PeIconReaderTest {
 
         val icon = PeIconReader.iconOf(exe) as PeIcon.Pixels
         assertEquals("group 4 is the application icon", argb(255, 1, 1, 1), icon.argb[0])
+    }
+
+    @Test
+    fun `a group icon named by a string is found -- No Man's Sky's GLFW_ICON`() {
+        val icons = mapOf(1 to PeFixture.dib(8, 8, 32) { _, _ -> argb(255, 7, 7, 7) })
+        val exe = exeOf(
+            groups = mapOf(0 to listOf(PeFixture.Row(8, 8, 32, 1))),
+            icons = icons,
+            groupNames = mapOf(0 to "GLFW_ICON"),
+        )
+
+        val icon = PeIconReader.iconOf(exe) as PeIcon.Pixels
+        assertEquals(argb(255, 7, 7, 7), icon.argb[0])
+    }
+
+    @Test
+    fun `a named group icon comes before a numbered one, as it does on Windows`() {
+        val icons = mapOf(
+            1 to PeFixture.dib(8, 8, 32) { _, _ -> argb(255, 1, 1, 1) },
+            2 to PeFixture.dib(8, 8, 32) { _, _ -> argb(255, 2, 2, 2) },
+        )
+        val exe = exeOf(
+            groups = mapOf(
+                1 to listOf(PeFixture.Row(8, 8, 32, 1)),
+                50 to listOf(PeFixture.Row(8, 8, 32, 2)),
+            ),
+            icons = icons,
+            groupNames = mapOf(50 to "MAINICON"),
+        )
+
+        val icon = PeIconReader.iconOf(exe) as PeIcon.Pixels
+        assertEquals("MAINICON is the application icon", argb(255, 2, 2, 2), icon.argb[0])
     }
 
     // --- the PNG entry ---------------------------------------------------------

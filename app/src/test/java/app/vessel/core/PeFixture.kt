@@ -28,15 +28,23 @@ object PeFixture {
     /**
      * A PE32+ image whose resources are [groups] (id to rows) and [icons]
      * (`RT_ICON` id to payload).
+     *
+     * A group whose id is in [groupNames] is written as a string-named entry
+     * instead -- `GLFW_ICON`, `MAINICON` -- and its id only keys the maps here.
      */
-    fun exe(groups: Map<Int, List<Row>>, icons: Map<Int, ByteArray>): ByteArray {
+    fun exe(
+        groups: Map<Int, List<Row>>,
+        icons: Map<Int, ByteArray>,
+        groupNames: Map<Int, String> = emptyMap(),
+    ): ByteArray {
         val resources = buildMap<Int, Map<Int, ByteArray>> {
             if (groups.isNotEmpty()) {
                 put(RT_GROUP_ICON, groups.mapValues { (_, rows) -> groupDirectory(rows, icons) })
             }
             if (icons.isNotEmpty()) put(RT_ICON, icons)
         }
-        return image(resourceSection(resources))
+        val names = groupNames.mapKeys { (id, _) -> RT_GROUP_ICON to id }
+        return image(resourceSection(resources, names))
     }
 
     /** A `GRPICONDIR` over [rows], sized from the payloads in [icons]. */
@@ -65,8 +73,18 @@ object PeFixture {
      * Laid out in that order and patched afterwards, because every directory
      * points forward.
      */
-    private fun resourceSection(resources: Map<Int, Map<Int, ByteArray>>): ByteArray {
+    private fun resourceSection(
+        resources: Map<Int, Map<Int, ByteArray>>,
+        names: Map<Pair<Int, Int>, String> = emptyMap(),
+    ): ByteArray {
         if (resources.isEmpty()) return ByteArray(0)
+
+        // A directory lists its named entries first, then its id entries.
+        fun ordered(type: Int): List<Int> {
+            val ids = resources.getValue(type).keys
+            val named = ids.filter { (type to it) in names }.sortedBy { names.getValue(type to it) }
+            return named + ids.filter { (type to it) !in names }.sorted()
+        }
 
         val types = resources.keys.sorted()
         var cursor = 16 + 8 * types.size
@@ -78,14 +96,14 @@ object PeFixture {
         // One language directory per (type, id), then one data entry each.
         val languageDirectoryAt = mutableMapOf<Pair<Int, Int>, Int>()
         for (type in types) {
-            for (id in resources.getValue(type).keys.sorted()) {
+            for (id in ordered(type)) {
                 languageDirectoryAt[type to id] = cursor
                 cursor += 16 + 8
             }
         }
         val dataEntryAt = mutableMapOf<Pair<Int, Int>, Int>()
         for (type in types) {
-            for (id in resources.getValue(type).keys.sorted()) {
+            for (id in ordered(type)) {
                 dataEntryAt[type to id] = cursor
                 cursor += 16
             }
@@ -98,6 +116,13 @@ object PeFixture {
                 cursor += bytes.size
             }
         }
+        // IMAGE_RESOURCE_DIR_STRING_U: a u16 length, then UTF-16LE with no NUL.
+        val nameAt = mutableMapOf<Pair<Int, Int>, Int>()
+        for ((key, name) in names) {
+            cursor = (cursor + 1) and 1.inv()
+            nameAt[key] = cursor
+            cursor += 2 + 2 * name.length
+        }
 
         val blob = ByteArray(cursor)
         directory(blob, 0, types.size)
@@ -107,11 +132,20 @@ object PeFixture {
             blob.le32(at + 4, typeDirectoryAt.getValue(type) or DIRECTORY_FLAG)
         }
         for (type in types) {
-            val ids = resources.getValue(type).keys.sorted()
-            directory(blob, typeDirectoryAt.getValue(type), ids.size)
+            val ids = ordered(type)
+            val namedCount = ids.count { (type to it) in names }
+            directory(blob, typeDirectoryAt.getValue(type), ids.size - namedCount, namedCount)
             ids.forEachIndexed { i, id ->
                 val at = typeDirectoryAt.getValue(type) + 16 + i * 8
-                blob.le32(at, id)
+                val name = names[type to id]
+                if (name == null) {
+                    blob.le32(at, id)
+                } else {
+                    val string = nameAt.getValue(type to id)
+                    blob.le16(string, name.length)
+                    name.forEachIndexed { c, ch -> blob.le16(string + 2 + 2 * c, ch.code) }
+                    blob.le32(at, string or DIRECTORY_FLAG)
+                }
                 blob.le32(at + 4, languageDirectoryAt.getValue(type to id) or DIRECTORY_FLAG)
             }
             for (id in ids) {
@@ -134,9 +168,9 @@ object PeFixture {
 
     private const val DIRECTORY_FLAG = 0x80000000.toInt()
 
-    /** An `IMAGE_RESOURCE_DIRECTORY` with no named entries and [ids] id entries. */
-    private fun directory(blob: ByteArray, at: Int, ids: Int) {
-        blob.le16(at + 12, 0)
+    /** An `IMAGE_RESOURCE_DIRECTORY` with [named] named entries and [ids] id entries. */
+    private fun directory(blob: ByteArray, at: Int, ids: Int, named: Int = 0) {
+        blob.le16(at + 12, named)
         blob.le16(at + 14, ids)
     }
 

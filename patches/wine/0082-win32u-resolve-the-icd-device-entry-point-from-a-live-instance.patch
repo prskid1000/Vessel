@@ -1,0 +1,85 @@
+win32u: resolve the ICD's vkGetDeviceProcAddr from a live instance.
+
+Patch 0009 remembered the last instance to pass through its
+vkGetInstanceProcAddr wrapper and resolved vkGetDeviceProcAddr through it on
+the first device lookup. The last instance seen is not the device's and need
+not be alive. No Man's Sky loads DXVK's dxgi, which creates and destroys a
+dozen instances enumerating adapters, and then creates its own Vulkan device:
+
+    err:vulkan:icd_get_device_proc_addr No instance has been created yet, cannot resolve "vkAllocateMemory"
+      (x673, one per device function)
+    virtual_handle_fault unrepaired exec fault at 0x0 from 0x0
+    err:vulkan:vkCreateDevice Exception 0xc0000005 in Unix call.
+
+The entry point is now resolved inside the instance wrapper, the first time a
+non-NULL instance goes past -- win32u resolves every instance function right
+after vkCreateInstance, so that instance is alive. The pointer is the
+driver's own and outlives any instance.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -4237,23 +4237,34 @@
+ 
+ static pfn_vk_icdGetInstanceProcAddr p_vk_icdGetInstanceProcAddr;
+ 
+-/* The most recent non-NULL instance to pass through icd_get_instance_proc_addr.
+- * Written from whatever thread resolves a function and read by the device thunk;
+- * both are pointer-sized and the value only ever goes from NULL to an instance
+- * that stays valid, so no lock buys anything here. */
+-static VkInstance icd_instance;
++/* The ICD's vkGetDeviceProcAddr, resolved by icd_get_instance_proc_addr from the
++ * first live instance it sees. Written from whatever thread resolves a function
++ * and read by the device thunk; it is pointer-sized and only ever goes from NULL
++ * to the driver's own entry point, so no lock buys anything here. */
++static PFN_vkGetDeviceProcAddr icd_real_get_device_proc_addr;
+ 
+ /***********************************************************************
+  *           icd_get_instance_proc_addr
+  *
+  * vkGetInstanceProcAddr, on top of the ICD's vk_icdGetInstanceProcAddr. The two
+  * differ only in what a NULL instance may return, which does not matter to any
+- * caller here -- the wrapper exists to catch the instance on its way past, for
++ * caller here -- the wrapper exists to resolve vkGetDeviceProcAddr, for
+  * icd_get_device_proc_addr below.
++ *
++ * Resolved here, while the instance is known to be alive, and never later from
++ * a remembered instance. That is what this used to do, and the instance it
++ * remembered was simply the last one seen, which is not the one a device comes
++ * from and need not exist any more. No Man's Sky loads DXVK's dxgi, which makes
++ * and destroys a dozen instances enumerating adapters, and only then creates
++ * its own Vulkan device: the lookup went through a destroyed instance, Turnip
++ * answered NULL, every device function was NULL, and vkCreateDevice jumped to
++ * address 0. The entry point itself is the driver's and outlives any instance.
+  */
+ static PFN_vkVoidFunction VKAPI_CALL icd_get_instance_proc_addr( VkInstance instance, const char *name )
+ {
+-    if (instance) icd_instance = instance;
++    if (instance && !icd_real_get_device_proc_addr)
++        icd_real_get_device_proc_addr = (PFN_vkGetDeviceProcAddr)p_vk_icdGetInstanceProcAddr(
++            instance, "vkGetDeviceProcAddr" );
+     return p_vk_icdGetInstanceProcAddr( instance, name );
+ }
+ 
+@@ -4263,17 +4274,14 @@
+  * vkGetDeviceProcAddr cannot be resolved when the library is opened: an ICD
+  * answers vk_icdGetInstanceProcAddr( NULL, ... ) for the four global commands
+  * and nothing else, and it exports no other Vulkan symbol to dlsym. So it is
+- * resolved on first use instead, through the instance the wrapper above saw. A
+- * device cannot exist before the instance that created it, so by the time
+- * anything asks for a device function the instance is always there.
++ * resolved by the instance wrapper above instead. A device cannot exist before
++ * the instance that created it, and win32u resolves every instance function as
++ * soon as the instance is made, so by the time anything asks for a device
++ * function the entry point is always there.
+  */
+ static PFN_vkVoidFunction VKAPI_CALL icd_get_device_proc_addr( VkDevice device, const char *name )
+ {
+-    static PFN_vkGetDeviceProcAddr real_get_device_proc_addr;
+-
+-    if (!real_get_device_proc_addr && icd_instance)
+-        real_get_device_proc_addr = (PFN_vkGetDeviceProcAddr)p_vk_icdGetInstanceProcAddr(
+-            icd_instance, "vkGetDeviceProcAddr" );
++    PFN_vkGetDeviceProcAddr real_get_device_proc_addr = icd_real_get_device_proc_addr;
+ 
+     if (!real_get_device_proc_addr)
+     {

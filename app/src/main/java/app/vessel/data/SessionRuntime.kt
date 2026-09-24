@@ -40,6 +40,7 @@ import app.vessel.core.fexCacheHost
 import app.vessel.core.fexCacheLink
 import app.vessel.core.hardwareLimits
 import app.vessel.core.isDisplayAbsenceDiagnostic
+import app.vessel.core.isWineServedDirectXDll
 import app.vessel.core.params.ParamManifest
 import app.vessel.core.FrameGenerationLimits
 import app.vessel.core.params.ParamValue
@@ -2983,15 +2984,16 @@ class SessionRuntime @Inject constructor(
      * The same mechanism as [installVcRuntimes] and for the same reason:
      * [copyWindowsPayload] is what notices a new package by its `payloadSha256`.
      *
-     * **Unlike the VC++ runtimes, every name here collides with a Wine builtin**,
-     * and copying over it is correct rather than a clobber. What `system32`
-     * holds for a Wine builtin is a placeholder; which implementation loads is
-     * decided by the override, not by the file. `D3DX_DLL_OVERRIDES` puts D3DX
-     * and D3DCompiler `native,builtin`, so Microsoft's copy wins; the audio and
-     * input DLLs carry no override, so Wine's builtin still wins over the
-     * Microsoft file sitting beside it. `wineboot --update` leaves a real PE in
-     * place rather than restoring its placeholder, so this survives a Wine
-     * upgrade.
+     * **Unlike the VC++ runtimes, every name here collides with a Wine builtin.**
+     * D3DX and D3DCompiler are copied over Wine's file, and `D3DX_DLL_OVERRIDES`
+     * puts them `native,builtin` so Microsoft's copy wins. `wineboot --update`
+     * leaves a real PE in place rather than restoring Wine's, so this survives a
+     * Wine upgrade.
+     *
+     * **The audio and input DLLs are not copied at all**, although the package
+     * carries them: see [isWineServedDirectXDll] for why having no override did
+     * not keep them Wine's. A prefix that already received them gets Wine's
+     * builtin back from [restoreWineServedDirectX].
      */
     private suspend fun installDirectXRuntimes(
         containerId: String,
@@ -3000,7 +3002,10 @@ class SessionRuntime @Inject constructor(
     ): Unit = withContext(Dispatchers.IO) {
         val source = components.directoryFor(containerId, ComponentType.DIRECTX)
             ?: return@withContext
-        val deployed = copyWindowsPayload(source, layout, ComponentType.DIRECTX.wire)
+        restoreWineServedDirectX(containerId, source, layout, log)
+        val deployed = copyWindowsPayload(
+            source, layout, ComponentType.DIRECTX.wire, skip = ::isWineServedDirectXDll,
+        )
         if (deployed.copied == 0 && deployed.present == 0) {
             // A WARN for the same reason as the VC++ runtimes: the override still
             // says native first, so a game falls back to Wine's builtin D3DX and
@@ -3082,6 +3087,64 @@ class SessionRuntime @Inject constructor(
             "steam client: $copied file(s) into ${SteamClient.INSTALL_DIR}",
         )
     }
+
+    /**
+     * Put Wine's own XInput, XAudio2, XACT, X3DAudio and XAPOFX back where an
+     * earlier DirectX component copied Microsoft's over them.
+     *
+     * What belongs in `system32` for a Wine builtin is the builtin itself --
+     * `wineboot` copies `lib/wine/aarch64-windows/<name>` there byte for byte,
+     * and `i386-windows` into `syswow64`. A file without Wine's builtin marker is
+     * one of Microsoft's and is replaced with that; one that has the marker is
+     * left alone, so this costs a 64-byte read per name once the prefix is clean.
+     */
+    private suspend fun restoreWineServedDirectX(
+        containerId: String,
+        source: File,
+        layout: ContainerLayout,
+        log: SessionLog,
+    ): Unit = withContext(Dispatchers.IO) {
+        val wine = components.directoryFor(containerId, ComponentType.WINE) ?: return@withContext
+        val windows = File(layout.prefix, DRIVE_C_WINDOWS)
+        val restored = mutableListOf<String>()
+        for ((folder, builtins) in listOf(SYSTEM32 to WINE_PE_AARCH64, SYSWOW64 to WINE_PE_I386)) {
+            val names = File(source, folder).listFiles().orEmpty()
+                .map { it.name }
+                .filter { it.endsWith(DLL_SUFFIX) && isWineServedDirectXDll(it) }
+            for (name in names) {
+                val installed = File(windows, "$folder/$name")
+                if (!installed.isFile || isWineBuiltinPe(installed)) continue
+                val builtin = File(wine, "$builtins/$name")
+                if (builtin.isFile) builtin.copyTo(installed, overwrite = true) else installed.delete()
+                restored += "$folder/$name"
+            }
+        }
+        if (restored.isNotEmpty()) {
+            log.line(
+                LogSource.VESSEL,
+                LogLevel.INFO,
+                "directx runtimes: Wine's own ${restored.size} audio/input DLL(s) put back " +
+                    "over Microsoft's (${restored.joinToString(", ")})",
+            )
+        }
+    }
+
+    /** Whether [file] carries the "Wine builtin DLL" marker Wine puts after the DOS header. */
+    private fun isWineBuiltinPe(file: File): Boolean = runCatching {
+        val header = ByteArray(WINE_BUILTIN_MARKER_OFFSET + WINE_BUILTIN_MARKER.length)
+        // A loop rather than readNBytes, which Android has only from API 33.
+        var read = 0
+        file.inputStream().use { input ->
+            while (read < header.size) {
+                val n = input.read(header, read, header.size - read)
+                if (n < 0) break
+                read += n
+            }
+        }
+        read == header.size &&
+            String(header, WINE_BUILTIN_MARKER_OFFSET, WINE_BUILTIN_MARKER.length, Charsets.US_ASCII) ==
+            WINE_BUILTIN_MARKER
+    }.getOrDefault(false)
 
     /** Copy one tree of the Tools payload into the prefix. See [installTools]. */
     private fun installToolTree(
@@ -3222,7 +3285,12 @@ class SessionRuntime @Inject constructor(
      * lands in `system32`. Import libraries (`.dll.a`) are link-time artifacts
      * and are skipped, as is anything already there at the same size.
      */
-    private fun copyWindowsPayload(source: File, layout: ContainerLayout, key: String): Deployed {
+    private fun copyWindowsPayload(
+        source: File,
+        layout: ContainerLayout,
+        key: String,
+        skip: (String) -> Boolean = { false },
+    ): Deployed {
         val windows = File(layout.prefix, DRIVE_C_WINDOWS)
         val system32 = File(windows, SYSTEM32)
         val groups = listOf(
@@ -3249,15 +3317,15 @@ class SessionRuntime @Inject constructor(
         val staged = stagedVersions(layout)
         val alreadyStaged = staged[key] == version &&
             groups.all { (files, destination) ->
-                files.none { it.isFile && it.name.endsWith(DLL_SUFFIX) } ||
-                    files.filter { it.isFile && it.name.endsWith(DLL_SUFFIX) }
+                files.none { it.isPayloadDll(skip) } ||
+                    files.filter { it.isPayloadDll(skip) }
                         .all { File(destination, it.name).isFile }
             }
 
         var copied = 0
         var present = 0
         for ((files, destination) in groups) {
-            val dlls = files.filter { it.isFile && it.name.endsWith(DLL_SUFFIX) }
+            val dlls = files.filter { it.isPayloadDll(skip) }
             if (dlls.isEmpty()) continue
             if (alreadyStaged) {
                 present += dlls.size
@@ -3289,6 +3357,10 @@ class SessionRuntime @Inject constructor(
         if (!alreadyStaged) recordStaged(layout, key, version)
         return Deployed(copied, present)
     }
+
+    /** A DLL this payload copies: a file, a `.dll`, and not one [skip] names. */
+    private fun File.isPayloadDll(skip: (String) -> Boolean): Boolean =
+        isFile && name.endsWith(DLL_SUFFIX) && !skip(name)
 
     /**
      * Which version of each component was last written into this prefix.
@@ -3696,6 +3768,14 @@ class SessionRuntime @Inject constructor(
         const val CODE_CACHE_DURING_SESSION: Boolean = true
         const val SYSWOW64 = "syswow64"
         const val DLL_SUFFIX = ".dll"
+
+        /** Where the Wine package keeps its builtin PE DLLs, per architecture. */
+        const val WINE_PE_AARCH64 = "lib/wine/aarch64-windows"
+        const val WINE_PE_I386 = "lib/wine/i386-windows"
+
+        /** What Wine writes right after the DOS header of every builtin PE. */
+        const val WINE_BUILTIN_MARKER = "Wine builtin DLL"
+        const val WINE_BUILTIN_MARKER_OFFSET = 0x40
 
         /** The 64-bit hive, and the only file that can prove a prefix was booted. */
         const val SYSTEM_REG = "system.reg"

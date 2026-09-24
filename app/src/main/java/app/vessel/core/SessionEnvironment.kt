@@ -82,6 +82,35 @@ val D3D_DLL_OVERRIDES: List<String> = listOf(
  *   Wine's XInput; Microsoft's would be one more layer between the pad and the
  *   game with nothing it adds.
  */
+/**
+ * The DirectX component's DLLs that Wine serves, and which are therefore never
+ * copied into the prefix: XInput, XAudio2, XACT, X3DAudio and XAPOFX. See the
+ * "deliberately not here" list above for why each is Wine's.
+ *
+ * **Leaving them without an override was not enough, and that is why this list
+ * exists.** The component used to copy them into `system32` anyway, on the
+ * theory that with no override Wine's builtin still wins over the file beside
+ * it. On ARM64EC it does not: when a file in `system32` is not Wine's, the loader
+ * looks for a builtin of *that file's* architecture, and there is no x86-64
+ * build of Wine here -- only `aarch64-windows`. The search fails and the
+ * Microsoft file loads:
+ *
+ *     find_builtin_dll cannot find builtin library for L"...\system32\XINPUT9_1_0.dll"
+ *     Loaded L"C:\windows\system32\XINPUT9_1_0.dll" at 0000000000E50000: native
+ *
+ * That was No Man's Sky, and Microsoft's XInput looks for pads through the XUSB
+ * driver interface, which Wine does not provide -- Vessel's pad is a HID device
+ * that only Wine's XInput reads.
+ */
+val WINE_SERVED_DIRECTX_PREFIXES: List<String> =
+    listOf("xinput", "xaudio2_", "xactengine", "x3daudio", "xapofx")
+
+/** True for a DirectX component DLL that Wine serves; see [WINE_SERVED_DIRECTX_PREFIXES]. */
+fun isWineServedDirectXDll(fileName: String): Boolean {
+    val name = fileName.lowercase()
+    return WINE_SERVED_DIRECTX_PREFIXES.any { name.startsWith(it) }
+}
+
 val D3DX_DLL_OVERRIDES: List<String> =
     (24..43).map { "d3dx9_$it" } +
         "d3dx10" + (33..43).map { "d3dx10_$it" } +

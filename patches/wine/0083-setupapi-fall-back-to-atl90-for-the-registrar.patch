@@ -1,0 +1,47 @@
+setupapi: fall back to atl90 for the registrar when atl100 will not load.
+
+wine.inf sets atl100 to native,builtin, and Vessel's VC++ runtimes put
+Microsoft's x64 atl100.dll in system32. The prefix update after a Wine upgrade
+runs wine.inf through rundll32, an ARM64 process, which cannot load an x64 DLL
+and does not fall back to the builtin:
+
+    module:load_dll Failed to load module L"atl100.dll"; status=c000007b
+    setupapi:register_fake_dll failed to create IRegistrar: 80004002
+      (x181, one per fake dll with a registration script)
+
+So no COM class in the new Wine was registered. atl90 builds the same
+registrar.c, carries no override and has no Microsoft copy in the prefix, so it
+is tried when atl100 cannot supply AtlCreateRegistrar.
+
+--- a/dlls/setupapi/fakedll.c
++++ b/dlls/setupapi/fakedll.c
+@@ -993,13 +993,24 @@
+ 
+     if (!registrar)
+     {
++        /* Vessel: atl90 when atl100 cannot be loaded. wine.inf sets atl100 to
++         * native,builtin, and with Microsoft's VC++ runtimes in the prefix the
++         * native one is x64. This process may be ARM64, which cannot load it
++         * (c000007b) and does not fall back to the builtin, so every fake dll's
++         * registration failed on each prefix update. atl90 is built from the
++         * same registrar.c, has no override and has no Microsoft copy here. */
++        static const WCHAR *atl_dlls[] = { L"atl100.dll", L"atl90.dll" };
+         HRESULT (WINAPI *pAtlCreateRegistrar)(IRegistrar**);
+-        HMODULE atl = LoadLibraryW( L"atl100.dll" );
++        unsigned int i;
+ 
+-        if ((pAtlCreateRegistrar = (void *)GetProcAddress( atl, "AtlCreateRegistrar" )))
+-            hr = pAtlCreateRegistrar( &registrar );
+-        else
+-            hr = E_NOINTERFACE;
++        hr = E_NOINTERFACE;
++        for (i = 0; i < ARRAY_SIZE(atl_dlls) && !registrar; i++)
++        {
++            HMODULE atl = LoadLibraryW( atl_dlls[i] );
++
++            if (atl && (pAtlCreateRegistrar = (void *)GetProcAddress( atl, "AtlCreateRegistrar" )))
++                hr = pAtlCreateRegistrar( &registrar );
++        }
+ 
+         if (!registrar)
+         {

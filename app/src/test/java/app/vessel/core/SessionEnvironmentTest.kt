@@ -1616,4 +1616,17 @@ class SessionEnvironmentTest {
         assertTrue(value.endsWith("d3d9=b"))
     }
 
+    @Test
+    fun `the DirectX component leaves audio and input to Wine, and keeps D3DX`() {
+        // Every Wine-served family the package carries, in the case it ships in.
+        for (name in listOf(
+            "xinput1_3.dll", "XINPUT9_1_0.dll", "xaudio2_7.dll", "xactengine3_7.dll",
+            "x3daudio1_7.dll", "xapofx1_5.dll",
+        )) assertTrue(name, isWineServedDirectXDll(name))
+        // What the package is for stays Microsoft's.
+        for (name in listOf("d3dx9_43.dll", "d3dcompiler_43.dll", "d3dx11_43.dll", "d3dcsx_43.dll"))
+            assertFalse(name, isWineServedDirectXDll(name))
+        // And the two lists never claim the same DLL.
+        assertTrue(D3DX_DLL_OVERRIDES.none { isWineServedDirectXDll("$it.dll") })
+    }
 }

@@ -168,11 +168,12 @@ object PeIconReader {
         fun icon(maxSize: Int): PeIcon? {
             if (resourceBase < 0) return null
 
-            // Windows takes the numerically lowest group-icon id as the
-            // application icon, and so does everything that shows one in a file
-            // listing. Anything else picks a different icon from the one the
-            // user sees on a Windows desktop for the same file.
-            val group = lowestResource(RT_GROUP_ICON) ?: return null
+            // Windows takes the *first* group icon as the application icon:
+            // the first string-named one if there are any, since named entries
+            // sort before numbered ones, and otherwise the lowest id. Anything
+            // else picks a different icon from the one the user sees on a
+            // Windows desktop for the same file.
+            val group = firstGroupIcon() ?: return null
             val directory = read(group) ?: return null
             val chosen = chooseEntry(directory, maxSize) ?: return null
 
@@ -239,15 +240,19 @@ object PeIconReader {
         private data class Data(val offset: Long, val size: Int)
 
         /**
-         * The data entry for the lowest-numbered resource of [type].
+         * The application's group icon: the first named entry, else the lowest id.
          *
-         * Three levels down: type, then id, then language. The first language is
-         * taken — a program with the same icon in two locales has the same icon.
+         * **Named groups are the common case, not a curiosity.** GLFW names its
+         * group `GLFW_ICON` and Delphi names its `MAINICON`; No Man's Sky has one
+         * group, `GLFW_ICON`, and nothing numbered, so skipping named entries left
+         * its shortcut with no icon at all. Only the *group* can be named -- the
+         * `RT_ICON` images it points at are always addressed by id.
          */
-        private fun lowestResource(type: Int): Data? {
-            val typeDirectory = subdirectoryOf(resourceBase, type) ?: return null
-            val firstId = entries(typeDirectory).minByOrNull { it.id } ?: return null
-            return firstLeaf(firstId, depth = 1)
+        private fun firstGroupIcon(): Data? {
+            val typeDirectory = subdirectoryOf(resourceBase, RT_GROUP_ICON) ?: return null
+            val all = entries(typeDirectory, includeNamed = true)
+            val chosen = all.firstOrNull { it.named } ?: all.minByOrNull { it.id } ?: return null
+            return firstLeaf(chosen, depth = 1)
         }
 
         private fun resourceById(type: Int, id: Int): Data? {
@@ -264,24 +269,33 @@ object PeIconReader {
             return firstLeaf(child, depth + 1)
         }
 
-        private data class Entry(val id: Int, val isDirectory: Boolean, val target: Long)
+        private data class Entry(
+            val id: Int,
+            val isDirectory: Boolean,
+            val target: Long,
+            /** A string-named entry; [id] is then meaningless. */
+            val named: Boolean = false,
+        )
 
         private fun subdirectoryOf(directory: Long, id: Int): Long? =
             entries(directory).firstOrNull { it.id == id && it.isDirectory }?.target
 
-        /** Every id-named entry of the directory at [at]. Named entries are skipped. */
-        private fun entries(at: Long): List<Entry> {
+        /**
+         * The entries of the directory at [at]: id-named ones only, unless
+         * [includeNamed], which adds the string-named ones first, in directory
+         * order. See [firstGroupIcon] for the one place that wants them.
+         */
+        private fun entries(at: Long, includeNamed: Boolean = false): List<Entry> {
             if (at < resourceBase || at + 16 > length) return emptyList()
             val named = u16(at + 12)
             val byId = u16(at + 14)
             val total = named + byId
             if (total <= 0 || at + 16 + total * 8L > length) return emptyList()
 
-            val out = ArrayList<Entry>(byId)
-            // Named entries come first and are skipped: an icon is addressed by
-            // id, and a resource named "MAINICON" as a string is a Delphi-ism
-            // that the group-icon directory does not point at.
-            for (i in named until total) {
+            val out = ArrayList<Entry>(total)
+            // Named entries come first in the directory. Skipped by default,
+            // because an RT_ICON image is always addressed by id.
+            for (i in (if (includeNamed) 0 else named) until total) {
                 val record = at + 16 + i * 8L
                 val name = u32(record)
                 val target = u32(record + 4)
@@ -290,6 +304,7 @@ object PeIconReader {
                     id = (name and 0x7FFFFFFF).toInt(),
                     isDirectory = isDirectory,
                     target = resourceBase + (target and 0x7FFFFFFF),
+                    named = i < named,
                 )
             }
             return out

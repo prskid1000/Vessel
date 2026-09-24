@@ -200,3 +200,42 @@ left alone: the bias was never swap's to pay. The total and the page count in
 `virtual.c` were already right and are unchanged.
 
 **Policy.** Vessel's. AI-authored in full.
+
+## 0082-win32u-resolve-the-icd-device-entry-point-from-a-live-instance.patch
+
+**Native Vulkan games could crash creating their device.** `0009` drives
+Turnip's ICD directly, and an ICD exports no `vkGetDeviceProcAddr`, so `0009`
+remembered the last instance to pass its `vkGetInstanceProcAddr` wrapper and
+resolved the device entry point through it on first use. The last instance
+seen is not the device's, and need not be alive. No Man's Sky loads DXVK's
+`dxgi`, which creates and destroys a dozen instances enumerating adapters, and
+only then creates its own Vulkan device. The lookup went through a destroyed
+instance, Turnip answered NULL, every device function was NULL (673 lines of
+`No instance has been created yet`) and `vkCreateDevice` jumped to address 0.
+
+D3D games never hit it: DXVK and vkd3d create their device while their
+instance is still alive.
+
+**The entry point is resolved inside the instance wrapper**, the first time a
+non-NULL instance goes past. win32u resolves every instance function right
+after `vkCreateInstance`, so that instance is alive, and the pointer is the
+driver's own and outlives any instance.
+
+**Policy.** Vessel's. AI-authored in full.
+
+## 0083-setupapi-fall-back-to-atl90-for-the-registrar.patch
+
+**Every prefix update after a Wine upgrade failed to register a single COM
+class.** `register_fake_dll` gets its `IRegistrar` from `atl100.dll`. Proton's
+`wine.inf` sets `atl100` to `native,builtin`, and the VCRuntime component puts
+Microsoft's x64 `atl100.dll` in `system32`. The update runs `wine.inf` through
+`rundll32`, which is an ARM64 process: it cannot load an x64 DLL (`c000007b`),
+and the loader does not fall back to the builtin when the file it found is for
+another architecture. 181 fake DLLs logged `failed to create IRegistrar:
+80004002`, and no class new to that Wine was registered.
+
+**`atl90` is tried when `atl100` cannot supply `AtlCreateRegistrar`.** It is
+built from the same `registrar.c`, `wine.inf` gives it no override, and the
+VCRuntime component (2010 onwards) carries no Microsoft copy of it.
+
+**Policy.** Vessel's. AI-authored in full.
