@@ -29,6 +29,34 @@ a single patch can hold, or that are referenced from `docs/TODO.md`.
 
 ---
 
+## 0084-mmdevapi-spatial-audio-on-a-device-with-fewer-channels.patch
+
+**GTA V Enhanced stopped at launch** with "Failed to initialize spatial audio
+client. Please ensure that your audio device is setup correctly."
+
+`ActivateSpatialAudioStream` opens one shared-mode `IAudioClient` with a channel
+per static object the caller asks for — 12 for a 7.1.4 bed. `0008`'s AAudio
+wineoss refuses more than 8 channels outright and fails any count AAudio does not
+grant exactly, and the phone's output is stereo (`aaudio: shared, … 48000 Hz x2`
+in the session log). So `Initialize` failed and the game gave up. GE-Proton fixed
+the same thing in winealsa (`WINEALSA_SPATIAL`); there is no winealsa here.
+
+**When the requested layout is refused, the stream reopens in the device's own
+mix-format layout and downmixes into it**: a speaker the device has is copied
+straight through, a missing one folds onto front left/right at -3 dB (centre onto
+both), LFE is dropped. A device that takes the full bed sees no change.
+`IsSpatialAudioStreamAvailable` and `GetNativeStaticObjectTypeMask` (both
+`E_NOTIMPL`) now report the stream and a 7.1.4 bed as available, which the
+fallback makes true. It also fixes an upstream mapping slip: `BackCenter` got map
+slot 12 while objects are indexed by `AudioObjectType_to_index` (16), so it was
+never mixed.
+
+Nothing in it is specific to wineoss — it is a candidate for upstream.
+
+**Policy.** Vessel's. AI-authored in full.
+
+---
+
 ## 0044-ntdll-an-image-that-has-moved-must-say-so-in-its-own-header.patch
 
 **The root cause of `#51`, and of a crash that presented as four different

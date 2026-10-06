@@ -1,0 +1,348 @@
+mmdevapi: spatial audio on a device with fewer channels than the bed.
+
+GTA V Enhanced stopped at launch with "Failed to initialize spatial audio
+client. Please ensure that your audio device is setup correctly." The
+session log shows the device the stream was opened against:
+
+    aaudio: shared, burst 868, capacity 1736, 48000 Hz x2, format 1
+
+ActivateSpatialAudioStream opens one IAudioClient with a channel per static
+object the caller asked for (a 7.1.4 bed is 12), in shared mode. wineoss
+(0008) refuses more than 8 channels outright and fails any count AAudio
+does not grant exactly, and the phone's output is stereo, so Initialize
+fails and the game reports the error. GE-Proton fixed the same thing in
+winealsa (WINEALSA_SPATIAL); there is no winealsa here.
+
+Three changes, none specific to wineoss:
+
+1. When Initialize with the requested layout fails, the stream reopens in
+   the device's own mix-format layout and downmixes into it: a speaker the
+   device has is copied straight through, a missing one is folded onto the
+   front left/right at -3 dB (centre onto both), LFE is dropped. With a
+   device that takes the full bed, nothing changes.
+2. IsSpatialAudioStreamAvailable answered E_NOTIMPL and
+   GetNativeStaticObjectTypeMask E_NOTIMPL. Both now report the object
+   render stream and a 7.1.4 bed as available, which (1) makes true.
+3. static_mask_to_channels gave BackCenter map slot 12 while
+   AudioObjectType_to_index returns 16 for it, so a BackCenter object was
+   never mixed. Routes are now indexed the same way objects are.
+
+The render buffer is also cleared at the start of each update, since
+objects are summed into it.
+
+--- a/dlls/mmdevapi/spatialaudio.c	2026-10-06 13:49:49.693515800 +0530
++++ b/dlls/mmdevapi/spatialaudio.c	2026-10-06 13:49:49.711749800 +0530
+@@ -112,7 +112,10 @@
+ 
+     float *buf;
+ 
+-    UINT32 static_object_map[17];
++    struct {
++        UINT32 chan[2];
++        float gain[2];
++    } static_route[17];
+ 
+     struct list objects;
+ };
+@@ -417,6 +420,8 @@
+             return hr;
+         }
+ 
++        memset(This->buf, 0, This->update_frames * This->stream_fmtex.Format.nBlockAlign);
++
+         LIST_FOR_EACH_ENTRY(object, &This->objects, SpatialAudioObjectImpl, entry){
+             memset(object->buf, 0, This->update_frames * This->sa_client->object_fmtex.Format.nBlockAlign);
+         }
+@@ -435,18 +440,23 @@
+ 
+ static void mix_static_object(SpatialAudioStreamImpl *stream, SpatialAudioObjectImpl *object)
+ {
+-    float *in = object->buf, *out;
+-    UINT32 i;
+-    if(object->static_idx == ~0 ||
+-            stream->static_object_map[object->static_idx] == ~0){
+-        WARN("Got unmapped static object?! Not mixing. Type: 0x%x\n", object->type);
++    UINT32 i, k, chans = stream->stream_fmtex.Format.nChannels;
++    if(object->static_idx == ~0 || object->static_idx >= ARRAY_SIZE(stream->static_route) ||
++            stream->static_route[object->static_idx].chan[0] == ~0){
++        TRACE("Unrouted static object, not mixing. Type: 0x%x\n", object->type);
+         return;
+     }
+-    out = stream->buf + stream->static_object_map[object->static_idx];
+-    for(i = 0; i < stream->update_frames; ++i){
+-        *out += *in;
+-        ++in;
+-        out += stream->stream_fmtex.Format.nChannels;
++    for(k = 0; k < 2; ++k){
++        UINT32 chan = stream->static_route[object->static_idx].chan[k];
++        float gain = stream->static_route[object->static_idx].gain[k], *in = object->buf, *out;
++        if(chan == ~0)
++            continue;
++        out = stream->buf + chan;
++        for(i = 0; i < stream->update_frames; ++i){
++            *out += *in * gain;
++            ++in;
++            out += chans;
++        }
+     }
+ }
+ 
+@@ -600,8 +610,20 @@
+         AudioObjectType *mask)
+ {
+     SpatialAudioImpl *This = impl_from_ISpatialAudioClient(iface);
+-    FIXME("(%p)->(%p)\n", This, mask);
+-    return E_NOTIMPL;
++    static const AudioObjectType bed_7_1_4 = AudioObjectType_FrontLeft | AudioObjectType_FrontRight |
++        AudioObjectType_FrontCenter | AudioObjectType_LowFrequency | AudioObjectType_SideLeft |
++        AudioObjectType_SideRight | AudioObjectType_BackLeft | AudioObjectType_BackRight |
++        AudioObjectType_TopFrontLeft | AudioObjectType_TopFrontRight | AudioObjectType_TopBackLeft |
++        AudioObjectType_TopBackRight;
++
++    TRACE("(%p)->(%p)\n", This, mask);
++
++    if(!mask)
++        return E_POINTER;
++
++    /* Every static bed is accepted: what the device lacks is downmixed. */
++    *mask = bed_7_1_4;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI SAC_GetMaxDynamicObjectCount(ISpatialAudioClient *iface,
+@@ -666,8 +688,11 @@
+         REFIID stream_uuid, const PROPVARIANT *info)
+ {
+     SpatialAudioImpl *This = impl_from_ISpatialAudioClient(iface);
+-    FIXME("(%p)->(%s, %p)\n", This, debugstr_guid(stream_uuid), info);
+-    return E_NOTIMPL;
++    TRACE("(%p)->(%s, %p)\n", This, debugstr_guid(stream_uuid), info);
++    if(IsEqualIID(stream_uuid, &IID_ISpatialAudioObjectRenderStream))
++        return S_OK;
++    FIXME("Unsupported stream IID %s\n", debugstr_guid(stream_uuid));
++    return E_NOINTERFACE;
+ }
+ 
+ static WAVEFORMATEX *clone_fmtex(const WAVEFORMATEX *src)
+@@ -677,33 +702,131 @@
+     return r;
+ }
+ 
+-static void static_mask_to_channels(AudioObjectType static_mask, WORD *count, DWORD *mask, UINT32 *map)
++/* speaker per AudioObjectType index (AudioObjectType_to_index); bottom layers have none */
++static const DWORD static_speaker[17] = {
++    SPEAKER_FRONT_LEFT, SPEAKER_FRONT_RIGHT, SPEAKER_FRONT_CENTER, SPEAKER_LOW_FREQUENCY,
++    SPEAKER_SIDE_LEFT, SPEAKER_SIDE_RIGHT, SPEAKER_BACK_LEFT, SPEAKER_BACK_RIGHT,
++    SPEAKER_TOP_FRONT_LEFT, SPEAKER_TOP_FRONT_RIGHT, SPEAKER_TOP_BACK_LEFT, SPEAKER_TOP_BACK_RIGHT,
++    0, 0, 0, 0, SPEAKER_BACK_CENTER,
++};
++/* -1 left, 1 right, 0 centre, 2 LFE */
++static const signed char static_side[17] = { -1, 1, 0, 2, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, 0 };
++
++static UINT32 speaker_channel(DWORD dev_mask, DWORD speaker)
+ {
+-    UINT32 out_chan = 0, map_idx = 0;
+-    *count = 0;
+-    *mask = 0;
+-#define CONVERT_MASK(f, t) \
+-    if(static_mask & f){ \
+-        *count += 1; \
+-        *mask |= t; \
+-        map[map_idx++] = out_chan++; \
+-        TRACE("mapping 0x%x to %u\n", f, out_chan - 1); \
+-    }else{ \
+-        map[map_idx++] = ~0; \
+-    }
+-    CONVERT_MASK(AudioObjectType_FrontLeft, SPEAKER_FRONT_LEFT);
+-    CONVERT_MASK(AudioObjectType_FrontRight, SPEAKER_FRONT_RIGHT);
+-    CONVERT_MASK(AudioObjectType_FrontCenter, SPEAKER_FRONT_CENTER);
+-    CONVERT_MASK(AudioObjectType_LowFrequency, SPEAKER_LOW_FREQUENCY);
+-    CONVERT_MASK(AudioObjectType_SideLeft, SPEAKER_SIDE_LEFT);
+-    CONVERT_MASK(AudioObjectType_SideRight, SPEAKER_SIDE_RIGHT);
+-    CONVERT_MASK(AudioObjectType_BackLeft, SPEAKER_BACK_LEFT);
+-    CONVERT_MASK(AudioObjectType_BackRight, SPEAKER_BACK_RIGHT);
+-    CONVERT_MASK(AudioObjectType_TopFrontLeft, SPEAKER_TOP_FRONT_LEFT);
+-    CONVERT_MASK(AudioObjectType_TopFrontRight, SPEAKER_TOP_FRONT_RIGHT);
+-    CONVERT_MASK(AudioObjectType_TopBackLeft, SPEAKER_TOP_BACK_LEFT);
+-    CONVERT_MASK(AudioObjectType_TopBackRight, SPEAKER_TOP_BACK_RIGHT);
+-    CONVERT_MASK(AudioObjectType_BackCenter, SPEAKER_BACK_CENTER);
++    DWORD below = dev_mask & (speaker - 1);
++    UINT32 n = 0;
++    if(!speaker || !(dev_mask & speaker))
++        return ~0;
++    while(below){
++        below &= below - 1;
++        ++n;
++    }
++    return n;
++}
++
++static DWORD default_channel_mask(WORD channels)
++{
++    switch(channels){
++    case 1: return SPEAKER_FRONT_CENTER;
++    case 2: return SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
++    case 4: return KSAUDIO_SPEAKER_QUAD;
++    case 6: return KSAUDIO_SPEAKER_5POINT1;
++    case 8: return KSAUDIO_SPEAKER_7POINT1_SURROUND;
++    }
++    return (channels >= 32) ? ~0u : ((1u << channels) - 1);
++}
++
++/* Route each requested static object onto the channels of dev_mask. A speaker the
++ * device has is copied straight through; one it lacks is folded onto the nearest
++ * front channel(s) at -3 dB, LFE is dropped. With dev_mask == the requested speakers
++ * this is the identity layout Wine always used. */
++static void route_static_objects(SpatialAudioStreamImpl *stream, AudioObjectType static_mask, DWORD dev_mask)
++{
++    UINT32 i, left = speaker_channel(dev_mask, SPEAKER_FRONT_LEFT),
++           right = speaker_channel(dev_mask, SPEAKER_FRONT_RIGHT),
++           centre = speaker_channel(dev_mask, SPEAKER_FRONT_CENTER);
++    const float fold = 0.70710678f;
++
++    if(left == ~0) left = (right != ~0) ? right : (centre != ~0 ? centre : 0);
++    if(right == ~0) right = left;
++
++    for(i = 0; i < ARRAY_SIZE(stream->static_route); ++i){
++        UINT32 chan = speaker_channel(dev_mask, static_speaker[i]);
++        stream->static_route[i].chan[0] = stream->static_route[i].chan[1] = ~0;
++        stream->static_route[i].gain[0] = stream->static_route[i].gain[1] = 0.0f;
++        if(!(static_mask & (AudioObjectType_FrontLeft << i)))
++            continue;
++        if(chan != ~0){
++            stream->static_route[i].chan[0] = chan;
++            stream->static_route[i].gain[0] = 1.0f;
++        }else if(static_side[i] == -1){
++            stream->static_route[i].chan[0] = left;
++            stream->static_route[i].gain[0] = fold;
++        }else if(static_side[i] == 1){
++            stream->static_route[i].chan[0] = right;
++            stream->static_route[i].gain[0] = fold;
++        }else if(static_side[i] == 0){
++            stream->static_route[i].chan[0] = left;
++            stream->static_route[i].gain[0] = fold;
++            if(right != left){
++                stream->static_route[i].chan[1] = right;
++                stream->static_route[i].gain[1] = fold;
++            }
++        }
++        TRACE("routing static object %u to %d/%d\n", i,
++                (int)stream->static_route[i].chan[0], (int)stream->static_route[i].chan[1]);
++    }
++}
++
++static DWORD static_mask_to_speakers(AudioObjectType static_mask)
++{
++    DWORD mask = 0;
++    UINT32 i;
++    for(i = 0; i < ARRAY_SIZE(static_speaker); ++i)
++        if(static_mask & (AudioObjectType_FrontLeft << i))
++            mask |= static_speaker[i];
++    return mask;
++}
++
++static WORD count_bits(DWORD mask)
++{
++    WORD n = 0;
++    while(mask){
++        mask &= mask - 1;
++        ++n;
++    }
++    return n;
++}
++
++static HRESULT get_device_layout(IAudioClient *client, WORD *channels, DWORD *mask)
++{
++    WAVEFORMATEX *mix;
++    HRESULT hr = IAudioClient_GetMixFormat(client, &mix);
++    if(FAILED(hr))
++        return hr;
++    *channels = mix->nChannels;
++    if(mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE && ((WAVEFORMATEXTENSIBLE *)mix)->dwChannelMask
++            && count_bits(((WAVEFORMATEXTENSIBLE *)mix)->dwChannelMask) == mix->nChannels)
++        *mask = ((WAVEFORMATEXTENSIBLE *)mix)->dwChannelMask;
++    else
++        *mask = default_channel_mask(mix->nChannels);
++    CoTaskMemFree(mix);
++    return S_OK;
++}
++
++static void set_stream_format(SpatialAudioStreamImpl *stream, WORD channels, DWORD mask)
++{
++    stream->stream_fmtex.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
++    stream->stream_fmtex.Format.nChannels = channels;
++    stream->stream_fmtex.dwChannelMask = mask;
++    stream->stream_fmtex.Format.nSamplesPerSec = stream->params.ObjectFormat->nSamplesPerSec;
++    stream->stream_fmtex.Format.wBitsPerSample = stream->params.ObjectFormat->wBitsPerSample;
++    stream->stream_fmtex.Format.nBlockAlign = (stream->stream_fmtex.Format.nChannels * stream->stream_fmtex.Format.wBitsPerSample) / 8;
++    stream->stream_fmtex.Format.nAvgBytesPerSec = stream->stream_fmtex.Format.nSamplesPerSec * stream->stream_fmtex.Format.nBlockAlign;
++    stream->stream_fmtex.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
++    stream->stream_fmtex.Samples.wValidBitsPerSample = stream->stream_fmtex.Format.wBitsPerSample;
++    stream->stream_fmtex.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+ }
+ 
+ static HRESULT activate_stream(SpatialAudioStreamImpl *stream)
+@@ -733,25 +856,50 @@
+         return hr;
+     }
+ 
+-    stream->stream_fmtex.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+-    static_mask_to_channels(stream->params.StaticObjectTypeMask,
+-            &stream->stream_fmtex.Format.nChannels, &stream->stream_fmtex.dwChannelMask,
+-            stream->static_object_map);
+-    stream->stream_fmtex.Format.nSamplesPerSec = stream->params.ObjectFormat->nSamplesPerSec;
+-    stream->stream_fmtex.Format.wBitsPerSample = stream->params.ObjectFormat->wBitsPerSample;
+-    stream->stream_fmtex.Format.nBlockAlign = (stream->stream_fmtex.Format.nChannels * stream->stream_fmtex.Format.wBitsPerSample) / 8;
+-    stream->stream_fmtex.Format.nAvgBytesPerSec = stream->stream_fmtex.Format.nSamplesPerSec * stream->stream_fmtex.Format.nBlockAlign;
+-    stream->stream_fmtex.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+-    stream->stream_fmtex.Samples.wValidBitsPerSample = stream->stream_fmtex.Format.wBitsPerSample;
+-    stream->stream_fmtex.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
++    {
++        DWORD requested = static_mask_to_speakers(stream->params.StaticObjectTypeMask);
++        route_static_objects(stream, stream->params.StaticObjectTypeMask, requested);
++        set_stream_format(stream, count_bits(requested), requested);
++    }
+ 
+     hr = IAudioClient_Initialize(stream->client, AUDCLNT_SHAREMODE_SHARED,
+             AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+             period, 0, &stream->stream_fmtex.Format, NULL);
+     if(FAILED(hr)){
+-        WARN("Initialize failed: %08lx\n", hr);
++        WORD dev_channels;
++        DWORD dev_mask;
++
++        /* The device can't take the requested layout (e.g. 7.1.4 on a stereo
++         * output): render in the device's own layout and downmix into it. */
++        WARN("Initialize with %u channels failed: %08lx, downmixing to the device layout\n",
++                stream->stream_fmtex.Format.nChannels, hr);
+         IAudioClient_Release(stream->client);
+-        return hr;
++
++        hr = IMMDevice_Activate(stream->sa_client->mmdev, &IID_IAudioClient,
++                CLSCTX_INPROC_SERVER, NULL, (void**)&stream->client);
++        if(FAILED(hr)){
++            WARN("Activate failed: %08lx\n", hr);
++            return hr;
++        }
++
++        hr = get_device_layout(stream->client, &dev_channels, &dev_mask);
++        if(FAILED(hr)){
++            WARN("GetMixFormat failed: %08lx\n", hr);
++            IAudioClient_Release(stream->client);
++            return hr;
++        }
++
++        route_static_objects(stream, stream->params.StaticObjectTypeMask, dev_mask);
++        set_stream_format(stream, dev_channels, dev_mask);
++
++        hr = IAudioClient_Initialize(stream->client, AUDCLNT_SHAREMODE_SHARED,
++                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
++                period, 0, &stream->stream_fmtex.Format, NULL);
++        if(FAILED(hr)){
++            WARN("Initialize failed: %08lx\n", hr);
++            IAudioClient_Release(stream->client);
++            return hr;
++        }
+     }
+ 
+     hr = IAudioClient_SetEventHandle(stream->client, stream->params.EventHandle);
