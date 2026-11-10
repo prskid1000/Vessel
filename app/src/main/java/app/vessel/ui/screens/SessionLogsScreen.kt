@@ -241,7 +241,7 @@ private fun statusTone(exit: SessionExit) = when (exit) {
 // empty device shows the empty state rather than a plausible-looking history of
 // runs that never happened.
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 824)
 @Composable
 private fun SessionLogsPreview() {
     VesselTheme {
@@ -269,7 +269,7 @@ private fun SessionLogsPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 824)
 @Composable
 private fun SessionLogsEmptyPreview() {
     VesselTheme {

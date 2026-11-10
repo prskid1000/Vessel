@@ -18,25 +18,25 @@ class GuestPaletteTest {
 
     @Test
     fun `the core tokens match VesselTheme`() {
-        assertEquals(0xFF161826.toInt(), GuestPalette.BG)
-        assertEquals(0xFF232532.toInt(), GuestPalette.SURFACE)
-        assertEquals(0xFFE9E9ED.toInt(), GuestPalette.TEXT)
-        assertEquals(0xFF9184D9.toInt(), GuestPalette.ACCENT)
+        assertEquals(0xFF0C0C0C.toInt(), GuestPalette.BG)
+        assertEquals(0xFF1A1D1A.toInt(), GuestPalette.SURFACE)
+        assertEquals(0xFFDDE3DC.toInt(), GuestPalette.TEXT)
+        assertEquals(0xFF8FBF7F.toInt(), GuestPalette.ACCENT)
     }
 
     @Test
     fun `the neutral ramp matches VesselTheme`() {
-        assertEquals(0xFF9397AB.toInt(), GuestPalette.NEUTRAL_500)
-        assertEquals(0xFF75798C.toInt(), GuestPalette.NEUTRAL_600)
-        assertEquals(0xFF595D6C.toInt(), GuestPalette.NEUTRAL_700)
-        assertEquals(0xFF3F424D.toInt(), GuestPalette.NEUTRAL_800)
-        assertEquals(0xFF292B31.toInt(), GuestPalette.NEUTRAL_900)
+        assertEquals(0xFF909A90.toInt(), GuestPalette.NEUTRAL_500)
+        assertEquals(0xFF727C72.toInt(), GuestPalette.NEUTRAL_600)
+        assertEquals(0xFF565F56.toInt(), GuestPalette.NEUTRAL_700)
+        assertEquals(0xFF3D433D.toInt(), GuestPalette.NEUTRAL_800)
+        assertEquals(0xFF282C28.toInt(), GuestPalette.NEUTRAL_900)
     }
 
     @Test
     fun `the accent ramp matches VesselTheme`() {
-        assertEquals(0xFF423A6A.toInt(), GuestPalette.ACCENT_800)
-        assertEquals(0xFFF5F4FF.toInt(), GuestPalette.ACCENT_100)
+        assertEquals(0xFF42583B.toInt(), GuestPalette.ACCENT_800)
+        assertEquals(0xFFF1F7EF.toInt(), GuestPalette.ACCENT_100)
     }
 
     @Test
@@ -47,7 +47,7 @@ class GuestPaletteTest {
         // image that failed to load.
         assertEquals(
             GuestPalette.BG,
-            0xFF161826.toInt(),
+            0xFF0C0C0C.toInt(),
         )
         assertEquals(
             rgbTriplet(GuestPalette.BG),

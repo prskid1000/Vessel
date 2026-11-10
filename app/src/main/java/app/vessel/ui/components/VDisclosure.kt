@@ -231,7 +231,7 @@ fun VDiagnosticRow(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421)
 @Composable
 private fun VDiagnosticRowPreview() {
     VesselTheme {

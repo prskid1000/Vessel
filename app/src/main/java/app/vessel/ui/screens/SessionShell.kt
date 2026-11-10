@@ -952,7 +952,7 @@ fun TaskbarTransition(visible: Boolean, content: @Composable () -> Unit) {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF292B31, widthDp = 927, heightDp = 120)
+@Preview(showBackground = true, backgroundColor = 0xFF282C28, widthDp = 927, heightDp = 120)
 @Composable
 private fun SessionTaskbarPreview() {
     VesselTheme {
@@ -967,7 +967,7 @@ private fun SessionTaskbarPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF292B31, widthDp = 460, heightDp = 420)
+@Preview(showBackground = true, backgroundColor = 0xFF282C28, widthDp = 460, heightDp = 420)
 @Composable
 private fun SessionLauncherPreview() {
     VesselTheme {

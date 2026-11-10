@@ -1029,7 +1029,7 @@ private const val WARMING_UP_SHORT = "sampling…"
 
 // — previews ---------------------------------------------------------------
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 1600)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 1600)
 @Composable
 private fun SessionMetricsPanelPreview() {
     VesselTheme {
@@ -1037,14 +1037,14 @@ private fun SessionMetricsPanelPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392)
 @Composable
 private fun SessionMetricsPanelNoTracePreview() {
     VesselTheme { SessionMetricsPanel(null) }
 }
 
 /** At the rail's real inner width, which is the only width this has to work at. */
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 150)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 150)
 @Composable
 private fun SessionMetricsRailPreview() {
     VesselTheme {
@@ -1053,7 +1053,7 @@ private fun SessionMetricsRailPreview() {
 }
 
 /** The case a caption exists for: four honest flat lines that are not idleness. */
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 150)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 150)
 @Composable
 private fun SessionMetricsRailPausedPreview() {
     VesselTheme {

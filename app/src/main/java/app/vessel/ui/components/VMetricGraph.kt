@@ -638,7 +638,7 @@ private const val DASH_OFF = 4f
 // They exist so the stroke weights and the gap handling can be judged without a
 // device; nothing that reaches a user is ever generated.
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392)
 @Composable
 private fun VMetricGraphCardPreview() {
     VesselTheme {
@@ -679,7 +679,7 @@ private fun VMetricGraphCardPreview() {
 }
 
 // At the rail's real inner width, which is the only width these have to work at.
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 150)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 150)
 @Composable
 private fun VMetricSparkPreview() {
     VesselTheme {

@@ -587,7 +587,7 @@ private fun secondsToFill(limits: SessionLogLimits): Long {
 
 private const val BYTES_PER_LINE = 120L
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 927)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 927)
 @Composable
 private fun DiagnosticsPanelPreview() {
     VesselTheme {

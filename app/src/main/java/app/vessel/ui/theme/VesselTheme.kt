@@ -61,41 +61,41 @@ import androidx.compose.ui.unit.Density
 data class VColors(
     // — core roles —
     /** `--color-bg`. A deep indigo, deliberately not black. */
-    val bg: Color = Color(0xFF161826),
+    val bg: Color = Color(0xFF0C0C0C),
     /** `--color-surface`: cards, sheets, bars. */
-    val surface: Color = Color(0xFF232532),
+    val surface: Color = Color(0xFF1A1D1A),
     /** `--color-text`. */
-    val text: Color = Color(0xFFE9E9ED),
+    val text: Color = Color(0xFFDDE3DC),
     /** `--color-accent`. */
-    val accent: Color = Color(0xFF9184D9),
+    val accent: Color = Color(0xFF8FBF7F),
     /** `--color-accent-2`: secondary accent, second series in charts. */
-    val accent2: Color = Color(0xFFA7A1DB),
+    val accent2: Color = Color(0xFFA8BEA7),
 
     // — neutral ramp —
-    val neutral100: Color = Color(0xFFF3F5FE),
-    val neutral200: Color = Color(0xFFE4E7F5),
-    val neutral300: Color = Color(0xFFCFD3E5),
-    val neutral400: Color = Color(0xFFB2B6CA),
-    val neutral500: Color = Color(0xFF9397AB),
-    val neutral600: Color = Color(0xFF75798C),
-    val neutral700: Color = Color(0xFF595D6C),
-    val neutral800: Color = Color(0xFF3F424D),
-    val neutral900: Color = Color(0xFF292B31),
+    val neutral100: Color = Color(0xFFF2F5F1),
+    val neutral200: Color = Color(0xFFE2E8E1),
+    val neutral300: Color = Color(0xFFCCD4CB),
+    val neutral400: Color = Color(0xFFAFB8AE),
+    val neutral500: Color = Color(0xFF909A90),
+    val neutral600: Color = Color(0xFF727C72),
+    val neutral700: Color = Color(0xFF565F56),
+    val neutral800: Color = Color(0xFF3D433D),
+    val neutral900: Color = Color(0xFF282C28),
 
     // — accent ramp —
-    val accent100: Color = Color(0xFFF5F4FF),
-    val accent200: Color = Color(0xFFE7E5FE),
-    val accent300: Color = Color(0xFFD2CEFD),
-    val accent400: Color = Color(0xFFB5ABFC),
-    val accent500: Color = Color(0xFF968AE0),
-    val accent600: Color = Color(0xFF796CBF),
-    val accent700: Color = Color(0xFF5D5294),
-    val accent800: Color = Color(0xFF423A6A),
-    val accent900: Color = Color(0xFF2B2741),
+    val accent100: Color = Color(0xFFF1F7EF),
+    val accent200: Color = Color(0xFFE0EDDB),
+    val accent300: Color = Color(0xFFC9E0C0),
+    val accent400: Color = Color(0xFFA9CF9B),
+    val accent500: Color = Color(0xFF8FBF7F),
+    val accent600: Color = Color(0xFF779F69),
+    val accent700: Color = Color(0xFF5C7C51),
+    val accent800: Color = Color(0xFF42583B),
+    val accent900: Color = Color(0xFF2A3627),
 
     // — accent-2 ramp, for the second chart series and its tag —
-    val accent2800: Color = Color(0xFF423E5D),
-    val accent2100: Color = Color(0xFFF5F4FF),
+    val accent2800: Color = Color(0xFF434F43),
+    val accent2100: Color = Color(0xFFF1F7EF),
 
     // — text opacities, all derived from `text` —
     /** Primary text. The same colour as [text]; the name is what call sites read. */
@@ -158,18 +158,18 @@ data class VColors(
      * so a violet badge stops reading as information and starts reading as a
      * button.
      */
-    val archNative: Color = Color(0xFF5BD99A),
+    val archNative: Color = Color(0xFF9FD48C),
     /** x86-64 — translated by FEX. */
-    val archX64: Color = Color(0xFF7FB0F0),
+    val archX64: Color = Color(0xFF8FBBD4),
     /** x86-32 — the WoW64 path. */
-    val archX86: Color = Color(0xFFE0A458),
+    val archX86: Color = Color(0xFFEFB080),
     /** Not yet inspected, or the PE header would not read. `neutral-600`. */
     val archUnknown: Color = neutral600,
 
     // — status —
-    val ok: Color = Color(0xFF5BD99A),
-    val warn: Color = Color(0xFFE0A458),
-    val danger: Color = Color(0xFFE5697A),
+    val ok: Color = Color(0xFF9FD48C),
+    val warn: Color = Color(0xFFEFB080),
+    val danger: Color = Color(0xFFDC9089),
     val info: Color = accent,
 ) {
     /** Nocturne drops a disabled control to 45% rather than recolouring it. */
@@ -872,7 +872,7 @@ private fun VColors.toMaterialScheme() = darkColorScheme(
  * `--shadow-sm` / `--shadow-md`.
  *
  * **Elevation here is a hairline ring, not a shadow.** `--shadow-sm` is
- * `0 0 0 1px #3f424d` and nothing else; `--shadow-md` adds
+ * `0 0 0 1px #3d433d` and nothing else; `--shadow-md` adds
  * `0 6px 18px rgba(0,0,0,0.55)` behind a lighter ring. A Material drop shadow
  * with no ring is the wrong shape for this system.
  */
@@ -885,16 +885,16 @@ data class VElevation(
 
 /** The two elevations the product uses. `lg` is dialog-only and lives with the sheet. */
 object VElev {
-    /** `0 0 0 1px #3f424d` — a ring, no shadow at all. */
+    /** `0 0 0 1px #3d433d` — a ring, no shadow at all. */
     val sm: VElevation
         @Composable @ReadOnlyComposable get() = VElevation(Vessel.colors.neutral800)
 
-    /** `0 0 0 1px #595d6c, 0 6px 18px rgba(0,0,0,0.55)`. */
+    /** `0 0 0 1px #565f56, 0 6px 18px rgba(0,0,0,0.55)`. */
     val md: VElevation
         @Composable @ReadOnlyComposable get() =
             VElevation(Vessel.colors.neutral700, ambientOffsetY = 6.dp, ambientAlpha = 0.55f)
 
-    /** `0 0 0 1px #9397ab, 0 16px 40px rgba(0,0,0,0.65)` — dialogs. */
+    /** `0 0 0 1px #909a90, 0 16px 40px rgba(0,0,0,0.65)` — dialogs. */
     val lg: VElevation
         @Composable @ReadOnlyComposable get() =
             VElevation(Vessel.colors.neutral500, ambientOffsetY = 16.dp, ambientAlpha = 0.65f)

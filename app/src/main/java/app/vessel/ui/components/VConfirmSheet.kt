@@ -87,7 +87,7 @@ fun VConfirmSheet(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 400)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 400)
 @Composable
 private fun VConfirmSheetPreview() {
     VesselTheme {

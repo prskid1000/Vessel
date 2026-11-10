@@ -216,13 +216,13 @@ internal class TouchOverlayPainter(private val density: Float) {
         }
 
         /** `--color-surface-2` — the ground every card in the product sits on. */
-        const val SURFACE = 0xFF232532.toInt()
+        const val SURFACE = 0xFF1A1D1A.toInt()
 
         /** `--color-accent`. */
-        const val ACCENT = 0xFF9184D9.toInt()
+        const val ACCENT = 0xFF8FBF7F.toInt()
 
         /** `--color-text-primary`. */
-        const val INK = 0xFFE9E9ED.toInt()
+        const val INK = 0xFFDDE3DC.toInt()
 
         /** How solid the ground is relative to the control's opacity. */
         const val SURFACE_ALPHA = 0.85f

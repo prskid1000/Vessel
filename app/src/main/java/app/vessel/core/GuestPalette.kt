@@ -22,7 +22,7 @@ package app.vessel.core
 object GuestPalette {
 
     /** `bg` — the window ground. */
-    const val BG: Int = 0xFF161826.toInt()
+    const val BG: Int = 0xFF0C0C0C.toInt()
 
     /**
      * The console's ground, and deliberately **not** [BG].
@@ -60,32 +60,32 @@ object GuestPalette {
     const val CONSOLE_BG: Int = 0xFF1E1E1E.toInt()
 
     /** `surface` — cards, sheets, bars; here, dialogs and menus. */
-    const val SURFACE: Int = 0xFF232532.toInt()
+    const val SURFACE: Int = 0xFF1A1D1A.toInt()
 
     /** `text` — primary text. */
-    const val TEXT: Int = 0xFFE9E9ED.toInt()
+    const val TEXT: Int = 0xFFDDE3DC.toInt()
 
     /** `accent` — the one thing in the guest allowed to be violet. */
-    const val ACCENT: Int = 0xFF9184D9.toInt()
+    const val ACCENT: Int = 0xFF8FBF7F.toInt()
 
     /** `accent-800` — Nocturne's tag fill, and so the selection ground. */
-    const val ACCENT_800: Int = 0xFF423A6A.toInt()
+    const val ACCENT_800: Int = 0xFF42583B.toInt()
 
     /** `accent-100` — what sits on [ACCENT_800]. */
-    const val ACCENT_100: Int = 0xFFF5F4FF.toInt()
+    const val ACCENT_100: Int = 0xFFF1F7EF.toInt()
 
     /** `neutral-500` — muted text that still has to be read. */
-    const val NEUTRAL_500: Int = 0xFF9397AB.toInt()
+    const val NEUTRAL_500: Int = 0xFF909A90.toInt()
 
     /** `neutral-600` — `textMuted`'s opaque equivalent; disabled text. */
-    const val NEUTRAL_600: Int = 0xFF75798C.toInt()
+    const val NEUTRAL_600: Int = 0xFF727C72.toInt()
 
     /** `neutral-700` — `borderStrong`, the edge of something touchable. */
-    const val NEUTRAL_700: Int = 0xFF595D6C.toInt()
+    const val NEUTRAL_700: Int = 0xFF565F56.toInt()
 
     /** `neutral-800` — `elevSm`, a hairline ring. */
-    const val NEUTRAL_800: Int = 0xFF3F424D.toInt()
+    const val NEUTRAL_800: Int = 0xFF3D433D.toInt()
 
     /** `neutral-900` — `surfaceRaised` and `surfaceSunken`, which are the same. */
-    const val NEUTRAL_900: Int = 0xFF292B31.toInt()
+    const val NEUTRAL_900: Int = 0xFF282C28.toInt()
 }

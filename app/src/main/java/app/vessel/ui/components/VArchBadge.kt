@@ -84,7 +84,7 @@ fun VTonalPill(
     )
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C)
 @Composable
 private fun VArchBadgePreview() {
     VesselTheme {

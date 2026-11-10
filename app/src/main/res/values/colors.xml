@@ -5,5 +5,5 @@
       sits on, not black. Duplicated here as a hex literal because resource XML
       cannot read Compose tokens; if VesselTheme's bg changes, change this too.
     -->
-    <color name="ic_launcher_background">#161826</color>
+    <color name="ic_launcher_background">#0C0C0C</color>
 </resources>

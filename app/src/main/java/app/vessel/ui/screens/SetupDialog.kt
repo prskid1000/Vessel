@@ -167,7 +167,7 @@ private val PreviewSteps = listOf(
     ProvisionStep("fex-2608-canoe", "Install FEX 2608", ProvisionStatus.PENDING),
 )
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 620)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 620)
 @Composable
 private fun SetupDialogPreview() {
     VesselTheme {
@@ -184,7 +184,7 @@ private fun SetupDialogPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 620)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 620)
 @Composable
 private fun SetupDialogIncompletePreview() {
     VesselTheme {

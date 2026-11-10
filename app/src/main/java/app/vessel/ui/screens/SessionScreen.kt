@@ -1117,7 +1117,7 @@ private val PreviewSteps = listOf(
     ProvisionStep("session:d3d", "Install D3D layers", ProvisionStatus.PENDING),
 )
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 620)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 620)
 @Composable
 private fun SessionLaunchDialogPreview() {
     VesselTheme {
@@ -1137,7 +1137,7 @@ private fun SessionLaunchDialogPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 620)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 620)
 @Composable
 private fun SessionFailedDialogPreview() {
     VesselTheme {
@@ -1170,7 +1170,7 @@ private fun SessionFailedDialogPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 927, heightDp = 422)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 927, heightDp = 422)
 @Composable
 private fun SessionDesktopPreview() {
     VesselTheme {

@@ -857,7 +857,7 @@ fun VComponentReadout(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392)
 @Composable
 private fun VParamRowPreview() {
     VesselTheme {

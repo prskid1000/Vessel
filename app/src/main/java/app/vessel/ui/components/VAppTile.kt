@@ -243,7 +243,7 @@ fun VAppGrid(
 /** Four across at 421 dp is a 95 dp cell, which is a 44 dp icon with room to label it. */
 private const val GRID_COLUMNS = 4
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421)
 @Composable
 private fun VAppGridPreview() {
     VesselTheme {

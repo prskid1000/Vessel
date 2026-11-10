@@ -23,20 +23,20 @@ class VesselThemeTest {
 
     @Test
     fun `the core roles are the stylesheet's own values`() {
-        assertEquals(Color(0xFF161826), colors.bg)
-        assertEquals(Color(0xFF232532), colors.surface)
-        assertEquals(Color(0xFFE9E9ED), colors.text)
-        assertEquals(Color(0xFF9184D9), colors.accent)
-        assertEquals(Color(0xFFA7A1DB), colors.accent2)
+        assertEquals(Color(0xFF0C0C0C), colors.bg)
+        assertEquals(Color(0xFF1A1D1A), colors.surface)
+        assertEquals(Color(0xFFDDE3DC), colors.text)
+        assertEquals(Color(0xFF8FBF7F), colors.accent)
+        assertEquals(Color(0xFFA8BEA7), colors.accent2)
     }
 
     @Test
     fun `the neutral ramp is the OKLCH scale, all nine steps`() {
         assertEquals(
             listOf(
-                Color(0xFFF3F5FE), Color(0xFFE4E7F5), Color(0xFFCFD3E5),
-                Color(0xFFB2B6CA), Color(0xFF9397AB), Color(0xFF75798C),
-                Color(0xFF595D6C), Color(0xFF3F424D), Color(0xFF292B31),
+                Color(0xFFF2F5F1), Color(0xFFE2E8E1), Color(0xFFCCD4CB),
+                Color(0xFFAFB8AE), Color(0xFF909A90), Color(0xFF727C72),
+                Color(0xFF565F56), Color(0xFF3D433D), Color(0xFF282C28),
             ),
             listOf(
                 colors.neutral100, colors.neutral200, colors.neutral300,
@@ -50,9 +50,9 @@ class VesselThemeTest {
     fun `the accent ramp is the OKLCH scale, all nine steps`() {
         assertEquals(
             listOf(
-                Color(0xFFF5F4FF), Color(0xFFE7E5FE), Color(0xFFD2CEFD),
-                Color(0xFFB5ABFC), Color(0xFF968AE0), Color(0xFF796CBF),
-                Color(0xFF5D5294), Color(0xFF423A6A), Color(0xFF2B2741),
+                Color(0xFFF1F7EF), Color(0xFFE0EDDB), Color(0xFFC9E0C0),
+                Color(0xFFA9CF9B), Color(0xFF8FBF7F), Color(0xFF779F69),
+                Color(0xFF5C7C51), Color(0xFF42583B), Color(0xFF2A3627),
             ),
             listOf(
                 colors.accent100, colors.accent200, colors.accent300,
@@ -79,9 +79,9 @@ class VesselThemeTest {
     fun `the architecture palette avoids the accent's own hue`() {
         // Nocturne's accent is violet, so a violet badge would stop reading as
         // information and start reading as a button. Green, blue, amber, grey.
-        assertEquals(Color(0xFF5BD99A), colors.archNative)
-        assertEquals(Color(0xFF7FB0F0), colors.archX64)
-        assertEquals(Color(0xFFE0A458), colors.archX86)
+        assertEquals(Color(0xFF9FD48C), colors.archNative)
+        assertEquals(Color(0xFF8FBBD4), colors.archX64)
+        assertEquals(Color(0xFFEFB080), colors.archX86)
         assertEquals(colors.neutral600, colors.archUnknown)
     }
 
@@ -138,7 +138,7 @@ class VesselThemeTest {
 
     @Test
     fun `elevation is a ring drawn from the ramp`() {
-        // `--shadow-sm` is `0 0 0 1px #3f424d` and nothing else; md and lg add
+        // `--shadow-sm` is `0 0 0 1px #3d433d` and nothing else; md and lg add
         // ambient darkness behind a lighter ring.
         assertEquals(colors.neutral800, VElevation(colors.neutral800).ring)
         assertEquals(0f, VElevation(colors.neutral800).ambientAlpha, 0f)

@@ -706,7 +706,7 @@ private fun ParamControl(param: EditorParam, onParam: (String, ParamValue) -> Un
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 927)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 927)
 @Composable
 private fun ContainerSheetPreview() {
     VesselTheme {

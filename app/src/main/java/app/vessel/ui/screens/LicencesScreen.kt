@@ -174,7 +174,7 @@ fun LicenceTextScreen(title: String, onBack: () -> Unit) {
 
 // — previews ---------------------------------------------------------------
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 824)
 @Composable
 private fun LicencesPreview() {
     VesselTheme { LicencesScreen(onBack = {}, onOpen = {}) }

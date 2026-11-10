@@ -258,7 +258,7 @@ private fun HomeContent(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 927)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 927)
 @Composable
 private fun HomePreview() {
     VesselTheme {
@@ -276,7 +276,7 @@ private fun HomePreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 927)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 927)
 @Composable
 private fun HomeEmptyPreview() {
     VesselTheme {
@@ -296,7 +296,7 @@ private fun HomeEmptyPreview() {
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 927, heightDp = 422)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 927, heightDp = 422)
 @Composable
 private fun HomeLandscapePreview() {
     VesselTheme {

@@ -392,7 +392,7 @@ private const val LOAD_AHEAD_LINES = 200
 // The only fabricated log in the product, and it exists so the level colours and
 // the mono column can be judged without a device. The screen reads a real file.
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 824)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 824)
 @Composable
 private fun SessionLogPreview() {
     VesselTheme {

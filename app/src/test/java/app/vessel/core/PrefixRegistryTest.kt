@@ -823,12 +823,12 @@ class PrefixRegistryTest {
     @Test
     fun `the desktop colour is a decimal RGB triplet, which is the only form Wine parses`() {
         // get_rgb_entry reads it with three wcstoul calls separated by one
-        // character each, so "#161826" and "22,24,38" both leave COLOR_BACKGROUND
+        // character each, so "#0C0C0C" and "22,24,38" both leave COLOR_BACKGROUND
         // at Wine's built-in RGB(58, 110, 165) — the medium blue a bare session
         // shows — with nothing logged.
         val background = PrefixRegistry.desktopTheme.values.single { it.name == "Background" }
         assertEquals(rgbTriplet(GuestPalette.BG), background.data)
-        assertEquals("22 24 38", background.data)
+        assertEquals("12 12 12", background.data)
     }
 
     @Test

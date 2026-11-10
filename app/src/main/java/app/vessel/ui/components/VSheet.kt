@@ -124,7 +124,7 @@ fun VSheet(
         val settleMs = Vessel.metrics.durationStandardMs
         val dismissAfterPx = with(density) { DISMISS_TRAVEL_FRACTION * maxSheetHeight.toPx() }
 
-        // Nocturne's sheet elevation is `0 0 0 1px #9397ab, 0 -16px 40px` — a ring
+        // Nocturne's sheet elevation is `0 0 0 1px #909a90, 0 -16px 40px` — a ring
         // plus an *upward* shadow. Compose has neither: `Modifier.shadow` blurs
         // evenly around the outline and `border` strokes all four sides.
         //
@@ -394,7 +394,7 @@ fun VLabeledField(
     }
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 421, heightDp = 500)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 421, heightDp = 500)
 @Composable
 private fun VSheetPreview() {
     VesselTheme {

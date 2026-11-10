@@ -50,7 +50,7 @@ fun VRule(
     )
 }
 
-@Preview(showBackground = true, backgroundColor = 0xFF161826, widthDp = 392, heightDp = 140)
+@Preview(showBackground = true, backgroundColor = 0xFF0C0C0C, widthDp = 392, heightDp = 140)
 @Composable
 private fun VRulePreview() {
     VesselTheme {
